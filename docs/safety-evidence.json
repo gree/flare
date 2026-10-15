@@ -1792,6 +1792,84 @@
           "result": "pass",
           "command": "full matrix 38664258590 (E2E MANUAL, attempt 1, all 14 legs) on rc67 candidate fe9afce: topology-authority: 13 executed, all ok; flare_unit 523/523 in all 14 legs",
           "report": "https://github.com/gree/flare/actions/runs/38664258590"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): topology-authority: 13 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
+        },
+        {
+          "check": "CHECK-01-generation",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): topology-authority: 13 executed, all ok; flare_unit 534/534 in all 14 legs",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
+        },
+        {
+          "check": "CHECK-01-init",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): cluster-init: 5 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
+        },
+        {
+          "check": "CHECK-01-nodemap",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): topology-authority: 13 executed, all ok; flare_unit 534/534 in all 14 legs",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
+        },
+        {
+          "check": "CHECK-01-observation",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): continuous-replication: 18 executed, all ok; topology-authority: 13 executed, all ok; flare_unit 534/534 in all 14 legs",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
+        },
+        {
+          "check": "CHECK-01-startup",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): topology-authority: 13 executed, all ok; flare_unit 534/534 in all 14 legs",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
         }
       ],
       "tasks": [
@@ -1810,7 +1888,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "0/6 checks pass in CI runs that tested candidate rc67-candidate-57d37a1 (57d37a1360)'s tree or a docs-only equivalent"
+          "evidence": "0/6 checks pass in CI runs that tested candidate rc67-candidate-66b749a (66b749a034)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -1897,6 +1975,19 @@
           "result": "pass",
           "command": "full matrix 38664258590 (E2E MANUAL, attempt 1, all 14 legs) on rc67 candidate fe9afce: lake build FlareOperator (proofs elaborated) in every leg",
           "report": "https://github.com/gree/flare/actions/runs/38664258590"
+        },
+        {
+          "check": "CHECK-02",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): lake build FlareOperator (proofs elaborated) in every leg",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
         }
       ],
       "tasks": [
@@ -1916,7 +2007,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-57d37a1 (57d37a1360)'s tree or a docs-only equivalent"
+          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-66b749a (66b749a034)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -2767,6 +2858,58 @@
           "result": "pass",
           "command": "full matrix 38664258590 (E2E MANUAL, attempt 1, all 14 legs) on rc67 candidate fe9afce: flare_unit 523/523 in all 14 legs",
           "report": "https://github.com/gree/flare/actions/runs/38664258590"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): replica-repair: 8 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
+        },
+        {
+          "check": "CHECK-03-firstwindow",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): repair-ledger: 3 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
+        },
+        {
+          "check": "CHECK-03-follow",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): continuous-replication: 18 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
+        },
+        {
+          "check": "CHECK-03-unit",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): flare_unit 534/534 in all 14 legs",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
         }
       ],
       "tasks": [
@@ -2786,7 +2929,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "0/4 checks pass in CI runs that tested candidate rc67-candidate-57d37a1 (57d37a1360)'s tree or a docs-only equivalent"
+          "evidence": "0/4 checks pass in CI runs that tested candidate rc67-candidate-66b749a (66b749a034)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -3705,6 +3848,71 @@
           "result": "pass",
           "command": "E2E MANUAL single-suite 38703976147 (promotion-disconnected-follower,promotion-disconnected-follower-empty,continuous-replication-lag-hold,continuous-replication-lag-hold-tmpfs,continuous-replication-lag-hold-expiry,continuous-replication-lag-hold-unreadable,multipart-lag-hold,history-tracking,history-masterless,promotion-reasons,r3-unreadable) on 117c915: fix verified on the fixed operator (20/20 E2E + unit pairs): C1 the ex-master returned with all 50 keys by value and was re-seated (committed), the cut follower not crowned, no NOT LOSS-FREE for it; A1 the ex-master verified empty, the follower promoted with every base key and logged NOT LOSS-FREE (last resort), accepted loss 20/20 writes acknowledged under the cut absent from every copy; lag-hold / history / promotion-reasons pairs still pass. Observation: the re-seated ex-master in C1 is also logged 'PROMOTION of a LAGGING copy' (over-report: its currency is not proven, not evidence of loss)",
           "report": "https://github.com/gree/flare/actions/runs/38703976147"
+        },
+        {
+          "check": "CHECK-04",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): prepare-evidence: 2 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
+        },
+        {
+          "check": "CHECK-04-eligibility",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): continuous-replication: 18 executed, all ok; read-balance: 5 executed, all ok; flare_unit 534/534 in all 14 legs",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
+        },
+        {
+          "check": "CHECK-04-follow",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): continuous-replication: 18 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
+        },
+        {
+          "check": "CHECK-04-staler3",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): promotion-disconnected-follower: 1 executed, all ok; flare_unit 534/534 in all 14 legs",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
+        },
+        {
+          "check": "CHECK-04-unit",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): flare_unit 534/534 in all 14 legs",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
         }
       ],
       "tasks": [
@@ -3724,7 +3932,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "0/7 checks pass in CI runs that tested candidate rc67-candidate-57d37a1 (57d37a1360)'s tree or a docs-only equivalent"
+          "evidence": "0/7 checks pass in CI runs that tested candidate rc67-candidate-66b749a (66b749a034)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -4050,6 +4258,45 @@
           "result": "pass",
           "command": "full matrix 38664258590 (E2E MANUAL, attempt 1, all 14 legs) on rc67 candidate fe9afce: flare_unit 523/523 in all 14 legs",
           "report": "https://github.com/gree/flare/actions/runs/38664258590"
+        },
+        {
+          "check": "CHECK-05",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): replica-repair: 8 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
+        },
+        {
+          "check": "CHECK-05-survivor",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): flare_unit 534/534 in all 14 legs",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
+        },
+        {
+          "check": "CHECK-05-unit",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): flare_unit 534/534 in all 14 legs",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
         }
       ],
       "tasks": [
@@ -4069,7 +4316,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "0/3 checks pass in CI runs that tested candidate rc67-candidate-57d37a1 (57d37a1360)'s tree or a docs-only equivalent"
+          "evidence": "0/3 checks pass in CI runs that tested candidate rc67-candidate-66b749a (66b749a034)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -4790,6 +5037,97 @@
           "result": "pass",
           "command": "E2E MANUAL single-suite 38703976147 (promotion-disconnected-follower,promotion-disconnected-follower-empty,continuous-replication-lag-hold,continuous-replication-lag-hold-tmpfs,continuous-replication-lag-hold-expiry,continuous-replication-lag-hold-unreadable,multipart-lag-hold,history-tracking,history-masterless,promotion-reasons,r3-unreadable) on 117c915: fix verified on the fixed operator (20/20 E2E + unit pairs): C1 the ex-master returned with all 50 keys by value and was re-seated (committed), the cut follower not crowned, no NOT LOSS-FREE for it; A1 the ex-master verified empty, the follower promoted with every base key and logged NOT LOSS-FREE (last resort), accepted loss 20/20 writes acknowledged under the cut absent from every copy; lag-hold / history / promotion-reasons pairs still pass. Observation: the re-seated ex-master in C1 is also logged 'PROMOTION of a LAGGING copy' (over-report: its currency is not proven, not evidence of loss)",
           "report": "https://github.com/gree/flare/actions/runs/38703976147"
+        },
+        {
+          "check": "CHECK-06",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): data-survival-failover: 3 executed, all ok; pvc-data-survival: 5 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
+        },
+        {
+          "check": "CHECK-06-holdexpiry",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): continuous-replication-lag-hold-expiry: 1 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
+        },
+        {
+          "check": "CHECK-06-holdmp",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): continuous-replication-multipart-lag-hold: 1 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
+        },
+        {
+          "check": "CHECK-06-holdtmpfs",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): continuous-replication-lag-hold-tmpfs: 1 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
+        },
+        {
+          "check": "CHECK-06-holdunreadable",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): continuous-replication-lag-hold-unreadable: 1 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
+        },
+        {
+          "check": "CHECK-06-laghold",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): continuous-replication-lag-hold: 2 executed, all ok; flare_unit 534/534 in all 14 legs",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
+        },
+        {
+          "check": "CHECK-06-staler3",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): promotion-disconnected-follower: 1 executed, all ok; promotion-disconnected-follower-empty: 1 executed, all ok; flare_unit 534/534 in all 14 legs",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
         }
       ],
       "tasks": [
@@ -4807,7 +5145,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "0/7 checks pass in CI runs that tested candidate rc67-candidate-57d37a1 (57d37a1360)'s tree or a docs-only equivalent"
+          "evidence": "0/7 checks pass in CI runs that tested candidate rc67-candidate-66b749a (66b749a034)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -5394,6 +5732,45 @@
           "result": "pass",
           "command": "full matrix 38664258590 (E2E MANUAL, attempt 1, all 14 legs) on rc67 candidate fe9afce: copy-identity: 4 executed, all ok",
           "report": "https://github.com/gree/flare/actions/runs/38664258590"
+        },
+        {
+          "check": "CHECK-07",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): circuit-breaker: 5 executed, all ok; failover: 13 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
+        },
+        {
+          "check": "CHECK-07-emptysource",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): empty-source: 9 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
+        },
+        {
+          "check": "CHECK-07-identity",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): copy-identity: 4 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
         }
       ],
       "tasks": [
@@ -5411,7 +5788,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "0/5 checks pass in CI runs that tested candidate rc67-candidate-57d37a1 (57d37a1360)'s tree or a docs-only equivalent"
+          "evidence": "0/5 checks pass in CI runs that tested candidate rc67-candidate-66b749a (66b749a034)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -5494,6 +5871,19 @@
           "result": "pass",
           "command": "full matrix 38664258590 (E2E MANUAL, attempt 1, all 14 legs) on rc67 candidate fe9afce: terminating-pod-handling: 5 executed, all ok",
           "report": "https://github.com/gree/flare/actions/runs/38664258590"
+        },
+        {
+          "check": "CHECK-08",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): terminating-pod-handling: 5 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
         }
       ],
       "tasks": [],
@@ -5509,7 +5899,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-57d37a1 (57d37a1360)'s tree or a docs-only equivalent"
+          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-66b749a (66b749a034)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -5931,6 +6321,19 @@
           "result": "pass",
           "command": "full matrix 38664258590 (E2E MANUAL, attempt 1, all 14 legs) on rc67 candidate fe9afce: circuit-breaker: 5 executed, all ok",
           "report": "https://github.com/gree/flare/actions/runs/38664258590"
+        },
+        {
+          "check": "CHECK-09",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): circuit-breaker: 5 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
         }
       ],
       "tasks": [],
@@ -5946,7 +6349,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-57d37a1 (57d37a1360)'s tree or a docs-only equivalent"
+          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-66b749a (66b749a034)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -6025,6 +6428,19 @@
           "result": "pass",
           "command": "full matrix 38664258590 (E2E MANUAL, attempt 1, all 14 legs) on rc67 candidate fe9afce: terminating-pod-handling: 5 executed, all ok",
           "report": "https://github.com/gree/flare/actions/runs/38664258590"
+        },
+        {
+          "check": "CHECK-10",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): terminating-pod-handling: 5 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
         }
       ],
       "tasks": [
@@ -6043,7 +6459,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-57d37a1 (57d37a1360)'s tree or a docs-only equivalent"
+          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-66b749a (66b749a034)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -6149,6 +6565,19 @@
           "result": "skip",
           "command": "full matrix 38664258590 (E2E MANUAL, attempt 1, all 14 legs) on rc67 candidate fe9afce: native-metrics: 5 executed, all ok; resync-failure-self-demote: test(s) ['12'] skipped (not evaluation-only)",
           "report": "https://github.com/gree/flare/actions/runs/38664258590"
+        },
+        {
+          "check": "CHECK-11",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "skip",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): native-metrics: 5 executed, all ok; resync-failure-self-demote: test(s) ['12'] skipped (not evaluation-only)",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
         }
       ],
       "tasks": [],
@@ -6164,7 +6593,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-57d37a1 (57d37a1360)'s tree or a docs-only equivalent"
+          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-66b749a (66b749a034)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -6243,6 +6672,19 @@
           "result": "pass",
           "command": "full matrix 38664258590 (E2E MANUAL, attempt 1, all 14 legs) on rc67 candidate fe9afce: read-balance: 5 executed, all ok",
           "report": "https://github.com/gree/flare/actions/runs/38664258590"
+        },
+        {
+          "check": "CHECK-12",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): read-balance: 5 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
         }
       ],
       "tasks": [
@@ -6260,7 +6702,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-57d37a1 (57d37a1360)'s tree or a docs-only equivalent"
+          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-66b749a (66b749a034)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -6349,6 +6791,19 @@
           "result": "skip",
           "command": "full matrix 38664258590 (E2E MANUAL, attempt 1, all 14 legs) on rc67 candidate fe9afce: strict-durability: 5 executed, all ok; wal-purged-fallback: test(s) ['15'] skipped (not evaluation-only)",
           "report": "https://github.com/gree/flare/actions/runs/38664258590"
+        },
+        {
+          "check": "CHECK-13",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "skip",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): strict-durability: 5 executed, all ok; wal-purged-fallback: test(s) ['15'] skipped (not evaluation-only)",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
         }
       ],
       "tasks": [
@@ -6366,7 +6821,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-57d37a1 (57d37a1360)'s tree or a docs-only equivalent"
+          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-66b749a (66b749a034)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -6441,6 +6896,19 @@
           "result": "pass",
           "command": "full matrix 38664258590 (E2E MANUAL, attempt 1, all 14 legs) on rc67 candidate fe9afce: terminating-pod-handling: 5 executed, all ok",
           "report": "https://github.com/gree/flare/actions/runs/38664258590"
+        },
+        {
+          "check": "CHECK-14",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): terminating-pod-handling: 5 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
         }
       ],
       "tasks": [],
@@ -6456,7 +6924,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-57d37a1 (57d37a1360)'s tree or a docs-only equivalent"
+          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-66b749a (66b749a034)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -6648,6 +7116,19 @@
           "result": "pass",
           "command": "full matrix 38664258590 (E2E MANUAL, attempt 1, all 14 legs) on rc67 candidate fe9afce: native-metrics: 5 executed, all ok. C++ references: see the nix-linux 38657543197 record",
           "report": "https://github.com/gree/flare/actions/runs/38664258590"
+        },
+        {
+          "check": "CHECK-15",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): native-metrics: 5 executed, all ok. C++ references: no nix-linux run at this candidate (C++ unchanged since 192f37f; not docs-only, so it does not count)",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
         }
       ],
       "tasks": [],
@@ -6663,7 +7144,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-57d37a1 (57d37a1360)'s tree or a docs-only equivalent"
+          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-66b749a (66b749a034)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -7573,6 +8054,97 @@
           "result": "pass",
           "command": "full matrix 38664258590 (E2E MANUAL, attempt 1, all 14 legs) on rc67 candidate fe9afce: flare_unit 523/523 in all 14 legs. C++ references: see the nix-linux 38657543197 record",
           "report": "https://github.com/gree/flare/actions/runs/38664258590"
+        },
+        {
+          "check": "CHECK-16",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): continuous-replication: 18 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
+        },
+        {
+          "check": "CHECK-16-confirm",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): continuous-replication-enable-purged: 1 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
+        },
+        {
+          "check": "CHECK-16-enable",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): continuous-replication-enable: 1 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
+        },
+        {
+          "check": "CHECK-16-enablemp",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): continuous-replication-multipart-enable: 1 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
+        },
+        {
+          "check": "CHECK-16-enablepurged",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): continuous-replication-enable-purged: 1 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
+        },
+        {
+          "check": "CHECK-16-limits",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "skip",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): continuous-replication-limits: 3 executed, all ok; continuous-replication-scale: no test executed (evaluation-only skips)",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
+        },
+        {
+          "check": "CHECK-16-unit",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): flare_unit 534/534 in all 14 legs. C++ references: no nix-linux run at this candidate (C++ unchanged since 192f37f; not docs-only, so it does not count)",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
         }
       ],
       "tasks": [
@@ -7590,7 +8162,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "0/7 checks pass in CI runs that tested candidate rc67-candidate-57d37a1 (57d37a1360)'s tree or a docs-only equivalent"
+          "evidence": "0/7 checks pass in CI runs that tested candidate rc67-candidate-66b749a (66b749a034)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -8023,6 +8595,19 @@
           "result": "pass",
           "command": "nix-linux 38657543197 on 192f37f (fe9afce differs from it in docs/ only): RocksDB 5384 / legacy 3644 tests, 0 failures",
           "report": "https://github.com/gree/flare/actions/runs/38657543197"
+        },
+        {
+          "check": "CHECK-17",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): continuous-replication: 18 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
         }
       ],
       "tasks": [
@@ -8040,7 +8625,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "0/2 checks pass in CI runs that tested candidate rc67-candidate-57d37a1 (57d37a1360)'s tree or a docs-only equivalent"
+          "evidence": "0/2 checks pass in CI runs that tested candidate rc67-candidate-66b749a (66b749a034)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -9028,6 +9613,98 @@
           "result": "pass",
           "command": "full matrix 38664258590 (E2E MANUAL, attempt 1, all 14 legs) on rc67 candidate fe9afce: continuous-replication-upgrade: 1 executed, all ok. C++ references: see the nix-linux 38657543197 record",
           "report": "https://github.com/gree/flare/actions/runs/38664258590"
+        },
+        {
+          "check": "CHECK-18",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): continuous-replication: 18 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
+        },
+        {
+          "check": "CHECK-18-purge",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): continuous-replication-purge: 2 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
+        },
+        {
+          "check": "CHECK-18-race",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): flare_unit 534/534 in all 14 legs",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
+        },
+        {
+          "check": "CHECK-18-rbtmpfs",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): continuous-replication-rebuild-tmpfs: 1 executed, all ok. C++ references: no nix-linux run at this candidate (C++ unchanged since 192f37f; not docs-only, so it does not count)",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
+        },
+        {
+          "check": "CHECK-18-unit",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): flare_unit 534/534 in all 14 legs. C++ references: no nix-linux run at this candidate (C++ unchanged since 192f37f; not docs-only, so it does not count)",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
+        },
+        {
+          "check": "CHECK-18-upgrade",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "fail",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): continuous-replication-upgrade: 1 failed. C++ references: no nix-linux run at this candidate (C++ unchanged since 192f37f; not docs-only, so it does not count)",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
+        },
+        {
+          "check": "CHECK-18-upgrade",
+          "commit": "c090cc1f0132764b381c0186f6eefcb641445ac3",
+          "head": "c090cc1f0132764b381c0186f6eefcb641445ac3",
+          "tree": "2836945273d68b2353d6eecd32c83b5ca8205f12",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "single-suite",
+          "suites": "continuous-replication-upgrade,promotion-disconnected-follower,promotion-disconnected-follower-empty,continuous-replication-lag-hold-tmpfs,continuous-replication-lag-hold-expiry,history-masterless,promotion-reasons,history-tracking",
+          "run_url": "https://github.com/gree/flare/actions/runs/38775718162",
+          "result": "pass",
+          "command": "E2E MANUAL single-suite 38775718162 (continuous-replication-upgrade,promotion-disconnected-follower,promotion-disconnected-follower-empty,continuous-replication-lag-hold-tmpfs,continuous-replication-lag-hold-expiry,history-masterless,promotion-reasons,history-tracking) on c090cc1: narrow untracked rule (decision 2026-10-16): PASS",
+          "report": "https://github.com/gree/flare/actions/runs/38775718162"
         }
       ],
       "tasks": [
@@ -9045,7 +9722,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "0/6 checks pass in CI runs that tested candidate rc67-candidate-57d37a1 (57d37a1360)'s tree or a docs-only equivalent"
+          "evidence": "0/6 checks pass in CI runs that tested candidate rc67-candidate-66b749a (66b749a034)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -9055,7 +9732,21 @@
           "state": "no",
           "note": "not approved for production"
         }
-      }
+      },
+      "open_findings": [
+        {
+          "id": "F-upgrade-untracked-hold",
+          "state": "fixed",
+          "since": "2026-10-16",
+          "summary": "After the history-tracking 10 fix (117c915), an rc56 -> this-build roll on tmpfs left the UNTRACKED partition with no master: the replica bound to the legacy rc56 master (no history record can exist) was classified unknown and never seated, not even after the wait (the old code promoted it only when its first pass read the stale eligible before flared invalidated it, without NOT LOSS-FREE).",
+          "checks": [
+            "CHECK-18-upgrade"
+          ],
+          "reproduced": "full matrix 38714646714 (ee31373, candidate 57d37a1): continuous-replication-upgrade 9 'after the roll: no Active P0 master in the operator's map'",
+          "fixed_in": "c090cc1f0132764b381c0186f6eefcb641445ac3",
+          "verified": "single-suite 38775718162 on c090cc1; unit pairs fail with the rule disabled (4 checks); counts for a candidate only through a full-matrix run"
+        }
+      ]
     },
     {
       "id": "EV-19",
@@ -9191,7 +9882,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-57d37a1 (57d37a1360)'s tree or a docs-only equivalent"
+          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-66b749a (66b749a034)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -9619,6 +10310,19 @@
           "result": "pass",
           "command": "nix-linux 38657543197 on 192f37f (fe9afce differs from it in docs/ only): RocksDB 5384 / legacy 3644 tests, 0 failures",
           "report": "https://github.com/gree/flare/actions/runs/38657543197"
+        },
+        {
+          "check": "CHECK-20",
+          "commit": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "head": "ee31373c4a5be42605c019b038ae3717a236a6dc",
+          "tree": "6876b238685f20ad6a2f6a02e7e0d4c09bbe27e9",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38714646714",
+          "result": "pass",
+          "command": "full matrix 38714646714 (E2E MANUAL, attempt 1, all 14 legs) at ee31373 (docs-only after rc67 candidate 57d37a1): continuous-replication-limits: 3 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38714646714"
         }
       ],
       "tasks": [
@@ -9636,7 +10340,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "0/2 checks pass in CI runs that tested candidate rc67-candidate-57d37a1 (57d37a1360)'s tree or a docs-only equivalent"
+          "evidence": "0/2 checks pass in CI runs that tested candidate rc67-candidate-66b749a (66b749a034)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -9650,8 +10354,8 @@
     }
   ],
   "candidate": {
-    "commit": "57d37a136005bc7961fd7e7dc9ab86abc44065b1",
-    "label": "rc67-candidate-57d37a1"
+    "commit": "66b749a034f0ae4b53020f02273dbe6a01643c03",
+    "label": "rc67-candidate-66b749a"
   },
   "previous_candidates": [
     {
@@ -9667,6 +10371,13 @@
       "superseded": "2026-10-15",
       "snapshot": "docs/reports/2026-10-15-ledger-candidate-fe9afce-snapshot.json",
       "note": "14 of 20 controls ci_passed=yes, 4 partial, 2 no at this candidate; EV-04/EV-06 capped by the OPEN finding F-ht10-stale-r3 (the refill crowned a cut-off follower with a stale R3 binding), which this candidate contains unfixed; kept for the record, not used by the computation"
+    },
+    {
+      "commit": "57d37a136005bc7961fd7e7dc9ab86abc44065b1",
+      "label": "rc67-candidate-57d37a1",
+      "superseded": "2026-10-16",
+      "snapshot": "docs/reports/2026-10-16-ledger-candidate-57d37a1-snapshot.json",
+      "note": "full matrix 38714646714 at ee31373: 11 controls yes, 6 partial, 3 no; EV-18 failed (continuous-replication-upgrade 9: the history-tracking 10 fix held an untracked partition masterless, F-upgrade-untracked-hold); C++-only checks uncounted (no nix-linux run at this candidate); kept for the record"
     }
   ]
 }

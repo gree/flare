@@ -236,6 +236,54 @@ the history-tracking 10 pairs):
   alarm, never a hidden loss); rewording or a separate class is a policy
   choice, left to review.
 
+Full matrix at candidate 57d37a1 (38714646714, ee31373 = docs-only after
+it): 12 of 14 legs green, flare_unit 534/534 in every leg. Two legs failed:
+- cross-cluster: X4 (`cluster-replication-faults` 4/5, snapshot-push seed)
+  as before ("the destination master did not come back within 300 s"); the
+  per-key control suite passed again. Open, unchanged.
+- repair: `continuous-replication-upgrade` 9 (rc56 → this build on tmpfs,
+  release procedure) — CAUSED BY THE FIX. Sequence: the new replica nodes-1
+  copied the rc56 master nodes-0 by the legacy staged rule and was BOUND to
+  it (source epoch "(legacy, lineage only)"); nodes-0's roll brought it back
+  EMPTY (tmpfs, READ empty; its rc56 preStop `shutdown` is not understood by
+  the operator, so no handoff); the partition is UNTRACKED (an rc56 master
+  has no copy evidence: no history record can exist). With no master in
+  the map, nodes-1's binding is stale (flared itself turned it
+  `revalidating`: "map names no master"), and with no record the fix
+  classified it `unknown`: never seated, not even after the wait — the
+  partition stayed masterless (CRITICAL, RUNBOOK #history-held-masterless).
+  The old code passed only when its first pass read the stale `eligible`
+  before flared's invalidation (a normal promotion, no NOT LOSS-FREE).
+
+Decision (user, 2026-10-16): narrow `lagging`, not unknown, for exactly
+this shape (PromotionEvidence.legacyCopyOfUntrackedLastMaster): no master
+in the map, NO recorded history, the partition explicitly UNTRACKED in the
+store, exactly one node with lastMasterOf = the partition, the copy's R3
+source (`repl_read_source`) IS that node and was a LEGACY peer
+(`repl_read_source_epoch` empty), state eligible or revalidating, the copy
+Active and non-empty, no forbidden marker. Then it is the refill's held,
+logged last resort: seated only when the ex-master is READ empty or the
+wait expired, PROMOTION NOT LOSS-FREE. Anything else without a record stays
+`unknown` (another source node, a source with an epoch, a tracked or
+undecided partition, an empty copy). With a master present the same
+reading is `eligible` (unchanged). Unit pairs (540/540): the four positive
+checks fail with the rule disabled; the negatives hold either way. The
+upgrade test now waits up to 300 s for the master and, when the masterless
+refill engaged, requires the NOT LOSS-FREE line for the seated replica.
+
+Targeted run 38775718162 on c090cc1 (8 suites, 16/16, flare_unit 540/540):
+the upgrade test passed — nodes-1 seated "by the masterless refill as a
+LAST RESORT", PROMOTION NOT LOSS-FREE, items equal across the roll, 20/20
+writes after it; C1 / A1, lag-hold-tmpfs / -expiry, history-masterless,
+promotion-reasons and history-tracking still pass. The test's masterless
+detector only looked for the hold line, which a READ-empty ex-master never
+produces (seated at once); 66b749a detects the refill's per-pass inputs
+line instead (test-only). Candidate: 66b749a (`rc67-candidate-66b749a`);
+57d37a1's ledger is kept in
+docs/reports/2026-10-16-ledger-candidate-57d37a1-snapshot.json. Full matrix
+and nix-linux (for the C++-referenced checks) are dispatched at the
+candidate's docs-only successor.
+
 ## Ledger (review [P2])
 
 The ledger candidate is now fe9afce (`rc67-candidate-fe9afce`). be60dbb's

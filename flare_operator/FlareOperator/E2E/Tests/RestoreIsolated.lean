@@ -564,7 +564,15 @@ def suite : TestSuite := {
           return (← statOf src2Cfg ip2 "rocksdb_restored_unverified") == some "0"
             && (← memcachedSet src2Cfg.debugPod ns2 ip2 src2Cfg.flarePort "inplace_probe" "x")
         let unv ← statOf src2Cfg ((← getPodIp p0 ns2).getD "") "rocksdb_restored_unverified"
-        if !verified then return .fail s!"the restored copy was not verified as P0's master or acknowledged no write (restored_unverified {unv})"
+        if !verified then
+          -- CI 38545812141 attempt 1: unverified for 240 s and nothing saved
+          -- for this cluster. Verification needs the map to name the
+          -- restored pod P0's master (check_partition_binding as_master), so
+          -- keep the operator's map and every log of this namespace.
+          let raw ← operatorTcpCmd src2Cfg.debugPod ns2 src2Cfg.operatorName src2Cfg.operatorPort "node sync"
+          IO.eprintln s!"# in-place restore not verified: {p0} restored_unverified {unv}; operator map: {raw.trim}"
+          saveFullLogs ns2 "after-test-7"
+          return .fail s!"the restored copy was not verified as P0's master or acknowledged no write (restored_unverified {unv})"
         return .pass },
 
     { name := "the SOURCE cluster and its backup are unchanged by every restore (items, history, pod UIDs, backup content hash)"

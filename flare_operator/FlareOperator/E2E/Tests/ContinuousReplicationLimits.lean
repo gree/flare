@@ -1843,7 +1843,17 @@ def identitySuite : TestSuite := {
               return ((← c.opLog 3000).splitOn "\n").any fun l => containsSubstr l "PROMOTION ABORTED" && containsSubstr l target
             -- the master's copy while it is still draining (its pod goes when
             -- the drain window ends)
-            let mItemsDraining ← c.currItems ((← getPodIp m ns).getD "")
+            -- (review of d311227: an unread count was 0 here — CI 38545812141
+            -- read "0/70" and could not say whether the pod was gone, the
+            -- read failed or the copy was empty; now `none` with the pod's
+            -- address, deletion time and UID at the read)
+            let mIpDraining ← getPodIp m ns
+            let mPodDraining ← kubectlGetJsonpath "pod" m ns "{.metadata.uid}|{.metadata.deletionTimestamp}|{.status.phase}"
+            let mItemsDraining ← match mIpDraining with
+              | some ip => c.statNat ip "curr_items"
+              | none => pure none
+            let mReadAt ← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%SZ"] }
+            IO.eprintln s!"# {m} while draining, read at {mReadAt.stdout.trim}: ip {mIpDraining}; pod uid|deletion|phase {mPodDraining.toOption.map String.trim}; curr_items {mItemsDraining}"
             let seen ← c.watchMaster 180 (fun x => x != m && x != target)
             let otherItems ← c.currItems ((← getPodIp other ns).getD "")
             discard <| kubectl ["uncordon", kindNode]
@@ -1884,8 +1894,8 @@ def identitySuite : TestSuite := {
               let otherNotNormal := winLines.any fun l => containsSubstr l "PROMOTION EVIDENCE"
                 && (containsSubstr l s!"{otherFqdn}=FORBIDDEN" || containsSubstr l s!"{otherFqdn}=unknown" || containsSubstr l s!"{otherFqdn}=lagging")
               let otherUnfit := otherIneligible || otherRepaired || otherNotNormal
-              IO.eprintln s!"# {other} not promoted: R3 reading 0 logged for it={otherIneligible}; repaired (rebuild) in the window={otherRepaired}; reason-based reading not a normal promotion={otherNotNormal}; masters seen {seen}; {m} held {mItemsDraining}/{items} keys while draining and came back with every key={back}; promotion of a slave committed={wrongPromotion}; drain incomplete (NO promotable successor for {m})={drainIncomplete}"
-              if !(otherUnfit && noOtherMaster && mItemsDraining == items && back && !wrongPromotion && drainIncomplete) then
+              IO.eprintln s!"# {other} not promoted: R3 reading 0 logged for it={otherIneligible}; repaired (rebuild) in the window={otherRepaired}; reason-based reading not a normal promotion={otherNotNormal}; masters seen {seen}; {m} held {mItemsDraining}/{items} keys while draining (none = not read) and came back with every key={back}; promotion of a slave committed={wrongPromotion}; drain incomplete (NO promotable successor for {m})={drainIncomplete}"
+              if !(otherUnfit && noOtherMaster && mItemsDraining == some items && back && !wrongPromotion && drainIncomplete) then
                 return .fail s!"expected {other} to take over, or — with {other} logged unfit (R3 0, under repair, or not a normal promotion by reason) — a safe stop: no slave promoted and the drain of {m} logged incomplete, {m} keeping every key; masters seen {seen}"
               return .pass
             if otherItems != items then return .fail s!"{other} holds {otherItems} of {items} keys"

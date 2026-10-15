@@ -6586,79 +6586,161 @@ private def scaleOp (c : Ctx) (n : Nat) : IO Bool := do
       return (← getPodNames s!"app={c.cfg.operatorName}" c.cfg.«namespace»).isEmpty
   else kubectlRolloutStatus s!"deployment/{c.cfg.operatorName}" c.cfg.«namespace» 240
 
-/-- The shared scenario. Returns (master pod, follower pod, master items
-    after its restart, acknowledged-under-the-cut keys, follower R3 state
-    and follow state just before the operator returned, who is master after,
-    NOT LOSS-FREE logged for the follower, the operator's evidence lines). -/
-private def disconnectedRefill (c : Ctx) (expectData : Bool)
-    : IO (Except String (String × String × Nat × List (String × String) × String × Option String × Bool × List String)) := do
+/-- What the shared scenario observed. Every field is a REQUIRED observation:
+    a failure to read one stops the scenario as unobservable, never as a
+    count of 0 or as missing data. -/
+private structure DiscObs where
+  mPod : String
+  sPod : String
+  base : List (String × String)
+  lag : List (String × String)
+  /-- the ex-master's own copy, read right after it re-registered (cut kept) -/
+  exMasterBack : List (String × String)
+  exMasterItems : Nat
+  r3 : String
+  /-- partition 0's master after the operator decided (`none` = no master) -/
+  master : Option String
+  committed : Bool
+  holdSeen : Bool
+  /-- every copy, read after the decision and BEFORE the cut was healed -/
+  newMasterCopy : Option (List (String × String))
+  exMasterAfter : List (String × String)
+  followerAfter : List (String × String)
+  nlf : Bool
+  lines : List String
+  timeline : List (String × String)
+
+/-- A required observation failed: neither a pass nor data loss. -/
+private def unobservable (what : String) : String := s!"UNOBSERVABLE (not a data verdict): {what}"
+/-- The scenario was not set up as specified: neither a pass nor data loss. -/
+private def notSetUp (what : String) : String := s!"PRECONDITION NOT MET (not a data verdict): {what}"
+
+/-- partition 0's master from the operator's node view; an empty view is
+    unobservable, not "no master". -/
+private def masterRead (c : Ctx) : IO (Except String (Option String)) := do
+  let v ← c.nodeView
+  if v.isEmpty then return .error (unobservable "the operator's node view could not be read")
+  return .ok ((findMasterFqdn v 0).bind (fun f => (f.splitOn ".").head?))
+
+private def dumpOf (c : Ctx) (pod : String) : IO (Except String (List (String × String))) := do
+  match ← getPodIp pod c.cfg.«namespace» with
+  | none => return .error (unobservable s!"no IP for {pod}")
+  | some ip =>
+    match ← c.localDump ip with
+    | none => return .error (unobservable s!"{pod}'s own copy could not be read (dump)")
+    | some d => return .ok d
+
+/-- The shared scenario (history-tracking 10). The follower is cut off; 20
+    writes are acknowledged by the master under the cut; the operator is
+    stopped; the master's flared is killed and restarts; the operator comes
+    back with the cut still in place and decides. -/
+private def disconnectedRefill (c : Ctx) (expectData : Bool) : IO (Except String DiscObs) := do
   let ns := c.cfg.«namespace»
+  let mut tl : List (String × String) := []
   let recorded ← waitForCondition "the partition's authoritative history is persisted" 240 do historyRecorded c
-  if !recorded then return .error "precondition: no authoritative history persisted"
+  if !recorded then return .error (notSetUp "no authoritative history persisted")
   match ← c.pair with
-  | .error e => return .error e
+  | .error e => return .error (notSetUp e)
   | .ok (mPod, mIp, sPod, sIp) =>
     let base := (List.range 30).map fun i => (s!"db_{i}", s!"vb_{i}")
     for (k, v) in base do
-      if !(← memcachedSet c.cfg.debugPod ns mIp c.cfg.flarePort k v) then return .error s!"precondition: {k} not acknowledged"
+      if !(← memcachedSet c.cfg.debugPod ns mIp c.cfg.flarePort k v) then return .error (notSetUp s!"{k} not acknowledged")
     let conv ← waitForCondition "the follower holds every base key and follows" 180 do
       let d ← c.localDump sIp
       return (d.map (fun d => (missingFrom base d).isEmpty)).getD false
         && (← c.statStr sIp "repl_follow_state") == some "following"
-    if !conv then return .error "precondition: the follower did not converge"
+    if !conv then return .error (notSetUp "the follower did not converge")
     match ← cut mIp sIp with
-    | .error e => return .error e
+    | .error e => return .error (notSetUp e)
     | .ok () => pure ()
+    tl := tl ++ [("cut", ← utcNow)]
     IO.sleep 2000
     let lag := (List.range 20).map fun i => (s!"dl_{i}", s!"vl_{i}")
     for (k, v) in lag do
-      if !(← memcachedSet c.cfg.debugPod ns mIp c.cfg.flarePort k v) then heal mIp sIp; return .error s!"precondition: {k} not acknowledged under the cut"
+      if !(← memcachedSet c.cfg.debugPod ns mIp c.cfg.flarePort k v) then heal mIp sIp; return .error (notSetUp s!"{k} not acknowledged under the cut")
+    tl := tl ++ [("20 writes acknowledged under the cut", ← utcNow)]
     let disc ← waitForCondition "the follower reports it is not following" 90 do
       return (← c.statStr sIp "repl_follow_state") != some "following"
-    if !disc then heal mIp sIp; return .error "precondition: the follower still reports following under the cut"
-    let mBefore := (← c.statNat mIp "curr_items").getD 0
-    if mBefore != base.length + lag.length then
-      heal mIp sIp; return .error s!"precondition: the master holds {mBefore}, not {base.length + lag.length}, before its restart"
-    if !(← scaleOp c 0) then heal mIp sIp; discard <| scaleOp c 1; return .error "precondition: the operator did not stop"
+    if !disc then heal mIp sIp; return .error (notSetUp "the follower still reports following under the cut")
+    -- the copies BEFORE the kill, by key and value: the master holds all 50,
+    -- the follower the 30 base keys and none of the 20
+    let some mDump ← c.localDump mIp | heal mIp sIp; return .error (unobservable "the master's own copy could not be read before the kill")
+    let mMiss := missingFrom (base ++ lag) mDump
+    if !mMiss.isEmpty then heal mIp sIp; return .error (notSetUp s!"the master lacks {mMiss.length} acknowledged keys before its restart: {mMiss.take 5}")
+    let some sDump ← c.localDump sIp | heal mIp sIp; return .error (unobservable "the follower's own copy could not be read before the kill")
+    let sMissBase := missingFrom base sDump
+    let sHasLag := lag.filter fun (k, _) => (sDump.lookup k).isSome
+    if !sMissBase.isEmpty || !sHasLag.isEmpty then
+      heal mIp sIp; return .error (notSetUp s!"the follower is not 'base only' before the kill: missing base {sMissBase.take 5}, holds {sHasLag.length} of the writes acknowledged under the cut")
+    if !(← scaleOp c 0) then heal mIp sIp; discard <| scaleOp c 1; return .error (notSetUp "the operator did not stop")
+    tl := tl ++ [("operator stopped", ← utcNow)]
     let r0 ← c.restartCount mPod
     match ← c.killFlaredIn mPod with
-    | .error e => heal mIp sIp; discard <| scaleOp c 1; return .error s!"could not kill flared in {mPod}: {e}"
+    | .error e => heal mIp sIp; discard <| scaleOp c 1; return .error (notSetUp s!"could not kill flared in {mPod}: {e}")
     | .ok o => IO.eprintln s!"# kill -9 flared in {mPod} (operator down): {o.trim}"
+    tl := tl ++ [("master's flared killed", ← utcNow)]
     -- with no index server the restarted flared cannot register and exits
-    -- (connect refused → restart); it answers only once the operator is back.
-    -- PVC: the data survives the container restart; pod-local: it does not
-    -- (history-tracking (R)). Read again after the decision.
+    -- (connect refused → restart); it answers only once the operator is back
     let up ← waitForCondition "the master's container restarted" 120 do
       return (← c.restartCount mPod) > r0
-    let r3 := (← c.statStr sIp "repl_read_source_state").getD "?"
+    if !up then heal mIp sIp; discard <| scaleOp c 1; return .error (notSetUp "the master's container did not restart")
+    tl := tl ++ [("master's container restarted", ← utcNow)]
+    let some r3 ← c.statStr sIp "repl_read_source_state" | heal mIp sIp; discard <| scaleOp c 1; return .error (unobservable "the follower's R3 state could not be read before the operator returned")
     let r3e := (← c.statStr sIp "repl_read_source_eligible").getD "?"
     let fs := (← c.statStr sIp "repl_follow_state").getD "?"
-    IO.eprintln s!"# operator down; {mPod} held {mBefore} before the kill, container restarted={up}; follower {sPod}: R3 {r3} eligible={r3e}, follow {fs}, items {← c.currItems sIp}"
-    if !up then heal mIp sIp; discard <| scaleOp c 1; return .error "precondition: the master's container did not restart"
+    IO.eprintln s!"# operator down; follower {sPod}: R3 {r3} eligible={r3e}, follow {fs}"
     let t0 ← utcNow
-    if !(← scaleOp c 1) then heal mIp sIp; return .error "the operator did not come back"
+    if !(← scaleOp c 1) then heal mIp sIp; return .error (notSetUp "the operator did not come back")
+    tl := tl ++ [("operator back", t0)]
     -- the restored map still names the ex-master: wait until its restarted
-    -- flared has registered (answers stats), then for the decision itself
-    -- (38685673044 read the restored map before the registration)
+    -- flared has registered (answers stats), then read its OWN copy at once
+    -- (the cut keeps it from syncing with the follower either way)
     let registered ← waitForCondition "the restarted ex-master registered (answers stats)" 300 do
       return (← c.statNat mIp "curr_items").isSome
-    let decided ← waitForCondition "the operator decided partition 0 (a committed promotion or the hold line)" 240 do
-      let l ← c.opLogSince t0
-      return containsSubstr l "PROMOTION committed" || containsSubstr l "has NO master"
-    -- let the decision's log lines land, then read the result and heal
+    if !registered then heal mIp sIp; return .error (unobservable "the restarted ex-master never answered stats within 300 s")
+    tl := tl ++ [("ex-master registered", ← utcNow)]
+    let some mItems ← c.statNat mIp "curr_items" | heal mIp sIp; return .error (unobservable "the ex-master's curr_items could not be read")
+    let some mBack ← c.localDump mIp | heal mIp sIp; return .error (unobservable "the ex-master's own copy could not be read after its return")
+    if expectData then
+      let miss := missingFrom (base ++ lag) mBack
+      if !miss.isEmpty then
+        heal mIp sIp; return .error (notSetUp s!"the ex-master did not come back with its copy (PVC): {miss.length} keys missing, e.g. {miss.take 5} — not the scenario under test")
+    else if !mBack.isEmpty || mItems != 0 then
+      heal mIp sIp; return .error (notSetUp s!"the ex-master did not come back EMPTY (pod-local): {mBack.length} keys in its copy, curr_items {mItems}")
+    let committed ← waitForCondition "the operator committed a promotion for partition 0" 400 do
+      return containsSubstr (← c.opLogSince t0) "PROMOTION committed"
+    tl := tl ++ [(if committed then "promotion committed (seen)" else "no promotion within 400 s", ← utcNow)]
+    -- let the decision's log lines land, then read every copy BEFORE healing
     IO.sleep 10000
-    let master ← masterPodOf c
-    IO.eprintln s!"# ex-master registered={registered}; decision seen={decided}"
+    let master ← match ← masterRead c with
+      | .error e => heal mIp sIp; return .error e
+      | .ok m => pure m
+    let newMasterCopy ← match master with
+      | none => pure none
+      | some p => match ← dumpOf c p with
+        | .error e => heal mIp sIp; return .error e
+        | .ok d => pure (some d)
+    let exAfter ← match ← dumpOf c mPod with
+      | .error e => heal mIp sIp; return .error e
+      | .ok d => pure d
+    let fAfter ← match ← dumpOf c sPod with
+      | .error e => heal mIp sIp; return .error e
+      | .ok d => pure d
     let log ← c.opLogSince t0
-    let mItems := (← c.statNat mIp "curr_items").getD 0
-    IO.eprintln s!"# {mPod} after the operator returned: curr_items {mItems} ({if expectData then "PVC: expected " ++ toString mBefore ++ " unless rebuilt" else "pod-local: expected 0"})"
     heal mIp sIp
     let lines := (log.splitOn "\n").filter fun l =>
       containsSubstr l "PROMOTION EVIDENCE" || containsSubstr l "PROMOTION" || containsSubstr l "has NO master"
         || containsSubstr l "R3 readings" || containsSubstr l "refill inputs" || containsSubstr l "CONTINUOUS REPLICATION eligibility"
     let nlf := (log.splitOn "\n").any fun l => containsSubstr l "PROMOTION NOT LOSS-FREE" && containsSubstr l sPod
-    IO.eprintln s!"# after the operator returned: master={master}; NOT LOSS-FREE for {sPod}={nlf}\n{String.intercalate "\n" ((lines.reverse.take 12).reverse.map (·.take 400))}"
-    return .ok (mPod, sPod, mItems, lag, r3, master, nlf, lines)
+    let holdSeen := containsSubstr log "has NO master"
+    IO.eprintln s!"# timeline: {tl.map fun (w, t) => s!"{t} {w}"}"
+    IO.eprintln s!"# ex-master {mPod} on return: {mBack.length} keys, curr_items {mItems}; after the decision: master={master}, committed={committed}, hold logged={holdSeen}, NOT LOSS-FREE for {sPod}={nlf}\n{String.intercalate "\n" ((lines.reverse.take 14).reverse.map (·.take 400))}"
+    return .ok { mPod, sPod, base, lag, exMasterBack := mBack, exMasterItems := mItems, r3, master, committed, holdSeen,
+                 newMasterCopy, exMasterAfter := exAfter, followerAfter := fAfter, nlf, lines, timeline := tl }
+
+/-- Which of `kv` are absent (or different) on EVERY copy read. -/
+private def lostEverywhere (kv : List (String × String)) (copies : List (List (String × String))) : List String :=
+  kv.filterMap fun (k, v) => if copies.any (fun d => d.lookup k == some v) then none else some k
 
 def promotionDisconnectedSuite : TestSuite := {
   name := "promotion-disconnected-follower"
@@ -6671,21 +6753,24 @@ def promotionDisconnectedSuite : TestSuite := {
   tests :=
     let c : Ctx := { cfg := discCfg }
     [
-    { name := "(C1) the ex-master comes back WITH every acknowledged write while the operator is down; the follower was cut off (R3 still bound): the copy that holds the writes is the master afterwards — a disconnected follower is not crowned ahead of it (REPRODUCTION of an open finding; expected to fail today)"
+    { name := "(C1) the ex-master comes back WITH every acknowledged write while the operator is down; the follower was cut off (R3 still bound): the copy that holds the writes is the master afterwards — a disconnected follower is not crowned ahead of it (history-tracking 10)"
       run := do
         match ← disconnectedRefill c true with
         | .error e => return .fail e
-        | .ok (mPod, sPod, _, lag, r3, master, nlf, _) =>
-          if master == some sPod then
-            let lost ← match ← getPodIp sPod c.cfg.«namespace» with
-              | none => pure lag.length
-              | some ip => pure ((← c.localDump ip).map (fun d => (missingFrom lag d).length) |>.getD lag.length)
-            return .fail s!"OPEN FINDING REPRODUCED: the disconnected follower {sPod} (R3 {r3} when read) was promoted while the ex-master {mPod} was back with all {lag.length} writes acknowledged under the cut; NOT LOSS-FREE logged={nlf}; acknowledged writes missing on the new master: {lost}"
-          if master != some mPod then return .fail s!"no master within 300 s of the operator's return (master {master})"
-          let some ip ← getPodIp mPod c.cfg.«namespace» | return .fail "no IP for the ex-master"
-          let some d ← c.localDump ip | return .fail "the ex-master's own copy could not be read"
-          let miss := missingFrom lag d
-          if !miss.isEmpty then return .fail s!"the ex-master is master but lacks {miss.length} acknowledged writes: {miss.take 5}"
+        | .ok o =>
+          let all := o.base ++ o.lag
+          let copies := [o.exMasterAfter, o.followerAfter] ++ o.newMasterCopy.toList
+          if o.master == some o.sPod then
+            let some nm := o.newMasterCopy | return .fail (unobservable "the new master's copy")
+            let missing := missingFrom o.lag nm
+            let gone := lostEverywhere o.lag copies
+            return .fail s!"OPEN FINDING REPRODUCED: the disconnected follower {o.sPod} (R3 {o.r3} when read) was promoted while the ex-master {o.mPod} was back with all {all.length} acknowledged keys (verified by value); NOT LOSS-FREE logged={o.nlf}. Missing on the NEW MASTER (the cluster serves without them): {missing.length} of {o.lag.length}. Absent from EVERY copy at read time (before the cut was healed): {gone.length} — the rest were still on the ex-master's copy, which is now a slave of the follower's history"
+          if o.master != some o.mPod then
+            return .fail s!"no master for partition 0 after the decision (master {o.master}, committed={o.committed}, hold logged={o.holdSeen}) — availability lost while the ex-master holds every write"
+          let some nm := o.newMasterCopy | return .fail (unobservable "the new master's copy")
+          let miss := missingFrom all nm
+          if !miss.isEmpty then return .fail s!"DATA: the ex-master is master but its copy lacks {miss.length} acknowledged keys: {miss.take 5}"
+          if o.nlf then return .fail s!"the ex-master was re-seated but a NOT LOSS-FREE line names the follower {o.sPod}"
           return .pass }
   ]
 }
@@ -6701,13 +6786,22 @@ def promotionDisconnectedEmptySuite : TestSuite := {
   tests :=
     let c : Ctx := { cfg := discEmptyCfg }
     [
-    { name := "(A1) the ex-master comes back EMPTY while the operator is down; the follower was cut off (R3 still bound) and is the only copy with data: it is promoted (availability) and that promotion is logged NOT LOSS-FREE — the writes acknowledged under the cut are lost (REPRODUCTION of history-tracking 10 attempt 1, deterministic order; expected to fail today)"
+    { name := "(A1) the ex-master comes back EMPTY (verified) while the operator is down; the follower was cut off (R3 still bound) and is the only copy with data: it is promoted (availability, the permitted last resort) with every base key, and that promotion is logged NOT LOSS-FREE — the writes acknowledged under the cut are lost (history-tracking 10 attempt 1, deterministic order)"
       run := do
         match ← disconnectedRefill c false with
         | .error e => return .fail e
-        | .ok (_, sPod, _, lag, r3, master, nlf, _) =>
-          if master != some sPod then return .fail s!"the only data-bearing copy {sPod} was not promoted within 300 s (master {master}) — availability lost"
-          if !nlf then return .fail s!"OPEN FINDING REPRODUCED: {sPod} (R3 {r3} when read, cut off from the master) was promoted without PROMOTION NOT LOSS-FREE although {lag.length} acknowledged writes never reached it"
+        | .ok o =>
+          let copies := [o.exMasterAfter, o.followerAfter] ++ o.newMasterCopy.toList
+          if o.master != some o.sPod then
+            return .fail s!"the only data-bearing copy {o.sPod} was not promoted (master {o.master}, committed={o.committed}, hold logged={o.holdSeen}) — availability lost"
+          let some nm := o.newMasterCopy | return .fail (unobservable "the new master's copy")
+          let baseMiss := missingFrom o.base nm
+          if !baseMiss.isEmpty then
+            return .fail s!"DATA: the promoted copy lacks {baseMiss.length} of the {o.base.length} base keys it held before the cut: {baseMiss.take 5}"
+          let gone := lostEverywhere o.lag copies
+          IO.eprintln s!"# accepted loss: {gone.length} of {o.lag.length} writes acknowledged under the cut are absent from every copy (the ex-master came back empty)"
+          if !o.nlf then
+            return .fail s!"OPEN FINDING REPRODUCED: {o.sPod} (R3 {o.r3} when read, cut off from the master) was promoted without PROMOTION NOT LOSS-FREE although {gone.length} acknowledged writes are absent from every copy"
           return .pass }
   ]
 }

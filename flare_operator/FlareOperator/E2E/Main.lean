@@ -77,6 +77,7 @@ def main (args : List String) : IO UInt32 :=
     Tests.TopologyAuthority.suite,
     Tests.ReadTimeoutReload.suite,
     Tests.ClusterReplicationFaults.suite,
+    Tests.ClusterReplicationFaults.perKeySuite,
     Tests.ClusterReplicationReseed.suite,
     Tests.ClusterReplicationRestartDump.suite,
     Tests.ClusterReplicationPerKeyOnly.suite,

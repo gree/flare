@@ -143,16 +143,57 @@ and fe9afce and the decision replay gives the same result on both; an E2E
 run of these tests on rc66 would need another branch (pushes go only to
 safety/saf-10-restore-provenance) and was not run.
 
-Fix — NOT made, needs a decision (it changes promotion policy):
-- (a) the refill treats followUnprovenKeys like unfit for tier 1 and for the
-  hold: a disconnected follower is crowned only by the logged last resort
-  (ex-master read empty, wait expired, or hold disabled), never ahead of an
-  ex-master holding data; or
-- (b) PromotionEvidence: an R3 `eligible` read from a follower that is not
-  following is classified `lagging`/`unknown` instead of `eligible`.
-Either way the pair tests stay: lag-hold-tmpfs (empty return → seated at
-once, NOT LOSS-FREE), lag-hold-expiry (seated after the wait), and the
-availability of the last resort in (A).
+Fix — plan (review of ee8f520 approved the work, 2026-10-15; written
+before the change, not a release approval)
+
+Neither "refill only" nor "classification only": the classification makes a
+stale R3 `eligible` no evidence of currency, and every selection and commit
+path consumes that class.
+- Classification (PromotionEvidence.classify): R3 `eligible` makes a copy
+  `eligible` only while its partition HAS a master in the map. With no
+  master the binding is stale (decide_source keeps it while its master is
+  unreachable), so the copy is decided by its history like any other copy:
+  the RECORDED last master's master id and epoch → `lagging`; no record or
+  no reported history → `unknown` (held, never seated); another history →
+  FORBIDDEN (rejoining); rebuild in flight / part-way / quarantine /
+  identity disagreement / parked / running / corrupted stay FORBIDDEN
+  (checked first). A disconnected copy is NOT "same history" by being
+  disconnected. A backend without copy evidence (tch: no WAL follower) keeps
+  the narrow legacy rule, without the stale R3 bit.
+- Selection: Main already puts every non-normal class (`Class.normal`: not
+  eligible / legacy / empty) with the unfit followers, and every
+  non-promotable class in the refill's blocked list. So the stale follower
+  is out of failover, drain, proxy assignment and the refill's first tier;
+  the refill's lastMasterOf tier seats the ex-master only when it is not
+  blocked (its CURRENT class: same recorded history and a healthy copy —
+  not by name) and holds data; otherwise the data-bearing last resort is
+  HELD while the ex-master is away or unreadable, and seats the follower only
+  when the ex-master was READ empty or the wait expired — logged PROMOTION
+  NOT LOSS-FREE with that reason (refillHoldEffects, unchanged).
+- Commit: re-classified with the pass's observation (masterless → the same
+  `lagging`; eligible→lagging aborts); a pass that did not read refuses
+  `lagging` (commitTimeAllows). Failover with the dead master still in the
+  map is unchanged: it never relied on R3 for currency (a disconnected
+  follower is FollowEvidence-unproven and its promotion is logged NOT
+  LOSS-FREE, design §5.3).
+- Pairs: unit checks driving the real classifier through the refill (A
+  empty return → seated, NOT LOSS-FREE "READ empty"; B away → held, then
+  seated NOT LOSS-FREE "EXPIRED"; C back with data → the ex-master, no
+  false NOT LOSS-FREE; ex-master back unhealthy → held, then the follower
+  after the wait; no history → never seated). They fail on the old
+  classification (10 checks) and pass on the new. E2E: the hardened
+  reproductions are run on the old operator first, then on the fix, with
+  lag-hold-tmpfs / lag-hold-expiry and the restore-promotion group.
+
+Repro hardening (review of ee8f520, item 1): every required observation
+(ex-master registration, the decision, every copy's dump, the node view)
+failing stops the test as UNOBSERVABLE / PRECONDITION NOT MET, never as a
+count of 0 or as data loss. Before the kill the master's copy must hold all
+50 keys by value and the follower exactly the 30 base keys; on return the
+ex-master's own copy must hold all 50 by value (PVC) or be verified EMPTY
+(pod-local). Every copy is read after the decision and BEFORE the cut is
+healed; the result separates "missing on the new master" from "absent from
+every copy", and records the timeline.
 
 ## Ledger (review [P2])
 

@@ -216,8 +216,30 @@ private def finalMatch (name : String) (r : IO.Ref (Option FaultOutcome)) : IO T
 private def earlyKeys : Nat := 10
 private def lateKeys : Nat := 20
 
-def suite : TestSuite := {
-  name := "cluster-replication-faults"
+/-- The destination's own history identity (the push seed adopts the
+    source's master id and epoch; a per-key seed must not change it). -/
+private def identityOf (ip : String) : IO (Option (String × String × String)) := do
+  let cmd := s!"printf 'stats\\r\\n' | nc -w 3 {ip} {cfgDst.flarePort}"
+  match ← execInDebugPod cfgDst.debugPod cfgDst.«namespace» cmd with
+  | .error _ => return none
+  | .ok out =>
+    let v := fun (k : String) => (out.splitOn "\n").findSome? fun l =>
+      let t := l.trim.replace "\r" ""
+      if t.startsWith s!"STAT {k} " then some (t.drop s!"STAT {k} ".length).trim else none
+    match v "rocksdb_master_id", v "rocksdb_source_epoch", v "rocksdb_copy_id" with
+    | some m, some e, some c => return some (m, e, c)
+    | _, _, _ => return none
+
+/-- The destination's identity before replication was enabled (control run). -/
+initialize dstIdentityBefore : IO.Ref (Option (String × String × String)) ← IO.mkRef none
+
+/-- The X4 body. `snapshotPush` = the source's `spec.clusterReplication.
+    snapshotPush`: true (default) seeds the destination by snapshot push (X4
+    as recorded); false is the CONTROL — the same steps with a per-key seed
+    (the first per-key move's setting), same faults, same restart with
+    writes and the operator running. -/
+def mkSuite (suiteName : String) (snapshotPush : Bool) : TestSuite := {
+  name := suiteName
   setup := do
     cleanupCluster cfgSrc
     cleanupCluster cfgDst
@@ -228,6 +250,11 @@ def suite : TestSuite := {
     deploySecondCluster cfgDst
     let s2 ← waitForStable cfgDst 50
     if !s2 then throw (IO.userError "destination cluster did not stabilize")
+    dstIdentityBefore.set none
+    if !snapshotPush then
+      match ← masterIp cfgDst with
+      | some ip => dstIdentityBefore.set (← identityOf ip)
+      | none => pure ()
   onFailure := do
     dumpClusterDiagnostics cfgSrc.«namespace» s!"app={cfgSrc.operatorName}"
     dumpClusterDiagnostics cfgDst.«namespace» s!"app={cfgDst.operatorName}"
@@ -238,7 +265,10 @@ def suite : TestSuite := {
   tests := [
     { name := "the destination name does not resolve when replication is enabled: every acknowledged write is on the destination or counted as dropped; once the name resolves, later writes arrive (the forwarding thread did not leave)"
       run := do
-        let patchJson := s!"\{\"spec\":\{\"clusterReplication\":\{\"enabled\":true,\"serverName\":\"{lateSvc}\",\"port\":{cfgDst.flarePort},\"mode\":\"duplicate\",\"concurrency\":1}}}"
+        let push := if snapshotPush then "" else ",\"snapshotPush\":false"
+        if !snapshotPush && (← dstIdentityBefore.get).isNone then
+          return .fail "PRECONDITION NOT MET (control): the destination's own identity (master id, epoch, copy id) could not be read before replication was enabled"
+        let patchJson := s!"\{\"spec\":\{\"clusterReplication\":\{\"enabled\":true,\"serverName\":\"{lateSvc}\",\"port\":{cfgDst.flarePort},\"mode\":\"duplicate\",\"concurrency\":1{push}}}}"
         match ← kubectlPatch "flarecluster" cfgSrc.name cfgSrc.«namespace» patchJson with
         | .error e => return .fail s!"could not enable replication: {e}"
         | .ok _ => pure ()
@@ -347,6 +377,15 @@ def suite : TestSuite := {
           return (← divergent sIp dIp preKeys).isEmpty
         if !flowing then return .fail "precondition: forwarding did not deliver before the restart"
         let itemsBefore ← getCurrItems cfgDst.debugPod cfgDst.«namespace» dIp cfgDst.flarePort
+        let identPre ← identityOf dIp
+        IO.eprintln s!"# destination identity before its restart: {identPre} (before replication was enabled: {← dstIdentityBefore.get}; snapshotPush={snapshotPush})"
+        if !snapshotPush then
+          -- the control must really be a per-key seed: no push replaced the
+          -- destination's master id / epoch / copy id
+          match ← dstIdentityBefore.get, identPre with
+          | some b, some n =>
+            if b != n then return .fail s!"PRECONDITION NOT MET (control): the destination's identity changed after the seed ({b} → {n}) — not a per-key seed"
+          | _, _ => return .fail "PRECONDITION NOT MET (control): the destination's identity could not be read before the restart"
         let d0 := (← droppedTotal sIp).getD 0
         match ← kubectl ["delete", "pod", dPod, "-n", cfgDst.«namespace», "--grace-period=0", "--force", "--wait=false"] with
         | .error e => return .fail s!"could not delete {dPod}: {e}"
@@ -387,6 +426,7 @@ def suite : TestSuite := {
           return .fail "the destination master did not come back within 300 s"
         let some dIp2 ← masterIp cfgDst | return .fail "no destination master after the restart"
         let itemsAfter ← getCurrItems cfgDst.debugPod cfgDst.«namespace» dIp2 cfgDst.flarePort
+        IO.eprintln s!"# destination identity after its restart: {← identityOf dIp2}"
         IO.eprintln s!"# destination back after ~{(t1 - t0) / 1000} s at {dIp2}; curr_items {itemsBefore} before, {itemsAfter} on return (an EMPTY return would not be detected by anything: no source-side check exists)"
         let mut postKeys : List String := []
         for j in List.range 5 do
@@ -413,5 +453,12 @@ def suite : TestSuite := {
       run := finalMatch "destination restart" restartOutcome }
   ]
 }
+
+/-- X4 as recorded: the destination is seeded by SNAPSHOT PUSH (default). -/
+def suite : TestSuite := mkSuite "cluster-replication-faults" true
+
+/-- The X4 CONTROL (review of ee8f520, item 3): the same body with
+    `snapshotPush: false` — a per-key seed. -/
+def perKeySuite : TestSuite := mkSuite "cluster-replication-faults-per-key" false
 
 end FlareOperator.E2E.Tests.ClusterReplicationFaults

@@ -2883,6 +2883,10 @@
         {
           "path": "flare_operator/FlareOperator/Main.lean",
           "symbol": "masterPods"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/PromotionEvidence.lean",
+          "symbol": "classify"
         }
       ],
       "call_path": "flared finishes reconstruction and calls activate_node; if the operator returned OK but did not persist it (leader handover) the node stays Prepare in the operator map. Main 4c builds a per-node episode, reads flared stats (reconstruction_completed, rocksdb_master_id, cursor + master head), SyncEvidence.judge requires a completed reconstruction bound to the current master's lineage with a sane cursor and unchanged source, and a positive verdict re-derives Prepare->Active through Reconciler.reconcileStep.",
@@ -2978,6 +2982,21 @@
             {
               "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplication.lean",
               "symbol": "suite"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-04-staler3",
+          "kind": "scenario",
+          "procedure": "A normal promotion needs evidence against the CURRENT source: flare_unit checkPromotionEvidence pairs the same bound R3 reading (eligible against a present master; lagging / unknown on a masterless partition; FORBIDDEN markers win; commit re-classification agrees; a non-reading pass refuses it). E2E promotion-disconnected-follower (C1): a follower cut off from its master with a stale R3 binding is not promoted as a normal (eligible) candidate.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "symbol": "checkPromotionEvidence"
+            },
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplicationLimits.lean",
+              "symbol": "promotionDisconnectedSuite"
             }
           ]
         }
@@ -3644,6 +3663,34 @@
           "result": "pass",
           "command": "full matrix 38664258590 (E2E MANUAL, attempt 1, all 14 legs) on rc67 candidate fe9afce: flare_unit 523/523 in all 14 legs",
           "report": "https://github.com/gree/flare/actions/runs/38664258590"
+        },
+        {
+          "check": "CHECK-04-staler3",
+          "commit": "509f2c8d4a5faf1a8c7607a21ecc2860dbf8d83d",
+          "head": "509f2c8d4a5faf1a8c7607a21ecc2860dbf8d83d",
+          "tree": "698751b6a542f9e72b9122d952ebdfbff642f504",
+          "date": "2026-10-15",
+          "source": "ci",
+          "scope": "single-suite",
+          "suites": "promotion-disconnected-follower,promotion-disconnected-follower-empty",
+          "run_url": "https://github.com/gree/flare/actions/runs/38687661051",
+          "result": "fail",
+          "command": "E2E MANUAL single-suite 38687661051 (promotion-disconnected-follower,promotion-disconnected-follower-empty) on 509f2c8: first reproduction on the unfixed operator (observations not yet hardened): C1 follower promoted, A1 no NOT LOSS-FREE",
+          "report": "https://github.com/gree/flare/actions/runs/38687661051"
+        },
+        {
+          "check": "CHECK-04-staler3",
+          "commit": "671353c9d3a6bdaebebff4ab007f1b9a3d0da9d5",
+          "head": "671353c9d3a6bdaebebff4ab007f1b9a3d0da9d5",
+          "tree": "fcb4ddf7937aa88a3f4b279117dc8bba8b657e9a",
+          "date": "2026-10-15",
+          "source": "ci",
+          "scope": "single-suite",
+          "suites": "promotion-disconnected-follower,promotion-disconnected-follower-empty",
+          "run_url": "https://github.com/gree/flare/actions/runs/38699030754",
+          "result": "fail",
+          "command": "E2E MANUAL single-suite 38699030754 (promotion-disconnected-follower,promotion-disconnected-follower-empty) on 671353c: hardened reproduction on the unfixed operator: C1 follower promoted while the ex-master held all 50 keys by value, 20/20 missing on the new master, 0 absent from every copy at read time (still on the ex-master copy, now a slave of the follower history), no NOT LOSS-FREE; A1 ex-master verified empty, follower promoted with no NOT LOSS-FREE, 20/20 absent from every copy",
+          "report": "https://github.com/gree/flare/actions/runs/38699030754"
         }
       ],
       "tasks": [
@@ -3662,8 +3709,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "6/6 checks pass in CI runs that tested candidate rc67-candidate-fe9afce (fe9afceca1)'s tree or a docs-only equivalent"
+          "state": "partial",
+          "evidence": "6/7 checks pass in CI runs that tested candidate rc67-candidate-fe9afce (fe9afceca1)'s tree or a docs-only equivalent; OPEN finding(s) F-ht10-stale-r3 — not a pass"
         },
         "reviewed": {
           "state": "no",
@@ -3673,7 +3720,19 @@
           "state": "no",
           "note": "not approved for production"
         }
-      }
+      },
+      "open_findings": [
+        {
+          "id": "F-ht10-stale-r3",
+          "state": "open",
+          "since": "2026-10-15",
+          "summary": "A follower cut off from its master keeps a stale R3 'eligible' binding; on a masterless partition the refill crowned it as an in-sync Active slave: no hold while the ex-master is away, crowned ahead of an ex-master back with every write (20 acknowledged writes missing on the new master), and no NOT LOSS-FREE line. Present on rc66 and fe9afce.",
+          "checks": [
+            "CHECK-04-staler3"
+          ],
+          "reproduced": "single-suite 38687661051 (509f2c8) and 38699030754 (671353c, hardened observations): C1 and A1 both 'OPEN FINDING REPRODUCED' on the unfixed operator"
+        }
+      ]
     },
     {
       "id": "EV-05",
@@ -4085,6 +4144,10 @@
         {
           "path": "flare_operator/FlareOperator/K8s/Bridge.lean",
           "symbol": "dataPresencePodKeys"
+        },
+        {
+          "path": "flare_operator/FlareOperator/StateMachine/PromotionEvidence.lean",
+          "symbol": "classify"
         }
       ],
       "call_path": "NodeAdd rejoin -> Slave/Prepare; FSM failover/RecoveryRefill -> promoteMasterlessPartitions -> promoteMasterlessPartition.",
@@ -4172,6 +4235,25 @@
             {
               "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplicationLimits.lean",
               "symbol": "lagHoldUnreadableSuite"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-06-staler3",
+          "kind": "scenario",
+          "procedure": "history-tracking 10 (stale R3 binding on a masterless partition). Unit: flare_unit checkStaleR3Refill drives the real classifier through the refill and its log effects: ex-master back READ empty -> the follower is seated, NOT LOSS-FREE 'READ empty'; ex-master away -> held (CRITICAL), then seated NOT LOSS-FREE 'EXPIRED' after the wait; ex-master back with every write -> the ex-master, no false NOT LOSS-FREE; ex-master back with an unhealthy copy -> held, then the follower after the wait; no recorded history -> never seated. E2E promotion-disconnected-follower (C1, PVC: the ex-master returns with all 50 keys by value while the operator is down; the cut follower must not be crowned ahead of it) and promotion-disconnected-follower-empty (A1, pod-local: the ex-master is verified empty; the follower is promoted with every base key and logged NOT LOSS-FREE). Unobservable / precondition failures are reported as such, not as data verdicts.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "symbol": "checkStaleR3Refill"
+            },
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplicationLimits.lean",
+              "symbol": "promotionDisconnectedSuite"
+            },
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplicationLimits.lean",
+              "symbol": "promotionDisconnectedEmptySuite"
             }
           ]
         }
@@ -4650,6 +4732,34 @@
           "result": "pass",
           "command": "full matrix 38664258590 (E2E MANUAL, attempt 1, all 14 legs) on rc67 candidate fe9afce: continuous-replication-lag-hold: 2 executed, all ok; flare_unit 523/523 in all 14 legs",
           "report": "https://github.com/gree/flare/actions/runs/38664258590"
+        },
+        {
+          "check": "CHECK-06-staler3",
+          "commit": "509f2c8d4a5faf1a8c7607a21ecc2860dbf8d83d",
+          "head": "509f2c8d4a5faf1a8c7607a21ecc2860dbf8d83d",
+          "tree": "698751b6a542f9e72b9122d952ebdfbff642f504",
+          "date": "2026-10-15",
+          "source": "ci",
+          "scope": "single-suite",
+          "suites": "promotion-disconnected-follower,promotion-disconnected-follower-empty",
+          "run_url": "https://github.com/gree/flare/actions/runs/38687661051",
+          "result": "fail",
+          "command": "E2E MANUAL single-suite 38687661051 (promotion-disconnected-follower,promotion-disconnected-follower-empty) on 509f2c8: first reproduction on the unfixed operator (observations not yet hardened): C1 follower promoted, A1 no NOT LOSS-FREE",
+          "report": "https://github.com/gree/flare/actions/runs/38687661051"
+        },
+        {
+          "check": "CHECK-06-staler3",
+          "commit": "671353c9d3a6bdaebebff4ab007f1b9a3d0da9d5",
+          "head": "671353c9d3a6bdaebebff4ab007f1b9a3d0da9d5",
+          "tree": "fcb4ddf7937aa88a3f4b279117dc8bba8b657e9a",
+          "date": "2026-10-15",
+          "source": "ci",
+          "scope": "single-suite",
+          "suites": "promotion-disconnected-follower,promotion-disconnected-follower-empty",
+          "run_url": "https://github.com/gree/flare/actions/runs/38699030754",
+          "result": "fail",
+          "command": "E2E MANUAL single-suite 38699030754 (promotion-disconnected-follower,promotion-disconnected-follower-empty) on 671353c: hardened reproduction on the unfixed operator: C1 follower promoted while the ex-master held all 50 keys by value, 20/20 missing on the new master, 0 absent from every copy at read time (still on the ex-master copy, now a slave of the follower history), no NOT LOSS-FREE; A1 ex-master verified empty, follower promoted with no NOT LOSS-FREE, 20/20 absent from every copy",
+          "report": "https://github.com/gree/flare/actions/runs/38699030754"
         }
       ],
       "tasks": [
@@ -4666,8 +4776,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "6/6 checks pass in CI runs that tested candidate rc67-candidate-fe9afce (fe9afceca1)'s tree or a docs-only equivalent"
+          "state": "partial",
+          "evidence": "6/7 checks pass in CI runs that tested candidate rc67-candidate-fe9afce (fe9afceca1)'s tree or a docs-only equivalent; OPEN finding(s) F-ht10-stale-r3 — not a pass"
         },
         "reviewed": {
           "state": "no",
@@ -4677,7 +4787,19 @@
           "state": "no",
           "note": "not approved for production"
         }
-      }
+      },
+      "open_findings": [
+        {
+          "id": "F-ht10-stale-r3",
+          "state": "open",
+          "since": "2026-10-15",
+          "summary": "A follower cut off from its master keeps a stale R3 'eligible' binding; on a masterless partition the refill crowned it as an in-sync Active slave: no hold while the ex-master is away, crowned ahead of an ex-master back with every write (20 acknowledged writes missing on the new master), and no NOT LOSS-FREE line. Present on rc66 and fe9afce.",
+          "checks": [
+            "CHECK-06-staler3"
+          ],
+          "reproduced": "single-suite 38687661051 (509f2c8) and 38699030754 (671353c, hardened observations): C1 and A1 both 'OPEN FINDING REPRODUCED' on the unfixed operator"
+        }
+      ]
     },
     {
       "id": "EV-07",

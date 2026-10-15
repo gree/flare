@@ -23,6 +23,13 @@ procedures and immutable execution evidence. A verified control only supports
 its bounded claim; it does not close every linked hazard. Alerts describe
 detection, not prevention, and depend on deployment enablement and routing.
 
+"CI passed at candidate" says only that every RECORDED check of the control
+executed and passed in a full CI run of the candidate's tree. It is not a
+safety pass: a check covers its scenario, not every way the control can
+fail. A reproduced defect that is not fixed at the candidate is recorded as
+an OPEN finding on the control; it caps the column at `partial` and is shown
+next to it (`OPEN F-…`), whatever the checks say.
+
 <!-- safety-evidence:begin -->
 
 <!-- Generated from safety-evidence.json; do not edit this table. -->
@@ -31,9 +38,9 @@ detection, not prevention, and depend on deployment enablement and routing.
 | <a id="ev-01"></a>EV-01 / SC-01 | Only the current leader may issue topology changes; recipients must reject obsolete authority. | H6, H4, UCA-14, UCA-15, UCA-16, UCA-08 | partial | yes (6/6) | no | no | unverified | [code](../flare_operator/FlareOperator/Main.lean), [check](../flare_operator/FlareOperator/UnitTests.lean) |
 | <a id="ev-02"></a>EV-02 / SC-02 | mergeClusterState commits at most one Master per partition in its node map. | H6, UCA-08, UCA-14 | yes | yes (1/1) | no | no | unverified | [code](../flare_operator/FlareOperator/StateMachine/K8sReconciler.lean), [check](../flare_operator/FlareOperator/StateMachine/K8sReconciler.lean) |
 | <a id="ev-03"></a>EV-03 / SC-03 | A replica with missed writes remains repair-pending until reconstruction completes and missing data is recovered. | H3, H2, UCA-02, UCA-32 | partial | yes (4/4) | no | no | unverified | [code](../flare_operator/FlareOperator/StateMachine/ReplicaRepair.lean), [check](../flare_operator/FlareOperator/E2E/Tests/ReplicaRepair.lean) |
-| <a id="ev-04"></a>EV-04 / SC-04 | Normal promotion and Prepare activation require a completed usable copy associated with the current source. | H2, H4, UCA-10, UCA-26 | partial | yes (6/6) | no | no | unverified | [code](../flare_operator/FlareOperator/StateMachine/SyncEvidence.lean), [check](../flare_operator/FlareOperator/E2E/Tests/PrepareEvidence.lean) |
+| <a id="ev-04"></a>EV-04 / SC-04 | Normal promotion and Prepare activation require a completed usable copy associated with the current source. | H2, H4, UCA-10, UCA-26 | partial | partial (6/7) — OPEN F-ht10-stale-r3 | no | no | unverified | [code](../flare_operator/FlareOperator/StateMachine/SyncEvidence.lean), [check](../flare_operator/FlareOperator/E2E/Tests/PrepareEvidence.lean) |
 | <a id="ev-05"></a>EV-05 / SC-05 | Delete only a revalidated target when independent current evidence supports the surviving copy. | H5, H2, UCA-07, UCA-11, UCA-12, UCA-13, UCA-26 | partial | yes (3/3) | no | no | unverified | [code](../flare_operator/FlareOperator/StateMachine/StatsObservation.lean), [check](../flare_operator/FlareOperator/StateMachine/StatsObservation.lean) |
-| <a id="ev-06"></a>EV-06 / SC-06 | Refill missing masters under an explicit emergency policy, with partial-copy promotion distinguished from normal successor promotion. | H1, H2, H5, UCA-04, UCA-07, UCA-09, UCA-10 | partial | yes (6/6) | no | no | unverified | [code](../flare_operator/FlareOperator/StateMachine/K8sReconciler.lean), [check](../flare_operator/FlareOperator/E2E/Tests/PvcDataSurvival.lean) |
+| <a id="ev-06"></a>EV-06 / SC-06 | Refill missing masters under an explicit emergency policy, with partial-copy promotion distinguished from normal successor promotion. | H1, H2, H5, UCA-04, UCA-07, UCA-09, UCA-10 | partial | partial (6/7) — OPEN F-ht10-stale-r3 | no | no | unverified | [code](../flare_operator/FlareOperator/StateMachine/K8sReconciler.lean), [check](../flare_operator/FlareOperator/E2E/Tests/PvcDataSurvival.lean) |
 | <a id="ev-07"></a>EV-07 / SC-07 | Use Pod existence/readiness streaks with guards, retaining an unhealthy lone master rather than stripping its assignment. | H1, H4, H5, UCA-01, UCA-03, UCA-05, UCA-12 | partial | partial (3/5) | no | no | unverified | [code](../flare_operator/FlareOperator/Main.lean), [check](../flare_operator/FlareOperator/E2E/Tests/Failover.lean) |
 | <a id="ev-08"></a>EV-08 / SC-08 | The pure drain transform retains a master assignment if there is no Active slave successor. | H1, H5, UCA-04, UCA-05 | yes | yes (1/1) | no | no | unverified | [code](../flare_operator/FlareOperator/StateMachine/K8sReconciler.lean), [check](../flare_operator/FlareOperator/E2E/Tests/TerminatingPodHandling.lean) |
 | <a id="ev-09"></a>EV-09 / SC-09 | Circuit-breaker policy pauses mass failover; configured recovery refill is a separate path. | H1, H5, UCA-03 | partial | yes (1/1) | no | no | unverified | [code](../flare_operator/FlareOperator/StateMachine/K8sReconciler.lean), [check](../flare_operator/FlareOperator/E2E/Tests/CircuitBreaker.lean) |

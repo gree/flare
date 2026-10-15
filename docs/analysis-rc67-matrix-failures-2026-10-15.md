@@ -185,6 +185,22 @@ path consumes that class.
   reproductions are run on the old operator first, then on the fix, with
   lag-hold-tmpfs / lag-hold-expiry and the restore-promotion group.
 
+Unfixed-operator result with the hardened observations (single-suite
+38699030754 on 671353c = fe9afce operator + tests): both REPRODUCED, as
+findings (not unobservable / precondition):
+- C1: timeline cut 08:06:16 → 20 writes acked 08:06:20 → operator stopped and
+  master killed 08:06:50 → container restarted / operator back 08:06:56 →
+  ex-master registered 08:07:17 (its copy: 50/50 keys by value) → promotion
+  committed 08:07:22 for the FOLLOWER (R3 eligible=1, follow disconnected).
+  Missing on the new master: 20/20. Absent from every copy at read time
+  (before the cut was healed): 0 — they were still on the ex-master's copy,
+  which had become a slave of the follower's new history (epoch advanced at
+  the promotion: followers of the previous history must rebuild). No NOT
+  LOSS-FREE.
+- A1: ex-master verified empty (0 keys, curr_items 0); follower promoted
+  with every base key; 20/20 under-the-cut writes absent from every copy
+  (the accepted loss) — but no NOT LOSS-FREE.
+
 Repro hardening (review of ee8f520, item 1): every required observation
 (ex-master registration, the decision, every copy's dump, the node view)
 failing stops the test as UNOBSERVABLE / PRECONDITION NOT MET, never as a
@@ -306,6 +322,22 @@ Scope statement
   cutover takes the destination down (review-cross-cluster §7.6). The
   first-move limitation stays: snapshot push must not be used (switch off).
 - X4 stays recorded as failing; not counted as passing.
+
+Control — RUN (review of ee8f520, item 3; single-suite 38699030754 on
+671353c, both suites in one job, same kind cluster):
+
+| suite | seed | destination identity across the seed | test 4 (restart with writes, operator running) | test 5 (final per-key match) |
+|---|---|---|---|---|
+| cluster-replication-faults (X4) | snapshot push (default) | not read before (the push replaces it) | FAIL: master not back within 300 s | FAIL: no comparison (not a data verdict) |
+| cluster-replication-faults-per-key (control) | per-key, `snapshotPush: false` | unchanged (master id, epoch, copy id verified before the restart) | pass: back in ~17 s, 60 → 65 items, forwarding resumed | pass: every tracked key matches |
+
+Same body (unresolvable name, four connection breaks, then the destination
+master pod deleted with data kept while 15 changes are written, operator
+running). Conclusion boundary: with this procedure the restart failure needs
+the snapshot-push seed; the per-key seed does not reproduce it, so no common
+recovery defect is shown for the first per-key move (its limitations are
+unchanged). One run; not a statement about other restart procedures or about
+production. Snapshot push stays out of the first move.
 
 ## What the logs already settle, and the next deterministic step (13 / 7 / 8)
 

@@ -129,8 +129,15 @@ def ci_stage(control, candidate=None, root=None):
             latest[run["check"]] = run["result"]
     passed = [i for i in ids if latest.get(i) == "pass"]
     state = "yes" if ids and len(passed) == len(ids) else ("partial" if passed else "no")
+    # An OPEN finding against the control (a reproduced defect not fixed at
+    # the candidate) caps the stage: "every check passed" must never read as
+    # "the control holds" while a known reproduction of its failure stands.
+    open_ids = [f["id"] for f in control.get("open_findings", []) if f["state"] == "open"]
+    if open_ids and state == "yes":
+        state = "partial"
+    note = f"; OPEN finding(s) {', '.join(open_ids)} — not a pass" if open_ids else ""
     return state, (f"{len(passed)}/{len(ids)} checks pass in CI runs that tested candidate "
-                   f"{candidate.get('label', '?')} ({candidate['commit'][:10]})'s tree or a docs-only equivalent")
+                   f"{candidate.get('label', '?')} ({candidate['commit'][:10]})'s tree or a docs-only equivalent{note}")
 
 
 def derive_status(control, candidate=None, root=None):
@@ -269,6 +276,14 @@ def validate(data, root):
             latest = passing.get(c["runs"][-1]["commit"], {}) if c["runs"] else {}
             require(all(latest.get(k) == "pass" for k in check_ids),
                     f"{label}: verified requires all checks passing on one tested revision")
+        for f in c.get("open_findings", []):
+            require(re.fullmatch(r"F-[a-z0-9-]+", str(f.get("id", ""))) and nonempty(f.get("summary", ""))
+                    and f.get("state") in ("open", "fixed"), f"{label}: open finding needs id F-..., summary, state open|fixed")
+            require(isinstance(f.get("checks"), list) and f["checks"] and set(f["checks"]) <= set(check_ids),
+                    f"{label}: an open finding names the checks that reproduce it")
+            require(nonempty(f.get("reproduced", "")), f"{label}: an open finding names its reproduction (run)")
+            if f["state"] == "fixed":
+                require(SHA.fullmatch(str(f.get("fixed_in", ""))), f"{label}: a fixed finding names the full fixing commit")
         validate_status(c, label, candidate, root)
     unique(all_checks, r"CHECK-\d{2}(?:-[a-z0-9]+)?", "check")
     require(covered == uca_ids, "every UCA needs at least one control")
@@ -294,6 +309,9 @@ def render(data):
         st = c["status"]
         ev = st["ci_passed"]["evidence"]
         ci = f"{st['ci_passed']['state']} ({'no candidate' if ev.startswith('no release candidate') else ev.split(' ')[0]})"
+        open_ids = [f["id"] for f in c.get("open_findings", []) if f["state"] == "open"]
+        if open_ids:
+            ci += f" — OPEN {', '.join(open_ids)}"
         lines.append("| " + " | ".join(map(cell, [ids, c["constraint"]["text"], links,
                       st["implemented"]["state"], ci, st["reviewed"]["state"],
                       st["production_approved"]["state"], c["verification"], ", ".join(refs)])) + " |")

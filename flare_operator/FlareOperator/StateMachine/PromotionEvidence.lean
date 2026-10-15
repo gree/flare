@@ -79,6 +79,11 @@ structure Stats where
   switchUnresolved : Option Nat := none
   corrupted : Option Nat := none
   readSourceReason : Option String := none
+  /-- R3: the node key the copy was validated against (`repl_read_source`)
+      and that validation's history (`repl_read_source_epoch`; "" = a legacy
+      peer, lineage only) -/
+  readSource : Option String := none
+  readSourceEpoch : Option String := none
   followReason : Option String := none
   reconstruction : Option String := none
   masterId : Option String := none
@@ -143,6 +148,8 @@ def parseStats (out : String) : Stats :=
     eligible := el.1, sourceState := ss.1, identityConsistent := ic.1, quarantined := qu.1
     copyPartial := cp.1, inFlight := fl.1, parked := pk.1, switchUnresolved := su.1, corrupted := co.1, reconstruction := rc.1
     readSourceReason := value "repl_read_source_reason"
+    readSource := (value "repl_read_source").filter (!·.isEmpty)
+    readSourceEpoch := value "repl_read_source_epoch"
     followReason := value "repl_follow_last_reason"
     masterId := value "rocksdb_master_id"
     sourceEpoch := value "rocksdb_source_epoch"
@@ -203,6 +210,25 @@ structure Observed where
   /-- the partition binding the map would give it as the master of its
       partition (`bindingFor`); `none` = not checked -/
   expectedBinding : Option String := none
+  /-- the node key of the partition's last master (the map's lastMasterOf,
+      exactly one) when the partition is explicitly UNTRACKED (previous
+      behaviour, decided): no history can be recorded for it; `none` = tracked,
+      undecided, or no unique last master -/
+  untrackedLastMaster : Option String := none
+
+/-- An UNTRACKED partition with no master (user decision 2026-10-16, upgrade
+    from rc56 on tmpfs, CI 38714646714): a copy whose R3 validation was against
+    the partition's last master itself, a LEGACY peer (no history epoch), is a
+    copy of that master's data — but its binding is stale (eligible or
+    re-validating with no master to follow), so it is not proven current:
+    `lagging` (the refill's held, logged last resort: seated only when the
+    ex-master is READ empty or the wait expired, NOT LOSS-FREE). Everything
+    else without a record stays `unknown`. -/
+def Stats.legacyCopyOfUntrackedLastMaster (s : Stats) (o : Observed) : Bool :=
+  !o.partitionHasMaster && o.lastMasterHistory.isNone && o.untrackedLastMaster.isSome
+    && s.readSource == o.untrackedLastMaster && s.readSourceEpoch == some ""
+    && (s.sourceState == some "eligible" || s.sourceState == some "revalidating")
+    && o.mapActive && !o.mapPrepare && s.items.getD 0 != 0
 
 /-- R3's reason names WHAT it compared the copy with: "history differs:
     copy E1, master K E2" or "lineage differs: copy X, master K Y".
@@ -326,6 +352,7 @@ def classify (reply : Option String) (o : Observed) : Class :=
       else if s.items == some 0 then .empty
       else if o.mapActive && !o.mapPrepare && o.podReady then .legacy
       else .unknown "a backend without copy evidence that is not Active, Ready and idle"
+    else if s.legacyCopyOfUntrackedLastMaster o then .lagging
     else if s.sourceState == some "revalidating" then
       -- the master went while it was re-validating: its going is NOT
       -- evidence. Only a copy proven to be the RECORDED last master's

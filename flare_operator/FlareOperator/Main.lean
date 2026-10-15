@@ -650,6 +650,19 @@ private def recordedHistory (p : Int) : IO (Option (String × String)) := do
   | none => return none
   | some st => return (st.recorded p.toNat).map fun h => (h.masterId, h.epoch)
 
+/-- The partition's last master (the map's lastMasterOf, exactly one) when the
+    partition is explicitly UNTRACKED: the source a legacy-bound copy must
+    name to be `lagging` (PromotionEvidence.legacyCopyOfUntrackedLastMaster). -/
+private def untrackedLastMaster (cs : FlareClusterState) (p : Int) : IO (Option String) := do
+  if p < 0 then return none
+  match ← historyStoreRef.get with
+  | none => return none
+  | some st =>
+    if st.tracked p.toNat then return none
+    match (cs.nodeMap.filter fun kv => kv.2.lastMasterOf == p).map Prod.fst with
+    | [k] => return some k
+    | _ => return none
+
 /-- (persisted text: some (some t) present / some none absent / none unreadable, resourceVersion) -/
 private def readHistory (crName ns : String) : IO (Option (Option String) × String) := do
   match ← kubectl ["get", "configmap", historyCm crName, "-n", ns, "-o", "jsonpath={.metadata.resourceVersion}|{.data.record}"] with
@@ -1628,7 +1641,8 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
                 partitionHasMaster := hasMaster
                 lastMasterHistory := ← recordedHistory part
                 isLastMasterHolder := part ≥ 0 && n.lastMasterOf == part
-                expectedBinding := if part ≥ 0 then some (PromotionEvidence.bindingFor part.toNat nPartsB cs.partitionSize) else none }
+                expectedBinding := if part ≥ 0 then some (PromotionEvidence.bindingFor part.toNat nPartsB cs.partitionSize) else none
+                untrackedLastMaster := ← untrackedLastMaster cs part }
               let cls := PromotionEvidence.classify reply obs
               evidence := evidence ++ [(key, cls, PromotionEvidence.bindingOf (some p.uid) reply)]
               observedFor := observedFor ++ [(key, obs)]
@@ -1978,7 +1992,8 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
           partitionHasMaster := cur.nodeMap.any fun kv => kv.2.role == FlareRole.Master && kv.2.partition == part
           lastMasterHistory := hist
           isLastMasterHolder := (n?.map (·.lastMasterOf)) == some part
-          expectedBinding := if part ≥ 0 then some (PromotionEvidence.bindingFor part.toNat nPartsB cur.partitionSize) else none }
+          expectedBinding := if part ≥ 0 then some (PromotionEvidence.bindingFor part.toNat nPartsB cur.partitionSize) else none
+          untrackedLastMaster := ← untrackedLastMaster cur part }
         let cls := PromotionEvidence.classify replyNow obs
         IO.eprintln s!"[flare-operator] PROMOTION EVIDENCE (read at commit, a pass that did not read the candidates): {k}={cls.label} [boot {(PromotionEvidence.bindingOf none replyNow).bootId.getD "?"}]"
         if podNow.isNone || !PromotionEvidence.commitTimeAllows cls then

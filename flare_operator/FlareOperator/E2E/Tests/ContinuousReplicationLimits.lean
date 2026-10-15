@@ -1479,6 +1479,23 @@ def upgradeSuite : TestSuite := {
           if !done then return .fail s!"the roll did not complete within 20 min (restarts nodes-0={r0} nodes-1={r1})"
           if r0 + r1 > 0 then return .fail s!"flared containers restarted during the roll (nodes-0={r0} nodes-1={r1}): two copies did not fit"
           if !legacyPath || !legacyDone then return .fail s!"the new replica did not copy the epoch-less master by the legacy staged rule (used={legacyPath}, switched in={legacyDone})"
+          -- decision 2026-10-16 (CI 38714646714): the master's roll on tmpfs
+          -- can leave the UNTRACKED partition with NO master (the ex-master
+          -- re-registers empty). The replica the legacy master validated is
+          -- then seated only as the logged LAST RESORT (its binding is stale:
+          -- not proven current) — never as a normal promotion.
+          let seated ← waitForCondition "after the roll: P0 has a master again" 300 do
+            return (← masterPodOf c).isSome
+          if !seated then return .fail "after the roll: no Active P0 master within 300 s"
+          let opl := (← c.opLog 200000).splitOn "\n"
+          let masterless := opl.any (containsSubstr · "partition 0 has NO master")
+          match ← masterPodOf c with
+          | none => return .fail "after the roll: the P0 master went away again"
+          | some m =>
+            let nlf ← notLossFreeLine c m
+            IO.eprintln s!"# after the roll: master {m}; masterless refill engaged={masterless}; NOT LOSS-FREE line: {(nlf.map (·.take 260)).getD "none"}"
+            if masterless && nlf.isNone then
+              return .fail s!"after the roll: {m} was seated on a masterless untracked partition without PROMOTION NOT LOSS-FREE (a stale legacy binding is not proof of currency)"
           match ← c.pair with
           | .error e => return .fail s!"after the roll: {e}"
           | .ok (_, mIp2, _, sIp2) =>

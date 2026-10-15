@@ -1956,10 +1956,11 @@ private def checkCopyDiscardApproval (ctx : Ctx) : IO Unit := do
     non-promotable ones blocked. history-tracking 10 / 38687661051. -/
 private def staleR3Refill (st : FlareClusterState) (replies : List (String × String))
     (live dataBearing knownEmpty : List String) (expired : List Nat := [])
+    (lastHist : Option (String × String) := some ("M", "2:e")) (untracked : Option String := none)
     : Option String × List String :=
   let obs : PromotionEvidence.Observed :=
     { mapPrepare := false, mapActive := true, podReady := true, partitionHasMaster := false,
-      lastMasterHistory := some ("M", "2:e") }
+      lastMasterHistory := lastHist, untrackedLastMaster := untracked }
   let classes := replies.map fun (k, r) =>
     let n? := st.lookupNode k
     (k, PromotionEvidence.classify (some r) { obs with
@@ -2011,6 +2012,35 @@ private def checkStaleR3Refill (ctx : Ctx) : IO Unit := do
   let (uM, _) := staleR3Refill holdState [("f", copy 30 "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\n")] ["f"] ["f"] [] [0]
   check ctx "history-tracking 10: a stale-eligible follower whose history cannot be told is UNKNOWN: never seated, not even after the wait"
     (uM == none)
+  -- upgrade from rc56 on tmpfs (decision 2026-10-16, CI 38714646714): the
+  -- partition is UNTRACKED (its master was a legacy flared: no history can be
+  -- recorded) and the replica was validated against that master itself, a
+  -- legacy peer (no epoch). Stale bound (eligible) or re-validating: LAGGING —
+  -- the held, logged last resort. Fails on 57d37a1 (unknown, never seated).
+  let fLegacy := fun (state : String) (src : String) (ep : String) =>
+    copy 2450 s!"STAT rocksdb_master_id N1\r\nSTAT rocksdb_source_epoch 1:n1\r\nSTAT repl_read_source_eligible {if state == "eligible" then 1 else 0}\r\nSTAT repl_read_source_state {state}\r\nSTAT repl_read_source {src}\r\nSTAT repl_read_source_epoch {ep}\r\nSTAT repl_read_source_reason x\r\n"
+  for state in ["eligible", "revalidating"] do
+    let f := fLegacy state "m" ""
+    let (lM, lL) := staleR3Refill back [("m", mEmpty), ("f", f)] ["m", "f"] ["f"] ["m"] [] none (some "m")
+    check ctx s!"untracked upgrade ({state}): the ex-master (a legacy master) back READ EMPTY: the replica it validated is seated as the last resort, logged NOT LOSS-FREE (READ empty)"
+      (lM == some "f" && nlf lL && lL.any (containsSub · "READ empty"))
+    let (hM, hL) := staleR3Refill holdState [("f", f)] ["f"] ["f"] [] [] none (some "m")
+    let (xM, xL) := staleR3Refill holdState [("f", f)] ["f"] ["f"] [] [0] none (some "m")
+    check ctx s!"untracked upgrade ({state}): the ex-master AWAY: HELD, then seated NOT LOSS-FREE only after the wait (EXPIRED)"
+      (hM == none && held hL && !nlf hL && xM == some "f" && nlf xL && xL.any (containsSub · "EXPIRED"))
+  let never := fun (f : String) (untracked : Option String) =>
+    (staleR3Refill back [("m", mEmpty), ("f", f)] ["m", "f"] ["f"] ["m"] [0] none untracked).1 == none
+  check ctx "untracked upgrade: still UNKNOWN (never seated, not even after the wait) when the binding names ANOTHER node, the source had a history epoch, the partition is not untracked, or the copy is empty"
+    (never (fLegacy "eligible" "x" "") (some "m") && never (fLegacy "eligible" "m" "3:k") (some "m")
+      && never (fLegacy "eligible" "m" "") none
+      && PromotionEvidence.classify (some ((fLegacy "eligible" "m" "").replace "curr_items 2450" "curr_items 0"))
+          { mapPrepare := false, mapActive := true, podReady := true, partitionHasMaster := false,
+            lastMasterHistory := none, untrackedLastMaster := some "m" } != .lagging)
+  -- with a master present nothing changes: the same reading is eligible
+  check ctx "untracked upgrade: with a master present the same bound reading is ELIGIBLE (the rule is masterless-only)"
+    (PromotionEvidence.classify (some (fLegacy "eligible" "m" ""))
+      { mapPrepare := false, mapActive := true, podReady := true, partitionHasMaster := true,
+        lastMasterHistory := none, untrackedLastMaster := some "m" } == .eligible)
 
 -- ─── promotion by reason (decision 2026-10-08) ────────────────────────────
 

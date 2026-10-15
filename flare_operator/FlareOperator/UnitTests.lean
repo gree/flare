@@ -1949,6 +1949,69 @@ private def checkCopyDiscardApproval (ctx : Ctx) : IO Unit := do
     (CopyDiscardApproval.parseReply "STAT copy_discard_result applied\r\nEND\r\n" == some "applied"
       && CopyDiscardApproval.parseReply "STAT copy_discard_result applied\r\n" == none)
 
+-- ─── history-tracking 10: a stale R3 binding through every refill tier ────
+
+/-- The masterless refill driven by the REAL classifier, the way Main feeds
+    it: non-normal classes are excluded (with the unfit followers) and
+    non-promotable ones blocked. history-tracking 10 / 38687661051. -/
+private def staleR3Refill (st : FlareClusterState) (replies : List (String × String))
+    (live dataBearing knownEmpty : List String) (expired : List Nat := [])
+    : Option String × List String :=
+  let obs : PromotionEvidence.Observed :=
+    { mapPrepare := false, mapActive := true, podReady := true, partitionHasMaster := false,
+      lastMasterHistory := some ("M", "2:e") }
+  let classes := replies.map fun (k, r) =>
+    let n? := st.lookupNode k
+    (k, PromotionEvidence.classify (some r) { obs with
+      mapPrepare := (n?.map (fun (n : FlareNode) => n.state)) == some FlareState.Prepare,
+      mapActive := (n?.map (fun (n : FlareNode) => n.state)) == some FlareState.Active })
+  let excl := classes.filterMap fun (k, c) => if c.normal then none else some k
+  let blocked := classes.filterMap fun (k, c) => if c.promotable then none else some k
+  let after := K8sReconciler.promoteMasterlessPartitions st activationCrd live [] dataBearing excl true expired knownEmpty blocked
+  let rs : K8sReconciler.FlareReconcileState :=
+    { followUnfitKeys := excl, followHoldEnabled := true, followHoldExpiredParts := expired,
+      livePodKeys := live, dataBearingKeys := dataBearing, knownEmptyKeys := knownEmpty }
+  (masterOf after, (K8sReconciler.refillHoldEffects st after activationCrd rs).filterMap fun
+    | .Log m => some m
+    | _ => none)
+
+private def checkStaleR3Refill (ctx : Ctx) : IO Unit := do
+  let copy := fun (items : Nat) (extra : String) =>
+    s!"STAT rocksdb_copy_identity_consistent 1\r\nSTAT rocksdb_quarantined 0\r\nSTAT rocksdb_copy_partial 0\r\nSTAT rebuild_in_flight 0\r\nSTAT rocksdb_copy_id u:1\r\nSTAT reconstruction_boot_id 7\r\nSTAT curr_items {items}\r\n" ++ extra ++ "END\r\n"
+  -- the follower cut off from its master: R3 still BOUND (decide_source keeps it)
+  let fStale := copy 30 "STAT rocksdb_master_id M\r\nSTAT rocksdb_source_epoch 2:e\r\nSTAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nSTAT repl_follow_last_reason peer_unreachable\r\n"
+  -- the ex-master back on its PVC with every write (same history)
+  let mData := copy 50 "STAT rocksdb_master_id M\r\nSTAT rocksdb_source_epoch 2:e\r\nSTAT repl_read_source_eligible 0\r\nSTAT repl_read_source_state none\r\n"
+  -- the ex-master back EMPTY (a new history of its own)
+  let mEmpty := copy 0 "STAT rocksdb_master_id M2\r\nSTAT rocksdb_source_epoch 5:x\r\nSTAT repl_read_source_eligible 0\r\nSTAT repl_read_source_state none\r\n"
+  -- the ex-master back with data but a copy left part-way (not healthy)
+  let mPartial := (mData.replace "rocksdb_copy_partial 0" "rocksdb_copy_partial 1")
+  let back : FlareClusterState :=
+    ({ holdState with nodeMap := [("m", holdNode .Slave .Prepare 0 "m" 0), ("f", holdNode .Slave .Active 0 "f")] }).rebuildPartitionMap
+  let nlf := fun (ls : List String) => ls.any (containsSub · "PROMOTION NOT LOSS-FREE")
+  let held := fun (ls : List String) => ls.any (containsSub · "has NO master")
+  let (cM, cL) := staleR3Refill back [("m", mData), ("f", fStale)] ["m", "f"] ["m", "f"] []
+  check ctx "history-tracking 10 (C): the ex-master back WITH every write is crowned, not the cut-off follower whose R3 binding is stale; no false NOT LOSS-FREE"
+    (cM == some "m" && !nlf cL)
+  let (aM, aL) := staleR3Refill back [("m", mEmpty), ("f", fStale)] ["m", "f"] ["f"] ["m"]
+  check ctx "history-tracking 10 (A): the ex-master back READ EMPTY: the follower is still seated (availability, the permitted last resort) and logged NOT LOSS-FREE with that reason"
+    (aM == some "f" && nlf aL && aL.any (containsSub · "READ empty"))
+  let (bM, bL) := staleR3Refill holdState [("f", fStale)] ["f"] ["f"] []
+  check ctx "history-tracking 10 (B): the ex-master AWAY: the follower is HELD (CRITICAL, no master) — the wait is not bypassed"
+    (bM == none && held bL && !nlf bL)
+  let (eM, eL) := staleR3Refill holdState [("f", fStale)] ["f"] ["f"] [] [0]
+  check ctx "history-tracking 10 (B, wait over): the follower is seated and logged NOT LOSS-FREE with the EXPIRY reason"
+    (eM == some "f" && nlf eL && eL.any (containsSub · "EXPIRED"))
+  let (pM, pL) := staleR3Refill back [("m", mPartial), ("f", fStale)] ["m", "f"] ["m", "f"] []
+  check ctx "history-tracking 10: an ex-master back with data but an unhealthy copy (part-way) is NOT crowned by name; the follower stays held until the ex-master is usable or the wait ends"
+    (pM == none && held pL)
+  let (pxM, pxL) := staleR3Refill back [("m", mPartial), ("f", fStale)] ["m", "f"] ["m", "f"] [] [0]
+  check ctx "history-tracking 10: ... and after the wait the follower is seated NOT LOSS-FREE (never the unhealthy ex-master)"
+    (pxM == some "f" && nlf pxL)
+  let (uM, _) := staleR3Refill holdState [("f", copy 30 "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\n")] ["f"] ["f"] [] [0]
+  check ctx "history-tracking 10: a stale-eligible follower whose history cannot be told is UNKNOWN: never seated, not even after the wait"
+    (uM == none)
+
 -- ─── promotion by reason (decision 2026-10-08) ────────────────────────────
 
 private def checkPromotionEvidence (ctx : Ctx) : IO Unit := do
@@ -2008,10 +2071,27 @@ private def checkPromotionEvidence (ctx : Ctx) : IO Unit := do
     ((match cls (some ((base.replace "rocksdb_source_epoch 2:e" "rocksdb_source_epoch 9:x") ++ "STAT repl_read_source_eligible 0\r\nEND\r\n")) obs with | .forbidden _ => true | _ => false)
       && (match cls (reply "STAT repl_read_source_eligible 0\r\n") { obs with lastMasterHistory := none } with | .unknown _ => true | _ => false)
       && (match cls (reply "STAT repl_read_source_eligible 0\r\n") { obs with lastMasterHistory := none, isLastMasterHolder := true } with | .unknown _ => true | _ => false))
-  check ctx "promotion by reason: unreadable or incomplete is UNKNOWN; a bound eligible Active copy is ELIGIBLE"
+  check ctx "promotion by reason: unreadable or incomplete is UNKNOWN; a bound eligible Active copy is ELIGIBLE while its partition HAS a master"
     ((match cls none obs with | .unknown _ => true | _ => false)
       && (match cls (some base) obs with | .unknown _ => true | _ => false)
-      && cls (reply "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\n") obs == .eligible)
+      && cls (reply "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\n") { obs with partitionHasMaster := true } == .eligible)
+  -- history-tracking 10 (38687661051): the PAIR — the same bound R3 reading
+  -- is eligible against a present master and NOT once the partition is
+  -- masterless (a stale binding: R3 keeps it while its master is unreachable)
+  let bound := reply "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nSTAT repl_follow_last_reason peer_unreachable\r\n"
+  check ctx "history-tracking 10: a STALE R3 eligible (masterless partition) is not eligible — the recorded last master's history = LAGGING (held, logged last resort only)"
+    (cls bound obs == .lagging && cls bound { obs with partitionHasMaster := true } == .eligible)
+  check ctx "history-tracking 10: a stale R3 eligible with NO recorded history, or no reported history, is UNKNOWN (held) — being disconnected is not by itself 'same history'"
+    ((match cls bound { obs with lastMasterHistory := none } with | .unknown _ => true | _ => false)
+      && (match cls (some ((base.replace "STAT rocksdb_master_id M\r\nSTAT rocksdb_source_epoch 2:e\r\n" "") ++ "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nEND\r\n")) obs with | .unknown _ => true | _ => false))
+  check ctx "history-tracking 10: a stale R3 eligible does not override FORBIDDEN (another history = rejoining; rebuild in flight; partial; quarantine)"
+    ((match cls (some ((base.replace "rocksdb_source_epoch 2:e" "rocksdb_source_epoch 9:x") ++ "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nEND\r\n")) obs with | .forbidden _ => true | _ => false)
+      && [("rebuild_in_flight 0", "rebuild_in_flight 1"), ("rocksdb_copy_partial 0", "rocksdb_copy_partial 1"), ("rocksdb_quarantined 0", "rocksdb_quarantined 1")].all (fun (a, b) =>
+        match cls (some ((base.replace a b) ++ "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nEND\r\n")) obs with | .forbidden _ => true | _ => false))
+  check ctx "history-tracking 10: at commit the stale-eligible copy is classified the same way (lagging = lagging); a non-reading pass refuses it (commitTimeAllows)"
+    ((PromotionEvidence.reclassifyAllows (cls bound obs) (cls bound obs)).1
+      && !(PromotionEvidence.reclassifyAllows .eligible (cls bound obs)).1
+      && !PromotionEvidence.commitTimeAllows (cls bound obs))
   check ctx "promotion by reason: LEGACY is not unconditional — Prepare, NotReady or a running reconstruction is not legacy-promotable"
     (cls (some "STAT curr_items 60\r\nEND\r\n") { obs with mapActive := true, podReady := true } == .legacy
       && (match cls (some "STAT curr_items 60\r\nEND\r\n") { obs with mapPrepare := true, mapActive := false } with | .unknown _ => true | _ => false)
@@ -2019,7 +2099,9 @@ private def checkPromotionEvidence (ctx : Ctx) : IO Unit := do
       && (match cls (some "STAT curr_items 60\r\nSTAT reconstruction_current_state running\r\nEND\r\n") obs with | .forbidden _ => true | _ => false))
   check ctx "promotion by reason: a backend without copy evidence (tch) is decided by the narrow legacy rule, not held as unknown"
     (cls (some "STAT repl_read_source_eligible 0\r\nSTAT repl_read_source_state none\r\nSTAT curr_items 60\r\nEND\r\n") { obs with lastMasterHistory := none } == .legacy
-      && cls (some "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nSTAT curr_items 60\r\nEND\r\n") obs == .eligible
+      && cls (some "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nSTAT curr_items 60\r\nEND\r\n") { obs with partitionHasMaster := true } == .eligible
+      -- masterless: the stale R3 binding is not used; the narrow legacy rule decides (tch has no WAL follower)
+      && cls (some "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nSTAT curr_items 60\r\nEND\r\n") obs == .legacy
       && (match cls (some "STAT repl_read_source_eligible 0\r\nSTAT repl_read_source_state none\r\nSTAT curr_items 60\r\nEND\r\n") { obs with mapPrepare := true, mapActive := false } with | .unknown _ => true | _ => false)
       && (match cls (some "STAT repl_read_source_eligible 0\r\nSTAT repl_read_source_state needs_rebuild\r\nSTAT curr_items 60\r\nEND\r\n") obs with | .forbidden _ => true | _ => false))
   check ctx "promotion by reason (review 2026-10-08): the ONLY unread promotion is the first master of a partition no copy has held"
@@ -2475,6 +2557,7 @@ def run : IO UInt32 := do
   checkRestoreProvenance ctx
   checkCopyDiscardApproval ctx
   checkPromotionEvidence ctx
+  checkStaleR3Refill ctx
   checkMigrationForwardGate ctx
   checkSnapshotPushSwitch ctx
   let failures ← ctx.failures.get

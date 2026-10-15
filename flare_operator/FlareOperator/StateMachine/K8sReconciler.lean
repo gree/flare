@@ -1429,7 +1429,7 @@ def refillHoldEffects (before after : FlareClusterState) (crd : FlareClusterView
     then heldForExMaster after crd s.livePodKeys s.dataBearingKeys s.followUnfitKeys
     else []
   held.map (fun (p, ks) =>
-    FlareEffect.Log s!"[flare-operator] CRITICAL: partition {p} has NO master: its only data-bearing copy {ks} is unfit (too far behind its source, or its copy is unusable), so it is NOT promoted while the ex-master is away or cannot be read; waiting for the ex-master to return with its data (FLARE_FOLLOW_FAILOVER_WAIT_SECONDS). Writes to this partition fail meanwhile. See RUNBOOK #failover-lag-hold")
+    FlareEffect.Log s!"[flare-operator] CRITICAL: partition {p} has NO master: its only data-bearing copy {ks} is unfit (too far behind its source, its copy is unusable, or it cannot be proven current: a stale read-source binding with no master to follow), so it is NOT promoted while the ex-master is away or cannot be read; waiting for the ex-master to return with its data (FLARE_FOLLOW_FAILOVER_WAIT_SECONDS). Writes to this partition fail meanwhile. See RUNBOOK #failover-lag-hold")
   ++ crowned.map (fun k =>
     let p : Nat := ((after.lookupNode k).map (·.partition.toNat)).getD 0
     let why :=
@@ -1439,7 +1439,7 @@ def refillHoldEffects (before after : FlareClusterState) (crd : FlareClusterView
       else if exMasterBackEmpty before p s.livePodKeys s.knownEmptyKeys then
         "the ex-master came back and was READ empty this tick (complete stats, pod unchanged)"
       else "no recorded reason (unexpected: the hold should have kept it)"
-    FlareEffect.Log s!"[flare-operator] PROMOTION NOT LOSS-FREE: {k} was seated by the masterless refill as a LAST RESORT although its continuous replication judged it unfit (too far behind, or an unusable copy): {why}. Writes it never received are lost. See RUNBOOK #failover-lag-hold")
+    FlareEffect.Log s!"[flare-operator] PROMOTION NOT LOSS-FREE: {k} was seated by the masterless refill as a LAST RESORT although it was judged unfit or not proven current (too far behind, an unusable copy, or a stale read-source binding with no master): {why}. Writes it never received are lost. See RUNBOOK #failover-lag-hold")
 
 /-- The core reconciler transition function.
     Each step processes a K8s API response and produces a new state,

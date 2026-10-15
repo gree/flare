@@ -11,7 +11,9 @@ import FlareOperator.StateMachine.Reconciler
 
   Run (any tree): `lake env lean --run FlareOperator/Repro/HistoryTracking10.lean`
   It PRINTS what the pure decision does; it asserts nothing (it is evidence,
-  not a gate).
+  not a gate). The asserting pairs are UnitTests.checkStaleR3Refill. On the
+  fix (a stale R3 eligible is not eligible on a masterless partition) the
+  "stale BOUND" column equals the "needs_rebuild" one.
 -/
 
 open FlareOperator
@@ -61,9 +63,7 @@ def obsNoMaster : PromotionEvidence.Observed :=
     here is FollowEvidence-UNPROVEN (disconnected, its own backlog 0), never
     unfit; only the R3 class can put it into the excluded list. -/
 def excludedFor (cls : PromotionEvidence.Class) : List String :=
-  match cls with
-  | .eligible | .legacy | .empty => []
-  | _ => ["f"]
+  if cls.normal then [] else ["f"]
 
 def run (title : String) (st : FlareClusterState) (live dataBearing knownEmpty : List String)
     (reply : String) : IO Unit := do

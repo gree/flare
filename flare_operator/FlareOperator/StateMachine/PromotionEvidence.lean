@@ -2,7 +2,9 @@
   Promotion by reason (decision 2026-10-08). On a pass where a promotion is
   possible, every live non-master candidate is read and classified:
 
-  * `eligible`  — R3 says the copy is validated for its source;
+  * `eligible`  — R3 says the copy is validated for its source, and that
+                  source is the master the partition has NOW (a masterless
+                  partition's R3 binding is stale: history-tracking 10);
   * `lagging`   — a healthy copy of the SAME history as the partition's last
                   master (recorded by the operator while that master was
                   readable), merely behind. Never a normal promotion; only the
@@ -49,6 +51,15 @@ def Class.label : Class → String
     normal paths exclude it beforehand as unfit). -/
 def Class.promotable : Class → Bool
   | .eligible | .lagging | .legacy | .empty => true
+  | _ => false
+
+/-- A NORMAL promotion candidate (eligible / legacy / empty). Every other
+    class is out of the normal paths: Main puts it with the unfit followers
+    (excluded from failover, drain, proxy assignment and the refill's first
+    tier; held by the refill while the ex-master is away), and only the
+    refill's logged last resort may seat a `lagging` one. -/
+def Class.normal : Class → Bool
+  | .eligible | .legacy | .empty => true
   | _ => false
 
 /-- The parsed stats of one candidate (`none` fields = not reported).
@@ -180,7 +191,9 @@ structure Observed where
   mapPrepare : Bool          -- the map has it in Prepare
   mapActive : Bool           -- the map has it Active
   podReady : Bool
-  partitionHasMaster : Bool  -- a master is in the map for its partition now
+  /-- a master is in the map for its partition now. Without one, an R3
+      `eligible` reading is stale and never makes the copy `eligible`. -/
+  partitionHasMaster : Bool
   /-- (master_id, source epoch) of the partition's last master, recorded while
       it was readable; `none` = not known (operator restarted, never read) -/
   lastMasterHistory : Option (String × String)
@@ -309,7 +322,7 @@ def classify (reply : Option String) (o : Observed) : Class :=
       else .unknown "a pre-R3 flared that is not Active, Ready and idle"
     else if s.noCopyEvidence then
       if s.sourceState == some "revalidating" then .unknown "re-validating with no master, and no copy evidence to tell its history"
-      else if s.eligible == some 1 && o.mapActive && !o.mapPrepare then .eligible
+      else if s.eligible == some 1 && o.partitionHasMaster && o.mapActive && !o.mapPrepare then .eligible
       else if s.items == some 0 then .empty
       else if o.mapActive && !o.mapPrepare && o.podReady then .legacy
       else .unknown "a backend without copy evidence that is not Active, Ready and idle"
@@ -322,7 +335,17 @@ def classify (reply : Option String) (o : Observed) : Class :=
         if cm == mid && ce == ep then .lagging
         else .unknown s!"re-validating, and its history ({cm}/{ce}) is not the recorded last master's ({mid}/{ep})"
       | _, _, _ => .unknown "re-validating when the master went, and the last master's history was not recorded"
-    else if s.eligible == some 1 && o.mapActive && !o.mapPrepare then .eligible
+    -- R3 `eligible` says the copy was validated against the master the
+    -- partition HAS. With no master in the map it is a stale binding: R3
+    -- keeps it while the master it validated against cannot be probed
+    -- (source_eligibility.h decide_source), so a follower cut off long before
+    -- still reads eligible (history-tracking 10, 38687661051: 20 acknowledged
+    -- writes lost to a cut-off follower crowned ahead of the ex-master that
+    -- held them). It is not evidence of currency then: the copy is decided
+    -- by its history below — the recorded last master's = `lagging` (only
+    -- the refill's held, logged last resort), no record / not reported =
+    -- `unknown` (held). Being disconnected is not by itself "same history".
+    else if s.eligible == some 1 && o.partitionHasMaster && o.mapActive && !o.mapPrepare then .eligible
     else if (s.items == some 0) && s.copyPartial == some 0 && s.inFlight != some 1 then .empty
     else
       match o.lastMasterHistory, s.masterId, s.copyEpoch with

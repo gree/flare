@@ -1648,9 +1648,7 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
         -- not a normal promotion: anything other than eligible / legacy /
         -- empty is out of the normal paths (the refill's last resort may still
         -- choose a lagging copy; the commit decides by reason)
-        let notNormal := evidence.filterMap fun (k, c, _) => match c with
-          | .eligible | .legacy | .empty => none
-          | _ => some k
+        let notNormal := evidence.filterMap fun (k, c, _) => if c.normal then none else some k
         sourceIneligible := sourceIneligible ++ notNormal.filter (!sourceIneligible.contains ·)
         -- every reading this pass, unreadable ones included: which evidence
         -- a promotion on this pass could stand on (copy-identity 11)

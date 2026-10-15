@@ -793,9 +793,14 @@ def suite : TestSuite := {
               let b ← localBalance
               let v2 ← statNat sIp "node_map_version"
               return if v1.isSome && v1 == v2 && b == some "50" then v1 else none
+            -- keep the snapshot the wait confirmed; a second read could see a
+            -- later version and lose a precondition that held (CI 38791047421)
+            let seenVer ← IO.mkRef (none : Option Nat)
             let stable ← waitForCondition "a stable snapshot: the same map version around a balance-50 read" 60 do
-              return (← snapshot).isSome
-            let verAtReady ← snapshot
+              let s ← snapshot
+              seenVer.set s
+              return s.isSome
+            let verAtReady ← seenVer.get
             let readyAt ← utcNow
             if !stable || verAtReady.isNone then return .fail "PRECONDITION NOT MET: no stable balance-50 snapshot of the replica's own map"
             for spec in topologyRules ++ readGuardRules mIp sIp do

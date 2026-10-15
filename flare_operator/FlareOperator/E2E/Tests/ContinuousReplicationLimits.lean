@@ -1623,6 +1623,23 @@ private def Ctx.threeInSync (c : Ctx) : IO (Option (String × String × String �
     IO.sleep 4000
   return none
 
+/-- `threeInSync`, and both slaves report R3 `eligible` — validated against
+    the CURRENT master's history. Equal counts alone are not that: right
+    after the previous test's promotion the slaves still carry the old
+    history (CI 38791047421: both FORBIDDEN at test 13's start, so the drain
+    had no successor and the only promotion to hold was the drained master's
+    own re-seat). -/
+private def Ctx.threeEligible (c : Ctx) : IO (Option (String × String × String × Nat)) := do
+  for _ in [0:90] do
+    match ← c.threeInSync with
+    | some (m, a, b, n) =>
+      let ra ← c.statStr ((← getPodIp a c.cfg.«namespace»).getD "") "repl_read_source_state"
+      let rb ← c.statStr ((← getPodIp b c.cfg.«namespace»).getD "") "repl_read_source_state"
+      if ra == some "eligible" && rb == some "eligible" then return some (m, a, b, n)
+    | none => return none
+    IO.sleep 4000
+  return none
+
 def identitySuite : TestSuite := {
   name := "copy-identity"
   setup := do
@@ -1827,8 +1844,8 @@ def identitySuite : TestSuite := {
       run := do
         IO.sleep 1100
         let since13 ← utcNow
-        match ← c.threeInSync with
-        | none => return .fail "precondition: one master and two in-sync Active slaves"
+        match ← c.threeEligible with
+        | none => return .fail "PRECONDITION NOT MET: one master and two in-sync Active slaves, both R3 eligible against it"
         | some (m, a, b, items) =>
           -- each node's OWN view at the start (CI 37547974017: the other
           -- slave was Prepare when the promotion was needed; why is the question)
@@ -1846,6 +1863,12 @@ def identitySuite : TestSuite := {
           | none => c.releasePromotion; c.windowRecord since13 [a, b] "copy-identity 13"; return .fail "the promotion barrier was never reached"
           | some keys =>
             let target := podOf (keys.head!)
+            -- the held pass must be a slave's promotion; the drained master's
+            -- own re-seat is not what this test replaces (deleting it would
+            -- delete the master, CI 38791047421)
+            if target != a && target != b then
+              c.releasePromotion; c.windowRecord since13 [a, b, m] "copy-identity 13"
+              return .fail s!"PRECONDITION NOT MET: the held promotion is of {target}, not of a slave ({a}, {b}); no successor was chosen"
             let other := if target == a then b else a
             let uid0 := (← c.podUid target).getD ""
             discard <| kubectl ["cordon", kindNode]

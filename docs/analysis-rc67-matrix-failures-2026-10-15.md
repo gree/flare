@@ -127,6 +127,22 @@ flared restarts, so the refill (not failover) decides. No flared test seam
 is needed. They are in the restore-promotion group: the full matrix reports
 the open finding as a failure, not a pass.
 
+E2E result — REPRODUCED, both, deterministic (single-suite 38687661051 on
+509f2c8 = fe9afce product + these tests; 38682940390 and 38685673044 stopped
+at test-side preconditions, fixed in 3a58959 / 509f2c8):
+- C: ex-master prom-disc-nodes-0 back on its PVC with 50/50 items (20
+  acknowledged under the cut). Pass evidence: ex-master `lagging (same
+  history)`, follower (R3 eligible=1, follow disconnected, 30 items)
+  `eligible` → `PROMOTION committed` for the FOLLOWER; no NOT LOSS-FREE;
+  the 20 acknowledged writes are missing on the new master.
+- A: ex-master back empty (`FORBIDDEN (rejoining …)`), follower `eligible`
+  → promoted (the right copy) with NO NOT LOSS-FREE although 20
+  acknowledged writes never reached it.
+rc66 control: the operator and validator code are unchanged between rc66
+and fe9afce and the decision replay gives the same result on both; an E2E
+run of these tests on rc66 would need another branch (pushes go only to
+safety/saf-10-restore-provenance) and was not run.
+
 Fix — NOT made, needs a decision (it changes promotion policy):
 - (a) the refill treats followUnprovenKeys like unfit for tier 1 and for the
   hold: a disconnected follower is crowned only by the logged last resort

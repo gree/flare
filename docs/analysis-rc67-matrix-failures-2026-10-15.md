@@ -211,6 +211,31 @@ ex-master's own copy must hold all 50 by value (PVC) or be verified EMPTY
 healed; the result separates "missing on the new master" from "absent from
 every copy", and records the timeline.
 
+Fixed-operator result (single-suite 38703976147 on 117c915; 20/20 E2E in
+the eleven suites promotion-disconnected-follower(-empty), lag-hold /
+-tmpfs / -expiry / -unreadable, multipart-lag-hold, history-tracking,
+history-masterless, promotion-reasons, r3-unreadable; flare_unit including
+the history-tracking 10 pairs):
+- C1 PASS: cut 09:19:40 → 20 writes acked 09:19:44 → operator stopped and
+  master killed 09:20:20 → container restarted / operator back 09:20:25 →
+  ex-master registered 09:20:41 (its copy: 50/50 by value) → promotion
+  committed 09:20:52 for the EX-MASTER. The cut follower is not crowned; no
+  hold line was needed (the ex-master was back and readable); no NOT
+  LOSS-FREE for the follower.
+- A1 PASS: ex-master verified empty (0 keys); follower promoted with every
+  base key and logged PROMOTION NOT LOSS-FREE (masterless refill, last
+  resort); accepted loss 20/20 under-the-cut writes absent from every copy.
+- The lag-hold, history and promotion-reasons suites still pass (held
+  while away / unreadable, seated NOT LOSS-FREE on expiry or an empty
+  return, FORBIDDEN copies never seated).
+- Observation (open, not changed): in C1 the re-seated ex-master is also
+  logged `PROMOTION of a LAGGING copy … writes it never received are lost`.
+  Its copy is classified `lagging` because nothing proves it current (it is
+  not preferred by name), so the line over-reports: "behind it" is not
+  established for the last master's own copy. Safe direction (a false
+  alarm, never a hidden loss); rewording or a separate class is a policy
+  choice, left to review.
+
 ## Ledger (review [P2])
 
 The ledger candidate is now fe9afce (`rc67-candidate-fe9afce`). be60dbb's
@@ -226,6 +251,17 @@ ran evaluation-only skips); EV-11 no (resync self-demote test skipped); EV-13
 no (wal-purged fallback test skipped). X4's suite is referenced by no check.
 EV-06 carries the refill finding above as an OPEN residual risk: its
 ci_passed=yes does not cover it. Candidate update ≠ review or approval.
+
+Candidate moved to 57d37a1 (`rc67-candidate-57d37a1`) = fe9afce + the
+history-tracking 10 fix (117c915) + the reproduction / X4-control tests
+(671353c) + the ledger checker (57d37a1: an OPEN finding caps ci_passed; a
+finding marked fixed lifts the cap only when its fixing commit is an
+ancestor of the candidate). Later commits are docs only. fe9afce's ledger
+is kept in docs/reports/2026-10-15-ledger-candidate-fe9afce-snapshot.json
+(14 yes / 4 partial / 2 no; EV-04 and EV-06 capped by the OPEN finding).
+F-ht10-stale-r3 is `fixed` (fixed_in 117c915). The targeted run 38703976147
+does not count for the candidate (its tree differs by the checker script);
+every control is `no` until the full matrix at the candidate is recorded.
 
 ## restore 7 (restore-promotion) — attempt 1 failed, attempt 2 passed
 

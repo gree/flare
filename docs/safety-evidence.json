@@ -1809,8 +1809,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "6/6 checks pass in CI runs that tested candidate rc67-candidate-fe9afce (fe9afceca1)'s tree or a docs-only equivalent"
+          "state": "no",
+          "evidence": "0/6 checks pass in CI runs that tested candidate rc67-candidate-57d37a1 (57d37a1360)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -1915,8 +1915,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "1/1 checks pass in CI runs that tested candidate rc67-candidate-fe9afce (fe9afceca1)'s tree or a docs-only equivalent"
+          "state": "no",
+          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-57d37a1 (57d37a1360)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -2785,8 +2785,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "4/4 checks pass in CI runs that tested candidate rc67-candidate-fe9afce (fe9afceca1)'s tree or a docs-only equivalent"
+          "state": "no",
+          "evidence": "0/4 checks pass in CI runs that tested candidate rc67-candidate-57d37a1 (57d37a1360)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -3691,6 +3691,20 @@
           "result": "fail",
           "command": "E2E MANUAL single-suite 38699030754 (promotion-disconnected-follower,promotion-disconnected-follower-empty) on 671353c: hardened reproduction on the unfixed operator: C1 follower promoted while the ex-master held all 50 keys by value, 20/20 missing on the new master, 0 absent from every copy at read time (still on the ex-master copy, now a slave of the follower history), no NOT LOSS-FREE; A1 ex-master verified empty, follower promoted with no NOT LOSS-FREE, 20/20 absent from every copy",
           "report": "https://github.com/gree/flare/actions/runs/38699030754"
+        },
+        {
+          "check": "CHECK-04-staler3",
+          "commit": "117c915528a2aded29272a45ff305672c3af8e4c",
+          "head": "117c915528a2aded29272a45ff305672c3af8e4c",
+          "tree": "d9fac817351cff82d6c5f761efa3431f680e0233",
+          "date": "2026-10-15",
+          "source": "ci",
+          "scope": "single-suite",
+          "suites": "promotion-disconnected-follower,promotion-disconnected-follower-empty,continuous-replication-lag-hold,continuous-replication-lag-hold-tmpfs,continuous-replication-lag-hold-expiry,continuous-replication-lag-hold-unreadable,multipart-lag-hold,history-tracking,history-masterless,promotion-reasons,r3-unreadable",
+          "run_url": "https://github.com/gree/flare/actions/runs/38703976147",
+          "result": "pass",
+          "command": "E2E MANUAL single-suite 38703976147 (promotion-disconnected-follower,promotion-disconnected-follower-empty,continuous-replication-lag-hold,continuous-replication-lag-hold-tmpfs,continuous-replication-lag-hold-expiry,continuous-replication-lag-hold-unreadable,multipart-lag-hold,history-tracking,history-masterless,promotion-reasons,r3-unreadable) on 117c915: fix verified on the fixed operator (20/20 E2E + unit pairs): C1 the ex-master returned with all 50 keys by value and was re-seated (committed), the cut follower not crowned, no NOT LOSS-FREE for it; A1 the ex-master verified empty, the follower promoted with every base key and logged NOT LOSS-FREE (last resort), accepted loss 20/20 writes acknowledged under the cut absent from every copy; lag-hold / history / promotion-reasons pairs still pass. Observation: the re-seated ex-master in C1 is also logged 'PROMOTION of a LAGGING copy' (over-report: its currency is not proven, not evidence of loss)",
+          "report": "https://github.com/gree/flare/actions/runs/38703976147"
         }
       ],
       "tasks": [
@@ -3709,8 +3723,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "partial",
-          "evidence": "6/7 checks pass in CI runs that tested candidate rc67-candidate-fe9afce (fe9afceca1)'s tree or a docs-only equivalent; OPEN finding(s) F-ht10-stale-r3 — not a pass"
+          "state": "no",
+          "evidence": "0/7 checks pass in CI runs that tested candidate rc67-candidate-57d37a1 (57d37a1360)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -3724,13 +3738,15 @@
       "open_findings": [
         {
           "id": "F-ht10-stale-r3",
-          "state": "open",
+          "state": "fixed",
           "since": "2026-10-15",
           "summary": "A follower cut off from its master keeps a stale R3 'eligible' binding; on a masterless partition the refill crowned it as an in-sync Active slave: no hold while the ex-master is away, crowned ahead of an ex-master back with every write (20 acknowledged writes missing on the new master), and no NOT LOSS-FREE line. Present on rc66 and fe9afce.",
           "checks": [
             "CHECK-04-staler3"
           ],
-          "reproduced": "single-suite 38687661051 (509f2c8) and 38699030754 (671353c, hardened observations): C1 and A1 both 'OPEN FINDING REPRODUCED' on the unfixed operator"
+          "reproduced": "single-suite 38687661051 (509f2c8) and 38699030754 (671353c, hardened observations): C1 and A1 both 'OPEN FINDING REPRODUCED' on the unfixed operator",
+          "fixed_in": "117c915528a2aded29272a45ff305672c3af8e4c",
+          "verified": "single-suite 38703976147 on 117c915 (C1/A1 pass, unit pairs fail on the old classification); counts for a candidate only through a full-matrix run"
         }
       ]
     },
@@ -4052,8 +4068,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "3/3 checks pass in CI runs that tested candidate rc67-candidate-fe9afce (fe9afceca1)'s tree or a docs-only equivalent"
+          "state": "no",
+          "evidence": "0/3 checks pass in CI runs that tested candidate rc67-candidate-57d37a1 (57d37a1360)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -4760,6 +4776,20 @@
           "result": "fail",
           "command": "E2E MANUAL single-suite 38699030754 (promotion-disconnected-follower,promotion-disconnected-follower-empty) on 671353c: hardened reproduction on the unfixed operator: C1 follower promoted while the ex-master held all 50 keys by value, 20/20 missing on the new master, 0 absent from every copy at read time (still on the ex-master copy, now a slave of the follower history), no NOT LOSS-FREE; A1 ex-master verified empty, follower promoted with no NOT LOSS-FREE, 20/20 absent from every copy",
           "report": "https://github.com/gree/flare/actions/runs/38699030754"
+        },
+        {
+          "check": "CHECK-06-staler3",
+          "commit": "117c915528a2aded29272a45ff305672c3af8e4c",
+          "head": "117c915528a2aded29272a45ff305672c3af8e4c",
+          "tree": "d9fac817351cff82d6c5f761efa3431f680e0233",
+          "date": "2026-10-15",
+          "source": "ci",
+          "scope": "single-suite",
+          "suites": "promotion-disconnected-follower,promotion-disconnected-follower-empty,continuous-replication-lag-hold,continuous-replication-lag-hold-tmpfs,continuous-replication-lag-hold-expiry,continuous-replication-lag-hold-unreadable,multipart-lag-hold,history-tracking,history-masterless,promotion-reasons,r3-unreadable",
+          "run_url": "https://github.com/gree/flare/actions/runs/38703976147",
+          "result": "pass",
+          "command": "E2E MANUAL single-suite 38703976147 (promotion-disconnected-follower,promotion-disconnected-follower-empty,continuous-replication-lag-hold,continuous-replication-lag-hold-tmpfs,continuous-replication-lag-hold-expiry,continuous-replication-lag-hold-unreadable,multipart-lag-hold,history-tracking,history-masterless,promotion-reasons,r3-unreadable) on 117c915: fix verified on the fixed operator (20/20 E2E + unit pairs): C1 the ex-master returned with all 50 keys by value and was re-seated (committed), the cut follower not crowned, no NOT LOSS-FREE for it; A1 the ex-master verified empty, the follower promoted with every base key and logged NOT LOSS-FREE (last resort), accepted loss 20/20 writes acknowledged under the cut absent from every copy; lag-hold / history / promotion-reasons pairs still pass. Observation: the re-seated ex-master in C1 is also logged 'PROMOTION of a LAGGING copy' (over-report: its currency is not proven, not evidence of loss)",
+          "report": "https://github.com/gree/flare/actions/runs/38703976147"
         }
       ],
       "tasks": [
@@ -4776,8 +4806,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "partial",
-          "evidence": "6/7 checks pass in CI runs that tested candidate rc67-candidate-fe9afce (fe9afceca1)'s tree or a docs-only equivalent; OPEN finding(s) F-ht10-stale-r3 — not a pass"
+          "state": "no",
+          "evidence": "0/7 checks pass in CI runs that tested candidate rc67-candidate-57d37a1 (57d37a1360)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -4791,13 +4821,15 @@
       "open_findings": [
         {
           "id": "F-ht10-stale-r3",
-          "state": "open",
+          "state": "fixed",
           "since": "2026-10-15",
           "summary": "A follower cut off from its master keeps a stale R3 'eligible' binding; on a masterless partition the refill crowned it as an in-sync Active slave: no hold while the ex-master is away, crowned ahead of an ex-master back with every write (20 acknowledged writes missing on the new master), and no NOT LOSS-FREE line. Present on rc66 and fe9afce.",
           "checks": [
             "CHECK-06-staler3"
           ],
-          "reproduced": "single-suite 38687661051 (509f2c8) and 38699030754 (671353c, hardened observations): C1 and A1 both 'OPEN FINDING REPRODUCED' on the unfixed operator"
+          "reproduced": "single-suite 38687661051 (509f2c8) and 38699030754 (671353c, hardened observations): C1 and A1 both 'OPEN FINDING REPRODUCED' on the unfixed operator",
+          "fixed_in": "117c915528a2aded29272a45ff305672c3af8e4c",
+          "verified": "single-suite 38703976147 on 117c915 (C1/A1 pass, unit pairs fail on the old classification); counts for a candidate only through a full-matrix run"
         }
       ]
     },
@@ -5378,8 +5410,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "partial",
-          "evidence": "3/5 checks pass in CI runs that tested candidate rc67-candidate-fe9afce (fe9afceca1)'s tree or a docs-only equivalent"
+          "state": "no",
+          "evidence": "0/5 checks pass in CI runs that tested candidate rc67-candidate-57d37a1 (57d37a1360)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -5476,8 +5508,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "1/1 checks pass in CI runs that tested candidate rc67-candidate-fe9afce (fe9afceca1)'s tree or a docs-only equivalent"
+          "state": "no",
+          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-57d37a1 (57d37a1360)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -5913,8 +5945,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "1/1 checks pass in CI runs that tested candidate rc67-candidate-fe9afce (fe9afceca1)'s tree or a docs-only equivalent"
+          "state": "no",
+          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-57d37a1 (57d37a1360)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -6010,8 +6042,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "1/1 checks pass in CI runs that tested candidate rc67-candidate-fe9afce (fe9afceca1)'s tree or a docs-only equivalent"
+          "state": "no",
+          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-57d37a1 (57d37a1360)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -6132,7 +6164,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-fe9afce (fe9afceca1)'s tree or a docs-only equivalent"
+          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-57d37a1 (57d37a1360)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -6227,8 +6259,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "1/1 checks pass in CI runs that tested candidate rc67-candidate-fe9afce (fe9afceca1)'s tree or a docs-only equivalent"
+          "state": "no",
+          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-57d37a1 (57d37a1360)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -6334,7 +6366,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-fe9afce (fe9afceca1)'s tree or a docs-only equivalent"
+          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-57d37a1 (57d37a1360)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -6423,8 +6455,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "1/1 checks pass in CI runs that tested candidate rc67-candidate-fe9afce (fe9afceca1)'s tree or a docs-only equivalent"
+          "state": "no",
+          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-57d37a1 (57d37a1360)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -6630,8 +6662,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "1/1 checks pass in CI runs that tested candidate rc67-candidate-fe9afce (fe9afceca1)'s tree or a docs-only equivalent"
+          "state": "no",
+          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-57d37a1 (57d37a1360)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -7557,8 +7589,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "partial",
-          "evidence": "6/7 checks pass in CI runs that tested candidate rc67-candidate-fe9afce (fe9afceca1)'s tree or a docs-only equivalent"
+          "state": "no",
+          "evidence": "0/7 checks pass in CI runs that tested candidate rc67-candidate-57d37a1 (57d37a1360)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -8007,8 +8039,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "2/2 checks pass in CI runs that tested candidate rc67-candidate-fe9afce (fe9afceca1)'s tree or a docs-only equivalent"
+          "state": "no",
+          "evidence": "0/2 checks pass in CI runs that tested candidate rc67-candidate-57d37a1 (57d37a1360)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -9012,8 +9044,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "6/6 checks pass in CI runs that tested candidate rc67-candidate-fe9afce (fe9afceca1)'s tree or a docs-only equivalent"
+          "state": "no",
+          "evidence": "0/6 checks pass in CI runs that tested candidate rc67-candidate-57d37a1 (57d37a1360)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -9158,8 +9190,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "1/1 checks pass in CI runs that tested candidate rc67-candidate-fe9afce (fe9afceca1)'s tree or a docs-only equivalent"
+          "state": "no",
+          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-57d37a1 (57d37a1360)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -9603,8 +9635,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "2/2 checks pass in CI runs that tested candidate rc67-candidate-fe9afce (fe9afceca1)'s tree or a docs-only equivalent"
+          "state": "no",
+          "evidence": "0/2 checks pass in CI runs that tested candidate rc67-candidate-57d37a1 (57d37a1360)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -9618,8 +9650,8 @@
     }
   ],
   "candidate": {
-    "commit": "fe9afceca1ebf8a9b51de0eea07a13a73f7567de",
-    "label": "rc67-candidate-fe9afce"
+    "commit": "57d37a136005bc7961fd7e7dc9ab86abc44065b1",
+    "label": "rc67-candidate-57d37a1"
   },
   "previous_candidates": [
     {
@@ -9628,6 +9660,13 @@
       "superseded": "2026-10-15",
       "snapshot": "docs/reports/2026-10-15-ledger-candidate-be60dbb-snapshot.json",
       "note": "0 of 57 checks had a counting CI run at this candidate (every control ci_passed=no); kept for the record, not used by the computation"
+    },
+    {
+      "commit": "fe9afceca1ebf8a9b51de0eea07a13a73f7567de",
+      "label": "rc67-candidate-fe9afce",
+      "superseded": "2026-10-15",
+      "snapshot": "docs/reports/2026-10-15-ledger-candidate-fe9afce-snapshot.json",
+      "note": "14 of 20 controls ci_passed=yes, 4 partial, 2 no at this candidate; EV-04/EV-06 capped by the OPEN finding F-ht10-stale-r3 (the refill crowned a cut-off follower with a stale R3 binding), which this candidate contains unfixed; kept for the record, not used by the computation"
     }
   ]
 }

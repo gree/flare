@@ -1488,7 +1488,9 @@ def upgradeSuite : TestSuite := {
             return (← masterPodOf c).isSome
           if !seated then return .fail "after the roll: no Active P0 master within 300 s"
           let opl := (← c.opLog 200000).splitOn "\n"
-          let masterless := opl.any (containsSubstr · "partition 0 has NO master")
+          -- the refill logs its inputs on every masterless pass (a READ-empty
+          -- ex-master seats the replica at once, with no hold line)
+          let masterless := opl.any fun l => containsSubstr l "partition 0 has NO master" || containsSubstr l "masterless refill inputs p0"
           match ← masterPodOf c with
           | none => return .fail "after the roll: the P0 master went away again"
           | some m =>

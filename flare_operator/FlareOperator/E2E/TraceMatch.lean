@@ -286,6 +286,48 @@ def caughtUp (o : AccObs) : Bool :=
    | some ap, some hd, some si, some mi => ap ≥ hd && si == mi
    | _, _, _, _ => false)
 
+-- ─── a batch larger than the follow budget (review of d311227) ────────────
+
+/-- A memcached reply carries `word` as a line of its own ("STORED",
+    "DELETED"). An unobserved reply, NOT_FOUND, an error or a reply that
+    only mentions the word inside another line is not an acknowledgement. -/
+def acked (word : String) (reply : Option String) : Bool :=
+  match reply with
+  | none => false
+  | some r => (r.splitOn "\n").any fun l => (l.replace "\r" "").trim == word
+
+/-- The answer form of a value too large to compare inline: the debug pod
+    replaces the value line by `sha256:<hex>:<bytes>` before the reply is
+    returned, so the copy is compared by content and size. -/
+def digestAnswer (hash : String) (bytes : Nat) : String := s!"=sha256:{hash}:{bytes}"
+
+/-- The debug pod's report of the value it generated: `<bytes>` on one line
+    and `<64 hex>  <path>` (sha256sum) on the next. Anything else is `none`
+    (never a default size or hash). -/
+def parseDigestReport (out : String) : Option (Nat × String) := do
+  let ls := ((out.splitOn "\n").map fun l => (l.replace "\r" "").trim).filter (· != "")
+  let [n, h] := ls | none
+  let bytes ← if n.all Char.isDigit && !n.isEmpty then n.toNat? else none
+  let hash ← (h.splitOn " ").head?
+  if hash.length == 64 && hash.all (fun c => c.isDigit || ('a' ≤ c && c ≤ 'f')) then some (bytes, hash) else none
+
+/-- The replica's cursor moved past `batchSeq` (the large batch's sequence on
+    the master) between two COMPLETE observations: before it, after it at
+    the end. A missing observation is a failure, never "passed". -/
+def crossedBatch (before after : AccObs) (batchSeq : Nat) : List String :=
+  let miss := before.missing "before" ++ after.missing "after"
+  if !miss.isEmpty then miss
+  else match before.replica.applied, after.replica.applied with
+    | some a0, some a1 =>
+      (if a0 < batchSeq then [] else [s!"the cursor was already at {a0} ≥ the large batch {batchSeq} before it was written"]) ++
+      (if batchSeq ≤ a1 then [] else [s!"the cursor {a1} did not pass the large batch {batchSeq}"])
+    | _, _ => ["the replica's cursor was not observed"]
+
+/-- Caught up to a head read on the master: `caughtUp` and the cursor at or
+    past `head` (both obtained). -/
+def reachedHead (o : AccObs) (head : Nat) : Bool :=
+  caughtUp o && (o.replica.applied.map (fun a => decide (a ≥ head))) == some true
+
 -- ─── activation order ─────────────────────────────────────────────────────
 
 /-- Verdict on a replica's activations around a master switch.

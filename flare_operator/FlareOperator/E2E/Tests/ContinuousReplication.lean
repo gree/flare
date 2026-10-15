@@ -197,15 +197,26 @@ private def readGuardRules (masterIp slaveIp : String) : List (List String) :=
     key of `expect`, on ONE connection; the replica's read traces for that
     connection are matched and judged by TraceMatch.judgeLocalCopy. Needs
     FLARE_TEST_READ_TRACE_PREFIX = "acc" (cfg). The problems; empty = every
-    key matched from the node's own copy. -/
-private def localCopyRound (pod ip marker : String) (expect : List (String × String)) : IO (List String) := do
+    key matched from the node's own copy.
+    `digest`: every reply line longer than 4096 bytes (a value) is replaced
+    in the debug pod by `sha256:<hex>:<bytes>` of that line, so a large
+    value is compared by content and size (TraceMatch.digestAnswer) without
+    carrying it back. -/
+private def localCopyRound (pod ip marker : String) (expect : List (String × String)) (digest : Bool := false) : IO (List String) := do
   let mk := s!"{marker}_{← IO.monoMsNow}"
   let keys := expect.map (·.1)
   IO.sleep 1100
   let since ← utcNow
   IO.sleep 1100
   let cmds := String.join ((mk :: keys).map fun k => s!"get {k}\\r\\n") ++ "quit\\r\\n"
-  let replies ← match ← execInDebugPod cfg.debugPod cfg.«namespace» s!"printf '{cmds}' | nc -w 5 {ip} {cfg.flarePort}" with
+  let fetch := if digest then
+      s!"printf '{cmds}' | nc -w 15 {ip} {cfg.flarePort} > /tmp/lr && : > /tmp/lr.sed && " ++
+      "for b in $(awk 'length($0) > 4096 {print NR}' /tmp/lr); do " ++
+      "h=$(sed -n \"$b\"p /tmp/lr | tr -d '\\r\\n' | sha256sum | cut -d' ' -f1); " ++
+      "n=$(sed -n \"$b\"p /tmp/lr | tr -d '\\r\\n' | wc -c | tr -d ' '); " ++
+      "echo \"$b\"'s/.*/sha256:'\"$h:$n\"'/' >> /tmp/lr.sed; done && sed -f /tmp/lr.sed /tmp/lr"
+    else s!"printf '{cmds}' | nc -w 5 {ip} {cfg.flarePort}"
+  let replies ← match ← execInDebugPod cfg.debugPod cfg.«namespace» fetch with
     | .ok out => pure ((FlareOperator.E2E.TraceMatch.parseGetReplies (mk :: keys) out).map (·.tail))
     | .error _ => pure none
   IO.sleep 1000
@@ -369,38 +380,90 @@ def suite : TestSuite := {
     -- by re-sending it, spent the budget on it alone and ended with MORE, and
     -- the follower retried at once — applied position frozen, ~0.45 core per
     -- node with no writes, until the source purged the WAL.
-    { name := "a value larger than the follow budget: the follower passes it and reaches the master's head; the copies match"
+    { name := "a value larger than the follow budget: on the SAME history and without a rebuild the follower's cursor passes it to the master's head; the replica's OWN copy holds the value (content and size), the 10 later writes, and then its delete"
       run := do
         match ← pair with
         | .error e => return .fail e
-        | .ok (_, mIp, _, sIp) =>
+        | .ok (mPod, mIp, sPod, sIp) =>
+          -- Required observations (review of d311227, P1): every observation
+          -- is an Option checked explicitly; a read failure is never 0, a
+          -- count is never the copy, and a catch-up by a rebuild is excluded
+          -- (TraceMatch.judgeNoRebuild across the whole test).
+          let ready ← waitForCondition "replica following and caught up" 120 do
+            let o ← observePair mPod mIp sPod sIp
+            return (← statStr sIp "repl_follow_state") == some "following" && FlareOperator.E2E.TraceMatch.caughtUp o
+          if !ready then return .fail s!"precondition: replica not following/caught up (state {← statStr sIp "repl_follow_state"})"
+          let obs0 ← observePair mPod mIp sPod sIp
+          let miss0 := obs0.missing "before"
+          if !miss0.isEmpty then return .fail s!"precondition: the required observation is incomplete: {miss0}"
+          -- the value: random hex (printable, one line), its size and sha256
+          -- as generated in the debug pod
           let size := 5 * 1024 * 1024
-          let cmd := s!"head -c {size} /dev/zero | tr '\\0' x > /tmp/bigvalue && (printf 'set follow_bigvalue 0 0 {size}\\r\\n'; cat /tmp/bigvalue; printf '\\r\\n') | nc -w 15 {mIp} {cfg.flarePort}"
-          let reply ← execInDebugPod cfg.debugPod cfg.«namespace» cmd
-          match reply with
-          | .error e => return .fail s!"could not write the large value: {e}"
-          | .ok o =>
-            if !containsSubstr o "STORED" then return .fail s!"the master did not store the {size}-byte value: {o.trim.take 200}"
-          let stored ← writeKeys cfg.debugPod cfg.«namespace» mIp cfg.flarePort "after_big" 10
-          if stored != 10 then return .fail s!"stored only {stored}/10 after the large value"
-          let head := (← statNat mIp "rocksdb_latest_sequence_number").getD 0
-          let reached ← waitForCondition "the replica's applied position reaches the master's head" 60 do
-            return (← statNat sIp "repl_applied_lsn").getD 0 >= head
-          let applied := (← statNat sIp "repl_applied_lsn").getD 0
-          IO.eprintln s!"# large value: master head {head}; replica applied {applied}; state {← statStr sIp "repl_follow_state"}; wal skipped {← statNat sIp "repl_wal_skipped"}"
-          if !reached then return .fail s!"the follower stopped behind the large value: applied {applied} < head {head} after 60 s"
-          -- a replica read may be proxied to the master, so the copy is
-          -- checked by the replica's own key count
-          let same ← waitForCondition "replica's local items match the master's" 60 do
-            return (← currItems sIp) == (← currItems mIp)
-          if !same then return .fail s!"local items master={← currItems mIp} replica={← currItems sIp}"
-          -- leave the keyspace as the later tests expect it
-          discard <| execInDebugPod cfg.debugPod cfg.«namespace» s!"printf 'delete follow_bigvalue\\r\\n' | nc -w 5 {mIp} {cfg.flarePort}"
-          let head2 := (← statNat mIp "rocksdb_latest_sequence_number").getD 0
-          let reached2 ← waitForCondition "the replica follows the delete" 60 do
-            return (← statNat sIp "repl_applied_lsn").getD 0 >= head2
-          if !reached2 then return .fail s!"the follower did not follow the delete after the large value (applied {← statNat sIp "repl_applied_lsn"} < {head2})"
-          return .pass },
+          let gen ← execInDebugPod cfg.debugPod cfg.«namespace»
+            s!"head -c {size / 2} /dev/urandom | od -An -v -tx1 | tr -d ' \\n' > /tmp/accbig && wc -c < /tmp/accbig | tr -d ' ' && sha256sum /tmp/accbig"
+          let some (bytes, hash) := (gen.toOption).bind FlareOperator.E2E.TraceMatch.parseDigestReport
+            | return .fail s!"precondition: the large value's size and sha256 could not be read: {gen}"
+          if bytes != size then return .fail s!"precondition: generated {bytes} bytes, not {size}"
+          let stored ← execInDebugPod cfg.debugPod cfg.«namespace»
+            s!"(printf 'set accbig_value 0 0 {size}\\r\\n'; cat /tmp/accbig; printf '\\r\\n') | nc -w 15 {mIp} {cfg.flarePort}"
+          if !FlareOperator.E2E.TraceMatch.acked "STORED" stored.toOption then
+            return .fail s!"the master did not answer STORED for the {size}-byte value: {stored}"
+          let some bigSeq ← statNat mIp "rocksdb_latest_sequence_number" | return .fail "the master's head could not be read after the large value"
+          let later := (List.range 10).map fun i => (s!"accbig_{i}", s!"later_{i}")
+          for (k, v) in later do
+            if !(← memcachedSet cfg.debugPod cfg.«namespace» mIp cfg.flarePort k v) then return .fail s!"the master did not store {k} after the large value"
+          let some head ← statNat mIp "rocksdb_latest_sequence_number" | return .fail "the master's head could not be read after the later writes"
+          let reached ← waitForCondition s!"the replica's cursor reaches the master's head {head}" 60 do
+            return FlareOperator.E2E.TraceMatch.reachedHead (← observePair mPod mIp sPod sIp) head
+          let obs1 ← observePair mPod mIp sPod sIp
+          IO.eprintln s!"# large value {bytes} bytes sha256 {hash}: batch {bigSeq}, head {head}; replica applied {obs0.replica.applied} -> {obs1.replica.applied}; state {← statStr sIp "repl_follow_state"}; reconstruction_started {obs0.replica.recon} -> {obs1.replica.recon}"
+          if !reached then return .fail s!"the follower did not reach the head {head} within 60 s (applied {obs1.replica.applied}, state {← statStr sIp "repl_follow_state"})"
+          let crossed := FlareOperator.E2E.TraceMatch.crossedBatch obs0 obs1 bigSeq
+          if !crossed.isEmpty then return .fail s!"the cursor did not pass the large batch: {crossed}"
+          let nr1 := FlareOperator.E2E.TraceMatch.judgeNoRebuild "before" "at the head" obs0 obs1
+          if !nr1.isEmpty then return .fail s!"caught up, but not on the same process, copy and history without a rebuild: {nr1}"
+          -- the replica's OWN copy: reads routed to the replica only and each
+          -- answer attributed to its local copy by the read trace
+          let balanceOnReplica : IO (Option Nat) := do
+            return ((← nodeView).find? (fun e => podOf e.fqdn == sPod)).map (·.balance)
+          try
+            discard <| kubectlPatch "flarecluster" cfg.name cfg.«namespace» "{\"spec\":{\"readBalance\":{\"master\":0,\"slave\":100}}}"
+            let routed ← waitForCondition "the replica's map entry has balance 100" 180 do
+              return (← balanceOnReplica) == some 100
+            if !routed then return .fail s!"reads could not be routed to the replica (its balance {← balanceOnReplica}): the copy cannot be verified"
+            let expect1 := ("accbig_value", FlareOperator.E2E.TraceMatch.digestAnswer hash bytes) :: later.map fun (k, v) => (k, s!"={v}")
+            let p1 ← localCopyRound sPod sIp "accbig_mark_held" expect1 (digest := true)
+            IO.eprintln s!"# replica's own copy with the value: problems {p1.length}: {p1.take 5}"
+            if !p1.isEmpty then return .fail s!"the replica's own copy does not hold the large value and the later writes: {p1.take 5}"
+            let del ← execInDebugPod cfg.debugPod cfg.«namespace» s!"printf 'delete accbig_value\\r\\n' | nc -w 5 {mIp} {cfg.flarePort}"
+            if !FlareOperator.E2E.TraceMatch.acked "DELETED" del.toOption then return .fail s!"the master did not answer DELETED: {del}"
+            let some head2 ← statNat mIp "rocksdb_latest_sequence_number" | return .fail "the master's head could not be read after the delete"
+            let reached2 ← waitForCondition s!"the replica's cursor reaches the delete at {head2}" 60 do
+              return FlareOperator.E2E.TraceMatch.reachedHead (← observePair mPod mIp sPod sIp) head2
+            if !reached2 then return .fail s!"the follower did not follow the delete (head {head2}, applied {(← observePair mPod mIp sPod sIp).replica.applied})"
+            let expect2 := ("accbig_value", "miss") :: later.map fun (k, v) => (k, s!"={v}")
+            let p2 ← localCopyRound sPod sIp "accbig_mark_deleted" expect2 (digest := true)
+            IO.eprintln s!"# replica's own copy after the delete: problems {p2.length}: {p2.take 5}"
+            if !p2.isEmpty then return .fail s!"the replica's own copy after the delete is not as expected: {p2.take 5}"
+            -- CONTROL: with reads proxied (slave balance 0) the same round must
+            -- fail on every key as not-local, although every answer is correct
+            discard <| kubectlPatch "flarecluster" cfg.name cfg.«namespace» "{\"spec\":{\"readBalance\":{\"master\":100,\"slave\":0}}}"
+            let withheld ← waitForCondition "the replica's map entry has balance 0" 180 do
+              return (← balanceOnReplica) == some 0
+            if !withheld then return .fail s!"control precondition: the replica's balance did not go to 0 ({← balanceOnReplica})"
+            let ctl ← localCopyRound sPod sIp "accbig_mark_ctl_proxy" expect2 (digest := true)
+            let ctlProxied := ctl.length == expect2.length && ctl.all (containsSubstr · "NOT from the replica's own copy")
+            IO.eprintln s!"# control (reads proxied): problems {ctl.length}/{expect2.length}, all 'not from the own copy' = {ctlProxied}: {ctl.take 3}"
+            if !ctlProxied then return .fail s!"control: with every read proxied the check did not fail on every key as not-local: {ctl.take 5}"
+            -- the observation interval ends after the last round
+            let obs2 ← observePair mPod mIp sPod sIp
+            let nr2 := FlareOperator.E2E.TraceMatch.judgeNoRebuild "before" "after the last round" obs0 obs2 ++
+              FlareOperator.E2E.TraceMatch.judgeNoRebuild "at the head" "after the last round" obs1 obs2
+            if !nr2.isEmpty then return .fail s!"same process, copy and history without a rebuild not shown through the last round: {nr2}"
+            if obs2.master.head != some head2 then return .fail s!"a write reached the master during the check ({head2} -> {obs2.master.head})"
+            return .pass
+          finally
+            discard <| kubectlPatch "flarecluster" cfg.name cfg.«namespace» "{\"spec\":{\"readBalance\":{\"master\":100,\"slave\":0}}}" },
 
     { name := "cut: create, update and delete on the master while the replica is unreachable; then new writes stop"
       run := do

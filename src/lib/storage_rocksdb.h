@@ -500,7 +500,12 @@ public:
 	// applied_through (0 = off): the reader already holds every sequence up
 	// to it, so batches ending at or before it are neither returned nor
 	// counted against the bounds (RocksDB starts at the batch HOLDING
-	// seq_number; re-sending it could spend a whole bounded slice).
+	// seq_number; re-sending it could spend a whole bounded slice). A batch
+	// is left out only when ALL of it is at or before applied_through; a
+	// batch the reader holds part of is sent whole. max_bytes is checked
+	// BEFORE each batch is read, so it is not a hard limit on one batch: a
+	// new batch larger than max_bytes is still sent, whole, and ends the
+	// slice (test_follow_slice_applied_through_boundaries).
 	int get_updates_since(uint64_t seq_number, vector<pair<uint64_t, rocksdb::WriteBatch>>& updates,
 		uint64_t max_batches = 0, uint64_t max_bytes = 0, bool* more = NULL,
 		uint64_t applied_through = 0);

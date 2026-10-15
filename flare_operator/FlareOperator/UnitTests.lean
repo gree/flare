@@ -1400,6 +1400,35 @@ private def checkTraceMatch (ctx : Ctx) : IO Unit := do
   check ctx "acceptance obs: the cursor going back fails; caughtUp needs both item counts (never none == none)"
     (!(judgeNoRebuild "b" "a" o1 o0).isEmpty &&
      !caughtUp (mk (some (drop (stS "55" "2" "1" "183") "curr_items")) (some podS) (some (drop stM "curr_items")) (some podM)))
+  -- review of d311227 (P1): the large-value follow test fails closed — a
+  -- head or cursor that was not read is never 0, a count is not a copy
+  check ctx "big value: reaching the head needs the cursor AND the head read (an unread cursor is not ≥ 0)"
+    (reachedHead o1 183 && !reachedHead o1 184 && !reachedHead o0 183 &&
+     !reachedHead (mk (some (drop (stS "55" "2" "1" "183") "repl_applied_lsn")) (some podS) (some stM) (some podM)) 0 &&
+     !reachedHead (mk none (some podS) none (some podM)) 0)
+  check ctx "big value: the cursor must pass the large batch between two complete observations"
+    ((crossedBatch o0 o1 170).isEmpty && !(crossedBatch o0 o1 184).isEmpty && !(crossedBatch o0 o1 150).isEmpty &&
+     !(crossedBatch o0 (mk (some (drop (stS "55" "2" "1" "183") "repl_applied_lsn")) (some podS) (some stM) (some podM)) 170).isEmpty &&
+     !(crossedBatch (mk none (some podS) none (some podM)) o1 170).isEmpty)
+  check ctx "big value: STORED / DELETED must be a reply line; unobserved, NOT_FOUND, errors and mentions fail"
+    (acked "DELETED" (some "DELETED\r\n") && !acked "DELETED" none && !acked "DELETED" (some "NOT_FOUND\r\n") &&
+     !acked "DELETED" (some "SERVER_ERROR not DELETED\r\n") && !acked "DELETED" (some "") &&
+     acked "STORED" (some "STORED\r\n") && !acked "STORED" (some "NOT_STORED\r\n"))
+  let h64 := String.mk (List.replicate 64 'a')
+  check ctx "big value: the generated value's report needs a size and a 64-hex sha256 (no default)"
+    (parseDigestReport s!"5242880\n{h64}  /tmp/accbig\n" == some (5242880, h64) &&
+     parseDigestReport "" == none && parseDigestReport s!"{h64}  /tmp/accbig\n" == none &&
+     parseDigestReport s!"x\n{h64}  /tmp/accbig\n" == none && parseDigestReport "5242880\nabc  /tmp/accbig\n" == none &&
+     parseDigestReport s!"5242880\n{h64}  /tmp/accbig\nextra\n" == none)
+  let bigLoc : KeyTrace := { decision := some (tdec 1 "c" "accbig_value" "local" "slave_guard_allowed"), answer := some (tans 2 "c" "accbig_value" "hit" "local") }
+  let bigPx : KeyTrace := { decision := some (tdec 1 "c" "accbig_value" "proxy" "own_slave_balance_0"), answer := some (tans 2 "c" "accbig_value" "hit" "forwarded") }
+  let want := [("accbig_value", digestAnswer h64 5242880)]
+  check ctx "big value: the local copy is compared by content AND size, and a proxied answer fails"
+    ((judgeLocalCopy want (some [("accbig_value", s!"=sha256:{h64}:5242880")]) [("accbig_value", bigLoc)]).isEmpty &&
+     (judgeLocalCopy want (some [("accbig_value", s!"=sha256:{h64}:5242879")]) [("accbig_value", bigLoc)]).length == 1 &&
+     (judgeLocalCopy want (some [("accbig_value", s!"=sha256:{String.mk (List.replicate 64 'b')}:5242880")]) [("accbig_value", bigLoc)]).length == 1 &&
+     (judgeLocalCopy want (some [("accbig_value", s!"=sha256:{h64}:5242880")]) [("accbig_value", bigPx)]).length == 1 &&
+     (judgeLocalCopy want (some [("accbig_value", "miss")]) [("accbig_value", { bigLoc with answer := some (tans 2 "c" "accbig_value" "miss" "local") })]).length == 1)
 
 open FlareOperator.E2E.TraceMatch in
 private def checkTraceAmbiguity (ctx : Ctx) : IO Unit := do

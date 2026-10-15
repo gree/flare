@@ -3908,6 +3908,61 @@ void test_follow_slice_does_not_spend_its_budget_on_the_batch_already_applied() 
 	cut_assert_operator(lsns.back(), >, position);
 }
 
+// The boundaries of applied_through (review of d311227): a batch is left out
+// only when the reader holds ALL of it. A cursor inside a multi-op batch keeps
+// that batch (its tail is unapplied); a batch ending at the cursor is left
+// out; a NEW batch larger than max_bytes is still sent, whole — max_bytes
+// bounds how much is READ after it, it is not a hard limit on one batch.
+void test_follow_slice_applied_through_boundaries() {
+	storage_rocksdb* m = make_rocksdb(wal_master_dir);
+	cut_assert_equal_int(0, storage_set_string(m, "before", "v"));
+	rocksdb::WriteBatch three;
+	three.Put("t1", "v");
+	three.Put("t2", "v");
+	three.Put("t3", "v");
+	cut_assert_equal_int(0, m->apply_batch(three));
+	const uint64_t three_last = m->get_latest_sequence_number();
+	const uint64_t three_first = three_last - 2;
+	const string big(5 * 1024 * 1024, 'y');
+	cut_assert_equal_int(0, storage_set_string(m, "big", big));
+	const uint64_t big_last = m->get_latest_sequence_number();
+	cut_assert_equal_int(0, storage_set_string(m, "after", "v"));
+	const uint64_t budget = 4 * 1024 * 1024;
+
+	// a cursor in the middle of the three-op batch: the batch is sent
+	vector<pair<uint64_t, rocksdb::WriteBatch> > mid;
+	bool mid_more = false;
+	const int mid_rc = m->get_updates_since(three_first + 1, mid, 256, 0, &mid_more, three_first + 1);
+	// a cursor at the batch's last op: it is left out, the big batch is first
+	vector<pair<uint64_t, rocksdb::WriteBatch> > held;
+	bool held_more = false;
+	const int held_rc = m->get_updates_since(three_last, held, 256, budget, &held_more, three_last);
+	// without applied_through (legacy readers) nothing is left out
+	vector<pair<uint64_t, rocksdb::WriteBatch> > legacy;
+	const int legacy_rc = m->get_updates_since(three_last, legacy, 256, 0, NULL, 0);
+	const uint64_t mid_first = mid.empty() ? 0 : mid.front().first;
+	const uint64_t mid_count = mid.empty() ? 0 : mid.front().second.Count();
+	const uint64_t held_first = held.empty() ? 0 : held.front().first;
+	const uint64_t held_size = held.empty() ? 0 : held.front().second.Data().size();
+	const size_t held_n = held.size();
+	const uint64_t legacy_first = legacy.empty() ? 0 : legacy.front().first;
+	// close and remove the store before asserting (see the test above)
+	drop_rocksdb(m, wal_master_dir);
+
+	cut_assert_equal_int(0, mid_rc);
+	cut_assert_equal_int(0, held_rc);
+	cut_assert_equal_int(0, legacy_rc);
+	cut_assert_equal_int((int)three_first, (int)mid_first);
+	cut_assert_equal_int(3, (int)mid_count);
+	// the big batch: first, alone (the budget is spent on it) and whole
+	cut_assert_operator(held_first, >, three_last);
+	cut_assert_operator(held_first, <=, big_last);
+	cut_assert_equal_int(1, (int)held_n);
+	cut_assert_operator(held_size, >, budget);
+	cut_assert_true(held_more);
+	cut_assert_equal_int((int)three_first, (int)legacy_first);
+}
+
 void test_follow_local_read_guard_until_caught_up() {
 	stats::follow_record r = stats_object->get_follow_record();
 	r.enabled = true;

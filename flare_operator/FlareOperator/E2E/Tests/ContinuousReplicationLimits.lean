@@ -1495,7 +1495,20 @@ def upgradeSuite : TestSuite := {
           | none => return .fail "after the roll: the P0 master went away again"
           | some m =>
             let nlf ← notLossFreeLine c m
-            IO.eprintln s!"# after the roll: master {m}; masterless refill engaged={masterless}; NOT LOSS-FREE line: {(nlf.map (·.take 260)).getD "none"}"
+            -- the class m had in the last evidence pass before its promotion
+            -- was committed: a seat in the same pass that found the partition
+            -- masterless logs neither the hold nor the inputs line (CI
+            -- 38791047421: engaged=false with the NOT LOSS-FREE line present),
+            -- but a non-normal class at the seat needs NOT LOSS-FREE all the same
+            let mKey := s!"{m}.{upgradeCfg.name}-nodes.{ns}.svc.cluster.local:{upgradeCfg.flarePort}"
+            -- its LAST committed promotion (it may have been master before)
+            let commitBack := opl.reverse.findIdx? fun l => containsSubstr l "PROMOTION committed" && containsSubstr l mKey
+            let seatClass := commitBack.bind fun j =>
+              ((opl.reverse.drop (j + 1)).find? fun l => containsSubstr l "PROMOTION EVIDENCE" && containsSubstr l s!"{mKey}=").bind fun l =>
+                ((l.splitOn s!"{mKey}=").get? 1).map fun r => (r.splitOn " ").headD ""
+            let notNormalAtSeat := seatClass.any fun cls => cls == "lagging" || cls == "unknown" || cls == "FORBIDDEN"
+            let masterless := masterless || notNormalAtSeat
+            IO.eprintln s!"# after the roll: master {m}; class at its committed promotion {seatClass} (none = no commit line in the log); masterless refill engaged={masterless}; NOT LOSS-FREE line: {(nlf.map (·.take 260)).getD "none"}"
             if masterless && nlf.isNone then
               return .fail s!"after the roll: {m} was seated on a masterless untracked partition without PROMOTION NOT LOSS-FREE (a stale legacy binding is not proof of currency)"
           match ← c.pair with

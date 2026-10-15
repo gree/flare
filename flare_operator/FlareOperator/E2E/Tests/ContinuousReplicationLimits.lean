@@ -6637,13 +6637,18 @@ private def disconnectedRefill (c : Ctx) (expectData : Bool)
     if !up then heal mIp sIp; discard <| scaleOp c 1; return .error "precondition: the master's container did not restart"
     let t0 ← utcNow
     if !(← scaleOp c 1) then heal mIp sIp; return .error "the operator did not come back"
-    let mut master : Option String := none
-    for _ in [0:150] do
-      IO.sleep 2000
-      master ← masterPodOf c
-      if master.isSome then break
-    -- let the decision's log lines land, then heal
-    IO.sleep 5000
+    -- the restored map still names the ex-master: wait until its restarted
+    -- flared has registered (answers stats), then for the decision itself
+    -- (38685673044 read the restored map before the registration)
+    let registered ← waitForCondition "the restarted ex-master registered (answers stats)" 300 do
+      return (← c.statNat mIp "curr_items").isSome
+    let decided ← waitForCondition "the operator decided partition 0 (a committed promotion or the hold line)" 240 do
+      let l ← c.opLogSince t0
+      return containsSubstr l "PROMOTION committed" || containsSubstr l "has NO master"
+    -- let the decision's log lines land, then read the result and heal
+    IO.sleep 10000
+    let master ← masterPodOf c
+    IO.eprintln s!"# ex-master registered={registered}; decision seen={decided}"
     let log ← c.opLogSince t0
     let mItems := (← c.statNat mIp "curr_items").getD 0
     IO.eprintln s!"# {mPod} after the operator returned: curr_items {mItems} ({if expectData then "PVC: expected " ++ toString mBefore ++ " unless rebuilt" else "pod-local: expected 0"})"

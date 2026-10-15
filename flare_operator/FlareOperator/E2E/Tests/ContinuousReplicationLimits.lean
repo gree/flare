@@ -6616,23 +6616,25 @@ private def disconnectedRefill (c : Ctx) (expectData : Bool)
     let disc ← waitForCondition "the follower reports it is not following" 90 do
       return (← c.statStr sIp "repl_follow_state") != some "following"
     if !disc then heal mIp sIp; return .error "precondition: the follower still reports following under the cut"
+    let mBefore := (← c.statNat mIp "curr_items").getD 0
+    if mBefore != base.length + lag.length then
+      heal mIp sIp; return .error s!"precondition: the master holds {mBefore}, not {base.length + lag.length}, before its restart"
     if !(← scaleOp c 0) then heal mIp sIp; discard <| scaleOp c 1; return .error "precondition: the operator did not stop"
     let r0 ← c.restartCount mPod
     match ← c.killFlaredIn mPod with
     | .error e => heal mIp sIp; discard <| scaleOp c 1; return .error s!"could not kill flared in {mPod}: {e}"
     | .ok o => IO.eprintln s!"# kill -9 flared in {mPod} (operator down): {o.trim}"
-    let up ← waitForCondition "the master's flared restarted and answers" 120 do
-      return (← c.restartCount mPod) > r0 && (← c.statNat mIp "curr_items").isSome
-    let mItems := (← c.statNat mIp "curr_items").getD 0
+    -- with no index server the restarted flared cannot register and exits
+    -- (connect refused → restart); it answers only once the operator is back.
+    -- PVC: the data survives the container restart; pod-local: it does not
+    -- (history-tracking (R)). Read again after the decision.
+    let up ← waitForCondition "the master's container restarted" 120 do
+      return (← c.restartCount mPod) > r0
     let r3 := (← c.statStr sIp "repl_read_source_state").getD "?"
     let r3e := (← c.statStr sIp "repl_read_source_eligible").getD "?"
     let fs := (← c.statStr sIp "repl_follow_state").getD "?"
-    IO.eprintln s!"# operator down; {mPod} restarted={up} items={mItems} (expected {if expectData then "50, data kept" else "0, pod-local"}); follower {sPod}: R3 {r3} eligible={r3e}, follow {fs}, items {← c.currItems sIp}"
-    if !up then heal mIp sIp; discard <| scaleOp c 1; return .error "precondition: the master's flared did not come back"
-    if expectData && mItems != base.length + lag.length then
-      heal mIp sIp; discard <| scaleOp c 1; return .error s!"precondition: the restarted master holds {mItems}, not {base.length + lag.length}"
-    if !expectData && mItems != 0 then
-      heal mIp sIp; discard <| scaleOp c 1; return .error s!"precondition: the restarted master holds {mItems}, expected empty"
+    IO.eprintln s!"# operator down; {mPod} held {mBefore} before the kill, container restarted={up}; follower {sPod}: R3 {r3} eligible={r3e}, follow {fs}, items {← c.currItems sIp}"
+    if !up then heal mIp sIp; discard <| scaleOp c 1; return .error "precondition: the master's container did not restart"
     let t0 ← utcNow
     if !(← scaleOp c 1) then heal mIp sIp; return .error "the operator did not come back"
     let mut master : Option String := none
@@ -6643,6 +6645,8 @@ private def disconnectedRefill (c : Ctx) (expectData : Bool)
     -- let the decision's log lines land, then heal
     IO.sleep 5000
     let log ← c.opLogSince t0
+    let mItems := (← c.statNat mIp "curr_items").getD 0
+    IO.eprintln s!"# {mPod} after the operator returned: curr_items {mItems} ({if expectData then "PVC: expected " ++ toString mBefore ++ " unless rebuilt" else "pod-local: expected 0"})"
     heal mIp sIp
     let lines := (log.splitOn "\n").filter fun l =>
       containsSubstr l "PROMOTION EVIDENCE" || containsSubstr l "PROMOTION" || containsSubstr l "has NO master"

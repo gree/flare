@@ -116,6 +116,26 @@ def counts_for(run, candidate, root):
     return equivalent(root, run["commit"], candidate["commit"])
 
 
+def unfixed_ids(control, candidate, root):
+    """Findings not fixed AT the candidate: open ones, and fixed ones whose
+    fixing commit is not the candidate or an ancestor of it (unverifiable
+    counts as not fixed)."""
+    out = []
+    for f in control.get("open_findings", []):
+        fixed = False
+        if f["state"] == "fixed" and candidate and root is not None:
+            try:
+                subprocess.check_call(["git", "-C", str(root), "merge-base", "--is-ancestor",
+                                       f["fixed_in"], candidate["commit"]],
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                fixed = True
+            except (subprocess.CalledProcessError, OSError):
+                pass
+        if not fixed:
+            out.append(f["id"])
+    return out
+
+
 def ci_stage(control, candidate=None, root=None):
     """CI stage for the release CANDIDATE, derived from recorded runs (see
     counts_for). yes = every check's latest counting run passed; partial =
@@ -132,7 +152,7 @@ def ci_stage(control, candidate=None, root=None):
     # An OPEN finding against the control (a reproduced defect not fixed at
     # the candidate) caps the stage: "every check passed" must never read as
     # "the control holds" while a known reproduction of its failure stands.
-    open_ids = [f["id"] for f in control.get("open_findings", []) if f["state"] == "open"]
+    open_ids = unfixed_ids(control, candidate, root)
     if open_ids and state == "yes":
         state = "partial"
     note = f"; OPEN finding(s) {', '.join(open_ids)} — not a pass" if open_ids else ""
@@ -294,7 +314,7 @@ def cell(value):
     return value.replace("|", "\\|").replace("\n", " ")
 
 
-def render(data):
+def render(data, root=None):
     lines = [BEGIN, "", "<!-- Generated from safety-evidence.json; do not edit this table. -->",
              "| Evidence / constraint | Bounded claim | Hazards / UCA | Implemented (declared) | CI passed at candidate | Reviewed | Production approved | Verification | Code / candidate check |",
              "|---|---|---|---|---|---|---|---|---|"]
@@ -309,7 +329,7 @@ def render(data):
         st = c["status"]
         ev = st["ci_passed"]["evidence"]
         ci = f"{st['ci_passed']['state']} ({'no candidate' if ev.startswith('no release candidate') else ev.split(' ')[0]})"
-        open_ids = [f["id"] for f in c.get("open_findings", []) if f["state"] == "open"]
+        open_ids = unfixed_ids(c, data.get("candidate"), root)
         if open_ids:
             ci += f" — OPEN {', '.join(open_ids)}"
         lines.append("| " + " | ".join(map(cell, [ids, c["constraint"]["text"], links,
@@ -318,11 +338,11 @@ def render(data):
     return "\n".join(lines + ["", END])
 
 
-def sync_document(text, data, write=False):
+def sync_document(text, data, write=False, root=None):
     require(text.count(BEGIN) == text.count(END) == 1, "STPA needs one generated block")
     start, end = text.index(BEGIN), text.index(END) + len(END)
     require(start < end - len(END), "invalid generated block order")
-    expected = render(data)
+    expected = render(data, root)
     if not write:
         require(text[start:end] == expected, "STPA table drift: run --write")
     return text[:start] + expected + text[end:]
@@ -380,7 +400,7 @@ def main():
             (root / REGISTER).write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
         validate(data, root)
         document = root / STPA
-        updated = sync_document(document.read_text(), data, args.write)
+        updated = sync_document(document.read_text(), data, args.write, root)
         if args.base:
             base = git(root, "rev-parse", "--verify", args.base + "^{commit}").strip()
             listing = git(root, "ls-tree", "--name-only", base, "--", REGISTER).strip()

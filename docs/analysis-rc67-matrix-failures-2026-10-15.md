@@ -284,6 +284,47 @@ docs/reports/2026-10-16-ledger-candidate-57d37a1-snapshot.json. Full matrix
 and nix-linux (for the C++-referenced checks) are dispatched at the
 candidate's docs-only successor.
 
+Full matrix 38791047421 at 7641f76 (docs-only after 66b749a) and nix-linux
+38791053760 (success, test programs legacy 134/134, RocksDB 134/134):
+9 of 14 legs green, flare_unit 540/540 in every leg; at candidate 66b749a
+7 controls yes, 8 partial, 5 no (snapshot
+docs/reports/2026-10-16-ledger-candidate-66b749a-snapshot.json). The
+C++-referenced checks count now (nix-linux at the same tree).
+- continuous-replication-upgrade 9 PASSED in the full matrix: nodes-1
+  seated "by the masterless refill as a LAST RESORT", PROMOTION NOT
+  LOSS-FREE. Its detector printed engaged=false: the inputs line is logged
+  only for a partition STILL masterless after the refill, so a same-pass
+  seat (READ-empty ex-master) logs neither line — the requirement was not
+  armed; it held only because the line was there. 7f6affe also arms it
+  from the class the new master had in the last PROMOTION EVIDENCE pass
+  before its last "PROMOTION committed" (lagging / unknown / FORBIDDEN =
+  NOT LOSS-FREE required), independently of the line it requires.
+- cross-cluster: X4 (4/5, snapshot-push seed) as before. Open, unchanged.
+- breaker-migration: copy-identity 13 — a PRECONDITION failure of the test,
+  not an operator defect. At its start both slaves were FORBIDDEN
+  ("confirmed different history against the present master": test 12 had
+  just promoted nodes-2; nodes-1 then declared needs_rebuild and was
+  demoted for repair); `threeInSync` compares item counts only. The drain
+  of nodes-2 had NO promotable successor (CRITICAL, kept as master — the
+  safe outcome); nodes-2 came back on its PVC as Slave/Prepare, `lagging
+  (same history)`, and the held pass was ITS re-seat — the test then
+  force-deleted the master itself (cordoned, Pending) and saw no master
+  for 180 s. a911172: the test starts only with both slaves R3 `eligible`
+  against the current master (bounded wait, else PRECONDITION NOT MET) and
+  refuses a held promotion that is not a slave's.
+- continuous-replication 10 — a PRECONDITION failure of the test: the wait
+  saw a stable balance-50 snapshot, then a SECOND read saw a later map
+  version. a911172 keeps the snapshot the wait confirmed; the check after
+  the rules are in force (same version, still 50) is unchanged.
+- wal-recovery and restore-promotion: cut by the 120-min job timeout (the
+  runner's Lean build took ~90 min; ~15 min in 38714646714). Incomplete,
+  not failures; every test they reached passed (restore-promotion 19/19
+  incl. C1 and A1; wal-recovery 22 passed, 3 skipped, 0 failed).
+
+Candidate: 7f6affe (`rc67-candidate-7f6affe`, test-only changes after
+66b749a). The full matrix and nix-linux are re-run at its docs-only
+successor.
+
 ## Ledger (review [P2])
 
 The ledger candidate is now fe9afce (`rc67-candidate-fe9afce`). be60dbb's

@@ -261,6 +261,9 @@ theorem autoAssign_cle (s : FlareClusterState) (crd : FlareClusterView)
       split
       · -- only excluded (unfit) Active slaves: the proxy is left as it is
         exact CLE.rfl _
+      split
+      · -- the proxy itself is excluded: left as it is
+        exact CLE.rfl _
       · intro p
         dsimp only
         rw [setPartition_nodeMap]

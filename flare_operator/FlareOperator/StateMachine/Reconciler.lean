@@ -281,6 +281,14 @@ def autoAssign (state : FlareClusterState) (crd : FlareClusterView) (nodeKey : S
           && (findActiveSlaveForPartition cleanState pIdx livePodKeys standbyKeys).isSome then
         -- Only excluded (unfit) Active slaves: leave the proxy as it is.
         (state, node)
+      else if excludedKeys.contains nodeKey then
+        -- The proxy ITSELF is excluded (its copy is not a normal promotion:
+        -- unknown, lagging, forbidden …): it is not made master here either;
+        -- the masterless refill decides. CI 38808521263 (pvc-survival 17):
+        -- a re-registered replica (unknown: stale binding, no master) was
+        -- put in P0's master slot every pass, the commit aborted every pass,
+        -- and the returning ex-master with the data was never re-seated.
+        (state, node)
       else
       -- Mimic C++ flarei state assignment logic (cluster.cc:1010):
       -- Partition 0: always Active (special case, no reconstruction needed)

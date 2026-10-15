@@ -1093,6 +1093,21 @@ def checkExMasterReturn (ctx : Ctx) : IO Unit := do
   let (pb, _) := Reconciler.autoAssign px activationCrd "p:12121" (holdNode .Proxy .Active (-1) "p") ["p:12121", "f:12121"]
   check ctx "without exclusions the zombie guard still promotes the Active slave"
     (masterOf pb == some "f:12121")
+  -- CI 38808521263 (pvc-survival 17): master and slave killed together; the
+  -- ex-master is back (Slave/Prepare, lastMasterOf 0, data, lagging), the
+  -- replica re-registered as a Proxy and reads unknown — both excluded
+  let lv : FlareClusterState :=
+    ({ nodeMap := [("m:12121", holdNode .Slave .Prepare 0 "m" 0), ("p:12121", holdNode .Proxy .Active (-1) "p")],
+       nodeMapVersion := 9 } : FlareClusterState).rebuildPartitionMap
+  let lv1 := K8sReconciler.assignProxiesPure lv activationCrd ["m:12121", "p:12121"] [] [] ["m:12121", "p:12121"]
+  check ctx "an EXCLUDED proxy is not put in a masterless partition's master slot (the commit would abort it every pass)"
+    (masterOf lv1 == none && (lv1.lookupNode "p:12121").map (·.role) == some FlareRole.Proxy)
+  let lv2 := K8sReconciler.promoteMasterlessPartition lv1 0 ["m:12121", "p:12121"] [] ["m:12121", "p:12121"] ["m:12121", "p:12121"] true
+  check ctx "… so the refill re-seats the returning ex-master with the data"
+    (masterOf lv2 == some "m:12121")
+  let (pc, _) := Reconciler.autoAssign lv activationCrd "p:12121" (holdNode .Proxy .Active (-1) "p") ["m:12121", "p:12121"] [] ["m:12121"]
+  check ctx "a proxy that is NOT excluded still fills the master slot as before"
+    (masterOf pc == some "p:12121")
   let act : FlareClusterState :=
     { nodeMap := [("a:12121", holdNode .Master .Active 0 "a"), ("m:12121", holdNode .Slave .Prepare 0 "m" 0)], nodeMapVersion := 7 }
   let (sa, _) := Reconciler.reconcileStep act activationCrd (.NodeState "m" 12121 .Active)

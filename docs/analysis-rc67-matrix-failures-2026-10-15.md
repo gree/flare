@@ -78,25 +78,81 @@ Observed facts (artifact logs of both attempts)
 - Attempt 2: NEEDS REBUILD at 14:31:14.1Z came BEFORE the operator's pass
   at 14:31:19.8Z → `lagging` → "PROMOTION NOT LOSS-FREE" → pass.
 
-Conclusion from the facts (an ordering race, not attributed to rc67)
-- The verdict depends on whether the replica's validator re-runs before
-  the operator's first pass. The promotion itself is the intended action
-  (the replica is the only data holder), but in the losing order the
-  operator records a replica that is missing 20 acknowledged writes as
-  `eligible` (loss-free) — the loss is NOT reported. That is a defect in
-  the loss accounting (stale R3 BOUND is treated as current while the
-  follower is disconnected), independent of the follow fix.
+Selection → commit, traced (review of fe9afce/232c92c [P1]; replaces the
+earlier "reporting only" conclusion, which was NOT shown)
 
-Missing evidence
-- Whether rc66 can lose the same race (expected yes: neither the operator
-  nor the validator changed), and how often.
+| step | attempt 1 (R3 still BOUND) | attempt 2 (R3 needs_rebuild) |
+|---|---|---|
+| FollowEvidence (follow side) | disconnected → **unproven** (its own backlog reads 0: it never saw the 20 writes), not unfit | same |
+| PromotionEvidence.classify | `eligible` (stale R3 binding; partition masterless) | `lagging` (same recorded history) |
+| Main → followUnfitKeys | not included (eligible is "normal") | included (sourceIneligible) |
+| masterless refill tier | **tier 1, Active slave** — `excludedKeys` holds only followUnfitKeys, so the lag hold (`holdUnfit`) is never consulted | tier 1 skipped (excluded); data-bearing last resort; hold ended because the ex-master was READ empty |
+| loss report | none: `refillHoldEffects` reports only followUnfitKeys; the AfterHandleFailover "unproven" line covers the failover path, not the refill | `PROMOTION NOT LOSS-FREE … READ empty` |
+| commit | `commitAllows` (eligible promotable, binding unchanged) and `reclassifyAllows` (eligible = eligible) pass | same with lagging; extra "LAGGING copy" line |
 
-Next deterministic check (proposed, NOT implemented — new test seam)
-- Hold the replica's source validator (test seam) so the operator's pass
-  runs first, on rc66 and on rc67: expected today on both = promoted as
-  `eligible` with no NOT LOSS-FREE (the defect reproduced), not a timing
-  matter. The fix (e.g. a disconnected follower's R3 is not "eligible"
-  evidence) is a product decision for review, not part of rc67.
+So the class decides more than the log line. Deterministic replay
+(`lake exe ht10_replay`, flare_operator/FlareOperator/Repro/HistoryTracking10.lean;
+identical output on rc66 16921a5 — operator and validator code are unchanged
+between rc66 and fe9afce):
+
+| case | R3 stale BOUND (eligible) | R3 needs_rebuild (lagging) |
+|---|---|---|
+| A ex-master back EMPTY (the CI case) | f crowned, **no log** | f crowned, NOT LOSS-FREE (READ empty) |
+| B ex-master AWAY (PVC may hold the writes) | f crowned **at once — the lag hold is bypassed**, no log | held, CRITICAL "has NO master" |
+| C ex-master BACK WITH DATA (holds the 20 writes) | **f crowned ahead of the ex-master** (tier 1 before the lastMasterOf tier) — the acknowledged writes are discarded, no log | ex-master crowned |
+
+Why R3 stays BOUND (not a timing accident): `decide_source`
+(src/lib/source_eligibility.h) KEEPS an eligible binding while the map still
+names the same master and that master cannot be probed. R3 moves to
+revalidating only when a map naming another master / no master reaches the
+replica — and the pass that first sees the partition masterless reads the
+replica BEFORE it broadcasts that map. Attempt 2 differed only because the
+cut was already healed and the validator probed the returned (empty)
+ex-master before the operator's pass.
+
+General effect (not limited to the CI case): a follower that cannot be
+proven current (disconnected) is treated by the masterless refill as an
+in-sync Active slave: (B) bypasses the failover wait, (C) bypasses the
+"newest surviving copy" choice, and neither is reported. The failover path
+(dead master detected while the operator runs) does take unproven followers
+last and logs them NOT LOSS-FREE (design §5.3, availability first) — the
+refill path is the gap. Not attributed to rc67; present on rc66.
+
+Deterministic E2E reproductions (added; expected to FAIL until a fix):
+`promotion-disconnected-follower` (C: PVC, ex-master back with every write)
+and `promotion-disconnected-follower-empty` (A, attempt-1 order: pod-local,
+ex-master back empty). Both keep the cut until the operator has decided, so
+R3 stays BOUND by the rule above; the operator is down while the master's
+flared restarts, so the refill (not failover) decides. No flared test seam
+is needed. They are in the restore-promotion group: the full matrix reports
+the open finding as a failure, not a pass.
+
+Fix — NOT made, needs a decision (it changes promotion policy):
+- (a) the refill treats followUnprovenKeys like unfit for tier 1 and for the
+  hold: a disconnected follower is crowned only by the logged last resort
+  (ex-master read empty, wait expired, or hold disabled), never ahead of an
+  ex-master holding data; or
+- (b) PromotionEvidence: an R3 `eligible` read from a follower that is not
+  following is classified `lagging`/`unknown` instead of `eligible`.
+Either way the pair tests stay: lag-hold-tmpfs (empty return → seated at
+once, NOT LOSS-FREE), lag-hold-expiry (seated after the wait), and the
+availability of the last resort in (A).
+
+## Ledger (review [P2])
+
+The ledger candidate is now fe9afce (`rc67-candidate-fe9afce`). be60dbb's
+state is kept in docs/reports/2026-10-15-ledger-candidate-be60dbb-snapshot.json
+and `previous_candidates` (it had 0/57 counting runs). Per-check CI runs at
+fe9afce were recorded from 38664258590 (E2E, all 14 legs; flare_unit 523/523
+and `lake build FlareOperator` in every leg) and nix-linux 38657543197 on
+192f37f (differs from fe9afce in docs/ only). A check passes only if every
+suite it references executed with no failure and no non-evaluation skip.
+Result: 16 controls yes; EV-07 partial 3/5 (retention / quarantine checks
+have no test reference); EV-16 partial 6/7 (CHECK-16-limits: the scale suite
+ran evaluation-only skips); EV-11 no (resync self-demote test skipped); EV-13
+no (wal-purged fallback test skipped). X4's suite is referenced by no check.
+EV-06 carries the refill finding above as an OPEN residual risk: its
+ci_passed=yes does not cover it. Candidate update ≠ review or approval.
 
 ## restore 7 (restore-promotion) — attempt 1 failed, attempt 2 passed
 
@@ -147,11 +203,75 @@ Next deterministic check (proposed, not implemented)
 - Release the hold only after the restarted destination flared is up and
   answering (bounded wait), so the SERVER_ERROR window is guaranteed.
 
-## X4 (cross-cluster 4-5)
+## X4 (cross-cluster 4-5) — scope
 
-Same signature as on be60dbb and 16921a5 ("no node partition for this
-slave … deactivating"). Recorded as outside the first per-key move; not
-fixed, not counted as passing.
+Facts (38664258590 and the earlier full runs)
+
+| run | X4 (snapshot-push seed, restart with writes) | restart-dump 7/9 (merge-dump seed, restart with writes, operator held 45 s) | per-key-only 13 (switch off, per-key seed, restart) |
+|---|---|---|---|
+| 38338541303 rc66 16921a5 | fail | pass | pass |
+| 38545812141 d311227 att. 1 | fail | pass | pass |
+| 38545812141 d311227 att. 2 | fail | 7 pass, 8 fail (not reached), 9 pass | pass |
+| 38664258590 fe9afce | fail | pass | pass |
+
+- Test 4 failed because the destination master did not come back within
+  300 s; test 5 did not compare anything (4 recorded no outcome). Test 5's
+  absence of a comparison is NOT evidence of a match or a mismatch.
+- Destination operator: `FORBIDDEN (rejoining: the copy holds <source
+  master id>/<epoch>, not the authoritative history)`, refill inputs
+  `unfit=true blocked=true`, `CRITICAL: partition 0 has NO master`, held
+  until and past the wait expiry.
+
+Code path (why it is seed-specific): only `swap_in_snapshot` (snapshot
+push, and the in-cluster snapshot rebuild) replaces a copy's history
+identity — it adopts the SOURCE's master id and epoch (`inherited`) and a
+new copy id. The destination operator's authoritative record is not moved
+by a push (AuthoritativeHistory: no transition for a foreign prefix), so the
+first restart of that master reads as "rejoining" another history →
+FORBIDDEN → masterless. A per-key / merge-dump seed only writes keys
+through the normal path; the destination keeps its own master id, epoch and
+copy id (per-key-only 13 asserts the lineage is unchanged across the
+restart). rc67 does not touch any of these files.
+
+Scope statement
+- X4 = a destination seeded by SNAPSHOT PUSH cannot get its master back
+  after that master restarts. It is a history-identity (authority) gap of
+  the snapshot-push seed, not a general restart defect.
+- The first per-key move uses `snapshotPush: false` (per-key seed); its
+  restart is covered by per-key-only 13 (4/4 runs pass) and the restart
+  WITH writes while the operator is held by restart-dump 7/9 (merge-dump
+  seed, 4/4 pass on 7/9). Not covered: the exact X4 body (writes during the
+  restart, operator running) on a `snapshotPush: false` destination — a
+  control test for that is the next step; until it runs, "per-key seed is
+  not affected" rests on the code path and the two neighbouring tests.
+- This is NOT a statement that the snapshot push is acceptable in
+  production: any restart of a push-seeded destination master before the
+  cutover takes the destination down (review-cross-cluster §7.6). The
+  first-move limitation stays: snapshot push must not be used (switch off).
+- X4 stays recorded as failing; not counted as passing.
+
+## What the logs already settle, and the next deterministic step (13 / 7 / 8)
+
+- copy-identity 13: settled — the only failed condition was the draining
+  master's count read as 0 (the old `getD 0` read; an unread value and a
+  real 0 were indistinguishable). Open — H1 (read after flared stopped) vs
+  H2 (read failed) vs H3 (real 0). Next: the Option read with pod UID /
+  deletionTimestamp / phase is in (c5f0143); to decide without waiting for a
+  repeat, a fixed-order variant reads the count once inside the preStop
+  window and once after the container has stopped (pod Terminating, flared
+  gone) and asserts the harness reports `none` (H2-type) for the second —
+  proposed, not built.
+- restore 7: settled — the restore itself completed (25 items, new copy id,
+  retained copy, no marker). Open — H1 (never named master) vs H2 (named,
+  binding check refused). Next: the failure path now saves the src2 map and
+  every log; a deterministic check reads `node sync` on src2 while
+  `rocksdb_restored_unverified` is 1 and asserts whether P0 is named master
+  and, if so, the flared binding check's log line — proposed.
+- cross-cluster 8: settled — attempt 2 never produced a SERVER_ERROR window
+  (0 no-partition lines; refusals only); test 9's match does not satisfy 8.
+  Next: release the operator hold only after the restarted destination
+  flared answers `stats` (bounded wait), so the window is guaranteed —
+  proposed.
 
 ## Out of scope of rc67, kept as explicit tasks
 

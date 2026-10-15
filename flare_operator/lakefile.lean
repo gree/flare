@@ -23,3 +23,8 @@ lean_exe circuit_breaker_sim where
 /-- Executable unit checks for the pure decision code (see UnitTests.lean). -/
 lean_exe flare_unit where
   root := `FlareOperator.UnitTests
+
+/-- history-tracking 10: deterministic replay of the promotion decision
+    (docs/analysis-rc67-matrix-failures-2026-10-15.md). Prints; asserts nothing. -/
+lean_exe ht10_replay where
+  root := `FlareOperator.Repro.HistoryTracking10

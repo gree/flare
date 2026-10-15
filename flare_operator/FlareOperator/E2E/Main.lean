@@ -107,6 +107,8 @@ def main (args : List String) : IO UInt32 :=
     Tests.RestoreIsolated.suite,
     Tests.RestoreIsolated.repeatSuite,
     Tests.ContinuousReplicationLimits.historyTrackingSuite,
+    Tests.ContinuousReplicationLimits.promotionDisconnectedSuite,
+    Tests.ContinuousReplicationLimits.promotionDisconnectedEmptySuite,
     Tests.ContinuousReplicationLimits.historyHeldSuite,
     Tests.ContinuousReplicationLimits.historyIntentSuite,
     Tests.ContinuousReplicationLimits.forwardWindowSuite,

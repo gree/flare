@@ -1,0 +1,370 @@
+{
+  "note": "Ledger state for the PREVIOUS release candidate, saved when the candidate was switched to the rc67 candidate fe9afce (2026-10-15, review of fe9afce/232c92c [P2]). The full register at this state is commit 232c92c:docs/safety-evidence.json. Not a review or approval.",
+  "ledger_commit": "232c92c1956031ff3ccc98198911de6a414f1517",
+  "candidate": {
+    "commit": "be60dbb8772b9a65a6cc518df7910ee5fdbbf1a4",
+    "label": "saf10-first-move-c1"
+  },
+  "status_by_control": {
+    "EV-01": {
+      "implemented": {
+        "state": "partial",
+        "source": "declared"
+      },
+      "ci_passed": {
+        "state": "no",
+        "evidence": "0/6 checks pass in CI runs that tested candidate saf10-first-move-c1 (be60dbb877)'s tree or a docs-only equivalent"
+      },
+      "reviewed": {
+        "state": "no",
+        "note": "no independent review recorded (the review field holds change-impact notes)"
+      },
+      "production_approved": {
+        "state": "no",
+        "note": "not approved for production"
+      }
+    },
+    "EV-02": {
+      "implemented": {
+        "state": "yes",
+        "source": "declared"
+      },
+      "ci_passed": {
+        "state": "no",
+        "evidence": "0/1 checks pass in CI runs that tested candidate saf10-first-move-c1 (be60dbb877)'s tree or a docs-only equivalent"
+      },
+      "reviewed": {
+        "state": "no",
+        "note": "no independent review recorded (the review field holds change-impact notes)"
+      },
+      "production_approved": {
+        "state": "no",
+        "note": "not approved for production"
+      }
+    },
+    "EV-03": {
+      "implemented": {
+        "state": "partial",
+        "source": "declared"
+      },
+      "ci_passed": {
+        "state": "no",
+        "evidence": "0/4 checks pass in CI runs that tested candidate saf10-first-move-c1 (be60dbb877)'s tree or a docs-only equivalent"
+      },
+      "reviewed": {
+        "state": "no",
+        "note": "no independent review recorded (the review field holds change-impact notes)"
+      },
+      "production_approved": {
+        "state": "no",
+        "note": "not approved for production"
+      }
+    },
+    "EV-04": {
+      "implemented": {
+        "state": "partial",
+        "source": "declared"
+      },
+      "ci_passed": {
+        "state": "no",
+        "evidence": "0/6 checks pass in CI runs that tested candidate saf10-first-move-c1 (be60dbb877)'s tree or a docs-only equivalent"
+      },
+      "reviewed": {
+        "state": "no",
+        "note": "no independent review recorded (the review field holds change-impact notes)"
+      },
+      "production_approved": {
+        "state": "no",
+        "note": "not approved for production"
+      }
+    },
+    "EV-05": {
+      "implemented": {
+        "state": "partial",
+        "source": "declared"
+      },
+      "ci_passed": {
+        "state": "no",
+        "evidence": "0/3 checks pass in CI runs that tested candidate saf10-first-move-c1 (be60dbb877)'s tree or a docs-only equivalent"
+      },
+      "reviewed": {
+        "state": "no",
+        "note": "no independent review recorded (the review field holds change-impact notes)"
+      },
+      "production_approved": {
+        "state": "no",
+        "note": "not approved for production"
+      }
+    },
+    "EV-06": {
+      "implemented": {
+        "state": "partial",
+        "source": "declared"
+      },
+      "ci_passed": {
+        "state": "no",
+        "evidence": "0/6 checks pass in CI runs that tested candidate saf10-first-move-c1 (be60dbb877)'s tree or a docs-only equivalent"
+      },
+      "reviewed": {
+        "state": "no",
+        "note": "no independent review recorded (the review field holds change-impact notes)"
+      },
+      "production_approved": {
+        "state": "no",
+        "note": "not approved for production"
+      }
+    },
+    "EV-07": {
+      "implemented": {
+        "state": "partial",
+        "source": "declared"
+      },
+      "ci_passed": {
+        "state": "no",
+        "evidence": "0/5 checks pass in CI runs that tested candidate saf10-first-move-c1 (be60dbb877)'s tree or a docs-only equivalent"
+      },
+      "reviewed": {
+        "state": "no",
+        "note": "no independent review recorded (the review field holds change-impact notes)"
+      },
+      "production_approved": {
+        "state": "no",
+        "note": "not approved for production"
+      }
+    },
+    "EV-08": {
+      "implemented": {
+        "state": "yes",
+        "source": "declared"
+      },
+      "ci_passed": {
+        "state": "no",
+        "evidence": "0/1 checks pass in CI runs that tested candidate saf10-first-move-c1 (be60dbb877)'s tree or a docs-only equivalent"
+      },
+      "reviewed": {
+        "state": "no",
+        "note": "no independent review recorded (the review field holds change-impact notes)"
+      },
+      "production_approved": {
+        "state": "no",
+        "note": "not approved for production"
+      }
+    },
+    "EV-09": {
+      "implemented": {
+        "state": "partial",
+        "source": "declared"
+      },
+      "ci_passed": {
+        "state": "no",
+        "evidence": "0/1 checks pass in CI runs that tested candidate saf10-first-move-c1 (be60dbb877)'s tree or a docs-only equivalent"
+      },
+      "reviewed": {
+        "state": "no",
+        "note": "no independent review recorded (the review field holds change-impact notes)"
+      },
+      "production_approved": {
+        "state": "no",
+        "note": "not approved for production"
+      }
+    },
+    "EV-10": {
+      "implemented": {
+        "state": "partial",
+        "source": "declared"
+      },
+      "ci_passed": {
+        "state": "no",
+        "evidence": "0/1 checks pass in CI runs that tested candidate saf10-first-move-c1 (be60dbb877)'s tree or a docs-only equivalent"
+      },
+      "reviewed": {
+        "state": "no",
+        "note": "no independent review recorded (the review field holds change-impact notes)"
+      },
+      "production_approved": {
+        "state": "no",
+        "note": "not approved for production"
+      }
+    },
+    "EV-11": {
+      "implemented": {
+        "state": "partial",
+        "source": "declared"
+      },
+      "ci_passed": {
+        "state": "no",
+        "evidence": "0/1 checks pass in CI runs that tested candidate saf10-first-move-c1 (be60dbb877)'s tree or a docs-only equivalent"
+      },
+      "reviewed": {
+        "state": "no",
+        "note": "no independent review recorded (the review field holds change-impact notes)"
+      },
+      "production_approved": {
+        "state": "no",
+        "note": "not approved for production"
+      }
+    },
+    "EV-12": {
+      "implemented": {
+        "state": "partial",
+        "source": "declared"
+      },
+      "ci_passed": {
+        "state": "no",
+        "evidence": "0/1 checks pass in CI runs that tested candidate saf10-first-move-c1 (be60dbb877)'s tree or a docs-only equivalent"
+      },
+      "reviewed": {
+        "state": "no",
+        "note": "no independent review recorded (the review field holds change-impact notes)"
+      },
+      "production_approved": {
+        "state": "no",
+        "note": "not approved for production"
+      }
+    },
+    "EV-13": {
+      "implemented": {
+        "state": "partial",
+        "source": "declared"
+      },
+      "ci_passed": {
+        "state": "no",
+        "evidence": "0/1 checks pass in CI runs that tested candidate saf10-first-move-c1 (be60dbb877)'s tree or a docs-only equivalent"
+      },
+      "reviewed": {
+        "state": "no",
+        "note": "no independent review recorded (the review field holds change-impact notes)"
+      },
+      "production_approved": {
+        "state": "no",
+        "note": "not approved for production"
+      }
+    },
+    "EV-14": {
+      "implemented": {
+        "state": "partial",
+        "source": "declared"
+      },
+      "ci_passed": {
+        "state": "no",
+        "evidence": "0/1 checks pass in CI runs that tested candidate saf10-first-move-c1 (be60dbb877)'s tree or a docs-only equivalent"
+      },
+      "reviewed": {
+        "state": "no",
+        "note": "no independent review recorded (the review field holds change-impact notes)"
+      },
+      "production_approved": {
+        "state": "no",
+        "note": "not approved for production"
+      }
+    },
+    "EV-15": {
+      "implemented": {
+        "state": "partial",
+        "source": "declared"
+      },
+      "ci_passed": {
+        "state": "no",
+        "evidence": "0/1 checks pass in CI runs that tested candidate saf10-first-move-c1 (be60dbb877)'s tree or a docs-only equivalent"
+      },
+      "reviewed": {
+        "state": "no",
+        "note": "no independent review recorded (the review field holds change-impact notes)"
+      },
+      "production_approved": {
+        "state": "no",
+        "note": "not approved for production"
+      }
+    },
+    "EV-16": {
+      "implemented": {
+        "state": "partial",
+        "source": "declared"
+      },
+      "ci_passed": {
+        "state": "no",
+        "evidence": "0/7 checks pass in CI runs that tested candidate saf10-first-move-c1 (be60dbb877)'s tree or a docs-only equivalent"
+      },
+      "reviewed": {
+        "state": "no",
+        "note": "no independent review recorded (the review field holds change-impact notes)"
+      },
+      "production_approved": {
+        "state": "no",
+        "note": "not approved for production"
+      }
+    },
+    "EV-17": {
+      "implemented": {
+        "state": "yes",
+        "source": "declared"
+      },
+      "ci_passed": {
+        "state": "no",
+        "evidence": "0/2 checks pass in CI runs that tested candidate saf10-first-move-c1 (be60dbb877)'s tree or a docs-only equivalent"
+      },
+      "reviewed": {
+        "state": "no",
+        "note": "no independent review recorded (the review field holds change-impact notes)"
+      },
+      "production_approved": {
+        "state": "no",
+        "note": "not approved for production"
+      }
+    },
+    "EV-18": {
+      "implemented": {
+        "state": "yes",
+        "source": "declared"
+      },
+      "ci_passed": {
+        "state": "no",
+        "evidence": "0/6 checks pass in CI runs that tested candidate saf10-first-move-c1 (be60dbb877)'s tree or a docs-only equivalent"
+      },
+      "reviewed": {
+        "state": "no",
+        "note": "no independent review recorded (the review field holds change-impact notes)"
+      },
+      "production_approved": {
+        "state": "no",
+        "note": "not approved for production"
+      }
+    },
+    "EV-19": {
+      "implemented": {
+        "state": "partial",
+        "source": "declared"
+      },
+      "ci_passed": {
+        "state": "no",
+        "evidence": "0/1 checks pass in CI runs that tested candidate saf10-first-move-c1 (be60dbb877)'s tree or a docs-only equivalent"
+      },
+      "reviewed": {
+        "state": "no",
+        "note": "no independent review recorded (the review field holds change-impact notes)"
+      },
+      "production_approved": {
+        "state": "no",
+        "note": "not approved for production"
+      }
+    },
+    "EV-20": {
+      "implemented": {
+        "state": "yes",
+        "source": "declared"
+      },
+      "ci_passed": {
+        "state": "no",
+        "evidence": "0/2 checks pass in CI runs that tested candidate saf10-first-move-c1 (be60dbb877)'s tree or a docs-only equivalent"
+      },
+      "reviewed": {
+        "state": "no",
+        "note": "no independent review recorded (the review field holds change-impact notes)"
+      },
+      "production_approved": {
+        "state": "no",
+        "note": "not approved for production"
+      }
+    }
+  }
+}

@@ -6547,4 +6547,160 @@ def historyMasterlessSuite : TestSuite := {
   ]
 }
 
+-- ─── history-tracking 10 analysis (2026-10-15): a DISCONNECTED follower whose
+-- R3 binding is still BOUND, crowned by the masterless refill ─────────────────
+--
+-- Deterministic: the follower is cut off from the master (both directions)
+-- and the cut is kept until the operator has decided, so the follower's
+-- validator can only probe the master it validated against and fail — R3
+-- KEEPS eligible (source_eligibility.h decide_source: unreachable, same
+-- source → keep). The operator is down while the master's flared restarts,
+-- so on its return the master re-registers (demoted to a Prepare slave) and
+-- the partition is filled by the masterless refill, as in history-tracking
+-- 10 attempt 1 (38545812141). The decision-level replay is
+-- FlareOperator/Repro/HistoryTracking10.lean (same result on rc66 16921a5).
+-- These are REPRODUCTIONS of an open finding: today they are expected to fail.
+
+/-- PVC-backed: a killed flared comes back WITH its data. -/
+private def discCfg : ClusterConfig := {
+  name := "prom-disc"
+  «namespace» := "flare-prom-disc"
+  partitions := 1
+  replicas := 2
+  operatorName := "flare-operator"
+  debugPod := "debug-prom-disc"
+  storageBackend := "rocksdb"
+  usePvc := true
+  extraFlaredConf := flags
+  operatorEnv := [("FLARE_STATS_PROBE_INTERVAL_MS", "15000")]
+}
+
+/-- Pod-local data: a killed flared comes back EMPTY (same pod, same IP). -/
+private def discEmptyCfg : ClusterConfig :=
+  { discCfg with name := "prom-disc-e", «namespace» := "flare-prom-disc-e", debugPod := "debug-prom-disc-e", usePvc := false }
+
+private def scaleOp (c : Ctx) (n : Nat) : IO Bool := do
+  discard <| kubectl ["scale", "deployment", c.cfg.operatorName, "-n", c.cfg.«namespace», s!"--replicas={n}"]
+  if n == 0 then
+    waitForCondition "the operator has no pod" 120 do
+      return (← getPodNames s!"app={c.cfg.operatorName}" c.cfg.«namespace»).isEmpty
+  else kubectlRolloutStatus s!"deployment/{c.cfg.operatorName}" c.cfg.«namespace» 240
+
+/-- The shared scenario. Returns (master pod, follower pod, master items
+    after its restart, acknowledged-under-the-cut keys, follower R3 state
+    and follow state just before the operator returned, who is master after,
+    NOT LOSS-FREE logged for the follower, the operator's evidence lines). -/
+private def disconnectedRefill (c : Ctx) (expectData : Bool)
+    : IO (Except String (String × String × Nat × List (String × String) × String × Option String × Bool × List String)) := do
+  let ns := c.cfg.«namespace»
+  let recorded ← waitForCondition "the partition's authoritative history is persisted" 240 do historyRecorded c
+  if !recorded then return .error "precondition: no authoritative history persisted"
+  match ← c.pair with
+  | .error e => return .error e
+  | .ok (mPod, mIp, sPod, sIp) =>
+    let base := (List.range 30).map fun i => (s!"db_{i}", s!"vb_{i}")
+    for (k, v) in base do
+      if !(← memcachedSet c.cfg.debugPod ns mIp c.cfg.flarePort k v) then return .error s!"precondition: {k} not acknowledged"
+    let conv ← waitForCondition "the follower holds every base key and follows" 180 do
+      let d ← c.localDump sIp
+      return (d.map (fun d => (missingFrom base d).isEmpty)).getD false
+        && (← c.statStr sIp "repl_follow_state") == some "following"
+    if !conv then return .error "precondition: the follower did not converge"
+    match ← cut mIp sIp with
+    | .error e => return .error e
+    | .ok () => pure ()
+    IO.sleep 2000
+    let lag := (List.range 20).map fun i => (s!"dl_{i}", s!"vl_{i}")
+    for (k, v) in lag do
+      if !(← memcachedSet c.cfg.debugPod ns mIp c.cfg.flarePort k v) then heal mIp sIp; return .error s!"precondition: {k} not acknowledged under the cut"
+    let disc ← waitForCondition "the follower reports it is not following" 90 do
+      return (← c.statStr sIp "repl_follow_state") != some "following"
+    if !disc then heal mIp sIp; return .error "precondition: the follower still reports following under the cut"
+    if !(← scaleOp c 0) then heal mIp sIp; discard <| scaleOp c 1; return .error "precondition: the operator did not stop"
+    let r0 ← c.restartCount mPod
+    match ← c.killFlaredIn mPod with
+    | .error e => heal mIp sIp; discard <| scaleOp c 1; return .error s!"could not kill flared in {mPod}: {e}"
+    | .ok o => IO.eprintln s!"# kill -9 flared in {mPod} (operator down): {o.trim}"
+    let up ← waitForCondition "the master's flared restarted and answers" 120 do
+      return (← c.restartCount mPod) > r0 && (← c.statNat mIp "curr_items").isSome
+    let mItems := (← c.statNat mIp "curr_items").getD 0
+    let r3 := (← c.statStr sIp "repl_read_source_state").getD "?"
+    let r3e := (← c.statStr sIp "repl_read_source_eligible").getD "?"
+    let fs := (← c.statStr sIp "repl_follow_state").getD "?"
+    IO.eprintln s!"# operator down; {mPod} restarted={up} items={mItems} (expected {if expectData then "50, data kept" else "0, pod-local"}); follower {sPod}: R3 {r3} eligible={r3e}, follow {fs}, items {← c.currItems sIp}"
+    if !up then heal mIp sIp; discard <| scaleOp c 1; return .error "precondition: the master's flared did not come back"
+    if expectData && mItems != base.length + lag.length then
+      heal mIp sIp; discard <| scaleOp c 1; return .error s!"precondition: the restarted master holds {mItems}, not {base.length + lag.length}"
+    if !expectData && mItems != 0 then
+      heal mIp sIp; discard <| scaleOp c 1; return .error s!"precondition: the restarted master holds {mItems}, expected empty"
+    let t0 ← utcNow
+    if !(← scaleOp c 1) then heal mIp sIp; return .error "the operator did not come back"
+    let mut master : Option String := none
+    for _ in [0:150] do
+      IO.sleep 2000
+      master ← masterPodOf c
+      if master.isSome then break
+    -- let the decision's log lines land, then heal
+    IO.sleep 5000
+    let log ← c.opLogSince t0
+    heal mIp sIp
+    let lines := (log.splitOn "\n").filter fun l =>
+      containsSubstr l "PROMOTION EVIDENCE" || containsSubstr l "PROMOTION" || containsSubstr l "has NO master"
+        || containsSubstr l "R3 readings" || containsSubstr l "refill inputs" || containsSubstr l "CONTINUOUS REPLICATION eligibility"
+    let nlf := (log.splitOn "\n").any fun l => containsSubstr l "PROMOTION NOT LOSS-FREE" && containsSubstr l sPod
+    IO.eprintln s!"# after the operator returned: master={master}; NOT LOSS-FREE for {sPod}={nlf}\n{String.intercalate "\n" ((lines.reverse.take 12).reverse.map (·.take 400))}"
+    return .ok (mPod, sPod, mItems, lag, r3, master, nlf, lines)
+
+def promotionDisconnectedSuite : TestSuite := {
+  name := "promotion-disconnected-follower"
+  setup := do
+    deployCluster discCfg
+    IO.sleep 50000
+  teardown := cleanupCluster discCfg
+  onFailure := dumpClusterDiagnostics discCfg.«namespace» s!"app={discCfg.operatorName}"
+  afterEach := fun i => saveFullLogs discCfg.«namespace» s!"after-test-{i}"
+  tests :=
+    let c : Ctx := { cfg := discCfg }
+    [
+    { name := "(C1) the ex-master comes back WITH every acknowledged write while the operator is down; the follower was cut off (R3 still bound): the copy that holds the writes is the master afterwards — a disconnected follower is not crowned ahead of it (REPRODUCTION of an open finding; expected to fail today)"
+      run := do
+        match ← disconnectedRefill c true with
+        | .error e => return .fail e
+        | .ok (mPod, sPod, _, lag, r3, master, nlf, _) =>
+          if master == some sPod then
+            let lost ← match ← getPodIp sPod c.cfg.«namespace» with
+              | none => pure lag.length
+              | some ip => pure ((← c.localDump ip).map (fun d => (missingFrom lag d).length) |>.getD lag.length)
+            return .fail s!"OPEN FINDING REPRODUCED: the disconnected follower {sPod} (R3 {r3} when read) was promoted while the ex-master {mPod} was back with all {lag.length} writes acknowledged under the cut; NOT LOSS-FREE logged={nlf}; acknowledged writes missing on the new master: {lost}"
+          if master != some mPod then return .fail s!"no master within 300 s of the operator's return (master {master})"
+          let some ip ← getPodIp mPod c.cfg.«namespace» | return .fail "no IP for the ex-master"
+          let some d ← c.localDump ip | return .fail "the ex-master's own copy could not be read"
+          let miss := missingFrom lag d
+          if !miss.isEmpty then return .fail s!"the ex-master is master but lacks {miss.length} acknowledged writes: {miss.take 5}"
+          return .pass }
+  ]
+}
+
+def promotionDisconnectedEmptySuite : TestSuite := {
+  name := "promotion-disconnected-follower-empty"
+  setup := do
+    deployCluster discEmptyCfg
+    IO.sleep 50000
+  teardown := cleanupCluster discEmptyCfg
+  onFailure := dumpClusterDiagnostics discEmptyCfg.«namespace» s!"app={discEmptyCfg.operatorName}"
+  afterEach := fun i => saveFullLogs discEmptyCfg.«namespace» s!"after-test-{i}"
+  tests :=
+    let c : Ctx := { cfg := discEmptyCfg }
+    [
+    { name := "(A1) the ex-master comes back EMPTY while the operator is down; the follower was cut off (R3 still bound) and is the only copy with data: it is promoted (availability) and that promotion is logged NOT LOSS-FREE — the writes acknowledged under the cut are lost (REPRODUCTION of history-tracking 10 attempt 1, deterministic order; expected to fail today)"
+      run := do
+        match ← disconnectedRefill c false with
+        | .error e => return .fail e
+        | .ok (_, sPod, _, lag, r3, master, nlf, _) =>
+          if master != some sPod then return .fail s!"the only data-bearing copy {sPod} was not promoted within 300 s (master {master}) — availability lost"
+          if !nlf then return .fail s!"OPEN FINDING REPRODUCED: {sPod} (R3 {r3} when read, cut off from the master) was promoted without PROMOTION NOT LOSS-FREE although {lag.length} acknowledged writes never reached it"
+          return .pass }
+  ]
+}
+
 end FlareOperator.E2E.Tests.ContinuousReplicationLimits

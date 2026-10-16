@@ -6878,4 +6878,128 @@ def promotionDisconnectedEmptySuite : TestSuite := {
   ]
 }
 
+-- ─── 2026-10-16 analysis (38808521263): the ONLY copy with data is a PROXY ──
+--
+-- A copy that re-registers after its partition's slot was taken comes back
+-- as a Proxy (partition -1, "all partitions full"; pvc-survival 17). Its
+-- class is read against partition -1, so it is always `unknown`, and the
+-- refill considers only nodes of the partition (or its lastMasterOf). This
+-- REPRODUCTION stages that copy as the only one with data while the
+-- ex-master returns EMPTY, and REPORTS what the operator does. Behaviour is
+-- unchanged (decision 2026-10-16: reproduce first). The test fails only on
+-- safety: the empty copy seated over the data, or the data gone from every
+-- copy; being held masterless is an OBSERVATION, not a pass of availability.
+
+private def proxyOnlyCfg : ClusterConfig :=
+  { discCfg with name := "prom-proxy", «namespace» := "flare-prom-proxy", debugPod := "debug-prom-proxy" }
+
+/-- Reject `ip` → any:12120 (the operator's index port) on the kind node, so
+    the restarted flared there cannot register until it is lifted. -/
+private def regRule (ip : String) : List String :=
+  ["-s", ip, "-p", "tcp", "--dport", "12120", "-j", "REJECT", "--reject-with", "tcp-reset"]
+
+private def blockReg (ip : String) : IO (Except String Unit) := do
+  match ← hostCmd "docker" (["exec", kindNode, "iptables", "-I", "FORWARD", "1"] ++ regRule ip) with
+  | .error e => return .error e
+  | .ok _ => IO.eprintln s!"# fault: rejecting {ip} → :12120 (registration) on {kindNode}"; return .ok ()
+
+private def unblockReg (ip : String) : IO Unit := do
+  for _ in [0:3] do
+    discard <| hostCmd "docker" (["exec", kindNode, "iptables", "-D", "FORWARD"] ++ regRule ip)
+  IO.eprintln s!"# fault cleared: {ip} may register again"
+
+private def entryOf (v : List NodeSyncEntry) (pod : String) : Option NodeSyncEntry :=
+  v.find? fun e => (e.fqdn.splitOn ".").head? == some pod
+
+def promotionProxyOnlySuite : TestSuite := {
+  name := "promotion-proxy-only-copy"
+  setup := do
+    deployCluster proxyOnlyCfg
+    IO.sleep 50000
+  teardown := cleanupCluster proxyOnlyCfg
+  onFailure := dumpClusterDiagnostics proxyOnlyCfg.«namespace» s!"app={proxyOnlyCfg.operatorName}"
+  afterEach := fun i => saveFullLogs proxyOnlyCfg.«namespace» s!"after-test-{i}"
+  tests :=
+    let c : Ctx := { cfg := proxyOnlyCfg }
+    let ns := proxyOnlyCfg.«namespace»
+    [
+    { name := "(P) REPRODUCTION, behaviour unchanged: the operator is down; the ex-master's copy is wiped and its flared restarted (it returns EMPTY), the replica's flared restarted on its PVC (every key kept) and held from registering until the ex-master has, so it returns as a PROXY — the only copy with data. The outcome (seated / held masterless) is REPORTED; the test fails only if the empty copy is seated over the data or the data is gone from every copy"
+      run := do
+        let recorded ← waitForCondition "the partition's authoritative history is persisted" 240 do historyRecorded c
+        if !recorded then return .fail (notSetUp "no authoritative history persisted")
+        match ← c.pair with
+        | .error e => return .fail (notSetUp e)
+        | .ok (mPod, mIp, sPod, sIp) =>
+          let base := (List.range 30).map fun i => (s!"pq_{i}", s!"vq_{i}")
+          for (k, v) in base do
+            if !(← memcachedSet c.cfg.debugPod ns mIp c.cfg.flarePort k v) then return .fail (notSetUp s!"{k} not acknowledged")
+          let conv ← waitForCondition "the replica holds every key and follows" 180 do
+            let d ← c.localDump sIp
+            return (d.map (fun d => (missingFrom base d).isEmpty)).getD false
+              && (← c.statStr sIp "repl_follow_state") == some "following"
+          if !conv then return .fail (notSetUp "the replica did not converge")
+          if !(← scaleOp c 0) then discard <| scaleOp c 1; return .fail (notSetUp "the operator did not stop")
+          match ← blockReg sIp with
+          | .error e => discard <| scaleOp c 1; return .fail (notSetUp s!"could not block {sPod}'s registration: {e}")
+          | .ok () => pure ()
+          let rm0 ← c.restartCount mPod
+          let rs0 ← c.restartCount sPod
+          match ← kubectl ["exec", "-n", ns, mPod, "-c", "flared", "--", "sh", "-c", "rm -rf /data/flare/flare.rocksdb /data/flare/staging-* /data/flare/retained-*"] with
+          | .error e => unblockReg sIp; discard <| scaleOp c 1; return .fail (notSetUp s!"could not wipe {mPod}'s copy: {e}")
+          | .ok _ => pure ()
+          match ← c.killFlaredIn mPod, ← c.killFlaredIn sPod with
+          | .ok a, .ok b => IO.eprintln s!"# operator down; {mPod} wiped, kill -9: {a.trim}; {sPod} kill -9: {b.trim}"
+          | _, _ => unblockReg sIp; discard <| scaleOp c 1; return .fail (notSetUp "could not kill both flared processes")
+          let up ← waitForCondition "both containers restarted" 120 do
+            return (← c.restartCount mPod) > rm0 && (← c.restartCount sPod) > rs0
+          if !up then unblockReg sIp; discard <| scaleOp c 1; return .fail (notSetUp "the containers did not restart")
+          let t0 ← utcNow
+          if !(← scaleOp c 1) then unblockReg sIp; return .fail (notSetUp "the operator did not come back")
+          let mBack ← waitForCondition s!"{mPod} registered (in the map, answers stats)" 300 do
+            return (entryOf (← c.nodeView) mPod).isSome && (← c.statNat mIp "curr_items").isSome
+          if !mBack then unblockReg sIp; return .fail (unobservable s!"{mPod} did not register within 300 s")
+          let some mCopy ← c.localDump mIp | unblockReg sIp; return .fail (unobservable s!"{mPod}'s own copy could not be read")
+          if !mCopy.isEmpty then unblockReg sIp; return .fail (notSetUp s!"{mPod} did not come back EMPTY: {mCopy.length} keys")
+          let mEntry := entryOf (← c.nodeView) mPod
+          IO.eprintln s!"# {mPod} back EMPTY; its entry: {repr mEntry}"
+          unblockReg sIp
+          let sBack ← waitForCondition s!"{sPod} registered (in the map, answers stats)" 300 do
+            return (entryOf (← c.nodeView) sPod).isSome && (← c.statNat sIp "curr_items").isSome
+          if !sBack then return .fail (unobservable s!"{sPod} did not register within 300 s after the block was lifted")
+          let some sEntry := entryOf (← c.nodeView) sPod | return .fail (unobservable s!"{sPod}'s map entry")
+          let some sCopy ← c.localDump sIp | return .fail (unobservable s!"{sPod}'s own copy could not be read")
+          IO.eprintln s!"# {sPod} back with {sCopy.length} keys; its entry: {repr sEntry}"
+          if !(missingFrom base sCopy).isEmpty then
+            return .fail (notSetUp s!"{sPod} did not keep its copy across the restart ({(missingFrom base sCopy).length} keys missing)")
+          if sEntry.partition != -1 then
+            IO.eprintln s!"# operator log since the return (last 30 decision lines):\n{String.intercalate "\n" ((((← c.opLogSince t0).splitOn "\n").filter fun l => containsSubstr l "Event:" || containsSubstr l "PROMOT" || containsSubstr l "NO master").reverse.take 30).reverse}"
+            return .fail (notSetUp s!"{sPod} re-registered in partition {sEntry.partition} (role {sEntry.role}), not as a Proxy: the shape under study was not reached")
+          -- the shape is reached; observe for 300 s what the operator does
+          let mut seen : Option String := none
+          for _ in [0:30] do
+            match ← masterRead c with
+            | .ok (some p) => seen := some p; break
+            | _ => IO.sleep 10000
+          IO.sleep 10000
+          let master ← match ← masterRead c with
+            | .error e => return .fail e
+            | .ok m => pure (m.orElse fun _ => seen)
+          let mAfter ← match ← dumpOf c mPod with | .error e => return .fail e | .ok d => pure d
+          let sAfter ← match ← dumpOf c sPod with | .error e => return .fail e | .ok d => pure d
+          let log ← c.opLogSince t0
+          let lines := (log.splitOn "\n").filter fun l =>
+            containsSubstr l "Event:" || containsSubstr l "PROMOTION" || containsSubstr l "has NO master" || containsSubstr l "refill inputs" || containsSubstr l "REPLICA REPAIR"
+          let holdSeen := containsSubstr log "has NO master"
+          let nlf := containsSubstr log "PROMOTION NOT LOSS-FREE"
+          let v ← c.nodeView
+          IO.eprintln s!"# REPRO OUTCOME: master={master}; {sPod} now {repr (entryOf v sPod)}; {mPod} now {repr (entryOf v mPod)}; hold logged={holdSeen}; NOT LOSS-FREE logged={nlf}; keys after: {mPod} {mAfter.length}, {sPod} {sAfter.length}\n{String.intercalate "\n" ((lines.reverse.take 30).reverse.map (·.take 400))}"
+          if master == some mPod && !(missingFrom base mAfter).isEmpty then
+            return .fail s!"DATA: the EMPTY ex-master {mPod} was seated while the Proxy {sPod} held the only copy ({(missingFrom base mAfter).length} of {base.length} keys missing on the master)"
+          let gone := lostEverywhere base [mAfter, sAfter]
+          if !gone.isEmpty then
+            return .fail s!"DATA: {gone.length} of {base.length} acknowledged keys are absent from every copy: {gone.take 5}"
+          return .pass }
+  ]
+}
+
 end FlareOperator.E2E.Tests.ContinuousReplicationLimits

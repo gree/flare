@@ -76,7 +76,9 @@ jobs:
           # longest single suites (replica-repair 11.5, continuous-replication
           # 10.7) bound it from below. The union must equal `flare_e2e --list`
           # (checked in every leg). Evaluation profiles run in the
-          # continuous-replication leg only.
+          # continuous-replication leg only. restore-promotion was split in two
+          # (2026-10-16): with a 63-65 min Lean build it was cut by the 120-min
+          # job limit three times in a row (38808521263, 38835210953 x2).
           default='[
             {"group":"topology","suites":"failover,read-balance,scale-out-master,scale-out-slave,scale-in-slave,scale-in-master,continuous-replication-enable-purged"},
             {"group":"replication","suites":"cluster-replication,wal-retention-config,strict-durability,continuous-replication-purge,continuous-replication-limits,continuous-replication-lag-hold-tmpfs,continuous-replication-rebuild-tmpfs"},
@@ -86,7 +88,8 @@ jobs:
             {"group":"cross-cluster","suites":"cluster-replication-faults,cluster-replication-faults-per-key,cluster-replication-reseed,cluster-replication-restart-dump,cluster-replication-per-key-only"},
             {"group":"copy-protection","suites":"copy-protection,copy-retention,copy-retention-concurrency,r3-unreadable,promotion-reasons,promotion-precommit,forward-window,forward-window-wal,forward-window-steps"},
             {"group":"repair-ledger","suites":"repair-ledger,migration-per-key-only"},
-            {"group":"restore-promotion","suites":"restore-isolated,promotion-repeat,history-tracking,history-held,history-firstbuild,history-intent-restart,history-masterless,promotion-disconnected-follower,promotion-disconnected-follower-empty"},
+            {"group":"restore-promotion","suites":"restore-isolated,promotion-repeat,history-tracking"},
+            {"group":"history-promotion","suites":"history-held,history-firstbuild,history-intent-restart,history-masterless,promotion-disconnected-follower,promotion-disconnected-follower-empty,promotion-proxy-only-copy"},
             {"group":"failover-data","suites":"replace-nodes,failover-during-replication,data-survival-failover,pvc-data-survival,backup-restore,continuous-replication-enable,continuous-replication-multipart-enable"},
             {"group":"breaker-migration","suites":"circuit-breaker,operator-restart,blue-green-migration,continuous-replication-lag-hold-expiry,copy-identity"},
             {"group":"authority","suites":"topology-authority,resync-failure-self-demote,snapshot-push-seed,partition-reduction,continuous-replication-lag-hold,cluster-init"},

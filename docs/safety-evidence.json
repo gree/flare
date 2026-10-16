@@ -2026,6 +2026,84 @@
           "result": "pass",
           "command": "full matrix 38808521263 (E2E MANUAL, attempt 1, 14 legs; restore-promotion cut by the job timeout) at c419077 (docs-only after rc67 candidate 7f6affe): topology-authority: 13 executed, all ok; flare_unit 540/540 in all 14 legs",
           "report": "https://github.com/gree/flare/actions/runs/38808521263"
+        },
+        {
+          "check": "CHECK-01",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): topology-authority: 13 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
+        },
+        {
+          "check": "CHECK-01-generation",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): topology-authority: 13 executed, all ok; flare_unit 543/543 in all 14 legs",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
+        },
+        {
+          "check": "CHECK-01-init",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): cluster-init: 5 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
+        },
+        {
+          "check": "CHECK-01-nodemap",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): topology-authority: 13 executed, all ok; flare_unit 543/543 in all 14 legs",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
+        },
+        {
+          "check": "CHECK-01-observation",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): continuous-replication: 18 executed, all ok; topology-authority: 13 executed, all ok; flare_unit 543/543 in all 14 legs",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
+        },
+        {
+          "check": "CHECK-01-startup",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): topology-authority: 13 executed, all ok; flare_unit 543/543 in all 14 legs",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
         }
       ],
       "tasks": [
@@ -2043,8 +2121,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "no",
-          "evidence": "0/6 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
+          "state": "yes",
+          "evidence": "6/6 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -2170,6 +2248,19 @@
           "result": "pass",
           "command": "full matrix 38808521263 (E2E MANUAL, attempt 1, 14 legs; restore-promotion cut by the job timeout) at c419077 (docs-only after rc67 candidate 7f6affe): lake build FlareOperator (proofs elaborated) in every leg",
           "report": "https://github.com/gree/flare/actions/runs/38808521263"
+        },
+        {
+          "check": "CHECK-02",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): lake build FlareOperator (proofs elaborated) in every leg",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
         }
       ],
       "tasks": [
@@ -2188,8 +2279,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "no",
-          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
+          "state": "yes",
+          "evidence": "1/1 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -3196,6 +3287,58 @@
           "result": "pass",
           "command": "full matrix 38808521263 (E2E MANUAL, attempt 1, 14 legs; restore-promotion cut by the job timeout) at c419077 (docs-only after rc67 candidate 7f6affe): flare_unit 540/540 in all 14 legs",
           "report": "https://github.com/gree/flare/actions/runs/38808521263"
+        },
+        {
+          "check": "CHECK-03",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): replica-repair: 8 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
+        },
+        {
+          "check": "CHECK-03-firstwindow",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): repair-ledger: 3 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
+        },
+        {
+          "check": "CHECK-03-follow",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): continuous-replication: 18 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
+        },
+        {
+          "check": "CHECK-03-unit",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): flare_unit 543/543 in all 14 legs",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
         }
       ],
       "tasks": [
@@ -3214,8 +3357,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "no",
-          "evidence": "0/4 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
+          "state": "yes",
+          "evidence": "4/4 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -4381,6 +4524,97 @@
           "result": "pass",
           "command": "full matrix 38808521263 (E2E MANUAL, attempt 1, 14 legs; restore-promotion cut by the job timeout) at c419077 (docs-only after rc67 candidate 7f6affe): flare_unit 540/540 in all 14 legs",
           "report": "https://github.com/gree/flare/actions/runs/38808521263"
+        },
+        {
+          "check": "CHECK-04",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): prepare-evidence: 2 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
+        },
+        {
+          "check": "CHECK-04-cpp",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835213805",
+          "result": "pass",
+          "command": "nix-linux 38835213805 at 25ec074 (docs-only after rc67 candidate 0e41e97): success; test programs legacy 134/134 and RocksDB 134/134 passed, 0 failed",
+          "report": "https://github.com/gree/flare/actions/runs/38835213805"
+        },
+        {
+          "check": "CHECK-04-eligibility",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): continuous-replication: 18 executed, all ok; read-balance: 5 executed, all ok; flare_unit 543/543 in all 14 legs",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
+        },
+        {
+          "check": "CHECK-04-follow",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): continuous-replication: 18 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
+        },
+        {
+          "check": "CHECK-04-routing",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835213805",
+          "result": "pass",
+          "command": "nix-linux 38835213805 at 25ec074 (docs-only after rc67 candidate 0e41e97): success; test programs legacy 134/134 and RocksDB 134/134 passed, 0 failed",
+          "report": "https://github.com/gree/flare/actions/runs/38835213805"
+        },
+        {
+          "check": "CHECK-04-staler3",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): promotion-disconnected-follower: 1 executed, all ok; flare_unit 543/543 in all 14 legs",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
+        },
+        {
+          "check": "CHECK-04-unit",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): flare_unit 543/543 in all 14 legs",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
         }
       ],
       "tasks": [
@@ -4399,8 +4633,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "no",
-          "evidence": "0/7 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
+          "state": "yes",
+          "evidence": "7/7 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -4843,6 +5077,45 @@
           "result": "pass",
           "command": "full matrix 38808521263 (E2E MANUAL, attempt 1, 14 legs; restore-promotion cut by the job timeout) at c419077 (docs-only after rc67 candidate 7f6affe): flare_unit 540/540 in all 14 legs",
           "report": "https://github.com/gree/flare/actions/runs/38808521263"
+        },
+        {
+          "check": "CHECK-05",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): replica-repair: 8 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
+        },
+        {
+          "check": "CHECK-05-survivor",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): flare_unit 543/543 in all 14 legs",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
+        },
+        {
+          "check": "CHECK-05-unit",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): flare_unit 543/543 in all 14 legs",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
         }
       ],
       "tasks": [
@@ -4861,8 +5134,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "no",
-          "evidence": "0/3 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
+          "state": "yes",
+          "evidence": "3/3 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -5856,6 +6129,97 @@
           "result": "skip",
           "command": "full matrix 38808521263 (E2E MANUAL, attempt 1, 14 legs; restore-promotion cut by the job timeout) at c419077 (docs-only after rc67 candidate 7f6affe): promotion-disconnected-follower: not in this matrix; promotion-disconnected-follower-empty: not in this matrix; flare_unit 540/540 in all 14 legs",
           "report": "https://github.com/gree/flare/actions/runs/38808521263"
+        },
+        {
+          "check": "CHECK-06",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): data-survival-failover: 3 executed, all ok; pvc-data-survival: 5 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
+        },
+        {
+          "check": "CHECK-06-holdexpiry",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): continuous-replication-lag-hold-expiry: 1 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
+        },
+        {
+          "check": "CHECK-06-holdmp",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): continuous-replication-multipart-lag-hold: 1 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
+        },
+        {
+          "check": "CHECK-06-holdtmpfs",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): continuous-replication-lag-hold-tmpfs: 1 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
+        },
+        {
+          "check": "CHECK-06-holdunreadable",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): continuous-replication-lag-hold-unreadable: 1 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
+        },
+        {
+          "check": "CHECK-06-laghold",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): continuous-replication-lag-hold: 2 executed, all ok; flare_unit 543/543 in all 14 legs",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
+        },
+        {
+          "check": "CHECK-06-staler3",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): promotion-disconnected-follower: 1 executed, all ok; promotion-disconnected-follower-empty: 1 executed, all ok; flare_unit 543/543 in all 14 legs",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
         }
       ],
       "tasks": [
@@ -5872,8 +6236,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "no",
-          "evidence": "0/7 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
+          "state": "yes",
+          "evidence": "7/7 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -6589,6 +6953,45 @@
           "result": "pass",
           "command": "full matrix 38808521263 (E2E MANUAL, attempt 1, 14 legs; restore-promotion cut by the job timeout) at c419077 (docs-only after rc67 candidate 7f6affe): copy-identity: 4 executed, all ok",
           "report": "https://github.com/gree/flare/actions/runs/38808521263"
+        },
+        {
+          "check": "CHECK-07",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): circuit-breaker: 5 executed, all ok; failover: 13 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
+        },
+        {
+          "check": "CHECK-07-emptysource",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): empty-source: 9 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
+        },
+        {
+          "check": "CHECK-07-identity",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): copy-identity: 4 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
         }
       ],
       "tasks": [
@@ -6605,8 +7008,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "no",
-          "evidence": "0/5 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
+          "state": "partial",
+          "evidence": "3/5 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -6728,6 +7131,19 @@
           "result": "pass",
           "command": "full matrix 38808521263 (E2E MANUAL, attempt 1, 14 legs; restore-promotion cut by the job timeout) at c419077 (docs-only after rc67 candidate 7f6affe): terminating-pod-handling: 5 executed, all ok",
           "report": "https://github.com/gree/flare/actions/runs/38808521263"
+        },
+        {
+          "check": "CHECK-08",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): terminating-pod-handling: 5 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
         }
       ],
       "tasks": [],
@@ -6742,8 +7158,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "no",
-          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
+          "state": "yes",
+          "evidence": "1/1 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -7204,6 +7620,19 @@
           "result": "pass",
           "command": "full matrix 38808521263 (E2E MANUAL, attempt 1, 14 legs; restore-promotion cut by the job timeout) at c419077 (docs-only after rc67 candidate 7f6affe): circuit-breaker: 5 executed, all ok",
           "report": "https://github.com/gree/flare/actions/runs/38808521263"
+        },
+        {
+          "check": "CHECK-09",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): circuit-breaker: 5 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
         }
       ],
       "tasks": [],
@@ -7218,8 +7647,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "no",
-          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
+          "state": "yes",
+          "evidence": "1/1 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -7337,6 +7766,19 @@
           "result": "pass",
           "command": "full matrix 38808521263 (E2E MANUAL, attempt 1, 14 legs; restore-promotion cut by the job timeout) at c419077 (docs-only after rc67 candidate 7f6affe): terminating-pod-handling: 5 executed, all ok",
           "report": "https://github.com/gree/flare/actions/runs/38808521263"
+        },
+        {
+          "check": "CHECK-10",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): terminating-pod-handling: 5 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
         }
       ],
       "tasks": [
@@ -7354,8 +7796,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "no",
-          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
+          "state": "yes",
+          "evidence": "1/1 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -7500,6 +7942,19 @@
           "result": "skip",
           "command": "full matrix 38808521263 (E2E MANUAL, attempt 1, 14 legs; restore-promotion cut by the job timeout) at c419077 (docs-only after rc67 candidate 7f6affe): native-metrics: 5 executed, all ok; resync-failure-self-demote: test(s) ['12'] skipped (not evaluation-only)",
           "report": "https://github.com/gree/flare/actions/runs/38808521263"
+        },
+        {
+          "check": "CHECK-11",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "skip",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): native-metrics: 5 executed, all ok; resync-failure-self-demote: test(s) ['12'] skipped (not evaluation-only)",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
         }
       ],
       "tasks": [],
@@ -7633,6 +8088,19 @@
           "result": "pass",
           "command": "full matrix 38808521263 (E2E MANUAL, attempt 1, 14 legs; restore-promotion cut by the job timeout) at c419077 (docs-only after rc67 candidate 7f6affe): read-balance: 5 executed, all ok",
           "report": "https://github.com/gree/flare/actions/runs/38808521263"
+        },
+        {
+          "check": "CHECK-12",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): read-balance: 5 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
         }
       ],
       "tasks": [
@@ -7649,8 +8117,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "no",
-          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
+          "state": "yes",
+          "evidence": "1/1 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -7778,6 +8246,19 @@
           "result": "skip",
           "command": "full matrix 38808521263 (E2E MANUAL, attempt 1, 14 legs; restore-promotion cut by the job timeout) at c419077 (docs-only after rc67 candidate 7f6affe): strict-durability: 5 executed, all ok; wal-purged-fallback: test(s) ['15'] skipped (not evaluation-only)",
           "report": "https://github.com/gree/flare/actions/runs/38808521263"
+        },
+        {
+          "check": "CHECK-13",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "skip",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): strict-durability: 5 executed, all ok; wal-purged-fallback: test(s) ['15'] skipped (not evaluation-only)",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
         }
       ],
       "tasks": [
@@ -7909,6 +8390,19 @@
           "result": "pass",
           "command": "full matrix 38808521263 (E2E MANUAL, attempt 1, 14 legs; restore-promotion cut by the job timeout) at c419077 (docs-only after rc67 candidate 7f6affe): terminating-pod-handling: 5 executed, all ok",
           "report": "https://github.com/gree/flare/actions/runs/38808521263"
+        },
+        {
+          "check": "CHECK-14",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): terminating-pod-handling: 5 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
         }
       ],
       "tasks": [],
@@ -7923,8 +8417,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "no",
-          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
+          "state": "yes",
+          "evidence": "1/1 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -8181,6 +8675,32 @@
           "result": "pass",
           "command": "full matrix 38808521263 (E2E MANUAL, attempt 1, 14 legs; restore-promotion cut by the job timeout) at c419077 (docs-only after rc67 candidate 7f6affe): native-metrics: 5 executed, all ok. C++ references: nix-linux 38808525868 at the same commit",
           "report": "https://github.com/gree/flare/actions/runs/38808521263"
+        },
+        {
+          "check": "CHECK-15",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835213805",
+          "result": "pass",
+          "command": "nix-linux 38835213805 at 25ec074 (docs-only after rc67 candidate 0e41e97): success; test programs legacy 134/134 and RocksDB 134/134 passed, 0 failed",
+          "report": "https://github.com/gree/flare/actions/runs/38835213805"
+        },
+        {
+          "check": "CHECK-15",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): native-metrics: 5 executed, all ok. C++ references: nix-linux 38835213805 at the same commit",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
         }
       ],
       "tasks": [],
@@ -8195,8 +8715,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "no",
-          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
+          "state": "yes",
+          "evidence": "1/1 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -9405,6 +9925,110 @@
           "result": "pass",
           "command": "full matrix 38808521263 (E2E MANUAL, attempt 1, 14 legs; restore-promotion cut by the job timeout) at c419077 (docs-only after rc67 candidate 7f6affe): flare_unit 540/540 in all 14 legs. C++ references: nix-linux 38808525868 at the same commit",
           "report": "https://github.com/gree/flare/actions/runs/38808521263"
+        },
+        {
+          "check": "CHECK-16",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): continuous-replication: 18 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
+        },
+        {
+          "check": "CHECK-16-confirm",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): continuous-replication-enable-purged: 1 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
+        },
+        {
+          "check": "CHECK-16-enable",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): continuous-replication-enable: 1 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
+        },
+        {
+          "check": "CHECK-16-enablemp",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): continuous-replication-multipart-enable: 1 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
+        },
+        {
+          "check": "CHECK-16-enablepurged",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): continuous-replication-enable-purged: 1 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
+        },
+        {
+          "check": "CHECK-16-limits",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "skip",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): continuous-replication-limits: 3 executed, all ok; continuous-replication-scale: no test executed (evaluation-only skips)",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
+        },
+        {
+          "check": "CHECK-16-unit",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835213805",
+          "result": "pass",
+          "command": "nix-linux 38835213805 at 25ec074 (docs-only after rc67 candidate 0e41e97): success; test programs legacy 134/134 and RocksDB 134/134 passed, 0 failed",
+          "report": "https://github.com/gree/flare/actions/runs/38835213805"
+        },
+        {
+          "check": "CHECK-16-unit",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): flare_unit 543/543 in all 14 legs. C++ references: nix-linux 38835213805 at the same commit",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
         }
       ],
       "tasks": [
@@ -9421,8 +10045,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "no",
-          "evidence": "0/7 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
+          "state": "partial",
+          "evidence": "6/7 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -9920,6 +10544,32 @@
           "result": "pass",
           "command": "nix-linux 38808525868 at c419077 (docs-only after rc67 candidate 7f6affe): success; test programs legacy 134/134 and RocksDB 134/134 passed, 0 failed",
           "report": "https://github.com/gree/flare/actions/runs/38808525868"
+        },
+        {
+          "check": "CHECK-17",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): continuous-replication: 18 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
+        },
+        {
+          "check": "CHECK-17-unit",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835213805",
+          "result": "pass",
+          "command": "nix-linux 38835213805 at 25ec074 (docs-only after rc67 candidate 0e41e97): success; test programs legacy 134/134 and RocksDB 134/134 passed, 0 failed",
+          "report": "https://github.com/gree/flare/actions/runs/38835213805"
         }
       ],
       "tasks": [
@@ -9936,8 +10586,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "no",
-          "evidence": "0/2 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
+          "state": "yes",
+          "evidence": "2/2 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -11251,6 +11901,123 @@
           "result": "pass",
           "command": "full matrix 38808521263 (E2E MANUAL, attempt 1, 14 legs; restore-promotion cut by the job timeout) at c419077 (docs-only after rc67 candidate 7f6affe): continuous-replication-upgrade: 1 executed, all ok. C++ references: nix-linux 38808525868 at the same commit",
           "report": "https://github.com/gree/flare/actions/runs/38808521263"
+        },
+        {
+          "check": "CHECK-18",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): continuous-replication: 18 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
+        },
+        {
+          "check": "CHECK-18-purge",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): continuous-replication-purge: 2 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
+        },
+        {
+          "check": "CHECK-18-race",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): flare_unit 543/543 in all 14 legs",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
+        },
+        {
+          "check": "CHECK-18-rbtmpfs",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835213805",
+          "result": "pass",
+          "command": "nix-linux 38835213805 at 25ec074 (docs-only after rc67 candidate 0e41e97): success; test programs legacy 134/134 and RocksDB 134/134 passed, 0 failed",
+          "report": "https://github.com/gree/flare/actions/runs/38835213805"
+        },
+        {
+          "check": "CHECK-18-rbtmpfs",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): continuous-replication-rebuild-tmpfs: 1 executed, all ok. C++ references: nix-linux 38835213805 at the same commit",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
+        },
+        {
+          "check": "CHECK-18-unit",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835213805",
+          "result": "pass",
+          "command": "nix-linux 38835213805 at 25ec074 (docs-only after rc67 candidate 0e41e97): success; test programs legacy 134/134 and RocksDB 134/134 passed, 0 failed",
+          "report": "https://github.com/gree/flare/actions/runs/38835213805"
+        },
+        {
+          "check": "CHECK-18-unit",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): flare_unit 543/543 in all 14 legs. C++ references: nix-linux 38835213805 at the same commit",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
+        },
+        {
+          "check": "CHECK-18-upgrade",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835213805",
+          "result": "pass",
+          "command": "nix-linux 38835213805 at 25ec074 (docs-only after rc67 candidate 0e41e97): success; test programs legacy 134/134 and RocksDB 134/134 passed, 0 failed",
+          "report": "https://github.com/gree/flare/actions/runs/38835213805"
+        },
+        {
+          "check": "CHECK-18-upgrade",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): continuous-replication-upgrade: 1 executed, all ok. C++ references: nix-linux 38835213805 at the same commit",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
         }
       ],
       "tasks": [
@@ -11267,8 +12034,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "no",
-          "evidence": "0/6 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
+          "state": "yes",
+          "evidence": "6/6 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -11437,6 +12204,19 @@
           "result": "pass",
           "command": "nix-linux 38808525868 at c419077 (docs-only after rc67 candidate 7f6affe): success; test programs legacy 134/134 and RocksDB 134/134 passed, 0 failed",
           "report": "https://github.com/gree/flare/actions/runs/38808525868"
+        },
+        {
+          "check": "CHECK-19-unit",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835213805",
+          "result": "pass",
+          "command": "nix-linux 38835213805 at 25ec074 (docs-only after rc67 candidate 0e41e97): success; test programs legacy 134/134 and RocksDB 134/134 passed, 0 failed",
+          "report": "https://github.com/gree/flare/actions/runs/38835213805"
         }
       ],
       "tasks": [
@@ -11453,8 +12233,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "no",
-          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
+          "state": "yes",
+          "evidence": "1/1 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -11947,6 +12727,32 @@
           "result": "pass",
           "command": "nix-linux 38808525868 at c419077 (docs-only after rc67 candidate 7f6affe): success; test programs legacy 134/134 and RocksDB 134/134 passed, 0 failed",
           "report": "https://github.com/gree/flare/actions/runs/38808525868"
+        },
+        {
+          "check": "CHECK-20",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835210953",
+          "result": "pass",
+          "command": "full matrix 38835210953 (E2E MANUAL, 14 legs: 12 in attempt 1; copy-protection and restore-promotion were cut by the 120-min job timeout in attempt 1 (Lean build ~65 min, no test failed) and re-run in the same run: copy-protection attempt 2 passed in full (recorded); restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1 (21 ok, 0 failed) is recorded, history-masterless (b)(c) and history-firstbuild unreached in both; cross-cluster NOT re-run) at 25ec074 (docs-only after rc67 candidate 0e41e97): continuous-replication-limits: 3 executed, all ok",
+          "report": "https://github.com/gree/flare/actions/runs/38835210953"
+        },
+        {
+          "check": "CHECK-20-unit",
+          "commit": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "head": "25ec07456bd39b36abf19dd58f45f40fb498b65b",
+          "tree": "ce2c7f4e0ec3c8dc539840074181b81b435c4743",
+          "date": "2026-10-16",
+          "source": "ci",
+          "scope": "full",
+          "run_url": "https://github.com/gree/flare/actions/runs/38835213805",
+          "result": "pass",
+          "command": "nix-linux 38835213805 at 25ec074 (docs-only after rc67 candidate 0e41e97): success; test programs legacy 134/134 and RocksDB 134/134 passed, 0 failed",
+          "report": "https://github.com/gree/flare/actions/runs/38835213805"
         }
       ],
       "tasks": [
@@ -11963,8 +12769,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "no",
-          "evidence": "0/2 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
+          "state": "yes",
+          "evidence": "2/2 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",

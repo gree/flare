@@ -377,6 +377,34 @@ Candidate: 0e41e97 (`rc67-candidate-0e41e97`: b4e6a49 operator fix +
 0e41e97 test fix after 7f6affe). Full matrix and nix-linux at its
 docs-only successor.
 
+Full matrix 38835210953 at 25ec074 (docs-only after 0e41e97) and nix-linux
+38835213805 (success, legacy 134/134, RocksDB 134/134): flare_unit 543/543
+in every leg; at candidate 0e41e97 16 controls yes, 2 partial (EV-07: two
+checks without a test reference; EV-16-limits: evaluation-only skips),
+2 no (EV-11 / EV-13: a skipped test each, as before). EV-06 counts yes
+with F-proxy-excluded-master-slot fixed (pvc-data-survival passed in the
+matrix).
+- 11 legs green in attempt 1, including failover-data (pvc-data-survival
+  and multipart-enable with 0e41e97) and breaker-migration.
+- cross-cluster: X4 (4/5, snapshot-push seed) FAILED again — "the
+  destination master did not come back within 300 s"; the per-key control
+  passed, cross-cluster 13 passed. X4 is 1 pass in 3 matrices: open,
+  unchanged, not re-run.
+- copy-protection and restore-promotion were cut by the 120-min job
+  timeout in attempt 1 (Lean build 63-65 min) with no test failed, and
+  were re-run in the same run. copy-protection attempt 2: 16/16, recorded.
+  restore-promotion attempt 3 was cut again, earlier (19 ok), so attempt 1
+  is recorded (21 ok, 0 failed): history-masterless (b)(c) and
+  history-firstbuild were reached in none of them (history-masterless
+  passed 3/3 in the targeted 38824621386 on b4e6a49, which is not
+  docs-only equivalent and does not count). The ledger rule now marks only
+  the suite RUNNING at the cut as incomplete (finished suites in a cut leg
+  keep their result; unreached suites are not run).
+- The restore-promotion leg cannot finish inside 120 min on these runners
+  (three cuts in a row). Raising the limit or splitting the leg is a
+  workflow change outside docs/, so it would make a new candidate and need
+  another full matrix: not done here.
+
 ## Ledger (review [P2])
 
 The ledger candidate is now fe9afce (`rc67-candidate-fe9afce`). be60dbb's

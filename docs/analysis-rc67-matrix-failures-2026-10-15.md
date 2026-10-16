@@ -325,6 +325,58 @@ Candidate: 7f6affe (`rc67-candidate-7f6affe`, test-only changes after
 66b749a). The full matrix and nix-linux are re-run at its docs-only
 successor.
 
+Full matrix 38808521263 at c419077 (docs-only after 7f6affe) and nix-linux
+38808525868 (success, legacy 134/134, RocksDB 134/134): 11 of 14 legs
+green, flare_unit 540/540 in every leg; at candidate 7f6affe 14 controls
+yes, 4 partial, 2 no (snapshot
+docs/reports/2026-10-16-ledger-candidate-7f6affe-snapshot.json). X4
+(4/5) passed for the first time with the snapshot-push seed — one run,
+closes nothing. copy-identity 13 and continuous-replication 10 passed
+with the a911172 preconditions.
+- failover-data: pvc-data-survival 17 — an OPERATOR DEFECT
+  (F-proxy-excluded-master-slot). The P0 master and slave were killed
+  together on PVC. The replica re-registered as a Proxy (partition -1);
+  since 117c915 such a copy always classifies `unknown` (no record for
+  partition -1). autoAssign still put it into P0's empty master slot on
+  every pass — its exclusion guard looked only at Active slaves, not at
+  the Proxy itself — and the commit gate aborted every pass, so the
+  returning ex-master (lagging, same history, every key) was never
+  re-seated by the refill: no master within 420 s; 18 and 20 failed after
+  it. b4e6a49: an excluded Proxy is not placed in a master slot (the
+  refill decides), the matching proof case in GeneralSafety, 3 unit checks
+  built from this run's map (fail without the fix; 543 pass). Verified by
+  single-suite 38824621386 on b4e6a49: 22/22 (pvc-data-survival,
+  data-survival-failover, replace-nodes, lag-hold-tmpfs, multipart-enable,
+  upgrade, C1, A1, history-masterless).
+- failover-data: continuous-replication-multipart-enable 26 (503 keys,
+  P0 140 at the legacy stage instead of 137) — a test race, not an
+  operator defect. The test wrote from 22:56:32.5; the P0 master accepted
+  the map with P1 Active only at 22:56:33.73 (until then
+  `1(prepare): master`), and a master holding a partition in prepare keeps
+  the keys it forwards to it in its own store as well: 3 P1 keys stayed on
+  P0. 0e41e97: the test writes only after every node has accepted a map
+  with all four entries active (bounded, else PRECONDITION NOT MET).
+  Passed at 137/163 in 38824858293 and 38824621386 (before the fix: the
+  race is timing-dependent).
+- cross-cluster 13: forward_server_error_retried did not move — the known
+  open item (cross-cluster 8 type), unchanged.
+- restore-promotion: cut by the job timeout again (Lean build ~65 min).
+  history-tracking (1): the operator logged intent persisted, commit and
+  adoption, but the test's read of the persisted map had no `transition=`
+  line; (R), 3a, 4, 15, 3b followed (the replica stayed a repair-held
+  Proxy, which the refill never considers). Not reproduced on b4e6a49:
+  38824858293 history-tracking 7/7. Cause UNDETERMINED; open.
+- Not fixed, recorded: a data-holding Proxy (repair-held or re-registered)
+  is classified against partition -1, so it is always `unknown` and is not
+  a refill candidate. If the master dies while the only data copy is such
+  a Proxy and the ex-master is empty, no path seats it (before 117c915 the
+  stale eligible class did). Whether it may be seated as a last resort is
+  a policy decision, not taken here.
+
+Candidate: 0e41e97 (`rc67-candidate-0e41e97`: b4e6a49 operator fix +
+0e41e97 test fix after 7f6affe). Full matrix and nix-linux at its
+docs-only successor.
+
 ## Ledger (review [P2])
 
 The ledger candidate is now fe9afce (`rc67-candidate-fe9afce`). be60dbb's

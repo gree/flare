@@ -3855,6 +3855,20 @@ private def Ctx.pairOf (c : Ctx) (p : Nat) : IO (Except String (String × String
     IO.sleep 5000
   return .error lastErr
 
+/-- Every node at `ips` has ACCEPTED a map with `n` entries all in state active.
+    The operator's map going Active is not enough: a master still holding
+    partition 1 as "(prepare)" keeps the P1 keys it forwards in its own store
+    as well (CI 38808521263: writes began 1.2 s before nodes-0 accepted P1
+    Active, 3 P1 keys stayed on P0, total 503). -/
+private def Ctx.allSeeActive (c : Ctx) (ips : List String) (n : Nat) : IO Bool := do
+  for ip in ips do
+    match ← execInDebugPod c.cfg.debugPod c.cfg.«namespace» s!"printf 'stats nodes\\r\\n' | nc -w 3 {ip} {c.cfg.flarePort}" with
+    | .error _ => return false
+    | .ok o =>
+      let states := (o.splitOn "\n").filter fun l => containsSubstr l ":state "
+      if states.length != n || !states.all (fun l => containsSubstr l ":state active") then return false
+  return true
+
 private def multiEnableCfg : ClusterConfig := {
   name := "cont-repl-mp-enable"
   «namespace» := "flare-cont-repl-mp-enable"
@@ -3881,6 +3895,9 @@ def multiEnableSuite : TestSuite := {
         match ← c.pairOf 0, ← c.pairOf 1 with
         | .error e, _ | _, .error e => return .fail e
         | .ok (m0, m0Ip, s0, s0Ip), .ok (m1, m1Ip, s1, s1Ip) =>
+          if !(← waitForCondition "every node holds both partitions active in its own map" 120 do
+              c.allSeeActive [m0Ip, s0Ip, m1Ip, s1Ip] 4) then
+            return .fail "PRECONDITION NOT MET: not every node accepted a map with both partitions active"
           let w0 ← writeKeys multiEnableCfg.debugPod multiEnableCfg.«namespace» m0Ip multiEnableCfg.flarePort "legacy" 300
           let eqBoth : String → IO Bool := fun label => waitForCondition label 180 do
             let a ← c.currItems m0Ip

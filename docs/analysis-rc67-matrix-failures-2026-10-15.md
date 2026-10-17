@@ -647,3 +647,18 @@ The restore-promotion split worked: both halves completed.
 
 Candidate: cfed6a8 (`rc67-candidate-cfed6a8`, test and CI changes after
 ea7b1aa). Full matrix and nix-linux at its docs-only successor.
+
+Full matrix 39053727173 at 99322f2 (docs-only after cfed6a8) and nix-linux
+39053729135 (success, legacy 134/134, RocksDB 134/134), attempt 1, no
+re-run, all 17 legs completed (none cut, none unstarted); flare_unit
+569/569 in every leg; at candidate cfed6a8 16 controls yes, 2 partial
+(EV-07: two checks without a test reference; EV-16-limits: evaluation-only
+skips), 2 no (EV-11 / EV-13: a skipped test each, as before).
+- 16 of 17 legs green, including history-promotion (promotion-proxy-only-copy
+  P and F, C1, A1, history-held / intent-restart / masterless / firstbuild),
+  restore-promotion (history-tracking 7/7 with the bounded wait),
+  copy-protection, forward-window, authority, cluster-init.
+- cross-cluster: X4 (4/5, snapshot-push seed) failed again — "the
+  destination master did not come back within 300 s"; 1 pass in 5
+  matrices. Open, not re-run.
+Candidate stays cfed6a8.

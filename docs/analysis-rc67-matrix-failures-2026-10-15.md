@@ -576,3 +576,48 @@ production. Snapshot push stays out of the first move.
   replication, not a latency SLO (the <1 ms requirement is unaddressed),
   and pf-dev CPU / lag improvement is NOT measured. Not a production
   approval.
+
+## The only copy with data comes back as a Proxy (decision 2026-10-16)
+
+Reproduced on 33f8017 with behaviour unchanged (single-suite 38952942796,
+promotion-proxy-only-copy): operator running, the ex-master wiped and
+restarted (EMPTY), the replica's flared restarted on its PVC (30/30 keys)
+and held from registering until the operator had demoted it to
+Proxy/Down. On return it registered as a fresh Proxy (partition -1): class
+`unknown (the last master's history was not recorded)`, absent from the
+refill inputs (only the empty ex-master, FORBIDDEN, blocked), so the
+partition stayed masterless for 300 s+, even after the wait expired, with
+no CRITICAL hold line (the gauge only). With the operator DOWN instead
+(38944212806) the restored map let the replica rejoin as Slave P0 and the
+shape was not reached (PRECONDITION NOT MET); the empty ex-master was
+FORBIDDEN and never seated.
+
+Fix d6d531d (F-proxy-only-copy-unseated, CHECK-06-proxyonly), within the
+user's conditions: the attribution comes only from a PERSISTED record (a
+slave that dies Active records `slaveOf=P`; repair-held, drained or
+mid-rebuild copies none); the rejoin re-seats it Slave/Prepare; the
+classifier demands full proof (every copy-integrity key reported healthy,
+copy id, non-empty, exact binding, recorded history, no failed
+reconstruction) and yields only lagging / unknown / FORBIDDEN; the existing
+wait rule decides, and an ex-master read empty ends the wait only when every
+other copy was observed; the commit re-reads UID / boot / copy id and
+reclassifies; NOT LOSS-FREE no longer asserts an unmeasured loss; a
+throttled CRITICAL per masterless partition also with no candidate or all
+forbidden. ea7b1aa restructured the new unit check (as one IO block it
+generated 1.1M lines of C and the CI Lean build passed the 2-h job limit:
+39020785290 / 39020789955 / 39020795160 cancelled, no test ran).
+
+Targeted on ea7b1aa (single-suite, not candidate evidence): 39029087171
+12/12 — (P) seated NOT LOSS-FREE through the attributed rejoin, its local
+copy holds every key and value; (F) part-way copy never seated past the
+60 s wait, gauge 1, CRITICAL 6 lines over 32 passes naming it FORBIDDEN,
+keys kept — plus pvc-data-survival, data-survival-failover, C1, A1;
+39029092347 13/13 (lag-hold tmpfs / expiry, copy-identity, history-tracking);
+39029097546 30/30 (failover, terminating-pod-handling, replica-repair,
+upgrade, history-masterless). flare_unit 569. Every suite of `flare_e2e
+--list` (80) is assigned to exactly one leg; restore-promotion is split
+into restore-promotion + history-promotion.
+
+Candidate: ea7b1aa (`rc67-candidate-ea7b1aa`); 0e41e97's ledger is kept in
+docs/reports/2026-10-17-ledger-candidate-0e41e97-snapshot.json. Full matrix
+and nix-linux at its docs-only successor.

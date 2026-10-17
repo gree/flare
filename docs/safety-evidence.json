@@ -2121,8 +2121,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "6/6 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
+          "state": "no",
+          "evidence": "0/6 checks pass in CI runs that tested candidate rc67-candidate-ea7b1aa (ea7b1aab2f)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -2279,8 +2279,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "1/1 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
+          "state": "no",
+          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-ea7b1aa (ea7b1aab2f)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -3357,8 +3357,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "4/4 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
+          "state": "no",
+          "evidence": "0/4 checks pass in CI runs that tested candidate rc67-candidate-ea7b1aa (ea7b1aab2f)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -4633,8 +4633,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "7/7 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
+          "state": "no",
+          "evidence": "0/7 checks pass in CI runs that tested candidate rc67-candidate-ea7b1aa (ea7b1aab2f)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -5134,8 +5134,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "3/3 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
+          "state": "no",
+          "evidence": "0/3 checks pass in CI runs that tested candidate rc67-candidate-ea7b1aa (ea7b1aab2f)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -5336,6 +5336,21 @@
             {
               "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplicationLimits.lean",
               "symbol": "promotionDisconnectedEmptySuite"
+            }
+          ]
+        },
+        {
+          "id": "CHECK-06-proxyonly",
+          "kind": "scenario",
+          "procedure": "The only copy with data died an Active slave and returns while the ex-master returns EMPTY (decision 2026-10-16). Unit: flare_unit checkAttributedRejoin (arChecks): the dead-node demotion records formerSlaveOf only for an Active slave, persisted as slaveOf= and read back; a drained / repair-held / unrecorded copy is not attributed; the rejoin re-seats it Slave/Prepare in that partition; the classifier needs every copy-integrity key reported healthy, a copy id, non-empty, the exact binding, the recorded history, no failed reconstruction (missing = unknown, forbidden marker or another history = FORBIDDEN, never eligible); the refill seats it only as the masterless last resort under the wait rule, never a forbidden one even after expiry, and an unobserved (Down / unread) copy keeps the wait; the masterless CRITICAL summary and its throttle. E2E promotion-proxy-only-copy: (P) operator running, the replica's registration held until it is demoted to Proxy and the empty ex-master is back: it rejoins by its record, is seated NOT LOSS-FREE, and its LOCAL copy holds every key and value; (F) the same with copy.partial: never seated past the 60 s wait, flare_operator_partitions_masterless 1, a throttled CRITICAL naming it FORBIDDEN, its keys kept.",
+          "references": [
+            {
+              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "symbol": "checkAttributedRejoin"
+            },
+            {
+              "path": "flare_operator/FlareOperator/E2E/Tests/ContinuousReplicationLimits.lean",
+              "symbol": "promotionProxyOnlySuite"
             }
           ]
         }
@@ -6236,8 +6251,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "7/7 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
+          "state": "no",
+          "evidence": "0/8 checks pass in CI runs that tested candidate rc67-candidate-ea7b1aa (ea7b1aab2f)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -6272,6 +6287,18 @@
           "reproduced": "full matrix 38808521263 (c419077, candidate 7f6affe): pvc-data-survival 17 'no master within 420 s' after the P0 master and slave were killed together on PVC; 18 and 20 failed after it",
           "fixed_in": "b4e6a49819be0f83c54dbaea8d768066220432f5",
           "verified": "single-suite 38824621386 on b4e6a49 (pvc-data-survival 5/5, data-survival-failover, upgrade, C1/A1, history-masterless, lag-hold-tmpfs, multipart-enable: 22/22 pass) and 38824858293 (history-tracking 7/7, copy-identity, multipart-enable); 3 unit checks fail without the fix (543 pass with it); counts for a candidate only through a full-matrix run"
+        },
+        {
+          "id": "F-proxy-only-copy-unseated",
+          "state": "fixed",
+          "since": "2026-10-16",
+          "summary": "A slave that died while Active re-registered as a fresh Proxy (partition -1): its class was read against no partition (always unknown) and the refill never considered it, so when it held the only data and the ex-master returned empty the partition stayed masterless with no CRITICAL hold line (the gauge only).",
+          "checks": [
+            "CHECK-06-proxyonly"
+          ],
+          "reproduced": "single-suite 38952942796 on 33f8017 (promotion-proxy-only-copy, behaviour unchanged: master=none for 300 s, refill inputs listed only the empty ex-master, hold logged=false)",
+          "fixed_in": "d6d531d92da7a0e473ba04372075b975db527d9b",
+          "verified": "single-suite 39029087171 on ea7b1aa (P and F pass; with pvc-data-survival, data-survival-failover, C1, A1), 39029092347 and 39029097546 (history-tracking, lag-hold tmpfs/expiry, copy-identity, history-masterless, replica-repair, terminating-pod-handling, failover, upgrade: all pass); flare_unit 569; counts for a candidate only through a full-matrix run"
         }
       ]
     },
@@ -7008,8 +7035,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "partial",
-          "evidence": "3/5 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
+          "state": "no",
+          "evidence": "0/5 checks pass in CI runs that tested candidate rc67-candidate-ea7b1aa (ea7b1aab2f)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -7158,8 +7185,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "1/1 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
+          "state": "no",
+          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-ea7b1aa (ea7b1aab2f)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -7647,8 +7674,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "1/1 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
+          "state": "no",
+          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-ea7b1aa (ea7b1aab2f)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -7796,8 +7823,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "1/1 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
+          "state": "no",
+          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-ea7b1aa (ea7b1aab2f)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -7970,7 +7997,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
+          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-ea7b1aa (ea7b1aab2f)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -8117,8 +8144,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "1/1 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
+          "state": "no",
+          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-ea7b1aa (ea7b1aab2f)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -8276,7 +8303,7 @@
         },
         "ci_passed": {
           "state": "no",
-          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
+          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-ea7b1aa (ea7b1aab2f)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -8417,8 +8444,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "1/1 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
+          "state": "no",
+          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-ea7b1aa (ea7b1aab2f)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -8715,8 +8742,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "1/1 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
+          "state": "no",
+          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-ea7b1aa (ea7b1aab2f)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -10045,8 +10072,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "partial",
-          "evidence": "6/7 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
+          "state": "no",
+          "evidence": "0/7 checks pass in CI runs that tested candidate rc67-candidate-ea7b1aa (ea7b1aab2f)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -10586,8 +10613,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "2/2 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
+          "state": "no",
+          "evidence": "0/2 checks pass in CI runs that tested candidate rc67-candidate-ea7b1aa (ea7b1aab2f)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -12034,8 +12061,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "6/6 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
+          "state": "no",
+          "evidence": "0/6 checks pass in CI runs that tested candidate rc67-candidate-ea7b1aa (ea7b1aab2f)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -12233,8 +12260,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "1/1 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
+          "state": "no",
+          "evidence": "0/1 checks pass in CI runs that tested candidate rc67-candidate-ea7b1aa (ea7b1aab2f)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -12769,8 +12796,8 @@
           "source": "declared"
         },
         "ci_passed": {
-          "state": "yes",
-          "evidence": "2/2 checks pass in CI runs that tested candidate rc67-candidate-0e41e97 (0e41e97059)'s tree or a docs-only equivalent"
+          "state": "no",
+          "evidence": "0/2 checks pass in CI runs that tested candidate rc67-candidate-ea7b1aa (ea7b1aab2f)'s tree or a docs-only equivalent"
         },
         "reviewed": {
           "state": "no",
@@ -12784,8 +12811,8 @@
     }
   ],
   "candidate": {
-    "commit": "0e41e97059acd5f042b4cd31b438d793cffad027",
-    "label": "rc67-candidate-0e41e97"
+    "commit": "ea7b1aab2ffba99d235fb8d4cbd9d2aaae7c69d3",
+    "label": "rc67-candidate-ea7b1aa"
   },
   "previous_candidates": [
     {
@@ -12822,6 +12849,13 @@
       "superseded": "2026-10-16",
       "snapshot": "docs/reports/2026-10-16-ledger-candidate-7f6affe-snapshot.json",
       "note": "full matrix 38808521263 at c419077 + nix-linux 38808525868 (success, legacy and RocksDB 134/134): 14 controls yes, 4 partial, 2 no. Failures: pvc-data-survival 17/18/20 = operator defect F-proxy-excluded-master-slot (fixed b4e6a49, verified 38824621386); continuous-replication-multipart-enable 26 (503 keys) = test race, writes before the P0 master accepted P1 Active (fixed 0e41e97); cross-cluster 13 forward_server_error_retried did not move (known open, cross-cluster 8 type); history-tracking (1) transition id not seen in the persisted map read and the cascade after it (not reproduced in 38824858293: 7/7 pass; cause undetermined); restore-promotion leg cut by the 120-min job timeout (Lean build ~65 min). X4 (cross-cluster 4/5) passed once. Kept for the record"
+    },
+    {
+      "commit": "0e41e97059acd5f042b4cd31b438d793cffad027",
+      "label": "rc67-candidate-0e41e97",
+      "superseded": "2026-10-17",
+      "snapshot": "docs/reports/2026-10-17-ledger-candidate-0e41e97-snapshot.json",
+      "note": "full matrix 38835210953 at 25ec074 + nix-linux 38835213805 (success): 16 controls yes, 2 partial, 2 no. X4 failed (open); copy-protection re-run attempt 2 passed; restore-promotion cut by the job timeout in attempts 1 and 3 (attempt 1 recorded; history-masterless (b)(c) and history-firstbuild unreached). Superseded by the attributed-rejoin fix (F-proxy-only-copy-unseated) and the restore-promotion leg split. Kept for the record"
     }
   ]
 }

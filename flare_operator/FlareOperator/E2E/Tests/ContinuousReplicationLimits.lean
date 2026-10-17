@@ -5516,8 +5516,16 @@ def historyTrackingSuite : TestSuite := {
           if unrecorded then return .fail "after the restart the operator judged without the persisted history ('not recorded')"
           -- the PERSISTED map carries the promotion's transition id and names the
           -- replica master; the record adopted it as the next generation
+          -- the commit is seen in the operator's in-memory map first; the
+          -- persisted map is written later in that pass (CI 39036409438 /
+          -- 38808521263: read too early, no transition= line, while the
+          -- operator adopted from the persisted id 3 s later): wait for it
+          let persistedOk ← waitForCondition "the persisted map carries a transition id and the replica as master" 120 do
+            let t ← nodeMapText c
+            return ((t.splitOn "\n").any fun l => l.startsWith "transition=") && (← persistedMaster c sPod)
           let mapTxt ← nodeMapText c
           let ids := (mapTxt.splitOn "\n").filterMap fun l => if l.startsWith "transition=" then some (l.drop "transition=".length) else none
+          IO.eprintln s!"# persisted map ready within 120 s: {persistedOk}"
           let adopted ← waitForCondition "the record adopts the promotion (holder = the replica)" 120 do
             let t ← historyText c
             return (t.splitOn "\n").any fun l => l.startsWith "part 0 known" && containsSubstr l s!"{sPod}." && containsSubstr l " promotion "
@@ -6938,6 +6946,13 @@ private def stageProxyOnly (c : Ctx) (label : String) (markPartial : Bool) : IO 
   match ← c.pair with
   | .error e => return .error (notSetUp e)
   | .ok (mPod, mIp, sPod, sIp) =>
+    -- a master just seated by the previous test may not take writes yet, and
+    -- its replica may still be rebuilding (CI 39036409438: pf_0 refused)
+    let ready ← waitForCondition "the master acknowledges a write and the replica is Active" 240 do
+      let okW ← memcachedSet c.cfg.debugPod ns mIp c.cfg.flarePort s!"{label}_probe" "p"
+      let v ← c.nodeView
+      return okW && ((entryOf v sPod).map (fun e => e.role == 1 && e.state == 0)).getD false
+    if !ready then return .error (notSetUp s!"{mPod} did not take writes or {sPod} was not Active within 240 s")
     let base := (List.range 30).map fun i => (s!"{label}_{i}", s!"v{label}_{i}")
     for (k, v) in base do
       if !(← memcachedSet c.cfg.debugPod ns mIp c.cfg.flarePort k v) then return .error (notSetUp s!"{k} not acknowledged")

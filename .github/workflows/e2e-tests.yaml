@@ -79,6 +79,9 @@ jobs:
           # continuous-replication leg only. restore-promotion was split in two
           # (2026-10-16): with a 63-65 min Lean build it was cut by the 120-min
           # job limit three times in a row (38808521263, 38835210953 x2).
+          # copy-protection and authority split too (2026-10-18): in 39036409438
+          # copy-protection was cut mid-E2E and authority finished its tests
+          # only minutes before the limit (Lean build ~60 min on those runners).
           default='[
             {"group":"topology","suites":"failover,read-balance,scale-out-master,scale-out-slave,scale-in-slave,scale-in-master,continuous-replication-enable-purged"},
             {"group":"replication","suites":"cluster-replication,wal-retention-config,strict-durability,continuous-replication-purge,continuous-replication-limits,continuous-replication-lag-hold-tmpfs,continuous-replication-rebuild-tmpfs"},
@@ -86,13 +89,15 @@ jobs:
             {"group":"empty-source","suites":"empty-source"},
             {"group":"r3-source","suites":"r3-source-change,read-timeout-reload,v-capture-resources"},
             {"group":"cross-cluster","suites":"cluster-replication-faults,cluster-replication-faults-per-key,cluster-replication-reseed,cluster-replication-restart-dump,cluster-replication-per-key-only"},
-            {"group":"copy-protection","suites":"copy-protection,copy-retention,copy-retention-concurrency,r3-unreadable,promotion-reasons,promotion-precommit,forward-window,forward-window-wal,forward-window-steps"},
+            {"group":"copy-protection","suites":"copy-protection,copy-retention,copy-retention-concurrency,r3-unreadable"},
+            {"group":"forward-window","suites":"promotion-reasons,promotion-precommit,forward-window,forward-window-wal,forward-window-steps"},
             {"group":"repair-ledger","suites":"repair-ledger,migration-per-key-only"},
             {"group":"restore-promotion","suites":"restore-isolated,promotion-repeat,history-tracking"},
             {"group":"history-promotion","suites":"history-held,history-firstbuild,history-intent-restart,history-masterless,promotion-disconnected-follower,promotion-disconnected-follower-empty,promotion-proxy-only-copy"},
             {"group":"failover-data","suites":"replace-nodes,failover-during-replication,data-survival-failover,pvc-data-survival,backup-restore,continuous-replication-enable,continuous-replication-multipart-enable"},
             {"group":"breaker-migration","suites":"circuit-breaker,operator-restart,blue-green-migration,continuous-replication-lag-hold-expiry,copy-identity"},
-            {"group":"authority","suites":"topology-authority,resync-failure-self-demote,snapshot-push-seed,partition-reduction,continuous-replication-lag-hold,cluster-init"},
+            {"group":"authority","suites":"topology-authority,resync-failure-self-demote,snapshot-push-seed"},
+            {"group":"cluster-init","suites":"partition-reduction,continuous-replication-lag-hold,cluster-init"},
             {"group":"repair","suites":"replica-repair,prepare-evidence,native-metrics,continuous-replication-upgrade,continuous-replication-lag-hold-unreadable"},
             {"group":"continuous-replication","suites":"copy-retention-measure,continuous-replication,continuous-replication-scale,continuous-replication-sustained,continuous-replication-outage,continuous-replication-outage-tmpfs,visibility-bench"}
           ]'

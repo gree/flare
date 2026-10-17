@@ -215,6 +215,12 @@ structure Observed where
       behaviour, decided): no history can be recorded for it; `none` = tracked,
       undecided, or no unique last master -/
   untrackedLastMaster : Option String := none
+  /-- the copy is in its partition ONLY by the persisted attribution of a dead
+      ex-slave (formerSlaveOf, decision 2026-10-16): rejoined Slave/Prepare,
+      not the partition's ex-master, not re-synced since. Its belonging and
+      its completeness must then be PROVEN by its own report
+      (`Stats.attributedRejoinProof`); it is never a normal candidate. -/
+  attributedRejoin : Bool := false
 
 /-- An UNTRACKED partition with no master (user decision 2026-10-16, upgrade
     from rc56 on tmpfs, CI 38714646714): a copy whose R3 validation was against
@@ -317,6 +323,37 @@ def bindingConflict (binding : Option String) (restored : Option Nat) (expected 
     | _, none => some s!"the expected partition binding is malformed [{expected}]"
   | _, _ => none
 
+/-- The map state of an attributed rejoin: Slave/Prepare in the partition
+    its persisted record names, and not that partition's ex-master (whose
+    own copy IS the last master's — the ex-master rules apply to it). -/
+def isAttributedRejoin (isSlave isPrepare : Bool) (partition lastMasterOf formerSlaveOf : Int) : Bool :=
+  isSlave && isPrepare && partition ≥ 0 && formerSlaveOf == partition && lastMasterOf != partition
+
+/-- A dead ex-slave rejoined by its persisted attribution (decision
+    2026-10-16): what it must PROVE about itself before it can be anything but
+    held. Every copy-integrity key must be REPORTED with its healthy value
+    (absent = not proven, never read as healthy); the copy is not empty; its
+    persisted partition binding is exactly the partition's; its last
+    reconstruction did not end failed / aborted; its follow side reports
+    nothing unhealthy. `none` = proven; `some why` = not. The forbidden
+    markers themselves were checked before (forbiddenMarker). -/
+def Stats.attributedRejoinProof (s : Stats) (o : Observed) : Option String :=
+  if s.copyPartial != some 0 then some "copy completeness not proven (rocksdb_copy_partial not reported 0)"
+  else if s.inFlight != some 0 then some "copy completeness not proven (rebuild_in_flight not reported 0)"
+  else if s.parked != some 0 then some "copy completeness not proven (rebuild_parked not reported 0)"
+  else if s.switchUnresolved != some 0 then some "copy completeness not proven (rocksdb_switch_unresolved not reported 0)"
+  else if s.identityConsistent != some 1 then some "copy identity not proven (rocksdb_copy_identity_consistent not reported 1)"
+  else if s.quarantined != some 0 then some "not proven out of quarantine (rocksdb_quarantined not reported 0)"
+  else if s.copyId.isNone then some "the copy does not report its copy id"
+  else if s.reconstruction == some "failed" || s.reconstruction == some "aborted" then
+    some s!"its last reconstruction ended {s.reconstruction.getD "?"}"
+  else if (s.items.getD 0) == 0 then some "an empty or uncounted copy"
+  else if (s.followReason.map (unhealthyFollowReasons.contains ·)).getD false then
+    some s!"the follow side reports {s.followReason.getD "?"}"
+  else match o.expectedBinding, s.partitionBinding with
+    | some want, some got => if got == want then none else some s!"its partition binding [{got}] is not the partition's [{want}]"
+    | _, _ => some "its partition binding is not proven (not reported or not checked)"
+
 def classify (reply : Option String) (o : Observed) : Class :=
   match reply with
   | none => .unknown "stats unreadable"
@@ -330,6 +367,21 @@ def classify (reply : Option String) (o : Observed) : Class :=
     match o.expectedBinding.bind (bindingConflict s.partitionBinding s.restoredUnverified) with
     | some why => .forbidden s!"restore provenance: {why}"
     | none =>
+    -- an ATTRIBUTED REJOIN (a dead ex-slave back by its persisted record):
+    -- proof first, then only `lagging` (the refill's held, logged last
+    -- resort) or held / forbidden — never eligible, legacy or empty
+    if o.attributedRejoin then
+      match s.attributedRejoinProof o with
+      | some why => .unknown s!"attributed rejoin: {why}"
+      | none =>
+        if s.sourceState == some "needs_rebuild" then needsRebuildClass s o
+        else match o.lastMasterHistory, s.masterId, s.copyEpoch with
+          | some (mid, ep), some cm, some ce =>
+            if cm == mid && ce == ep then .lagging
+            else .forbidden s!"attributed rejoin: the copy holds {cm}/{ce}, not the recorded history {mid}/{ep}"
+          | none, _, _ => .unknown "attributed rejoin: the partition's history is not recorded"
+          | _, _, _ => .unknown "attributed rejoin: the copy does not report its history"
+    else
     -- REJOINING (docs/design-authoritative-history.md): with an authoritative
     -- record, a copy that reports ANOTHER history (e.g. the ex-master back
     -- with an empty DB and a new epoch) is never a master candidate, empty

@@ -399,13 +399,37 @@ waits for the ex-master. Writes to the partition fail meanwhile.
 - **The wait is bounded**: after `FLARE_FOLLOW_FAILOVER_WAIT_SECONDS` (default
   300, counted from the first pass that sees the partition masterless, so
   about one minute more in all: 117 s for a 60 s wait on CI) the
-  follower is seated anyway with the same NOT LOSS-FREE line. The writes it
-  never received are lost. Set the variable to 0 to never wait (the behaviour
+  follower is seated anyway with the same NOT LOSS-FREE line. A write it
+  never received is not in its copy; whether any exists is NOT measured. Set the variable to 0 to never wait (the behaviour
   before 2026-10-03); raise it where losing writes is worse than a longer
   write outage.
 
 To shorten the outage by hand, accepting the loss, set the variable lower
 and restart the operator.
+
+**A dead ex-slave that comes back (decision 2026-10-16).** A slave that
+died while Active keeps its partition in the persisted node map
+(`slaveOf=P` on its line in `<cluster>-node-map`). When it re-registers it
+rejoins that partition as Slave/Prepare — never by its name, and never a
+copy that was repair-held, drained or mid-reconstruction (those carry no
+`slaveOf`). It can be seated only by the masterless refill under the rule
+above, and only after its own report proves its copy: every copy-integrity
+key reported healthy (`rocksdb_copy_partial 0`, `rebuild_in_flight 0`,
+`rebuild_parked 0`, `rocksdb_switch_unresolved 0`,
+`rocksdb_copy_identity_consistent 1`, `rocksdb_quarantined 0`, a copy id),
+not empty, `rocksdb_partition_binding` exactly the partition's, the
+partition's RECORDED history, no failed / aborted reconstruction. Missing
+proof = `unknown (attributed rejoin: ...)`, held; a forbidden marker or
+another history = FORBIDDEN, never seated, not even after the wait. An
+ex-master read empty ends the wait only when every other copy of the
+partition was observed (read with data or read empty); a copy that is Down
+or unread keeps it until the wait expires.
+
+While a partition has no master the operator logs, on change and at most
+once a minute, `CRITICAL: partition P has NO master
+(flare_operator_partitions_masterless): copies: ...` with what was seen of
+each copy and its class, also when there is no copy or every copy is
+forbidden (FlareMasterMissing fires from the same gauge).
 
 ## Operator will not start: node map missing, invalid or unreadable {#node-map-lost}
 

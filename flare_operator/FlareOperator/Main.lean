@@ -151,7 +151,8 @@ private def handleFailover (state : FlareClusterState) (deadKeys : List String)
     | some node =>
       let roleName := match node.role with | .Master => "Master" | .Slave => "Slave" | .Proxy => "Proxy"
       let stateName := match node.state with | .Active => "Active" | .Prepare => "Prepare" | .Down => "Down" | .Ready => "Ready"
-      let downNode := { node with state := FlareState.Down, role := FlareRole.Proxy, partition := -1 }
+      let downNode := { node with state := FlareState.Down, role := FlareRole.Proxy, partition := -1,
+                                  formerSlaveOf := K8sReconciler.deadSlaveOf node }
       let s' := s.addNode key downNode
       let logs := logs ++ [s!"[NodeState] {key}: {roleName}/{stateName} P{node.partition} → Proxy/Down (dead)"]
       -- If dead node was a Master, try to promote a Slave in the same partition
@@ -302,6 +303,11 @@ initialize parkedIdleRef : IO.Ref (List String) ← IO.mkRef []
     so a node whose cause did not change is not resumed every pass. -/
 initialize resumedAtRef : IO.Ref (List (String × Nat)) ← IO.mkRef []
 
+/-- The masterless CRITICAL's last line per partition (summary, ms): logged
+    on change or every 60 s, not every pass (decision 2026-10-16). -/
+initialize masterlessLogRef : IO.Ref (List (Nat × (String × Nat))) ← IO.mkRef []
+/-- (live, data-bearing, read-empty) keys the last reconcile pass's refill saw. -/
+initialize refillSeenRef : IO.Ref (List String × List String × List String) ← IO.mkRef ([], [], [])
 /-- SAF-08: a successor the empty-master self-heal validated before deleting
     the master, pinned with its incarnation for the drain that follows:
     (node key, (uid, restarts), passes left). -/
@@ -1642,7 +1648,8 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
                 lastMasterHistory := ← recordedHistory part
                 isLastMasterHolder := part ≥ 0 && n.lastMasterOf == part
                 expectedBinding := if part ≥ 0 then some (PromotionEvidence.bindingFor part.toNat nPartsB cs.partitionSize) else none
-                untrackedLastMaster := ← untrackedLastMaster cs part }
+                untrackedLastMaster := ← untrackedLastMaster cs part
+                attributedRejoin := PromotionEvidence.isAttributedRejoin (n.role == FlareRole.Slave) (n.state == FlareState.Prepare) n.partition n.lastMasterOf n.formerSlaveOf }
               let cls := PromotionEvidence.classify reply obs
               evidence := evidence ++ [(key, cls, PromotionEvidence.bindingOf (some p.uid) reply)]
               observedFor := observedFor ++ [(key, obs)]
@@ -1993,7 +2000,8 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
           lastMasterHistory := hist
           isLastMasterHolder := (n?.map (·.lastMasterOf)) == some part
           expectedBinding := if part ≥ 0 then some (PromotionEvidence.bindingFor part.toNat nPartsB cur.partitionSize) else none
-          untrackedLastMaster := ← untrackedLastMaster cur part }
+          untrackedLastMaster := ← untrackedLastMaster cur part
+          attributedRejoin := (n?.map fun n => PromotionEvidence.isAttributedRejoin (n.role == FlareRole.Slave) (n.state == FlareState.Prepare) n.partition n.lastMasterOf n.formerSlaveOf).getD false }
         let cls := PromotionEvidence.classify replyNow obs
         IO.eprintln s!"[flare-operator] PROMOTION EVIDENCE (read at commit, a pass that did not read the candidates): {k}={cls.label} [boot {(PromotionEvidence.bindingOf none replyNow).bootId.getD "?"}]"
         if podNow.isNone || !PromotionEvidence.commitTimeAllows cls then
@@ -2029,7 +2037,7 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
         promotionAbortedRef.set true
         return
       if (entry.map (·.2.1)) == some .lagging then
-        IO.eprintln s!"[flare-operator] PROMOTION of a LAGGING copy (same history as the last master, behind it): {k} — a last resort, NOT a safe promotion; writes it never received are lost"
+        IO.eprintln s!"[flare-operator] PROMOTION of a LAGGING copy (same history as the last master, behind it): {k} — a last resort, NOT a safe promotion; a write it never received is not in its copy (whether any exists is NOT measured)"
     promotionBarrier promoted
     let observed ← podIdentityRef.get
     for k in promoted do
@@ -2229,6 +2237,8 @@ private partial def runReconcileFSMLoop
     -- CRITICAL drain-guard signal for the flare_operator_drain_no_successor
     -- gauge (draining masters kept because no promotable successor exists).
     drainBlockedRef.set s.drainBlockedCount
+    -- what the refill saw this pass, for the masterless CRITICAL summary
+    refillSeenRef.set (s.livePodKeys, s.dataBearingKeys, s.knownEmptyKeys)
     -- Terminal state reached
     match s.reconcileStep with
     | .Done =>
@@ -2562,7 +2572,7 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
                   if sourceSame && rn2.role == FlareRole.Slave && rn2.partition == rn.partition && rn2.regEpoch == rn.regEpoch then
                     let v := cur.nodeMapVersion + 1
                     let demoted : FlareNode :=
-                      { rn2 with role := FlareRole.Proxy, state := FlareState.Active, partition := -1 }
+                      { rn2 with role := FlareRole.Proxy, state := FlareState.Active, partition := -1, formerSlaveOf := -1 }
                     (some v, { (cur.addNode rKey demoted) with nodeMapVersion := v })
                   else (none, cur)
                 | none => (none, cur)
@@ -2933,6 +2943,22 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
         kv.2.role == FlareRole.Master && kv.2.state == FlareState.Active
           && kv.2.partition == Int.ofNat pIdx)))
   metrics.masterlessPartitions.set masterlessIdxs.length.toFloat
+  -- CRITICAL per masterless partition (decision 2026-10-16), also when there
+  -- is no candidate or every one is forbidden; on change or every 60 s
+  do
+    let nowMs ← IO.monoMsNow
+    let classes := (← promotionEvidenceRef.get).map fun (k, c, _) => (k, c.label)
+    let (live, data, empty) ← refillSeenRef.get
+    let prev ← masterlessLogRef.get
+    let mut next : List (Nat × (String × Nat)) := []
+    for p in masterlessIdxs do
+      let summary := K8sReconciler.masterlessSummary finalState p classes live data empty
+      if K8sReconciler.masterlessLogDue (prev.lookup p) summary nowMs 60000 then
+        IO.eprintln s!"[flare-operator] CRITICAL: partition {p} has NO master (flare_operator_partitions_masterless): {summary}. Writes to it fail until a copy is seated or recovered by hand. See RUNBOOK #failover-lag-hold and #history-held-masterless"
+        next := next ++ [(p, (summary, nowMs))]
+      else
+        next := next ++ ((prev.lookup p).map (fun e => (p, e))).toList
+    masterlessLogRef.set next
   let allPartitionsMastered := masterlessIdxs.isEmpty
   let breakerTripped ← trippedRef.get
   -- Deleting a pod on a tmpfs cluster erases that node's copy, so NEITHER

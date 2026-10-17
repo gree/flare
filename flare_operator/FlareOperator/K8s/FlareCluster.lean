@@ -74,6 +74,16 @@ structure FlareNode where
       roles themselves reload intact, so the marker only matters within the
       lifetime that witnessed the demotion. -/
   lastMasterOf : Int := -1
+  /-- Partition this key was an ACTIVE SLAVE of when it was declared dead
+      (demoted to Proxy/Down), or -1. Decision 2026-10-16: the attribution
+      of a returning ex-slave to its partition comes from this PERSISTED
+      record (node map token `slaveOf=`), never from its name. Set ONLY by
+      the dead-node demotion of an Active slave; every other demotion to
+      Proxy clears it (a repair-held or drained copy is not attributed), and
+      activation or a seat as master clears it. A rejoin re-seats the key in
+      that partition as Slave/Prepare and the classifier then demands full
+      copy proof (PromotionEvidence.Observed.attributedRejoin). -/
+  formerSlaveOf : Int := -1
   deriving Repr, BEq
 
 /-! ## Cluster Replication (Blue/Green Migration) -/
@@ -405,7 +415,7 @@ private def parseIntStr (s : String) : Option Int :=
     s.toNat?.map Int.ofNat
 
 /-- Parse a single serialized node-map line:
-    "host:port role=R state=S partition=P [lastMasterOf=L] [thread=T]"
+    "host:port role=R state=S partition=P [lastMasterOf=L] [slaveOf=F] [thread=T]"
     → (key, FlareNode). Tokens after the fixed prefix are optional and
     scanned by name, so older lines (without them) still parse:
     - lastMasterOf: emitted only while a rejoined ex-master waits for the
@@ -425,6 +435,8 @@ def parseNodeMapLine (line : String) : Option (String × FlareNode) :=
       stripPrefix t "lastMasterOf=" >>= parseIntStr).getD (-1)
     let threadVal := (rest.findSome? fun t =>
       stripPrefix t "thread=" >>= fun (s : String) => s.toNat?).getD 16
+    let slaveOfVal := (rest.findSome? fun t =>
+      stripPrefix t "slaveOf=" >>= parseIntStr).getD (-1)
     -- balance: the committed read weight, INCLUDING SAF-10c withholding
     -- (a WAL follower not proven eligible is at 0). Missing token (maps
     -- persisted before balance was) falls back conservatively: a master
@@ -436,6 +448,7 @@ def parseNodeMapLine (line : String) : Option (String × FlareNode) :=
     return (key, { serverName := host, serverPort := port, role := roleVal,
                    state := stateVal, partition := partVal,
                    lastMasterOf := lastMasterVal, threadType := threadVal,
+                   formerSlaveOf := slaveOfVal,
                    balance := balanceVal })
   | _ => none
 
@@ -448,6 +461,9 @@ def serializeNodeMap (state : FlareClusterState) : String :=
   let lines := state.nodeMap.map fun (key, node) =>
     let base := s!"{key} role={node.role.toNat} state={node.state.toNat} partition={node.partition}"
     let base := if node.lastMasterOf != -1 then base ++ s!" lastMasterOf={node.lastMasterOf}" else base
+    -- slaveOf=: the dead ex-slave's partition (formerSlaveOf), emitted only
+    -- while set, so an operator restart keeps the attribution
+    let base := if node.formerSlaveOf != -1 then base ++ s!" slaveOf={node.formerSlaveOf}" else base
     -- thread= is always emitted: threadType must survive the restart
     -- roundtrip or every node degrades to the shared default 16 and the
     -- proxy channels collapse again. (A DOWNGRADED operator's arity-based

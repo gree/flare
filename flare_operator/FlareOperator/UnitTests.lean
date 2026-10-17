@@ -1114,6 +1114,112 @@ def checkExMasterReturn (ctx : Ctx) : IO Unit := do
   check ctx "a slave that activates under an Active master drops its lastMasterOf marker"
     ((sa.lookupNode "m:12121").map (·.lastMasterOf) == some (-1))
 
+/-- Decision 2026-10-16 (promotion-proxy-only-copy, 38952942796): a dead
+    ex-slave is attributed to its partition ONLY by its persisted record,
+    must prove its copy, and is seated only as the masterless last resort. -/
+def checkAttributedRejoin (ctx : Ctx) : IO Unit := do
+  let sl := fun (st : FlareState) => ({ holdNode .Slave st 0 "s" with formerSlaveOf := -1 } : FlareNode)
+  check ctx "attribution: a dead ACTIVE slave records its partition; a Prepare slave keeps what it had; a master records none"
+    (K8sReconciler.deadSlaveOf (sl .Active) == 0 && K8sReconciler.deadSlaveOf (sl .Prepare) == -1
+      && K8sReconciler.deadSlaveOf { sl .Prepare with formerSlaveOf := 0 } == 0
+      && K8sReconciler.deadSlaveOf (holdNode .Master .Active 0 "m") == -1)
+  let live : FlareClusterState :=
+    ({ nodeMap := [("m:12121", holdNode .Master .Active 0 "m"), ("s:12121", holdNode .Slave .Active 0 "s")],
+       nodeMapVersion := 5 } : FlareClusterState).rebuildPartitionMap
+  let dead := K8sReconciler.handleFailoverWithPromotion live ["s:12121"]
+  let ds := dead.lookupNode "s:12121"
+  check ctx "attribution: the dead-node demotion sets formerSlaveOf for an Active slave"
+    (ds.map (fun n => (n.role == .Proxy, n.state == .Down, n.partition, n.formerSlaveOf)) == some (true, true, -1, 0))
+  let rt := FlareClusterState.fromNodeMapData (FlareClusterState.serializeNodeMap dead)
+  check ctx "attribution: persisted (slaveOf=) and read back across an operator restart"
+    (containsSub (FlareClusterState.serializeNodeMap dead) " slaveOf=0" && ((rt.lookupNode "s:12121").map (·.formerSlaveOf)) == some 0)
+  let drained := K8sReconciler.handleDrainWithPromotion { dead with nodeMap := dead.nodeMap.map fun (k, n) => if k == "s:12121" then (k, holdNode .Slave .Active 0 "s") else (k, n) } ["s:12121"]
+  check ctx "attribution: a DRAINED slave is not attributed (formerSlaveOf -1)"
+    (((drained.lookupNode "s:12121").map (·.formerSlaveOf)) == some (-1))
+  let (rj, _) := Reconciler.reconcileStep dead activationCrd (.NodeAdd "s" 12121)
+  check ctx "rejoin: an attributed dead ex-slave re-registers as Slave/Prepare of ITS partition, keeping the record"
+    (((rj.lookupNode "s:12121").map fun n => (n.role == .Slave, n.state == .Prepare, n.partition, n.formerSlaveOf)) == some (true, true, 0, 0))
+  let unattributed := dead.addNode "s:12121" { holdNode .Proxy .Down (-1) "s" with formerSlaveOf := -1 }
+  let (fr, _) := Reconciler.reconcileStep unattributed activationCrd (.NodeAdd "s" 12121)
+  check ctx "rejoin: without the record it registers fresh (never attributed by its name)"
+    (((fr.lookupNode "s:12121").map (·.partition)) != some 0 || ((fr.lookupNode "s:12121").map (·.role == .Slave)) != some true
+      || ((fr.lookupNode "s:12121").map (·.state == .Prepare)) != some true)
+  let repairHeld := dead.addNode "s:12121" { holdNode .Proxy .Active (-1) "s" with formerSlaveOf := -1 }
+  let (rh, _) := Reconciler.reconcileStep repairHeld activationCrd (.NodeAdd "s" 12121)
+  check ctx "rejoin: a repair-held (live, unattributed) proxy is not rejoined into the partition"
+    (((rh.lookupNode "s:12121").map fun n => n.role == .Slave && n.state == .Prepare && n.formerSlaveOf == 0) != some true)
+  let actd : FlareClusterState :=
+    { nodeMap := [("a:12121", holdNode .Master .Active 0 "a"), ("s:12121", { holdNode .Slave .Prepare 0 "s" with formerSlaveOf := 0 })], nodeMapVersion := 7 }
+  let (av, _) := Reconciler.reconcileStep actd activationCrd (.NodeState "s" 12121 .Active)
+  check ctx "attribution: activation under an Active master clears it"
+    (((av.lookupNode "s:12121").map (·.formerSlaveOf)) == some (-1))
+  -- the classifier: proof first, then lagging / held / forbidden only
+  let bind0 := PromotionEvidence.bindingFor 0 1 1024
+  let good := s!"STAT curr_items 30\r\nSTAT reconstruction_boot_id b1\r\nSTAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nSTAT rocksdb_copy_identity_consistent 1\r\nSTAT rocksdb_quarantined 0\r\nSTAT rocksdb_copy_partial 0\r\nSTAT rebuild_in_flight 0\r\nSTAT rebuild_parked 0\r\nSTAT rocksdb_switch_unresolved 0\r\nSTAT rocksdb_copy_id c1:1\r\nSTAT rocksdb_master_id M\r\nSTAT rocksdb_source_epoch 2:e\r\nSTAT rocksdb_partition_binding {bind0}\r\nEND\r\n"
+  let ob : Option (String × String) → Bool → PromotionEvidence.Observed := fun h hasM =>
+    { mapPrepare := true, mapActive := false, podReady := true, partitionHasMaster := hasM, lastMasterHistory := h, expectedBinding := some bind0, attributedRejoin := true }
+  let cl := fun (r : String) (o : PromotionEvidence.Observed) => PromotionEvidence.classify (some r) o
+  let isUnknown := fun (c : PromotionEvidence.Class) => match c with | .unknown _ => true | _ => false
+  let isForbidden := fun (c : PromotionEvidence.Class) => match c with | .forbidden _ => true | _ => false
+  check ctx "attributed rejoin: every key proven + the recorded history = lagging (only the held, logged last resort)"
+    (cl good (ob (some ("M", "2:e")) false) == .lagging)
+  check ctx "attributed rejoin: never eligible, not even with R3 eligible and a master present"
+    (!(cl good (ob (some ("M", "2:e")) true)).normal)
+  check ctx "attributed rejoin: a copy-integrity key NOT REPORTED is not proven (held), never read as healthy"
+    (["rocksdb_copy_partial 0", "rebuild_in_flight 0", "rebuild_parked 0", "rocksdb_switch_unresolved 0", "rocksdb_copy_identity_consistent 1", "rocksdb_quarantined 0", "rocksdb_copy_id c1:1"].all fun k =>
+      isUnknown (cl (good.replace s!"STAT {k}\r\n" "") (ob (some ("M", "2:e")) false)))
+  check ctx "attributed rejoin: part-way / in flight / parked / switch / identity / quarantine / running are FORBIDDEN"
+    (([("rocksdb_copy_partial 0", "rocksdb_copy_partial 1"), ("rebuild_in_flight 0", "rebuild_in_flight 1"), ("rebuild_parked 0", "rebuild_parked 1"),
+      ("rocksdb_switch_unresolved 0", "rocksdb_switch_unresolved 1"), ("rocksdb_copy_identity_consistent 1", "rocksdb_copy_identity_consistent 0"),
+      ("rocksdb_quarantined 0", "rocksdb_quarantined 1")].all fun (a, b) => isForbidden (cl (good.replace a b) (ob (some ("M", "2:e")) false)))
+      && isForbidden (cl (good.replace "STAT curr_items 30" "STAT reconstruction_current_state running\r\nSTAT curr_items 30") (ob (some ("M", "2:e")) false)))
+  check ctx "attributed rejoin: another history is FORBIDDEN; no record is held"
+    (isForbidden (cl good (ob (some ("M", "1:old")) false)) && isUnknown (cl good (ob none false)))
+  check ctx "attributed rejoin: empty, another binding, an unreported binding, a failed reconstruction are held"
+    (isUnknown (cl (good.replace "curr_items 30" "curr_items 0") (ob (some ("M", "2:e")) false))
+      && isUnknown (cl (good.replace "partition=0 " "partition=1 ") (ob (some ("M", "2:e")) false))
+      && isUnknown (cl (good.replace s!"STAT rocksdb_partition_binding {bind0}\r\n" "") (ob (some ("M", "2:e")) false))
+      && isUnknown (cl (good.replace "STAT curr_items 30" "STAT reconstruction_current_state failed\r\nSTAT curr_items 30") (ob (some ("M", "2:e")) false)))
+  check ctx "attributed rejoin: unreadable / incomplete stats are held"
+    (isUnknown (PromotionEvidence.classify none (ob (some ("M", "2:e")) false)) && isUnknown (cl (good.replace "END\r\n" "") (ob (some ("M", "2:e")) false)))
+  check ctx "the map state of an attributed rejoin: Slave/Prepare in the recorded partition, not its ex-master"
+    (PromotionEvidence.isAttributedRejoin true true 0 (-1) 0 && !PromotionEvidence.isAttributedRejoin true false 0 (-1) 0
+      && !PromotionEvidence.isAttributedRejoin true true 0 0 0 && !PromotionEvidence.isAttributedRejoin true true 1 (-1) 0)
+  -- the refill: masterless last resort, the existing wait, unobserved copies
+  let em := holdNode .Slave .Prepare 0 "m" 0
+  let ar := { holdNode .Slave .Prepare 0 "s" with formerSlaveOf := 0 }
+  let st2 : FlareClusterState := ({ nodeMap := [("m:12121", em), ("s:12121", ar)], nodeMapVersion := 9 } : FlareClusterState).rebuildPartitionMap
+  let live2 := ["m:12121", "s:12121"]
+  let refill := fun (st : FlareClusterState) (hold : Bool) (data excl known blocked : List String) =>
+    K8sReconciler.promoteMasterlessPartition st 0 live2 [] data excl hold known blocked
+  check ctx "refill: the attributed copy (lagging) is seated once the ex-master is READ empty"
+    (masterOf (refill st2 true ["s:12121"] ["s:12121", "m:12121"] ["m:12121"] ["m:12121"]) == some "s:12121")
+  check ctx "refill: … but held while the ex-master is not read (unread is not empty)"
+    (masterOf (refill st2 true ["s:12121"] ["s:12121", "m:12121"] [] ["m:12121"]) == none)
+  check ctx "refill: … and seated after the wait expired (accepted-loss policy)"
+    (masterOf (refill st2 false ["s:12121"] ["s:12121", "m:12121"] [] ["m:12121"]) == some "s:12121")
+  check ctx "refill: a FORBIDDEN / unknown attributed copy is never seated, not even after the wait expired"
+    (masterOf (refill st2 false ["s:12121"] ["s:12121", "m:12121"] ["m:12121"] ["m:12121", "s:12121"]) == none)
+  let st3 := st2.addNode "t:12121" { holdNode .Proxy .Down (-1) "t" with formerSlaveOf := 0 }
+  check ctx "refill: another attributed copy NOT observed (Down) keeps the wait though the ex-master is read empty"
+    (masterOf (refill st3 true ["s:12121"] ["s:12121", "m:12121"] ["m:12121"] ["m:12121"]) == none
+      && K8sReconciler.unobservedCopies st3 0 live2 ["s:12121"] ["m:12121"] == ["t:12121"])
+  check ctx "refill: … and after the wait expired it is seated"
+    (masterOf (refill st3 false ["s:12121"] ["s:12121", "m:12121"] ["m:12121"] ["m:12121"]) == some "s:12121")
+  let seated := refill st2 true ["s:12121"] ["s:12121", "m:12121"] ["m:12121"] ["m:12121"]
+  check ctx "refill: the seat clears the attribution"
+    (((seated.lookupNode "s:12121").map (·.formerSlaveOf)) == some (-1))
+  -- the masterless CRITICAL: summary and throttle
+  let empty0 : FlareClusterState := { nodeMap := [], nodeMapVersion := 1 }
+  check ctx "masterless CRITICAL: also when no copy is registered"
+    (containsSub (K8sReconciler.masterlessSummary empty0 0 [] [] [] []) "no copy of the partition")
+  check ctx "masterless CRITICAL: names every copy with what was seen and its class (unread shown as not read, never empty)"
+    (let sm := K8sReconciler.masterlessSummary st2 0 [("s:12121", "FORBIDDEN (x)")] live2 [] []
+     containsSub sm "s:12121 (not read; FORBIDDEN (x))" && containsSub sm "m:12121 (not read; not classified)")
+  check ctx "masterless CRITICAL: logged on change or after the interval, not every pass"
+    (K8sReconciler.masterlessLogDue none "a" 0 60000 && !K8sReconciler.masterlessLogDue (some ("a", 1000)) "a" 30000 60000
+      && K8sReconciler.masterlessLogDue (some ("a", 1000)) "b" 30000 60000 && K8sReconciler.masterlessLogDue (some ("a", 1000)) "a" 61000 60000)
+
 def nmGood : String := "version=4294967304\nh:12121 role=0 state=0 partition=0 thread=16 balance=100\ni:12121 role=1 state=0 partition=0 thread=17 balance=50"
 
 def kindOf (d : NodeMapRecovery.Decision) : String := d.kind
@@ -2586,6 +2692,7 @@ def run : IO UInt32 := do
   checkReactivation ctx
   checkFailoverLagHold ctx
   checkExMasterReturn ctx
+  checkAttributedRejoin ctx
   checkNodeMapRecovery ctx
   checkRepairSource ctx
   checkPodRows ctx

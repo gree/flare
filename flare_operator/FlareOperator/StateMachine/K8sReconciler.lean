@@ -397,6 +397,18 @@ def flareReconcileTerminal (s : FlareReconcileState) : Prop :=
 -- Pure Failover Logic (extracted from Main.lean handleFailover)
 -- ===========================================================================
 
+/-- The persisted attribution a dead node keeps (decision 2026-10-16): an
+    ACTIVE slave of a partition records that partition; a Prepare slave keeps
+    what it had (a rejoined ex-slave not yet re-synced is still that copy;
+    a slave mid-reconstruction had none); a master records nothing here (its
+    lastMasterOf does). -/
+def deadSlaveOf (node : FlareNode) : Int :=
+  if node.role == FlareRole.Slave then
+    if node.state == FlareState.Active && node.partition ≥ 0 then node.partition
+    else node.formerSlaveOf
+  else if node.role == FlareRole.Proxy then node.formerSlaveOf
+  else -1
+
 /-- Process a single dead key: demote the node to Proxy/Down.
     Slave-to-Master promotion is modeled at the K8s reconciler FSM level
     (AfterHandleFailover → AfterPatchService) rather than inline. -/
@@ -407,7 +419,8 @@ def handleFailoverSingleKey (s : FlareClusterState) (key : String) : FlareCluste
     let demoted : FlareNode :=
       { node with state := FlareState.Down, role := FlareRole.Proxy, partition := -1,
                   lastMasterOf := if node.role == FlareRole.Master then node.partition
-                                  else node.lastMasterOf }
+                                  else node.lastMasterOf
+                  formerSlaveOf := deadSlaveOf node }
     s.addNode key demoted
 
 /-- Pure version of handleFailover (Main.lean:45-69).
@@ -442,7 +455,8 @@ def handleFailoverWithPromotionSingleKey (s : FlareClusterState) (key : String)
     let demoted : FlareNode :=
       { node with state := FlareState.Down, role := FlareRole.Proxy, partition := -1,
                   lastMasterOf := if node.role == FlareRole.Master then node.partition
-                                  else node.lastMasterOf }
+                                  else node.lastMasterOf
+                  formerSlaveOf := deadSlaveOf node }
     let s := s.addNode key demoted
     -- If it was a Master, promote a live slave of its partition.
     if node.role == FlareRole.Master then
@@ -522,7 +536,7 @@ def handleDrainWithPromotionSingleKey (s : FlareClusterState) (key : String)
                 && slaveNode.state == FlareState.Active then
               let demoted : FlareNode :=
                 { node with state := FlareState.Active, role := FlareRole.Proxy,
-                            partition := -1 }
+                            partition := -1, formerSlaveOf := -1 }
               let s := s.addNode key demoted
               let promoted := { slaveNode with role := FlareRole.Master,
                                                state := FlareState.Active, balance := 100 }
@@ -532,7 +546,7 @@ def handleDrainWithPromotionSingleKey (s : FlareClusterState) (key : String)
     else
       -- Slave (or already-proxy): demoting to a live proxy is always safe.
       s.addNode key
-        { node with state := FlareState.Active, role := FlareRole.Proxy, partition := -1 }
+        { node with state := FlareState.Active, role := FlareRole.Proxy, partition := -1, formerSlaveOf := -1 }
 
 /-- Drain every Terminating master/slave (see the single-key doc). -/
 def handleDrainWithPromotion (state : FlareClusterState) (drainKeys : List String)
@@ -611,7 +625,8 @@ def demoteDuplicateMastersGo (seen : List Int)
         let demoted := { node with role := FlareRole.Proxy,
                                    state := FlareState.Active,
                                    partition := -1,
-                                   balance := 100 }
+                                   balance := 100,
+                                   formerSlaveOf := -1 }
         (key, demoted) :: demoteDuplicateMastersGo seen rest
       else
         (key, node) :: demoteDuplicateMastersGo (node.partition :: seen) rest
@@ -1229,6 +1244,49 @@ def exMasterBackEmpty (state : FlareClusterState) (pIdx : Nat)
     n.lastMasterOf == Int.ofNat pIdx && n.state != FlareState.Down
       && livePodKeys.contains key && knownEmptyKeys.contains key)
 
+/-- Copies attributed to partition `pIdx` that were NOT observed this tick
+    (decision 2026-10-16: "the only copy" is not "the only copy observed"):
+    a non-master member (partition, ex-master marker or a dead ex-slave's
+    persisted attribution) that is Down, or live but neither read with data
+    nor read empty. Such a copy may hold more than the candidate, so an
+    ex-master read empty does not end the wait while one exists (the wait's
+    own expiry still does, logged NOT LOSS-FREE); an unread copy is never
+    taken for an empty one. -/
+def unobservedCopies (state : FlareClusterState) (pIdx : Nat)
+    (livePodKeys dataBearingKeys knownEmptyKeys : List String) : List String :=
+  (state.nodeMap.filter fun (key, n) =>
+    n.role != FlareRole.Master
+      && (n.partition == Int.ofNat pIdx || n.lastMasterOf == Int.ofNat pIdx || n.formerSlaveOf == Int.ofNat pIdx)
+      && (n.state == FlareState.Down || !livePodKeys.contains key
+          || (!dataBearingKeys.contains key && !knownEmptyKeys.contains key))).map Prod.fst
+
+/-- Why a partition has NO master, in one line for the CRITICAL log
+    (decision 2026-10-16: emitted also when there is no candidate at all or
+    every candidate is forbidden). `classes` = this pass's evidence labels by
+    key (absent = not classified this pass). Stable for an unchanged
+    situation, so the caller can log it on CHANGE (plus a slow repeat). -/
+def masterlessSummary (state : FlareClusterState) (pIdx : Nat) (classes : List (String × String))
+    (livePodKeys dataBearingKeys knownEmptyKeys : List String) : String :=
+  let members := state.nodeMap.filter fun (_, n) =>
+    n.role != FlareRole.Master
+      && (n.partition == Int.ofNat pIdx || n.lastMasterOf == Int.ofNat pIdx || n.formerSlaveOf == Int.ofNat pIdx)
+  if members.isEmpty then "no copy of the partition is registered (none live, none attributed)"
+  else
+    let desc := members.map fun (k, n) =>
+      let seen := if n.state == FlareState.Down || !livePodKeys.contains k then "not live"
+        else if dataBearingKeys.contains k then "data"
+        else if knownEmptyKeys.contains k then "read empty"
+        else "not read"
+      s!"{k} ({seen}; {(classes.lookup k).getD "not classified"})"
+    s!"copies: {String.intercalate ", " desc}"
+
+/-- Log the masterless CRITICAL now? On a CHANGED summary, or when the same
+    one was last logged at least `intervalMs` ago; never every pass. -/
+def masterlessLogDue (last : Option (String × Nat)) (summary : String) (nowMs intervalMs : Nat) : Bool :=
+  match last with
+  | none => true
+  | some (prev, atMs) => prev != summary || nowMs ≥ atMs + intervalMs
+
 /-- Refill a partition that has lost EVERY master entry. Total-partition
     restart re-registers every replica as a syncing Slave/Prepare (never
     Proxy — see the NodeAdd rejoin path in Reconciler.lean), so neither
@@ -1305,7 +1363,8 @@ def promoteMasterlessPartition (state : FlareClusterState) (pIdx : Nat)
           && livePodKeys.contains key && dataBearingKeys.contains key
           && !blockedKeys.contains key
           && !(holdUnfit && excludedKeys.contains key
-                && !exMasterBackEmpty state pIdx livePodKeys knownEmptyKeys)))
+                && !(exMasterBackEmpty state pIdx livePodKeys knownEmptyKeys
+                      && (unobservedCopies state pIdx livePodKeys dataBearingKeys knownEmptyKeys).isEmpty))))
       -- An EMPTY partition: no copy holds data and the ex-master came back
       -- READ empty — an Active slave KNOWN empty that the history evidence
       -- does not block is seated: nothing can be lost. Without this tier the
@@ -1315,7 +1374,8 @@ def promoteMasterlessPartition (state : FlareClusterState) (pIdx : Nat)
       -- partition emptied by a flush_all whose master died). Positive
       -- evidence only (read empty, not blocked): an unread copy is not empty.
       |>.orElse (fun _ =>
-        if partitionHasData || !exMasterBackEmpty state pIdx livePodKeys knownEmptyKeys then none
+        if partitionHasData || !exMasterBackEmpty state pIdx livePodKeys knownEmptyKeys
+            || !(unobservedCopies state pIdx livePodKeys dataBearingKeys knownEmptyKeys).isEmpty then none
         else pick (fun (key, n) =>
           n.role == FlareRole.Slave && n.state == FlareState.Active
             && n.partition == Int.ofNat pIdx && livePodKeys.contains key
@@ -1324,7 +1384,7 @@ def promoteMasterlessPartition (state : FlareClusterState) (pIdx : Nat)
     | some kv =>
       state.addNode kv.1 { kv.2 with
         role := FlareRole.Master, state := FlareState.Active,
-        partition := Int.ofNat pIdx, lastMasterOf := -1 }
+        partition := Int.ofNat pIdx, lastMasterOf := -1, formerSlaveOf := -1 }
     | none => state
 
 /-- Run the masterless-partition refill over every partition of the CRD. -/
@@ -1439,7 +1499,7 @@ def refillHoldEffects (before after : FlareClusterState) (crd : FlareClusterView
       else if exMasterBackEmpty before p s.livePodKeys s.knownEmptyKeys then
         "the ex-master came back and was READ empty this tick (complete stats, pod unchanged)"
       else "no recorded reason (unexpected: the hold should have kept it)"
-    FlareEffect.Log s!"[flare-operator] PROMOTION NOT LOSS-FREE: {k} was seated by the masterless refill as a LAST RESORT although it was judged unfit or not proven current (too far behind, an unusable copy, or a stale read-source binding with no master): {why}. Writes it never received are lost. See RUNBOOK #failover-lag-hold")
+    FlareEffect.Log s!"[flare-operator] PROMOTION NOT LOSS-FREE: {k} was seated by the masterless refill as a LAST RESORT although it was judged unfit or not proven current (too far behind, an unusable copy, or a stale read-source binding with no master): {why}. A write it never received is not in its copy; whether any exists is NOT measured. See RUNBOOK #failover-lag-hold")
 
 /-- The core reconciler transition function.
     Each step processes a K8s API response and produces a new state,

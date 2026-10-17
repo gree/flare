@@ -6891,7 +6891,8 @@ def promotionDisconnectedEmptySuite : TestSuite := {
 -- copy; being held masterless is an OBSERVATION, not a pass of availability.
 
 private def proxyOnlyCfg : ClusterConfig :=
-  { discCfg with name := "prom-proxy", «namespace» := "flare-prom-proxy", debugPod := "debug-prom-proxy" }
+  { discCfg with name := "prom-proxy", «namespace» := "flare-prom-proxy", debugPod := "debug-prom-proxy",
+                 operatorEnv := discCfg.operatorEnv ++ [("FLARE_FOLLOW_FAILOVER_WAIT_SECONDS", "60")] }
 
 /-- Reject `ip` → any:12120 (the operator's index port) on the kind node, so
     the restarted flared there cannot register until it is lifted. -/
@@ -6911,6 +6912,170 @@ private def unblockReg (ip : String) : IO Unit := do
 private def entryOf (v : List NodeSyncEntry) (pod : String) : Option NodeSyncEntry :=
   v.find? fun e => (e.fqdn.splitOn ".").head? == some pod
 
+/-- What the staging left: (ex-master pod, its ip, replica pod, its ip, the
+    acknowledged keys, when the decision window began). -/
+private structure ProxyStage where
+  mPod : String
+  mIp : String
+  sPod : String
+  sIp : String
+  base : List (String × String)
+  t0 : String
+
+/-- The pvc-survival 17 shape with the ex-master EMPTY, the operator running:
+    30 keys on both copies; the ex-master's copy wiped and its flared killed;
+    the replica's flared killed on its PVC (every key kept) and held from
+    registering until the operator has demoted it (Proxy/Down) and the empty
+    ex-master is back. `markPartial` = the replica's copy carries copy.partial
+    (rocksdb_copy_partial 1, FORBIDDEN). The block is lifted on return. -/
+private def stageProxyOnly (c : Ctx) (label : String) (markPartial : Bool) : IO (Except String ProxyStage) := do
+  let ns := c.cfg.«namespace»
+  let graceOver ← waitForCondition "operator past its startup grace period" 240 do
+    return containsSubstr (← c.opLog 400) "grace period over"
+  if !graceOver then return .error (notSetUp "the operator never logged the end of its startup grace period")
+  let recorded ← waitForCondition "the partition's authoritative history is persisted" 240 do historyRecorded c
+  if !recorded then return .error (notSetUp "no authoritative history persisted")
+  match ← c.pair with
+  | .error e => return .error (notSetUp e)
+  | .ok (mPod, mIp, sPod, sIp) =>
+    let base := (List.range 30).map fun i => (s!"{label}_{i}", s!"v{label}_{i}")
+    for (k, v) in base do
+      if !(← memcachedSet c.cfg.debugPod ns mIp c.cfg.flarePort k v) then return .error (notSetUp s!"{k} not acknowledged")
+    let conv ← waitForCondition "the replica holds every key and follows" 180 do
+      let d ← c.localDump sIp
+      return (d.map (fun d => (missingFrom base d).isEmpty)).getD false
+        && (← c.statStr sIp "repl_follow_state") == some "following"
+    if !conv then return .error (notSetUp "the replica did not converge")
+    if markPartial then
+      match ← kubectl ["exec", "-n", ns, sPod, "-c", "flared", "--", "touch", "/data/flare/copy.partial"] with
+      | .error e => return .error (notSetUp s!"could not mark {sPod}'s copy part-way: {e}")
+      | .ok _ => pure ()
+    match ← blockReg sIp with
+    | .error e => return .error (notSetUp s!"could not block {sPod}'s registration: {e}")
+    | .ok () => pure ()
+    let rm0 ← c.restartCount mPod
+    let rs0 ← c.restartCount sPod
+    let t0 ← utcNow
+    match ← kubectl ["exec", "-n", ns, mPod, "-c", "flared", "--", "sh", "-c", "rm -rf /data/flare/flare.rocksdb /data/flare/staging-* /data/flare/retained-*"] with
+    | .error e => unblockReg sIp; return .error (notSetUp s!"could not wipe {mPod}'s copy: {e}")
+    | .ok _ => pure ()
+    match ← c.killFlaredIn sPod, ← c.killFlaredIn mPod with
+    | .ok b, .ok a => IO.eprintln s!"# [{label}] operator running; {sPod} kill -9: {b.trim}; {mPod} wiped, kill -9: {a.trim}"
+    | _, _ => unblockReg sIp; return .error (notSetUp "could not kill both flared processes")
+    let up ← waitForCondition "both containers restarted" 120 do
+      return (← c.restartCount mPod) > rm0 && (← c.restartCount sPod) > rs0
+    if !up then unblockReg sIp; return .error (notSetUp "the containers did not restart")
+    let staged ← waitForCondition s!"{sPod} demoted to a Proxy and {mPod} registered" 420 do
+      let v ← c.nodeView
+      return ((entryOf v sPod).map (·.partition == -1)).getD false
+        && (entryOf v mPod).isSome && (← c.statNat mIp "curr_items").isSome
+    let v0 ← c.nodeView
+    IO.eprintln s!"# [{label}] before lifting the block: {sPod} {repr (entryOf v0 sPod)}; {mPod} {repr (entryOf v0 mPod)}"
+    if !staged then
+      unblockReg sIp
+      return .error (notSetUp s!"within 420 s {sPod} was not demoted to a Proxy while {mPod} registered")
+    let some mCopy ← c.localDump mIp | unblockReg sIp; return .error (unobservable s!"{mPod}'s own copy could not be read")
+    if !mCopy.isEmpty then unblockReg sIp; return .error (notSetUp s!"{mPod} did not come back EMPTY: {mCopy.length} keys")
+    unblockReg sIp
+    let sBack ← waitForCondition s!"{sPod} registered (answers stats)" 300 do
+      return (← c.statNat sIp "curr_items").isSome
+    if !sBack then return .error (unobservable s!"{sPod} did not register within 300 s after the block was lifted")
+    let some sCopy ← c.localDump sIp | return .error (unobservable s!"{sPod}'s own copy could not be read")
+    if !(missingFrom base sCopy).isEmpty then
+      return .error (notSetUp s!"{sPod} did not keep its copy across the restart ({(missingFrom base sCopy).length} keys missing)")
+    IO.eprintln s!"# [{label}] {sPod} back with {sCopy.length} keys; its entry now: {repr (entryOf (← c.nodeView) sPod)}"
+    return .ok { mPod, mIp, sPod, sIp, base, t0 }
+
+/-- The decision lines since `t0` (for the report). -/
+private def proxyLines (log : String) : List String :=
+  (log.splitOn "\n").filter fun l =>
+    containsSubstr l "Event:" || containsSubstr l "PROMOTION" || containsSubstr l "has NO master" || containsSubstr l "refill inputs"
+
+private def proxyTestP (c : Ctx) : IO TestResult := do
+  match ← stageProxyOnly c "pp" false with
+  | .error e => return .fail e
+  | .ok st =>
+    let seated ← waitForCondition s!"{st.sPod} is the master" 300 do
+      let r ← masterRead c
+      match r with
+      | .ok (some _) => return true
+      | _ => return false
+    let master ← match ← masterRead c with | .error e => return .fail e | .ok m => pure m
+    let log ← c.opLogSince st.t0
+    let lines := proxyLines log
+    let rejoined := (log.splitOn "\n").any fun l => containsSubstr l s!"NodeAdd {st.sPod}." && containsSubstr l "Slave P0 (Prepare)"
+    let nlf ← notLossFreeLine c st.sPod
+    let critical := (log.splitOn "\n").any fun l => containsSubstr l "CRITICAL: partition 0 has NO master"
+    IO.eprintln s!"# [pp] seated={seated} master={master}; rejoined as Slave P0={rejoined}; masterless CRITICAL logged={critical}; NOT LOSS-FREE: {nlf.map (·.take 300)}\n{String.intercalate "\n" ((lines.reverse.take 25).reverse.map (·.take 400))}"
+    if master == some st.mPod then
+      return .fail s!"DATA: the EMPTY ex-master {st.mPod} was seated while {st.sPod} held the only copy"
+    if master != some st.sPod then
+      return .fail s!"the attributed copy {st.sPod} was not seated within 300 s (master {master})"
+    let some nm ← c.localDump st.sIp | return .fail (unobservable s!"the new master {st.sPod}'s own copy")
+    let wrong := st.base.filter fun (k, v) => nm.lookup k != some v
+    if !wrong.isEmpty then
+      return .fail s!"DATA: the new master's LOCAL copy lacks or differs on {wrong.length} of {st.base.length} acknowledged keys: {wrong.take 5}"
+    if !rejoined then return .fail s!"{st.sPod} was seated, but not through the attributed rejoin (Slave P0 (Prepare))"
+    if nlf.isNone then return .fail s!"{st.sPod} was seated without PROMOTION NOT LOSS-FREE"
+    if !critical then return .fail "the masterless window was not reported (no CRITICAL 'has NO master' line)"
+    return .pass
+
+private def clearPartial (ns : String) : IO Unit := do
+  for p in ["prom-proxy-nodes-0", "prom-proxy-nodes-1"] do
+    discard <| kubectl ["exec", "-n", ns, p, "-c", "flared", "--", "rm", "-f", "/data/flare/copy.partial"]
+
+/-- (master seen, gauge 1 seen) over `n` 10 s samples. -/
+private def watchMasterless (c : Ctx) (n : Nat) : IO (Option String × Bool) := do
+  let mut seen : Option String := none
+  let mut gaugeSeen := false
+  for _ in [0:n] do
+    let r ← masterRead c
+    let now : Option String := match r with
+      | .ok (some p) => some p
+      | _ => none
+    if now.isSome then seen := now
+    let g ← c.masterlessGauge
+    if g == some 1 then gaugeSeen := true
+    IO.sleep 10000
+  return (seen, gaugeSeen)
+
+/-- (F)'s verdict from its observations (`none` = pass). -/
+private def proxyFVerdict (sPod mPod : String) (seen : Option String) (lost : Nat)
+    (gaugeSeen namesForbidden : Bool) (critN passes : Nat) : Option String :=
+  if seen == some sPod then some s!"a PART-WAY copy {sPod} was seated"
+  else if seen == some mPod then some s!"DATA: the EMPTY ex-master {mPod} was seated"
+  else if lost != 0 then some s!"DATA: the copy of {sPod} lost {lost} keys while held"
+  else if !gaugeSeen then some "flare_operator_partitions_masterless never read 1"
+  else if !namesForbidden then some s!"no CRITICAL masterless line named {sPod} as FORBIDDEN"
+  else if passes > 4 && critN * 2 > passes then some s!"the CRITICAL line was logged on {critN} of {passes} passes (not throttled)"
+  else none
+
+private def proxyTestFObserve (c : Ctx) (ns : String) (st : ProxyStage) : IO TestResult := do
+  -- the wait (60 s) is counted from the first masterless pass: watch
+  -- well past it
+  let wm ← watchMasterless c 24
+  let log ← c.opLogSince st.t0
+  let crit := (log.splitOn "\n").filter fun l => containsSubstr l "CRITICAL: partition 0 has NO master (flare_operator_partitions_masterless)"
+  let namesForbidden := crit.any fun l => containsSubstr l st.sPod && containsSubstr l "FORBIDDEN"
+  let passes := ((log.splitOn "\n").filter fun l => containsSubstr l "PROMOTION EVIDENCE (by reason, this pass)").length
+  let copy ← c.localDump st.sIp
+  discard <| kubectl ["exec", "-n", ns, st.sPod, "-c", "flared", "--", "rm", "-f", "/data/flare/copy.partial"]
+  match copy with
+  | none => return .fail (unobservable s!"{st.sPod}'s own copy")
+  | some sCopy =>
+    let lost : Nat := (st.base.filter fun kv => sCopy.lookup kv.1 != some kv.2).length
+    IO.eprintln s!"# [pf] master seen={wm.1}; gauge 1 seen={wm.2}; CRITICAL lines {crit.length} over {passes} evidence passes; names {st.sPod} FORBIDDEN={namesForbidden}; {st.sPod} lacks {lost}/{st.base.length}\n{String.intercalate "\n" ((crit.take 3).map (·.take 500))}"
+    match proxyFVerdict st.sPod st.mPod wm.1 lost wm.2 namesForbidden crit.length passes with
+    | some why => return .fail why
+    | none => return .pass
+
+private def proxyTestF (c : Ctx) (ns : String) : IO TestResult := do
+  match ← stageProxyOnly c "pf" true with
+  | .error e =>
+    clearPartial ns
+    return .fail e
+  | .ok st => proxyTestFObserve c ns st
+
 def promotionProxyOnlySuite : TestSuite := {
   name := "promotion-proxy-only-copy"
   setup := do
@@ -6923,89 +7088,12 @@ def promotionProxyOnlySuite : TestSuite := {
     let c : Ctx := { cfg := proxyOnlyCfg }
     let ns := proxyOnlyCfg.«namespace»
     [
-    { name := "(P) REPRODUCTION, behaviour unchanged: with the operator RUNNING, the ex-master's copy is wiped and its flared restarted (it returns EMPTY), the replica's flared restarted on its PVC (every key kept) and held from registering until the operator has demoted it (Proxy/Down) and the ex-master has registered, so it returns as a PROXY — the only copy with data (pvc-survival 17 shape). The outcome (seated / held masterless) is REPORTED; the test fails only if the empty copy is seated over the data or the data is gone from every copy"
+    { name := "(P) the only copy with data died an Active slave and comes back while the ex-master returns EMPTY (operator running; pvc-survival 17 shape): it rejoins its partition by its PERSISTED attribution (never by its name), proves its copy, and is seated as the masterless LAST RESORT (the ex-master was read empty: the existing wait rule), logged NOT LOSS-FREE; its LOCAL copy holds every key and value; the empty ex-master is never seated"
       run := do
-        let graceOver ← waitForCondition "operator past its startup grace period" 240 do
-          return containsSubstr (← c.opLog 400) "grace period over"
-        if !graceOver then return .fail (notSetUp "the operator never logged the end of its startup grace period")
-        let recorded ← waitForCondition "the partition's authoritative history is persisted" 240 do historyRecorded c
-        if !recorded then return .fail (notSetUp "no authoritative history persisted")
-        match ← c.pair with
-        | .error e => return .fail (notSetUp e)
-        | .ok (mPod, mIp, sPod, sIp) =>
-          let base := (List.range 30).map fun i => (s!"pq_{i}", s!"vq_{i}")
-          for (k, v) in base do
-            if !(← memcachedSet c.cfg.debugPod ns mIp c.cfg.flarePort k v) then return .fail (notSetUp s!"{k} not acknowledged")
-          let conv ← waitForCondition "the replica holds every key and follows" 180 do
-            let d ← c.localDump sIp
-            return (d.map (fun d => (missingFrom base d).isEmpty)).getD false
-              && (← c.statStr sIp "repl_follow_state") == some "following"
-          if !conv then return .fail (notSetUp "the replica did not converge")
-          match ← blockReg sIp with
-          | .error e => return .fail (notSetUp s!"could not block {sPod}'s registration: {e}")
-          | .ok () => pure ()
-          let rm0 ← c.restartCount mPod
-          let rs0 ← c.restartCount sPod
-          let t0 ← utcNow
-          match ← kubectl ["exec", "-n", ns, mPod, "-c", "flared", "--", "sh", "-c", "rm -rf /data/flare/flare.rocksdb /data/flare/staging-* /data/flare/retained-*"] with
-          | .error e => unblockReg sIp; return .fail (notSetUp s!"could not wipe {mPod}'s copy: {e}")
-          | .ok _ => pure ()
-          match ← c.killFlaredIn sPod, ← c.killFlaredIn mPod with
-          | .ok b, .ok a => IO.eprintln s!"# operator running; {sPod} kill -9: {b.trim}; {mPod} wiped, kill -9: {a.trim}"
-          | _, _ => unblockReg sIp; return .fail (notSetUp "could not kill both flared processes")
-          let up ← waitForCondition "both containers restarted" 120 do
-            return (← c.restartCount mPod) > rm0 && (← c.restartCount sPod) > rs0
-          if !up then unblockReg sIp; return .fail (notSetUp "the containers did not restart")
-          -- the replica cannot register: wait until the operator has demoted it
-          -- (Proxy, partition -1) AND the ex-master has re-registered EMPTY
-          let staged ← waitForCondition s!"{sPod} demoted to a Proxy and {mPod} registered" 420 do
-            let v ← c.nodeView
-            return ((entryOf v sPod).map (·.partition == -1)).getD false
-              && (entryOf v mPod).isSome && (← c.statNat mIp "curr_items").isSome
-          let v0 ← c.nodeView
-          IO.eprintln s!"# before lifting the block: {sPod} {repr (entryOf v0 sPod)}; {mPod} {repr (entryOf v0 mPod)}"
-          if !staged then
-            unblockReg sIp
-            IO.eprintln s!"# operator log since the kill (last 30 decision lines):\n{String.intercalate "\n" ((((← c.opLogSince t0).splitOn "\n").filter fun l => containsSubstr l "Event:" || containsSubstr l "PROMOT" || containsSubstr l "NO master" || containsSubstr l "dead").reverse.take 30).reverse}"
-            return .fail (notSetUp s!"within 420 s {sPod} was not demoted to a Proxy while {mPod} registered: the shape under study was not reached")
-          let some mCopy ← c.localDump mIp | unblockReg sIp; return .fail (unobservable s!"{mPod}'s own copy could not be read")
-          if !mCopy.isEmpty then unblockReg sIp; return .fail (notSetUp s!"{mPod} did not come back EMPTY: {mCopy.length} keys")
-          unblockReg sIp
-          let sBack ← waitForCondition s!"{sPod} registered (answers stats)" 300 do
-            return (← c.statNat sIp "curr_items").isSome
-          if !sBack then return .fail (unobservable s!"{sPod} did not register within 300 s after the block was lifted")
-          let some sEntry := entryOf (← c.nodeView) sPod | return .fail (unobservable s!"{sPod}'s map entry")
-          let some sCopy ← c.localDump sIp | return .fail (unobservable s!"{sPod}'s own copy could not be read")
-          IO.eprintln s!"# {sPod} back with {sCopy.length} keys; its entry: {repr sEntry}"
-          if !(missingFrom base sCopy).isEmpty then
-            return .fail (notSetUp s!"{sPod} did not keep its copy across the restart ({(missingFrom base sCopy).length} keys missing)")
-          if sEntry.partition != -1 then
-            IO.eprintln s!"# OBSERVED: {sPod} re-registered into partition {sEntry.partition} (role {sEntry.role}) — not a Proxy; observing the outcome anyway"
-          -- the shape is reached; observe for 300 s what the operator does
-          let mut seen : Option String := none
-          for _ in [0:30] do
-            match ← masterRead c with
-            | .ok (some p) => seen := some p; break
-            | _ => IO.sleep 10000
-          IO.sleep 10000
-          let master ← match ← masterRead c with
-            | .error e => return .fail e
-            | .ok m => pure (m.orElse fun _ => seen)
-          let mAfter ← match ← dumpOf c mPod with | .error e => return .fail e | .ok d => pure d
-          let sAfter ← match ← dumpOf c sPod with | .error e => return .fail e | .ok d => pure d
-          let log ← c.opLogSince t0
-          let lines := (log.splitOn "\n").filter fun l =>
-            containsSubstr l "Event:" || containsSubstr l "PROMOTION" || containsSubstr l "has NO master" || containsSubstr l "refill inputs" || containsSubstr l "REPLICA REPAIR"
-          let holdSeen := containsSubstr log "has NO master"
-          let nlf := containsSubstr log "PROMOTION NOT LOSS-FREE"
-          let v ← c.nodeView
-          IO.eprintln s!"# REPRO OUTCOME: master={master}; {sPod} now {repr (entryOf v sPod)}; {mPod} now {repr (entryOf v mPod)}; hold logged={holdSeen}; NOT LOSS-FREE logged={nlf}; keys after: {mPod} {mAfter.length}, {sPod} {sAfter.length}\n{String.intercalate "\n" ((lines.reverse.take 30).reverse.map (·.take 400))}"
-          if master == some mPod && !(missingFrom base mAfter).isEmpty then
-            return .fail s!"DATA: the EMPTY ex-master {mPod} was seated while the Proxy {sPod} held the only copy ({(missingFrom base mAfter).length} of {base.length} keys missing on the master)"
-          let gone := lostEverywhere base [mAfter, sAfter]
-          if !gone.isEmpty then
-            return .fail s!"DATA: {gone.length} of {base.length} acknowledged keys are absent from every copy: {gone.take 5}"
-          return .pass }
+        proxyTestP c },
+    { name := "(F) the same shape with the only data copy PART-WAY (copy.partial): FORBIDDEN, never seated — not after the ex-master was read empty, not after the wait expired (60 s); the masterless state is reported (CRITICAL line naming the copy and its class, flare_operator_partitions_masterless 1) without a line every pass; the copy keeps every key"
+      run := do
+        proxyTestF c ns }
   ]
 }
 

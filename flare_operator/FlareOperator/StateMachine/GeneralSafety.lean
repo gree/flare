@@ -383,14 +383,14 @@ theorem promoteMasterlessPartition_cle (s : FlareClusterState) (pIdx : Nat)
       intro p
       by_cases hp : p = Int.ofNat pIdx
       · subst hp
-        have hle := count_addNode_le_succ (Int.ofNat pIdx) s kv.1 { kv.2 with role := FlareRole.Master, state := FlareState.Active, partition := Int.ofNat pIdx, lastMasterOf := -1 }
-        have h1 : countMastersFor (Int.ofNat pIdx) (s.addNode kv.1 { kv.2 with role := FlareRole.Master, state := FlareState.Active, partition := Int.ofNat pIdx, lastMasterOf := -1 }).nodeMap ≤ 1 := by omega
+        have hle := count_addNode_le_succ (Int.ofNat pIdx) s kv.1 { kv.2 with role := FlareRole.Master, state := FlareState.Active, partition := Int.ofNat pIdx, lastMasterOf := -1, formerSlaveOf := -1 }
+        have h1 : countMastersFor (Int.ofNat pIdx) (s.addNode kv.1 { kv.2 with role := FlareRole.Master, state := FlareState.Active, partition := Int.ofNat pIdx, lastMasterOf := -1, formerSlaveOf := -1 }).nodeMap ≤ 1 := by omega
         exact Nat.le_trans h1 (Nat.le_max_right _ _)
       · have hbp : (Int.ofNat pIdx == p) = false := by
           cases hb : Int.ofNat pIdx == p
           · rfl
           · exact absurd (Eq.symm (eq_of_beq hb)) hp
-        have hM : isM p { kv.2 with role := FlareRole.Master, state := FlareState.Active, partition := Int.ofNat pIdx, lastMasterOf := -1 } = false := by
+        have hM : isM p { kv.2 with role := FlareRole.Master, state := FlareState.Active, partition := Int.ofNat pIdx, lastMasterOf := -1, formerSlaveOf := -1 } = false := by
           dsimp only [isM]
           rw [hbp]
           simp
@@ -522,17 +522,17 @@ theorem handleFailoverSingle_cle (s : FlareClusterState) (key : String) :
     -- Parametric over the stamped lastMasterOf: countMastersFor only inspects
     -- role/partition, and the surrounding `split` reduces the record's inner
     -- if differently per branch — a fixed literal would match neither.
-    have hdemote : ∀ (lmo : Int) p, countMastersFor p (s.addNode key { node with state := FlareState.Down, role := FlareRole.Proxy, partition := -1, lastMasterOf := lmo }).nodeMap ≤ countMastersFor p s.nodeMap := fun _lmo p => count_addNode_nonmaster p s key _ (by simp [isM, show (FlareRole.Proxy == FlareRole.Master) = false from rfl])
+    have hdemote : ∀ (lmo fso : Int) p, countMastersFor p (s.addNode key { node with state := FlareState.Down, role := FlareRole.Proxy, partition := -1, lastMasterOf := lmo, formerSlaveOf := fso }).nodeMap ≤ countMastersFor p s.nodeMap := fun _lmo _fso p => count_addNode_nonmaster p s key _ (by simp [isM, show (FlareRole.Proxy == FlareRole.Master) = false from rfl])
     split
     next hM =>
       split
-      · exact CLE.of_le (fun p => hdemote _ p)
+      · exact CLE.of_le (fun p => hdemote _ _ p)
       next part hfindp =>
         split
-        · exact CLE.of_le (fun p => hdemote _ p)
+        · exact CLE.of_le (fun p => hdemote _ _ p)
         next slaveKey hhead =>
           split
-          · exact CLE.of_le (fun p => hdemote _ p)
+          · exact CLE.of_le (fun p => hdemote _ _ p)
           next slaveNode hlook2 =>
             split
             next hguard =>
@@ -549,8 +549,8 @@ theorem handleFailoverSingle_cle (s : FlareClusterState) (key : String) :
                   simp only [isM]
                   have hpp : (slaveNode.partition == p) = false := by rw [hpartEq]; exact hp
                   simp [hpp]
-                have h1 := count_addNode_nonmaster p (s.addNode key { node with state := FlareState.Down, role := FlareRole.Proxy, partition := -1, lastMasterOf := node.partition }) slaveKey _ hnm
-                have h2 := hdemote node.partition p
+                have h1 := count_addNode_nonmaster p (s.addNode key { node with state := FlareState.Down, role := FlareRole.Proxy, partition := -1, lastMasterOf := node.partition, formerSlaveOf := K8sReconciler.deadSlaveOf node }) slaveKey _ hnm
+                have h2 := hdemote node.partition (K8sReconciler.deadSlaveOf node) p
                 omega
               | true =>
                 have hpe : node.partition = p := eq_of_beq hp
@@ -559,16 +559,16 @@ theorem handleFailoverSingle_cle (s : FlareClusterState) (key : String) :
                   rw [hpe]
                   simp
                 have hlt := count_filter_ne_lt p key node s.nodeMap hmem hwit
-                have hdem0 : countMastersFor p (s.addNode key { node with state := FlareState.Down, role := FlareRole.Proxy, partition := -1, lastMasterOf := node.partition }).nodeMap ≤ countMastersFor p s.nodeMap - 1 := by
+                have hdem0 : countMastersFor p (s.addNode key { node with state := FlareState.Down, role := FlareRole.Proxy, partition := -1, lastMasterOf := node.partition, formerSlaveOf := K8sReconciler.deadSlaveOf node }).nodeMap ≤ countMastersFor p s.nodeMap - 1 := by
                   rw [addNode_nodeMap, countMastersFor_cons]
                   split
                   · next habs =>
                     exact absurd habs (by simp)
                   · omega
-                have h1 := count_addNode_le_succ p (s.addNode key { node with state := FlareState.Down, role := FlareRole.Proxy, partition := -1, lastMasterOf := node.partition }) slaveKey { slaveNode with role := FlareRole.Master, state := FlareState.Active, balance := 100 }
+                have h1 := count_addNode_le_succ p (s.addNode key { node with state := FlareState.Down, role := FlareRole.Proxy, partition := -1, lastMasterOf := node.partition, formerSlaveOf := K8sReconciler.deadSlaveOf node }) slaveKey { slaveNode with role := FlareRole.Master, state := FlareState.Active, balance := 100 }
                 omega
-            next hguard => exact CLE.of_le (fun p => hdemote _ p)
-    next hM => exact CLE.of_le (fun p => hdemote _ p)
+            next hguard => exact CLE.of_le (fun p => hdemote _ _ p)
+    next hM => exact CLE.of_le (fun p => hdemote _ _ p)
 
 theorem handleFailover_cle (s : FlareClusterState) (deadKeys : List String) :
     CLE s.nodeMap (handleFailoverWithPromotion s deadKeys).nodeMap := by
@@ -601,7 +601,7 @@ theorem handleDrainSingle_cle (s : FlareClusterState) (key : String) :
   · exact CLE.rfl _
   next node hlook =>
     have hmem : (key, node) ∈ s.nodeMap := mem_of_lookupNode hlook
-    have hdemote : ∀ p, countMastersFor p (s.addNode key { node with state := FlareState.Active, role := FlareRole.Proxy, partition := -1 }).nodeMap ≤ countMastersFor p s.nodeMap := fun p => count_addNode_nonmaster p s key _ (by simp [isM, show (FlareRole.Proxy == FlareRole.Master) = false from rfl])
+    have hdemote : ∀ p, countMastersFor p (s.addNode key { node with state := FlareState.Active, role := FlareRole.Proxy, partition := -1, formerSlaveOf := -1 }).nodeMap ≤ countMastersFor p s.nodeMap := fun p => count_addNode_nonmaster p s key _ (by simp [isM, show (FlareRole.Proxy == FlareRole.Master) = false from rfl])
     split
     next hM =>
       split
@@ -628,7 +628,7 @@ theorem handleDrainSingle_cle (s : FlareClusterState) (key : String) :
                   simp only [isM]
                   have hpp : (slaveNode.partition == p) = false := by rw [hpartEq]; exact hp
                   simp [hpp]
-                have h1 := count_addNode_nonmaster p (s.addNode key { node with state := FlareState.Active, role := FlareRole.Proxy, partition := -1 }) slaveKey _ hnm
+                have h1 := count_addNode_nonmaster p (s.addNode key { node with state := FlareState.Active, role := FlareRole.Proxy, partition := -1, formerSlaveOf := -1 }) slaveKey _ hnm
                 have h2 := hdemote p
                 omega
               | true =>
@@ -638,13 +638,13 @@ theorem handleDrainSingle_cle (s : FlareClusterState) (key : String) :
                   rw [hpe]
                   simp
                 have hlt := count_filter_ne_lt p key node s.nodeMap hmem hwit
-                have hdem0 : countMastersFor p (s.addNode key { node with state := FlareState.Active, role := FlareRole.Proxy, partition := -1 }).nodeMap ≤ countMastersFor p s.nodeMap - 1 := by
+                have hdem0 : countMastersFor p (s.addNode key { node with state := FlareState.Active, role := FlareRole.Proxy, partition := -1, formerSlaveOf := -1 }).nodeMap ≤ countMastersFor p s.nodeMap - 1 := by
                   rw [addNode_nodeMap, countMastersFor_cons]
                   split
                   · next habs =>
                     exact absurd habs (by simp)
                   · omega
-                have h1 := count_addNode_le_succ p (s.addNode key { node with state := FlareState.Active, role := FlareRole.Proxy, partition := -1 }) slaveKey { slaveNode with role := FlareRole.Master, state := FlareState.Active, balance := 100 }
+                have h1 := count_addNode_le_succ p (s.addNode key { node with state := FlareState.Active, role := FlareRole.Proxy, partition := -1, formerSlaveOf := -1 }) slaveKey { slaveNode with role := FlareRole.Master, state := FlareState.Active, balance := 100 }
                 omega
             next hguard => exact CLE.rfl _
     next hM => exact CLE.of_le hdemote

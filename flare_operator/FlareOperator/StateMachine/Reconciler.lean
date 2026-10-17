@@ -603,10 +603,19 @@ def reconcileStep (state : FlareClusterState) (crd : FlareClusterView)
       -- copy; rejoin it like a restart so the refill can re-seat it (CI
       -- 37030725289: as a fresh proxy the zombie guard crowned the far-behind
       -- follower instead, and the ex-master would have rebuilt from it).
+      -- A dead ex-SLAVE likewise (decision 2026-10-16, pvc-survival 17 /
+      -- promotion-proxy-only-copy): by its PERSISTED attribution
+      -- (formerSlaveOf, set only when it died an Active slave), never by its
+      -- name. As a fresh proxy it was invisible to the refill and could be
+      -- the only copy with data. It rejoins as Slave/Prepare; whether it may
+      -- ever be seated is the classifier's (full copy proof) and the
+      -- refill's (masterless last resort, wait rule) decision.
       let rejoinPart : Int :=
         if old.partition >= 0 then old.partition
         else if old.state == FlareState.Down && old.lastMasterOf >= 0
             && old.lastMasterOf < Int.ofNat crd.spec.partitions then old.lastMasterOf
+        else if old.state == FlareState.Down && old.role == FlareRole.Proxy && old.formerSlaveOf >= 0
+            && old.formerSlaveOf < Int.ofNat crd.spec.partitions then old.formerSlaveOf
         else -1
       if rejoinPart >= 0 then
         -- Rejoin the OLD partition as a syncing slave — deliberately the
@@ -669,7 +678,8 @@ def reconcileStep (state : FlareClusterState) (crd : FlareClusterView)
           -- its lastMasterOf marker (kept by a rejoined ex-master), or a stale
           -- marker could end a later failover-lag hold early.
           let updatedNode := { node with state := FlareState.Active,
-                                         lastMasterOf := if node.role == FlareRole.Slave then -1 else node.lastMasterOf }
+                                         lastMasterOf := if node.role == FlareRole.Slave then -1 else node.lastMasterOf
+                                         formerSlaveOf := -1 }
           let newClusterState := state.addNode nodeKey updatedNode
           (newClusterState, .OK)
       else if node.state == FlareState.Active && (newState == FlareState.Active || newState == FlareState.Ready) then

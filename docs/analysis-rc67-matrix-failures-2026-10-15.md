@@ -621,3 +621,29 @@ into restore-promotion + history-promotion.
 Candidate: ea7b1aa (`rc67-candidate-ea7b1aa`); 0e41e97's ledger is kept in
 docs/reports/2026-10-17-ledger-candidate-0e41e97-snapshot.json. Full matrix
 and nix-linux at its docs-only successor.
+
+Full matrix 39036409438 at f01b949 (docs-only after ea7b1aa) and nix-linux
+39036411719 (success, 134/134 each), attempt 1, no re-run: flare_unit
+569/569 in every leg; at candidate ea7b1aa 15 controls yes, 3 partial, 2 no
+(snapshot docs/reports/2026-10-18-ledger-candidate-ea7b1aa-snapshot.json).
+The restore-promotion split worked: both halves completed.
+- cross-cluster: X4 (4/5) failed again — 1 pass in 4 matrices; open.
+- history-tracking (1) failed again ("the persisted map does not carry the
+  promotion's transition id") — a TEST race, now settled from the operator
+  log: intent persisted and PROMOTION committed at 15:05:00.68, adopted as
+  generation 2 at 15:05:03 (adoption requires the persisted map to carry the
+  id, so it did). The test saw the commit in the operator's in-memory map and
+  read the persisted map before that pass wrote it; the master check came
+  later and passed. Same in 38808521263. cfed6a8: bounded wait for the
+  persisted id.
+- promotion-proxy-only-copy (F): PRECONDITION NOT MET ("pf_0 not
+  acknowledged") — written right after (P) seated a new master that did not
+  take writes yet. (P) passed. cfed6a8: wait until the master takes a write
+  and the replica is Active.
+- copy-protection cut by the 120-min job limit mid-E2E (13 ok, 0 failed;
+  Lean build ~60 min); authority's 38 tests passed and the job was cut
+  only after. cfed6a8 splits both legs (17 legs, 80 suites each assigned
+  once).
+
+Candidate: cfed6a8 (`rc67-candidate-cfed6a8`, test and CI changes after
+ea7b1aa). Full matrix and nix-linux at its docs-only successor.

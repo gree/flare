@@ -258,7 +258,7 @@ def Ctx.sample (c : Ctx) : IO (Nat × Option String × List (String × String)) 
     Each line: n epoch address key value reply (NORESOLVE / NORESPONSE when
     not observed). -/
 def Ctx.startWriter (c : Ctx) (name host pfx : String) : IO Bool := do
-  let script := s!"n=0; out=/tmp/w-{name}.log; : > $out; rm -f /tmp/stop-{name}; while [ ! -f /tmp/stop-{name} ]; do n=$((n+1)); k={pfx}_$n; v=v$n; case {host} in *[a-z]*) ip=$(nslookup {host} 2>/dev/null | awk '/^Address/ \{a=$NF} END \{print a}');; *) ip={host};; esac; r=$(printf 'set %s 0 0 %d\\r\\n%s\\r\\n' \"$k\" $\{#v} \"$v\" | nc -w 3 \"$ip\" {c.cfg.flarePort} 2>/dev/null | head -1 | tr -d '\\r' | tr ' ' '_'); echo \"$n $(date +%s) $\{ip:-NORESOLVE} $k $v $\{r:-NORESPONSE}\" >> $out; done"
+  let script := s!"n=0; out=/tmp/w-{name}.log; : > $out; rm -f /tmp/stop-{name}; while [ ! -f /tmp/stop-{name} ]; do n=$((n+1)); k={pfx}_$n; v=v$n; case {host} in *[a-z]*) ip=$(nslookup {host} 2>/dev/null | awk '/^Address/ \{a=$NF} END \{print a}');; *) ip={host};; esac; t0=$(date +%s); r=$(printf 'set %s 0 0 %d\\r\\n%s\\r\\n' \"$k\" $\{#v} \"$v\" | nc -w 3 \"$ip\" {c.cfg.flarePort} 2>/dev/null | head -1 | tr -d '\\r' | tr ' ' '_'); echo \"$n $(date +%s) $\{ip:-NORESOLVE} $k $v $\{r:-NORESPONSE} $t0\" >> $out; done"
   match ← kubectl ["exec", c.cfg.debugPod, "-n", c.cfg.«namespace», "--", "sh", "-c", s!"nohup sh -c '{script.replace "'" "'\\''"}' >/dev/null 2>&1 &"] with
   | .ok _ => c.event s!"writer {name} started against {host} (keys {pfx}_N)"; return true
   | .error e => c.event s!"writer {name} could not start: {e}"; return false
@@ -270,12 +270,21 @@ structure WriteRec where
   key : String
   value : String
   reply : String
+  /-- when the request was sent (same clock as `t`, the debug pod's); the
+      write was processed somewhere in [t0, t]. 0 = not recorded (older
+      writer line format) -/
+  t0 : Nat := 0
   deriving Repr
+
+/-- The interval the write was processed in (`t0` unknown -> the writer's
+    3 s nc timeout before `t`, conservative). -/
+def WriteRec.span (w : WriteRec) : Nat × Nat := (if w.t0 == 0 then w.t - 4 else w.t0, w.t)
 
 def parseWrites (out : String) : List WriteRec :=
   (out.splitOn "\n").filterMap fun l =>
     match (l.trim.splitOn " ").filter (!·.isEmpty) with
     | [n, t, ip, k, v, r] => (n.toNat?).bind fun n => (t.toNat?).map fun t => { n, t, ip, key := k, value := v, reply := r }
+    | [n, t, ip, k, v, r, t0] => (n.toNat?).bind fun n => (t.toNat?).bind fun t => (t0.toNat?).map fun t0 => { n, t, ip, key := k, value := v, reply := r, t0 }
     | _ => none
 
 def Ctx.stopWriter (c : Ctx) (name : String) : IO (Option (List WriteRec)) := do
@@ -285,7 +294,7 @@ def Ctx.stopWriter (c : Ctx) (name : String) : IO (Option (List WriteRec)) := do
   | .error _ => return none
   | .ok out =>
     let ws := parseWrites out
-    for w in ws do c.art s!"writes-{name}.txt" s!"{w.n} {w.t} {w.ip} {w.key} {w.value} {w.reply}"
+    for w in ws do c.art s!"writes-{name}.txt" s!"{w.n} {w.t} {w.ip} {w.key} {w.value} {w.reply} {w.t0}"
     return some ws
 
 /-- Reply classes: an acknowledgement, an explicit error, or unobserved. -/
@@ -425,21 +434,27 @@ def cutCounter (r : CutRule) : IO (Option Nat) := do
       | _ => none
 
 /-- Can node container `node` reach the API server at `cpIp`? `some true`
-    = an HTTP answer, `some false` = no connection within 3 s, `none` =
-    the probe itself could not run. -/
+    = an HTTP answer, `some false` = the connection TIMED OUT (curl 28: what
+    a DROP rule produces), `none` = anything else (curl missing, refused, DNS,
+    TLS...) — never taken as a cut. -/
 def apiReachableFrom (node cpIp : String) : IO (Option Bool) := do
   let out ← IO.Process.output { cmd := "docker", args := #["exec", node, "curl", "-sk", "-m", "3", "-o", "/dev/null", "-w", "%{http_code}", s!"https://{cpIp}:6443/healthz"] }
   let code := out.stdout.trim
   if out.exitCode == 0 && !code.isEmpty && code != "000" then return some true
-  else if out.exitCode == 28 || out.exitCode == 7 || code == "000" then return some false
+  else if out.exitCode == 28 then return some false
   else return none
 
 /-- Can a TCP connection to `ip:port` be opened from inside `pod`
-    (`container`)? `none` = the probe could not run (exec failed). -/
+    (`container`)? `some true` = OPEN, `some false` = the connect TIMED OUT
+    (timeout 124: a DROP), `none` = the probe could not tell (exec failed,
+    no `timeout`, refused, any other exit) — never taken as a cut. -/
 def tcpFromPod (ns pod container ip : String) (port : Nat) : IO (Option Bool) := do
   match ← kubectl ["exec", pod, "-n", ns, "-c", container, "--", "bash", "-c",
-      s!"if timeout 3 bash -c 'exec 3<>/dev/tcp/{ip}/{port}' 2>/dev/null; then echo OPEN; else echo CLOSED; fi"] with
-  | .ok o => return if containsSubstr o "OPEN" then some true else if containsSubstr o "CLOSED" then some false else none
+      s!"command -v timeout >/dev/null 2>&1 || \{ echo PROBE=none; exit 0; }; timeout 3 bash -c 'exec 3<>/dev/tcp/{ip}/{port}' 2>/dev/null; echo PROBE=$?"] with
+  | .ok o =>
+    if containsSubstr o "PROBE=0" then return some true
+    else if containsSubstr o "PROBE=124" then return some false
+    else return none
   | .error _ => return none
 
 /-- The node's Ready condition (`True` / `False` / `Unknown`). -/

@@ -1353,46 +1353,68 @@ def admChecks : List (String × Bool) :=
         && K8sReconciler.unreadySince [("a", 500)] [("a", 1)] 9000 == [("a", 9000)])
   ]
 
--- C / C' verdicts (E2E/Tests/NodeOps, review 2026-10-19 C')
+-- C / C' verdicts (E2E/Tests/NodeOps, review 2026-10-19 C' and its follow-up)
 open FlareOperator.E2E.NodeOps FlareOperator.E2E.Tests.NodeOps in
 def partChecks : List (String × Bool) :=
   let m : OwnV := { role := "master", version := 5, boot := "bA" }
-  let px : OwnV := { role := "proxy", version := 5, boot := "bA" }
   let sl : OwnV := { role := "slave", version := 5, boot := "bB" }
   let mB : OwnV := { role := "master", version := 6, boot := "bB" }
-  let smp := fun (t : Nat) (o r : OwnV) (nr : String) (ls : String) => ({ t, own := [("old", some o), ("rep", some r)], masterPodReady := some (nr == "True"), nodeReady := some nr, lease := some ls } : PartSample)
-  -- cut at 100, heal at 400; the node goes Unknown at 150, the lease stops
-  let noFail := (List.range 16).map fun i => smp (100 + i * 20) m sl (if i ≥ 3 then "Unknown" else "True") "L1"
-  let withFail := (List.range 16).map fun i => smp (100 + i * 20) m (if i ≥ 6 then mB else sl) (if i ≥ 3 then "Unknown" else "True") "L1"
-  let w := fun (n t : Nat) (ip : String) => ({ n, t, ip, key := s!"k{n}", value := "v", reply := "STORED" } : WriteRec)
-  let inj : Injection := { rulesInstalled := true, counters := [("r", some 9)], replicaToMaster := some false, operatorToMaster := some false, apiBefore := some true, apiAfter := some false, clientAcksAfterCut := 50 }
-  let base : PartObs := { nodeLevel := true, oldMaster := "old", replica := "rep", inj, tCut := 100, tHeal := 400, samples := noFail, oldAcks := [(w 1 250 "10.0.0.1", "local")], peerAcks := [(w 2 250 "10.0.0.2", "forwarded")], lostAcks := some 0, summary := "" }
+  -- each sample: both pods read over [t, t+1]; the node Unknown from 150
+  let smp := fun (t : Nat) (o r : OwnV) (nr : String) => ({ t, reads := [{ pod := "old", ts := t, te := t + 1, view := some o }, { pod := "rep", ts := t, te := t + 1, view := some r }], masterPodReady := some (nr == "True"), nodeReady := some nr, lease := some "L1" } : PartSample)
+  -- cut 100 .. heal 400, a sample every 4 s
+  let noFail := (List.range 90).map fun i => smp (100 + i * 4) m sl (if i ≥ 13 then "Unknown" else "True")
+  -- the replica is master (own view, v6) from 200
+  let withFail := (List.range 90).map fun i => let t := 100 + i * 4; smp t m (if t ≥ 200 then mB else sl) (if i ≥ 13 then "Unknown" else "True")
+  -- promoted only AFTER the heal (from 404)
+  let afterHeal := noFail ++ (List.range 5).map fun i => smp (404 + i * 4) m mB "True"
+  let w := fun (n t0 t : Nat) (ip : String) (r : String) => ({ n, t0, t, ip, key := s!"k{n}", value := "v", reply := r } : WriteRec)
+  let ack := fun (n t0 t : Nat) (ip : String) => w n t0 t ip "STORED"
+  let inj : Injection := { rulesInstalled := true, counters := [("r", some 9)], replicaToMasterBefore := some true, operatorToMasterBefore := some true, replicaToMaster := some false, operatorToMaster := some false, apiBefore := some true, apiAfter := some false, clientAcksAfterCut := 50 }
+  let base : PartObs := { nodeLevel := true, oldMaster := "old", replica := "rep", inj, tCut := 100, tHeal := 400, samples := noFail, oldAcks := [(ack 1 250 250 "o", "local")], peerAcks := [(ack 2 250 250 "p", "forwarded")], lostAcks := some 0, summary := "" }
   let startsWith := fun (o : Option String) (p : String) => (o.map (·.startsWith p)).getD false
   [
     ("C': acfa862 shape — FORWARD-only rules, the worker still reaches the API server -> injection NOT established (never a verdict)",
       startsWith (partVerdict { base with inj := { inj with apiAfter := some true } }) "PRECONDITION NOT MET"),
-    ("C': a rule that did not install, an unreadable counter, a cut path still open, or no client ack -> injection NOT established",
-      [{ inj with rulesInstalled := false }, { inj with counters := [("r", none)] }, { inj with replicaToMaster := some true },
-       { inj with operatorToMaster := none }, { inj with clientAcksAfterCut := 0 }].all fun i => startsWith (partVerdict { base with inj := i }) "PRECONDITION NOT MET"),
+    ("C': a rule that did not install, an unreadable counter, a path not OPEN before the cut, a path still open or not provable after it (probe could not run), no client ack -> NOT established",
+      [{ inj with rulesInstalled := false }, { inj with counters := [("r", none)] }, { inj with replicaToMasterBefore := none },
+       { inj with operatorToMasterBefore := some false }, { inj with replicaToMaster := some true }, { inj with operatorToMaster := none },
+       { inj with apiAfter := none }, { inj with clientAcksAfterCut := 0 }].all fun i => startsWith (partVerdict { base with inj := i }) "PRECONDITION NOT MET"),
     ("C': the node never NotReady/Unknown, or its Lease kept renewing -> injection NOT established",
       startsWith (partVerdict { base with samples := noFail.map fun s => { s with nodeReady := some "True" } }) "PRECONDITION NOT MET"
         && startsWith (partVerdict { base with samples := noFail.map fun s => { s with lease := some s!"L{s.t}" } }) "PRECONDITION NOT MET"),
     ("C': established but no failover -> NOT VERIFIED (never a pass)",
       startsWith (partVerdict base) "NOT VERIFIED"),
-    ("C': after a failover the old master acks LOCALLY while the new master, by its own view, is master and acks locally -> PRODUCT GAP (dual write)",
-      startsWith (partVerdict { base with samples := withFail, oldAcks := [(w 1 300 "o", "local")], peerAcks := [(w 2 300 "p", "local")] }) "PRODUCT GAP"),
-    ("C': the operator's map alone is not dual-write evidence: the new master never acked locally -> not PRODUCT GAP",
-      !startsWith (partVerdict { base with samples := withFail, oldAcks := [(w 1 300 "o", "local")], peerAcks := [(w 2 300 "p", "forwarded")] }) "PRODUCT GAP"),
-    ("C': an ack in the cut window whose path cannot be told from the own views -> UNOBSERVABLE; an unreadable final copy -> UNOBSERVABLE",
-      startsWith (partVerdict { base with oldAcks := [(w 1 250 "o", "unknown")] }) "UNOBSERVABLE"
+    ("C': a promotion seen only AFTER the heal is not a failover -> NOT VERIFIED",
+      startsWith (partVerdict { base with samples := afterHeal, peerAcks := [(ack 2 405 405 "p", "local")] }) "NOT VERIFIED"),
+    ("C': failover during the cut but the new master never acknowledged locally (zero acks, or every request an error) -> NOT VERIFIED, not a pass",
+      startsWith (partVerdict { base with samples := withFail, oldAcks := [(ack 1 150 150 "o", "local")], peerAcks := [] }) "NOT VERIFIED"
+        && startsWith (partVerdict { base with samples := withFail, oldAcks := [(ack 1 150 150 "o", "local")], peerAcks := [(ack 2 300 300 "p", "forwarded")] }) "NOT VERIFIED"),
+    ("C': failover, and the old master acks locally while the new master is master by its own view and vice versa -> PRODUCT GAP (dual write)",
+      startsWith (partVerdict { base with samples := withFail, oldAcks := [(ack 1 300 301 "o", "local")], peerAcks := [(ack 2 300 301 "p", "local")] }) "PRODUCT GAP"),
+    ("C': failover, the old master's last local ack BEFORE the new master's first -> pass; after it -> fail",
+      partVerdict { base with samples := withFail, oldAcks := [(ack 1 150 151 "o", "local")], peerAcks := [(ack 2 300 301 "p", "local")] } == none
+        && (partVerdict { base with samples := withFail, oldAcks := [(ack 1 150 151 "o", "local"), (ack 3 380 381 "o", "local")], peerAcks := [(ack 2 300 301 "p", "local")] }).isSome),
+    ("C': an ack in the cut window whose path is unknown -> UNOBSERVABLE; an unreadable final copy -> UNOBSERVABLE",
+      startsWith (partVerdict { base with oldAcks := [(ack 1 250 250 "o", "unknown")] }) "UNOBSERVABLE"
         && startsWith (partVerdict { base with lostAcks := none }) "UNOBSERVABLE"),
-    ("C: the links cut with both pods Ready, single master by own views, nothing lost -> pass (no failover is the expected design behaviour there)",
-      partVerdict { base with nodeLevel := false, samples := noFail.map fun s => { s with nodeReady := some "True" }, inj := { inj with apiBefore := none, apiAfter := none } } == none),
-    ("own view: a role counts only when the readings before and after agree on boot and role (restart or switch in between = unknown)",
-      ownRoleAt noFail "old" 150 == some "master"
-        && ownRoleAt [smp 100 m sl "True" "L", smp 102 px sl "True" "L"] "old" 101 == none
-        && ownRoleAt [smp 100 m sl "True" "L", smp 102 { m with boot := "bZ" } sl "True" "L"] "old" 101 == none
-        && ownRoleAt noFail "old" 9999 == none)
+    ("C: links cut with both pods Ready, single master, the old master acked locally, nothing lost -> pass; no local ack at all -> NOT VERIFIED",
+      let c : PartObs := { base with nodeLevel := false, samples := noFail.map fun s => { s with nodeReady := some "True" }, inj := { inj with apiBefore := none, apiAfter := none } }
+      partVerdict c == none && startsWith (partVerdict { c with oldAcks := [] }) "NOT VERIFIED"),
+    ("own view: strict bracket — the readings must END before and START after the span, agree on role, map VERSION and boot, and be at most 12 s apart",
+      let r := fun (ts : Nat) (v : OwnV) => ({ t := ts, reads := [{ pod := "old", ts, te := ts + 1, view := some v }], masterPodReady := none, nodeReady := none, lease := none } : PartSample)
+      ownViewOver [r 100 m, r 104 m] "old" 102 103 == some m
+        -- a reading overlapping the span's own second is not a bracket
+        && ownViewOver [r 100 m, r 104 m] "old" 101 103 == none
+        -- master -> proxy -> master between readings shows as a VERSION change
+        && ownViewOver [r 100 m, r 104 { m with version := 7 }] "old" 102 103 == none
+        && ownViewOver [r 100 m, r 102 { m with role := "proxy", version := 6 }, r 104 m] "old" 102 102 == none
+        && ownViewOver [r 100 m, r 104 { m with boot := "bZ" }] "old" 102 103 == none
+        -- too far apart
+        && ownViewOver [r 100 m, r 120 m] "old" 105 106 == none
+        && ownViewOver [r 100 m] "old" 102 103 == none),
+    ("writer records: the send time is kept (span [t0, t]); an older line without it is widened conservatively",
+      (parseWrites "7 1005 10.0.0.1 k7 v7 STORED 1003").head?.map (·.span) == some (1003, 1005)
+        && (parseWrites "7 1005 10.0.0.1 k7 v7 STORED").head?.map (·.span) == some (1001, 1005))
   ]
 
 def checkDisruption (ctx : Ctx) : IO Unit := do

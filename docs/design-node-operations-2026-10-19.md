@@ -82,7 +82,7 @@
 ### 8.1 C' で failover しなかった件（追加レビュー 2026-10-19）
 
 既存 artifact（39217270748、acfa862）で確定したこと:
-- 切断 08:55:37 → 復旧 09:01:10 の間、144 回のサンプルすべてで master Pod は `ready=true`。node NotReady → Pod Ready=False（node monitor grace 約 40 s）が 330 s の間一度も起きていない
+- 切断 08:55:37 → 復旧 09:01:10 の間、144 回のサンプルすべてで master Pod は `ready=true`。**Pod NotReady は未観測。Node の状態（Ready 条件・Lease）は当時採っていないので未確認**
 - operator は `READY but the OPERATOR cannot connect`（1 回目 / 10 回目のプローブ）を記録したが、Ready の Pod を接続不能だけでは dead にしない（EV-11 の設計どおり）ので昇格しなかった
 - operator → master Pod と replica → master Pod（Pod アドレス、FORWARD）の切断は成立していた（operator の接続不能、replica の `follow=disconnected`）
 
@@ -94,6 +94,8 @@
 - C' はさらに、node Ready が Unknown / False になり、Lease の renewTime が切断 60 s 後以降に進まないことを観測しない限りシナリオ不成立（PRECONDITION NOT MET）
 - 注入の失敗を成功扱いしない（`installCuts` の結果を必須に）。途中で失敗しても `finally` で設置済みのルールを外す（D の遮断も同じ）
 - 判定: 二重 write は operator map ではなく、両側の node 自身の view（`own_role` / `node_map_version` / boot。client が両側から読む）で前後のサンプルが一致する時刻だけ local / forwarded と判定し、旧 master の local ACK と新 master の local ACK が同じ時間帯にあることを要求。判定できない ACK は UNOBSERVABLE で fail（0 扱いしない）
+- 追加レビュー（8a9be61 に対して）で固定した穴: 昇格は**切断中に**replica 自身の view が master だった場合だけ数える（heal 後の初昇格は failover ではない）。C' の pass には切断中の新 master の local ACK が必須（0 件・全要求 error は NOT VERIFIED）。C も旧 master の local ACK が 0 件なら NOT VERIFIED。own view は role・map version・boot の一致を要求し、strict bracket で判定する: 書込の [送信, 応答] 区間（writer が送信時刻も記録）より前に**終わった**読み取りと、後に**始まった**読み取りを使う。両者は 12 s 以内で、その間に重なる読み取りもすべて同じ view でなければならない。時刻は全部 debug pod の時計（writer と同じ）。probe は、timeout による接続不能（DROP の結果: `timeout` 124 / curl 28）だけを遮断とする。実行不能・拒否・その他は Unknown（前提不成立）。Pod 間の経路は切断前に OPEN であることも必須
+- **これは役割の読み取りからの推定で、要求ごとの処理経路の直接証拠ではない。** したがって C / C' の pass は測定上の pass であり、受入合格には使わない。受入に使うには、request / connection ID に結び付いた mutation 結果の trace（flared 側の実装）が必要（未実装）
 - C' で交代なし = **NOT VERIFIED**（fail、緑にしない）。交代あり・二重 write = PRODUCT GAP（判断点 2）。交代あり・二重 write なしは、旧 master の最後の local ACK が新 master の最初の local ACK より前であることを要求。昇格を強制する操作はしない
 - writer の記録が読めない場合（`stopWriter` 失敗）は UNOBSERVABLE で fail（A / B / C すべて。以前は `getD []` で「ACK 欠損 0」になりえた）
 - B は、適格 replica の昇格が観測期間（300 s、ハーネスの上限で SLO ではない）内にあることと、昇格後に ACK が再開したことも要求

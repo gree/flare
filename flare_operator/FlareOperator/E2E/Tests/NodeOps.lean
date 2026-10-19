@@ -519,31 +519,56 @@ def stopSuite : TestSuite :=
     (availability after the partition, and safety after a switch, were not
     exercised). A failover is never forced. -/
 
+/-- One reading of a pod's OWN view by the client: the read started at
+    `ts` and ended at `te` (epoch seconds, the debug pod's clock = the
+    writers' clock); the view held at some moment in [ts, te]. -/
+structure Reading where
+  pod : String
+  ts : Nat
+  te : Nat
+  view : Option OwnV
+  deriving Repr
+
 /-- One sample of the partition run. -/
 structure PartSample where
   t : Nat
-  /-- pod -> its own view (`none` = not readable by the client) -/
-  own : List (String × Option OwnV)
+  reads : List Reading
   masterPodReady : Option Bool
   nodeReady : Option String
   lease : Option String
   deriving Repr
 
-/-- The role `pod` itself held around time `t`: the nearest samples before
-    and after both read it with the same boot and role; otherwise unknown. -/
-def ownRoleAt (ss : List PartSample) (pod : String) (t : Nat) : Option String :=
-  let before := (ss.filter (·.t ≤ t)).getLast?
-  let after := (ss.filter (·.t ≥ t)).head?
-  match before.bind (fun s => (s.own.lookup pod).join), after.bind (fun s => (s.own.lookup pod).join) with
-  | some x, some y => if x.boot == y.boot && x.role == y.role then some x.role else none
+/-- The widest gap between the two readings that bracket an interval. -/
+def maxBracketSec : Nat := 12
+
+/-- The view `pod` itself held over the WHOLE interval [a, b] — or `none`.
+    Strict bracket: the last reading that ENDED before `a` and the first that
+    STARTED after `b` (never the same reading, never one overlapping the
+    interval's own seconds), at most `maxBracketSec` apart, and every reading
+    of the pod overlapping [before.ts, after.te] (both included) read the
+    SAME view (role, map version, boot). An inference from role readings,
+    not a per-request trace. -/
+def ownViewOver (ss : List PartSample) (pod : String) (a b : Nat) : Option OwnV :=
+  let rs := (ss.flatMap (·.reads)).filter (·.pod == pod)
+  match (rs.filter (·.te < a)).getLast?, (rs.filter (·.ts > b)).head? with
+  | some x, some y =>
+    if y.ts - x.te > maxBracketSec then none else
+    let between := rs.filter fun r => r.te ≥ x.ts && r.ts ≤ y.te
+    match x.view with
+    | some v => if between.all (·.view == some v) then some v else none
+    | none => none
   | _, _ => none
 
-/-- How a write was processed, from the target's OWN view: "local" (it was
-    master), "forwarded" (it was not), "unknown" (not bracketed by readings). -/
+def ownRoleOver (ss : List PartSample) (pod : String) (a b : Nat) : Option String :=
+  (ownViewOver ss pod a b).map (·.role)
+
+/-- How a write was processed, inferred from the target's OWN view over the
+    write's whole [sent, replied] span: "local" (it was master), "forwarded"
+    (it was not), "unknown" (not strictly bracketed). -/
 def ownPathOf (ss : List PartSample) (ipToPod : List (String × String)) (w : WriteRec) : String :=
   match ipToPod.lookup w.ip with
   | none => "unknown"
-  | some pod => match ownRoleAt ss pod w.t with
+  | some pod => match ownRoleOver ss pod w.span.1 w.span.2 with
     | some "master" => "local"
     | some _ => "forwarded"
     | none => "unknown"
@@ -552,7 +577,10 @@ structure Injection where
   rulesInstalled : Bool
   rulesWhy : String := ""
   counters : List (String × Option Nat) := []
-  /-- probes after the cut: the cut paths CLOSED, the client path still acks -/
+  /-- probes before / after the cut: each cut path OPEN before and timed
+      out after; the client path still acks -/
+  replicaToMasterBefore : Option Bool := none
+  operatorToMasterBefore : Option Bool := none
   replicaToMaster : Option Bool := none
   operatorToMaster : Option Bool := none
   /-- C' only: the worker reaches the API server before / after the cut -/
@@ -580,6 +608,8 @@ def injectionProblem (o : PartObs) : Option String :=
   let inCut := o.samples.filter fun s => s.t ≥ o.tCut && s.t ≤ o.tHeal
   if !i.rulesInstalled then some s!"the cut rules were not all installed ({i.rulesWhy})"
   else if i.counters.any (·.2.isNone) then some s!"a cut rule's counter could not be read: {i.counters}"
+  else if i.replicaToMasterBefore != some true then some s!"replica -> master was not proven open before the cut (probe {i.replicaToMasterBefore})"
+  else if i.operatorToMasterBefore != some true then some s!"operator -> master was not proven open before the cut (probe {i.operatorToMasterBefore})"
   else if i.replicaToMaster != some false then some s!"replica -> master is not proven cut (probe {i.replicaToMaster})"
   else if i.operatorToMaster != some false then some s!"operator -> master is not proven cut (probe {i.operatorToMaster})"
   else if i.clientAcksAfterCut == 0 then some "the client did not reach the old master during the cut (no acknowledged write): not the scenario"
@@ -596,38 +626,53 @@ def injectionProblem (o : PartObs) : Option String :=
       else none
   else none
 
-/-- The pure verdict. `none` = pass. -/
+/-- The pure verdict. `none` = pass — a MEASUREMENT pass: local / forwarded
+    are inferred from the nodes' own-role readings, not traced per request,
+    so it is never an acceptance of failover safety. -/
 def partVerdict (o : PartObs) : Option String :=
   match injectionProblem o with
   | some why => some (notSetUp s!"injection not established: {why}")
   | none =>
-  let win := fun (w : WriteRec) => w.t ≥ o.tCut && w.t ≤ o.tHeal
-  let unknown := (o.oldAcks ++ o.peerAcks).filter fun (w, p) => win w && p == "unknown"
-  let newMasterTimes := o.samples.filter (fun s => s.t ≥ o.tCut && ((s.own.lookup o.replica).join.map (·.role)) == some "master")
-  let failedOver := !newMasterTimes.isEmpty
-  -- dual write: the old master acknowledged LOCALLY at a time the new
-  -- master itself was master, AND the new master acknowledged locally too
-  let oldLocal := o.oldAcks.filter fun (w, p) => win w && p == "local"
-  let newLocal := o.peerAcks.filter fun (w, p) => win w && p == "local" && ownRoleAt o.samples o.replica w.t == some "master"
-  let oldDual := oldLocal.filter fun (w, _) => ownRoleAt o.samples o.replica w.t == some "master"
-  if !unknown.isEmpty then some (unobservable s!"{unknown.length} acknowledged write(s) in the cut window whose processing path cannot be told from the nodes' own views")
+  let inCut := fun (w : WriteRec) => w.span.1 ≥ o.tCut && w.span.2 ≤ o.tHeal
+  let unknown := (o.oldAcks ++ o.peerAcks).filter fun (w, p) => inCut w && p == "unknown"
+  -- a promotion counts only when the replica's own view said master DURING
+  -- the cut (a promotion first seen after the heal is not a failover)
+  let reads := (o.samples.flatMap (·.reads)).filter fun r => r.pod == o.replica && r.ts ≥ o.tCut && r.te ≤ o.tHeal
+  let failedOver := reads.any fun r => (r.view.map (·.role)) == some "master"
+  let oldLocal := o.oldAcks.filter fun (w, p) => inCut w && p == "local"
+  let newLocal := o.peerAcks.filter fun (w, p) => inCut w && p == "local"
+  -- dual write, on ONE time base (the debug pod's clock): an old-master
+  -- local ack over whose whole span the new master was master by its own
+  -- view, and a new-master local ack over whose whole span the old master
+  -- was master by its own view
+  let oldDual := oldLocal.filter fun (w, _) => ownRoleOver o.samples o.replica w.span.1 w.span.2 == some "master"
+  let newDual := newLocal.filter fun (w, _) => ownRoleOver o.samples o.oldMaster w.span.1 w.span.2 == some "master"
+  if !unknown.isEmpty then some (unobservable s!"{unknown.length} acknowledged write(s) in the cut window whose processing cannot be told from strictly bracketed own-view readings")
   else match o.lostAcks with
   | none => some (unobservable "the final master's copy could not be read")
   | some n =>
-    if !oldDual.isEmpty && !newLocal.isEmpty then
-      some s!"PRODUCT GAP (dual write): the old master acknowledged {oldDual.length} write(s) locally while the new master, by its own view, was master and acknowledged {newLocal.length} locally (window {o.tCut}..{o.tHeal}); no fencing stops the old master (design decision point 2)"
+    if !oldDual.isEmpty && !newDual.isEmpty then
+      some s!"PRODUCT GAP (dual write, inferred from own-role readings): the old master acknowledged {oldDual.length} write(s) locally while the new master was master by its own view, and the new master {newDual.length} while the old one still was (cut {o.tCut}..{o.tHeal}); no fencing stops the old master (design decision point 2)"
     else if n > 0 then some s!"DATA: {n} acknowledged write(s) missing on the final master after the heal"
-    else if o.nodeLevel && !failedOver then
-      some "NOT VERIFIED: no failover happened during the cut (the old master kept the partition) — availability after the partition and safety after a switch were not exercised; not an acceptance pass"
-    else if !o.nodeLevel && failedOver then
-      some "the replica became master while both pods stayed Ready (unexpected for C: no failover is expected while the operator only lost its connection)"
     else if o.nodeLevel then
-      -- failover without a dual write: the old master's last local ack must
-      -- precede the new master's first local ack
-      match (oldLocal.map (·.1.t)).max?, (newLocal.map (·.1.t)).min? with
-      | some lo, some fn => if lo ≥ fn then some s!"the old master still acknowledged locally at {lo}, after the new master's first local ack at {fn}" else none
-      | _, _ => none
+      if !failedOver then
+        some "NOT VERIFIED: the replica was not master by its own view at any time DURING the cut (no failover, or only after the heal) — availability after the partition and safety after a switch were not exercised"
+      else if newLocal.isEmpty then
+        some "NOT VERIFIED: after the failover the new master acknowledged no write locally during the cut (write availability on the new master not shown)"
+      else match (oldLocal.map (·.1.span.2)).max?, (newLocal.map (·.1.span.1)).min? with
+        | some lo, some fn => if lo ≥ fn then some s!"the old master still acknowledged locally until {lo}, not before the new master's first local ack at {fn}" else none
+        | _, _ => none
+    else if failedOver then
+      some "the replica became master while both pods stayed Ready (unexpected for C: no failover is expected while the operator only lost its connection)"
+    else if oldLocal.isEmpty then
+      some "NOT VERIFIED: the old master acknowledged no write locally during the cut (the single-master observation has no writes behind it)"
     else none
+
+/-- The debug pod's clock (the writers' time base). -/
+private def debugEpoch (c : Ctx) : IO (Option Nat) := do
+  match ← execInDebugPod c.cfg.debugPod c.cfg.«namespace» "date +%s" with
+  | .ok o => return o.trim.toNat?
+  | .error _ => return none
 
 /-- Sample every ~2 s for `secs`: map roles (timeline), both pods' OWN
     views (client side), the master pod's Ready, its node's Ready and Lease. -/
@@ -637,15 +682,20 @@ private partial def partObserve (c : Ctx) (secs : Nat) (pods : List PodRow) (nod
   repeat
     discard <| c.sample
     let t ← epochNow
-    let mut own : List (String × Option OwnV) := []
+    let mut reads : List Reading := []
     for p in pods do
-      own := own ++ [(p.name, (← c.stats p.ip).bind ownVOf)]
+      let ts ← debugEpoch c
+      let v := (← c.stats p.ip).bind ownVOf
+      let te ← debugEpoch c
+      match ts, te with
+      | some a, some b => reads := reads ++ [{ pod := p.name, ts := a, te := b, view := v }]
+      | _, _ => pure ()   -- no time base: the reading is not used
     let mp := ((← c.pods).getD []).find? (·.name == master)
     let nr ← nodeReady node
     let ls ← nodeLeaseRenew node
-    let ownTxt := String.intercalate " " (own.map fun (n, v) => n ++ "=" ++ ((v.map fun (x : OwnV) => x.role ++ "/v" ++ toString x.version ++ "/" ++ x.boot.take 8).getD "?"))
+    let ownTxt := String.intercalate " " (reads.map fun r => s!"{r.pod}[{r.ts}..{r.te}]=" ++ ((r.view.map fun (x : OwnV) => x.role ++ "/v" ++ toString x.version ++ "/" ++ x.boot.take 8).getD "?"))
     c.art "own.txt" s!"{t} {ownTxt} node={nr} lease={ls} masterReady={mp.map (·.ready)}"
-    acc := acc ++ [{ t, own, masterPodReady := mp.map (·.ready), nodeReady := nr, lease := ls }]
+    acc := acc ++ [{ t, reads, masterPodReady := mp.map (·.ready), nodeReady := nr, lease := ls }]
     if (← nowSec) ≥ deadline then return acc
     IO.sleep 2000
   return acc
@@ -685,12 +735,14 @@ private def partitionRun (c : Ctx) (nodeLevel : Bool) : IO (Except String PartOb
     let rules := podCutRules nodes p.master.ip p.replica.ip ++ podCutRules nodes p.master.ip opIp
       ++ (if nodeLevel then nodeCutRules p.master.node wIp cp cpIp else [])
     let s0 ← partObserve c 10 pods p.master.node p.master.name
-    let tCut ← epochNow
+    let rBefore ← tcpFromPod c.cfg.«namespace» p.replica.name "flared" p.master.ip c.cfg.flarePort
+    let oBefore ← tcpFromPod c.cfg.«namespace» opPod "flare-operator" p.master.ip c.cfg.flarePort
+    let some tCut ← debugEpoch c | return .error (notSetUp "the debug pod's clock cannot be read")
     let (installed, rulesOk, rulesWhy) ← match ← installCuts rules with
       | .ok r => pure (r, true, "")
       | .error (why, part) => pure (part, false, why)
     c.event s!"cut: {installed.length}/{rules.length} rules installed{if rulesOk then "" else s!" — FAILED: {rulesWhy}"}"
-    let mut inj : Injection := { rulesInstalled := rulesOk, rulesWhy }
+    let mut inj : Injection := { rulesInstalled := rulesOk, rulesWhy, replicaToMasterBefore := rBefore, operatorToMasterBefore := oBefore }
     let mut s1 : List PartSample := []
     let mut tHeal := tCut
     try
@@ -709,7 +761,7 @@ private def partitionRun (c : Ctx) (nodeLevel : Bool) : IO (Except String PartOb
         cs := cs ++ [(r.label, n)]
         c.art "cuts.txt" s!"{r.label} dropped {(n.map toString).getD "?"} packets"
       inj := { inj with counters := cs }
-      tHeal ← epochNow
+      tHeal := (← debugEpoch c).getD 0
     finally
       removeCuts installed
     c.event "healed"
@@ -741,7 +793,7 @@ private def partitionTest (c : Ctx) (nodeLevel : Bool) : IO TestResult := do
     let inCut := o.samples.filter fun s => s.t ≥ o.tCut && s.t ≤ o.tHeal
     let firstNotReady := (inCut.find? fun s => s.nodeReady == some "Unknown" || s.nodeReady == some "False").map (·.t - o.tCut)
     let firstPodNotReady := (inCut.find? fun s => s.masterPodReady == some false).map (·.t - o.tCut)
-    let firstNewMaster := (inCut.find? fun s => ((s.own.lookup o.replica).join.map (·.role)) == some "master").map (·.t - o.tCut)
+    let firstNewMaster := ((inCut.flatMap (·.reads)).find? fun r => r.pod == o.replica && (r.view.map (·.role)) == some "master").map (·.ts - o.tCut)
     let paths := fun (xs : List (WriteRec × String)) (k : String) => (xs.filter (·.2 == k)).length
     IO.eprintln s!"# [{c.test}] injection {repr o.inj}; node NotReady +{firstNotReady} s, pod NotReady +{firstPodNotReady} s, replica master (own view) +{firstNewMaster} s; old acks local/forwarded/unknown {paths o.oldAcks "local"}/{paths o.oldAcks "forwarded"}/{paths o.oldAcks "unknown"}, peer {paths o.peerAcks "local"}/{paths o.peerAcks "forwarded"}/{paths o.peerAcks "unknown"}; lost {o.lostAcks}; {o.summary}"
     match partVerdict o with

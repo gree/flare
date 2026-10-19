@@ -111,3 +111,11 @@
 | 5 | lazy expiry の fence 確認と remove が不可分でない | 削除全体を `write_fence::entry` で覆った（確認と in-flight 計上が 1 つのロック。fenced なら隠すだけ）。試験用 seam `set_entry_hook`（admit 直後、mutation の前に呼ばれる） | C++ `test_expire_lazy_delete_counted_when_fence_arms_mid_delete`（check と削除の間で arm → in-flight 1、削除は barrier に含まれる。fence 中の次の lazy expiry は削除せず sequence も動かない） | 内部 mutation の監査: client / proxy / cross-cluster（op_set / op_delete / op_incr 系。add / replace / cas / append / prepend / touch / gat / decr は op_set / op_incr の `_run_server` を継承）、flush_all、snapshot push、orphan purge、reaper chunk はすべて entry。copy_discard は master では動かない。WAL apply / tombstone 回収は replica 側。メタ CF への書込（master id、generation、history、partition binding）は data を持たず、barrier の後に sequence を進めても保守側（後継により多くの適用を要求するだけ） |
 
 検証の状態: 実装済み、単体試験のみ（ローカル Lean、C++ は CI でコンパイル）。対象 suite の E2E、固定 candidate の全体 CI、レビュー、本番承認はいずれも未。ガードの有効化、pf-dev の変更、safe-to-evict の変更、tag / publish はこの対応に含まない。
+
+### 8.2 partition の targeted run（e51ad45、E2E 39242985724）— 判定はシナリオ不成立 / 観測不足
+
+製品の判定ではない（どちらも fail、ハーネス側の理由）。
+
+- **C'（node 単位）: PRECONDITION NOT MET。** ルールは全 20 本設置され、worker の OUTPUT（172.18.0.4→172.18.0.5）で 62、control-plane の OUTPUT（逆向き）で 243 パケットを落とした。worker → API server の IPv4 probe は切断前 OPEN、切断後 timeout。**それでも node Lease は 10 s ごとに更新を続けた**（node Ready は 107 サンプル中 Unknown 4 回、Pod NotReady 2 回だけ）。仮説（未確定）: kind の docker network は dual-stack なので、kubelet は IPv6 で API server に届いていた。修正: node アドレスの組は両コンテナの全 family（IPv6 は ip6tables）で切り、API probe も全 family で、切断前は全部 OPEN・切断後は全部 timeout を要求する。次の run で IPv6 ルールのカウンタと Lease を見て確かめる
+- **C（経路のみ）: UNOBSERVABLE。** ACK 3248 件の経路を判定できなかった。原因（artifact で確定）: 切断直後の probe 中（約 11 s）と、heal 後の待機中に own view の読み取りが途切れ、strict bracket（12 s 以内）が成立しなかった。判定規則は正しく働いた（不明を 0 扱いしない）。修正: 切断直後、probe の後、heal 直後にも読み取る
+- Pod 間の経路（FORWARD）は全経路でカウンタが正（46 / 141 / 42 など）。replica → master と operator → master は切断前 OPEN・切断後 timeout

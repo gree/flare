@@ -583,9 +583,11 @@ structure Injection where
   operatorToMasterBefore : Option Bool := none
   replicaToMaster : Option Bool := none
   operatorToMaster : Option Bool := none
-  /-- C' only: the worker reaches the API server before / after the cut -/
+  /-- C' only: the worker reaches the API server before / after the cut,
+      over EVERY address family (all must be open before, timed out after) -/
   apiBefore : Option Bool := none
   apiAfter : Option Bool := none
+  apiProbes : List (String × Option Bool × Option Bool) := []
   clientAcksAfterCut : Nat := 0
   deriving Repr
 
@@ -700,10 +702,12 @@ private partial def partObserve (c : Ctx) (secs : Nat) (pods : List PodRow) (nod
     IO.sleep 2000
   return acc
 
-private def dockerIp (node : String) : IO String := do
-  match ← hostCmd "docker" ["inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", node] with
-  | .ok o => return o.trim
-  | .error _ => return ""
+/-- Every address of a kind node container (IPv4 and, on the dual-stack
+    kind network, IPv6). -/
+private def dockerIps (node : String) : IO (List String) := do
+  match ← hostCmd "docker" ["inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{.GlobalIPv6Address}} {{end}}", node] with
+  | .ok o => return (o.splitOn " ").map String.trim |>.filter (!·.isEmpty)
+  | .error _ => return []
 
 private def operatorPod (c : Ctx) : IO (Option String) := do
   match ← kubectl ["get", "pods", "-n", c.cfg.«namespace», "-l", s!"app={c.cfg.operatorName}", "-o", "jsonpath={.items[0].metadata.name}"] with
@@ -723,17 +727,26 @@ private def partitionRun (c : Ctx) (nodeLevel : Bool) : IO (Except String PartOb
     let opIp := ((← getPodIps s!"app={c.cfg.operatorName}" c.cfg.«namespace»).head?).getD ""
     let some opPod ← operatorPod c | return .error (notSetUp "the operator pod cannot be found")
     let cp := "flare-e2e-control-plane"
-    let cpIp ← dockerIp cp
-    let wIp ← dockerIp p.master.node
+    let cpIps ← dockerIps cp
+    let wIps ← dockerIps p.master.node
     let nodes ← kindNodes
-    if opIp.isEmpty || !nodes.contains cp || !nodes.contains p.master.node || (nodeLevel && (cpIp.isEmpty || wIp.isEmpty)) then
-      return .error (notSetUp s!"addresses / kind nodes for the cut not resolved (operator {opIp}, nodes {nodes}, cp {cpIp}, worker {wIp})")
+    if opIp.isEmpty || !nodes.contains cp || !nodes.contains p.master.node || (nodeLevel && (cpIps.isEmpty || wIps.isEmpty)) then
+      return .error (notSetUp s!"addresses / kind nodes for the cut not resolved (operator {opIp}, nodes {nodes}, cp {cpIps}, worker {wIps})")
+    -- the API probes go to every control-plane address the worker has a
+    -- family for
+    let apiTargets := cpIps.filter fun a => wIps.any fun b => b.contains ':' == a.contains ':'
+    let probeApi := fun (_ : Unit) => do
+      let mut r : List (String × Option Bool) := []
+      for a in apiTargets do r := r ++ [(a, ← apiReachableFrom p.master.node a)]
+      return r
+    let allIs := fun (v : Bool) (xs : List (String × Option Bool)) => !xs.isEmpty && xs.all (·.2 == some v)
     let pods := (← c.pods).getD []
     if !(← c.startWriter "old" p.master.ip "wo") || !(← c.startWriter "peer" p.replica.ip "wr") then
       return .error (notSetUp "a writer did not start")
-    let apiBefore ← if nodeLevel then apiReachableFrom p.master.node cpIp else pure none
+    let apiB ← if nodeLevel then probeApi () else pure []
+    let apiBefore := if !nodeLevel then none else if allIs true apiB then some true else none
     let rules := podCutRules nodes p.master.ip p.replica.ip ++ podCutRules nodes p.master.ip opIp
-      ++ (if nodeLevel then nodeCutRules p.master.node wIp cp cpIp else [])
+      ++ (if nodeLevel then nodeCutRulesAll p.master.node wIps cp cpIps else [])
     let s0 ← partObserve c 10 pods p.master.node p.master.name
     let rBefore ← tcpFromPod c.cfg.«namespace» p.replica.name "flared" p.master.ip c.cfg.flarePort
     let oBefore ← tcpFromPod c.cfg.«namespace» opPod "flare-operator" p.master.ip c.cfg.flarePort
@@ -746,15 +759,24 @@ private def partitionRun (c : Ctx) (nodeLevel : Bool) : IO (Except String PartOb
     let mut s1 : List PartSample := []
     let mut tHeal := tCut
     try
+      -- keep reading the own views across the probe step (no gap)
+      let sA ← partObserve c 0 pods p.master.node p.master.name
+      s1 := sA
       IO.sleep 5000
+      let apiA ← if nodeLevel then probeApi () else pure []
+      inj := { inj with apiProbes := apiTargets.map fun a => (a, apiB.lookup a |>.join, apiA.lookup a |>.join) }
       inj := { inj with
         replicaToMaster := ← tcpFromPod c.cfg.«namespace» p.replica.name "flared" p.master.ip c.cfg.flarePort,
         operatorToMaster := ← tcpFromPod c.cfg.«namespace» opPod "flare-operator" p.master.ip c.cfg.flarePort,
-        apiAfter := ← if nodeLevel then apiReachableFrom p.master.node cpIp else pure none,
+        -- some false = EVERY family timed out; some true = one is open;
+        -- none = a probe could not tell
+        apiAfter := if !nodeLevel then none else if allIs false apiA then some false
+          else if apiA.any (·.2 == some true) then some true else none,
         apiBefore }
       c.event s!"probes after the cut: replica->master open={inj.replicaToMaster} operator->master open={inj.operatorToMaster} worker->API before={inj.apiBefore} after={inj.apiAfter}"
+      s1 := s1 ++ (← partObserve c 0 pods p.master.node p.master.name)
       if rulesOk then
-        s1 ← partObserve c (if nodeLevel then 330 else 90) pods p.master.node p.master.name
+        s1 := s1 ++ (← partObserve c (if nodeLevel then 330 else 90) pods p.master.node p.master.name)
       let mut cs : List (String × Option Nat) := []
       for r in installed do
         let n ← cutCounter r
@@ -765,6 +787,8 @@ private def partitionRun (c : Ctx) (nodeLevel : Bool) : IO (Except String PartOb
     finally
       removeCuts installed
     c.event "healed"
+    -- readings right after the heal bracket the last writes of the cut
+    let sH ← partObserve c 6 pods p.master.node p.master.name
     let (s2, _) ← observe c 180 (redundant c none)
     let s3 ← partObserve c 6 pods p.master.node p.master.name
     let wsOld? ← c.stopWriter "old"
@@ -777,7 +801,7 @@ private def partitionRun (c : Ctx) (nodeLevel : Bool) : IO (Except String PartOb
     let lost ← match mcopy with
       | some d => pure (some (← recordMissing c "master" (wsOld ++ wsPeer) d))
       | none => pure none
-    let ss := s0 ++ s1 ++ s3
+    let ss := s0 ++ s1 ++ sH ++ s3
     let ipToPod := pods.map fun r => (r.ip, r.name)
     let acks := fun (ws : List WriteRec) => (ws.filter fun w => classify w.reply == .ack).map fun w => (w, ownPathOf ss ipToPod w)
     inj := { inj with clientAcksAfterCut := (wsOld.filter fun w => classify w.reply == .ack && w.t ≥ tCut + 5 && w.t ≤ tHeal).length }

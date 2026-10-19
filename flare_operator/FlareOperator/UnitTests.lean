@@ -1412,6 +1412,14 @@ def partChecks : List (String × Bool) :=
         -- too far apart
         && ownViewOver [r 100 m, r 120 m] "old" 105 106 == none
         && ownViewOver [r 100 m] "old" 102 103 == none),
+    ("cuts: pod pairs go to FORWARD on every node; node pairs to OUTPUT (sender) + INPUT (receiver) for EVERY family both containers have, IPv6 via ip6tables",
+      let r := nodeCutRulesAll "w" ["172.18.0.4", "fc00::4"] "cp" ["172.18.0.5", "fc00::5"]
+      (podCutRules ["a", "b"] "1" "2").length == 4 && (podCutRules ["a", "b"] "1" "2").all (·.chain == "FORWARD")
+        && r.length == 8 && (r.filter (·.v6)).length == 4 && (r.filter (·.v6)).all (·.tool == "ip6tables")
+        && (r.filter (!·.v6)).all (·.tool == "iptables")
+        && r.contains { node := "w", chain := "OUTPUT", src := "fc00::4", dst := "fc00::5" }
+        && r.contains { node := "cp", chain := "INPUT", src := "fc00::4", dst := "fc00::5" }
+        && !r.any (fun x => x.src.contains ':' != x.dst.contains ':')),
     ("writer records: the send time is kept (span [t0, t]); an older line without it is widened conservatively",
       (parseWrites "7 1005 10.0.0.1 k7 v7 STORED 1003").head?.map (·.span) == some (1003, 1005)
         && (parseWrites "7 1005 10.0.0.1 k7 v7 STORED").head?.map (·.span) == some (1001, 1005))

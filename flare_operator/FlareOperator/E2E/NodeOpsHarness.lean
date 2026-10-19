@@ -388,8 +388,13 @@ structure CutRule where
   dst : String
   deriving Repr, BEq
 
+/-- An IPv6 address goes to ip6tables (the kind docker network is dual-stack:
+    e51ad45 C' dropped the kubelet's IPv4 packets yet its Lease kept
+    renewing — hypothesis: the API server stayed reachable over IPv6). -/
+def CutRule.v6 (r : CutRule) : Bool := r.src.contains ':'
+def CutRule.tool (r : CutRule) : String := if r.v6 then "ip6tables" else "iptables"
 def CutRule.args (r : CutRule) : List String := ["-s", r.src, "-d", r.dst, "-j", "DROP"]
-def CutRule.label (r : CutRule) : String := s!"{r.node}:{r.chain} {r.src}->{r.dst}"
+def CutRule.label (r : CutRule) : String := s!"{r.node}:{r.tool}:{r.chain} {r.src}->{r.dst}"
 
 /-- Pod-address pair: FORWARD, both directions, on every node container. -/
 def podCutRules (nodes : List String) (a b : String) : List CutRule :=
@@ -401,6 +406,11 @@ def nodeCutRules (na ia nb ib : String) : List CutRule :=
   [{ node := na, chain := "OUTPUT", src := ia, dst := ib }, { node := na, chain := "INPUT", src := ib, dst := ia },
    { node := nb, chain := "OUTPUT", src := ib, dst := ia }, { node := nb, chain := "INPUT", src := ia, dst := ib }]
 
+/-- Every address family both containers have: IPv4 with IPv4, IPv6 with
+    IPv6 (`as` / `bs` = the containers' addresses). -/
+def nodeCutRulesAll (na : String) (as : List String) (nb : String) (bs : List String) : List CutRule :=
+  as.flatMap fun ia => (bs.filter fun ib => ib.contains ':' == ia.contains ':').flatMap fun ib => nodeCutRules na ia nb ib
+
 /-- Install every rule. `.ok installed` only when ALL installed; on a
     failure `.error (why, installed so far)` so the caller still removes
     what it put in place. -/
@@ -408,7 +418,7 @@ def installCuts (rules : List CutRule) : IO (Except (String × List CutRule) (Li
   if rules.isEmpty then return .error ("no rule to install (no kind node / address resolved)", [])
   let mut done : List CutRule := []
   for r in rules do
-    match ← hostCmd "docker" (["exec", r.node, "iptables", "-I", r.chain, "1"] ++ r.args) with
+    match ← hostCmd "docker" (["exec", r.node, r.tool, "-I", r.chain, "1"] ++ r.args) with
     | .ok _ => done := done ++ [r]
     | .error e => return .error (s!"{r.label}: {e}", done)
   return .ok done
@@ -417,20 +427,26 @@ def installCuts (rules : List CutRule) : IO (Except (String × List CutRule) (Li
 def removeCuts (rules : List CutRule) : IO Unit := do
   for r in rules do
     for _ in [0:3] do
-      discard <| hostCmd "docker" (["exec", r.node, "iptables", "-D", r.chain] ++ r.args)
+      discard <| hostCmd "docker" (["exec", r.node, r.tool, "-D", r.chain] ++ r.args)
 
 /-- Packets dropped by the rule so far (`none` = the rule is not there or
     the counter cannot be read). -/
 def cutCounter (r : CutRule) : IO (Option Nat) := do
-  match ← hostCmd "docker" ["exec", r.node, "iptables", "-nvxL", r.chain] with
+  match ← hostCmd "docker" ["exec", r.node, r.tool, "-nvxL", r.chain] with
   | .error _ => return none
   | .ok out =>
     return (out.splitOn "\n").findSome? fun l =>
       let ws := (l.splitOn " ").filter (!·.isEmpty)
       -- pkts bytes target prot opt in out source destination
       match ws with
+      -- ip6tables prints no `opt` column
       | pk :: _ :: "DROP" :: _ :: _ :: _ :: _ :: src :: dst :: _ =>
-        if src == r.src && dst == r.dst then pk.toNat? else none
+        if src == r.src && dst == r.dst then pk.toNat? else
+        if !r.v6 then none else match ws with
+          | pk :: _ :: "DROP" :: _ :: _ :: _ :: src :: dst :: _ => if (src == r.src || src == r.src ++ "/128") && (dst == r.dst || dst == r.dst ++ "/128") then pk.toNat? else none
+          | _ => none
+      | pk :: _ :: "DROP" :: _ :: _ :: _ :: src :: dst :: _ =>
+        if r.v6 && (src == r.src || src == r.src ++ "/128") && (dst == r.dst || dst == r.dst ++ "/128") then pk.toNat? else none
       | _ => none
 
 /-- Can node container `node` reach the API server at `cpIp`? `some true`
@@ -438,7 +454,8 @@ def cutCounter (r : CutRule) : IO (Option Nat) := do
     a DROP rule produces), `none` = anything else (curl missing, refused, DNS,
     TLS...) — never taken as a cut. -/
 def apiReachableFrom (node cpIp : String) : IO (Option Bool) := do
-  let out ← IO.Process.output { cmd := "docker", args := #["exec", node, "curl", "-sk", "-m", "3", "-o", "/dev/null", "-w", "%{http_code}", s!"https://{cpIp}:6443/healthz"] }
+  let host := if cpIp.contains ':' then s!"[{cpIp}]" else cpIp
+  let out ← IO.Process.output { cmd := "docker", args := #["exec", node, "curl", "-gsk", "-m", "3", "-o", "/dev/null", "-w", "%{http_code}", s!"https://{host}:6443/healthz"] }
   let code := out.stdout.trim
   if out.exitCode == 0 && !code.isEmpty && code != "000" then return some true
   else if out.exitCode == 28 then return some false

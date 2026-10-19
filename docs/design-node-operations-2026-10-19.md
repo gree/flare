@@ -76,10 +76,27 @@
 | A master の drain（後継の worker に 100 ms 遅延） | 合格。ACK 欠損 master 0 / replica 0。冗長性の回復まで 130 s。**fence 中の client エラー: svc writer 8095 件 / peer 150 件、約 46 s の窓**（判断点 4 の測定値） | **不合格: ACK 済み write 2 件が新 master から欠損**（ギャップを再現） |
 | A' replica の drain | 合格、欠損 0、回復 91 s | （未実施） |
 | D 後継遮断中の drain | 合格: drain は完了せず、master は削除されず、理由が requester に届いた | **不合格: 後継が遮断されたまま drain が完了** |
-| C 複製・制御経路の切断 | 合格、二重 write 0 | — |
-| C' master の worker を control-plane からも 330 s 切断 | 合格（測定）: 330 s の間 failover は起きず、master は 1 つ、二重 write 0、ACK 欠損 0 | — |
+| C 複製・制御経路の切断 | 交代なしを観測（Pod は Ready のまま、operator は接続できないだけなので設計どおり交代しない）。二重 write 0（operator map からの推定）、ACK 欠損 0 | — |
+| C' master の worker を control-plane からも 330 s 切断 | **シナリオ不成立（注入が成立していない疑いが強い）。** 交代なしを観測、交代後の安全性は未実施。通常 failover・二重 write 防止の受入合格ではない（当時の test は dualAcks=0 / lost=0 だけで pass にしていた） | — |
 
-C' で failover が起きなかった理由は未分解（node NotReady の後の Pod Ready の遷移と operator の unready 判定を次で確認する）。
+### 8.1 C' で failover しなかった件（追加レビュー 2026-10-19）
+
+既存 artifact（39217270748、acfa862）で確定したこと:
+- 切断 08:55:37 → 復旧 09:01:10 の間、144 回のサンプルすべてで master Pod は `ready=true`。node NotReady → Pod Ready=False（node monitor grace 約 40 s）が 330 s の間一度も起きていない
+- operator は `READY but the OPERATOR cannot connect`（1 回目 / 10 回目のプローブ）を記録したが、Ready の Pod を接続不能だけでは dead にしない（EV-11 の設計どおり）ので昇格しなかった
+- operator → master Pod と replica → master Pod（Pod アドレス、FORWARD）の切断は成立していた（operator の接続不能、replica の `follow=disconnected`）
+
+仮説（強く支持されるが未確定）: worker ↔ control-plane（node アドレス 172.18.0.3 ↔ 172.18.0.4）のルールは各 kind コンテナの FORWARD にしか入れていなかった。kubelet → API server の通信は各コンテナ自身の名前空間で OUTPUT / INPUT を通るので、FORWARD では落ちない。そのため node heartbeat が止まらず、node は Ready のままだった。当時の artifact にはルールのカウンタも、Node Ready / Lease の時刻も、実接続の検査もないので確定はできない。operator の timeout や昇格条件は変えていない。
+
+修正（ハーネスのみ）:
+- 経路ごとに chain を選ぶ: Pod アドレスの組は全 node の FORWARD、node アドレスの組は送信側の OUTPUT と受信側の INPUT（両方向）。全ルールの設置成功を必須にし（kind node が空・対象 node が無ければ前提不成立）、復旧前に各ルールの drop カウンタを記録（`cuts.txt`）。読めないカウンタは前提不成立
+- 実通信で成立を立証: replica → master と operator → master は TCP 接続が開かないこと、worker → API server（`curl https://<cp>:6443/healthz`）は切断前に開き切断後に開かないこと、client（debug pod）→ 旧 master は ACK が続くこと
+- C' はさらに、node Ready が Unknown / False になり、Lease の renewTime が切断 60 s 後以降に進まないことを観測しない限りシナリオ不成立（PRECONDITION NOT MET）
+- 注入の失敗を成功扱いしない（`installCuts` の結果を必須に）。途中で失敗しても `finally` で設置済みのルールを外す（D の遮断も同じ）
+- 判定: 二重 write は operator map ではなく、両側の node 自身の view（`own_role` / `node_map_version` / boot。client が両側から読む）で前後のサンプルが一致する時刻だけ local / forwarded と判定し、旧 master の local ACK と新 master の local ACK が同じ時間帯にあることを要求。判定できない ACK は UNOBSERVABLE で fail（0 扱いしない）
+- C' で交代なし = **NOT VERIFIED**（fail、緑にしない）。交代あり・二重 write = PRODUCT GAP（判断点 2）。交代あり・二重 write なしは、旧 master の最後の local ACK が新 master の最初の local ACK より前であることを要求。昇格を強制する操作はしない
+- writer の記録が読めない場合（`stopWriter` 失敗）は UNOBSERVABLE で fail（A / B / C すべて。以前は `getD []` で「ACK 欠損 0」になりえた）
+- B は、適格 replica の昇格が観測期間（300 s、ハーネスの上限で SLO ではない）内にあることと、昇格後に ACK が再開したことも要求
 
 ## 9. レビュー指摘（2026-10-19、対象 6f65ab7）への対応
 

@@ -34,6 +34,7 @@ import FlareOperator.K8s.Bridge
 import FlareOperator.E2E.TraceMatch
 import FlareOperator.E2E.Helpers
 import FlareOperator.E2E.PromotionTimeline
+import FlareOperator.E2E.Tests.NodeOps
 import FlareOperator.StateMachine.SourceEligibility
 import FlareOperator.StateMachine.RebuildConcurrency
 import FlareOperator.StateMachine.AuthoritativeHistory
@@ -1352,9 +1353,52 @@ def admChecks : List (String × Bool) :=
         && K8sReconciler.unreadySince [("a", 500)] [("a", 1)] 9000 == [("a", 9000)])
   ]
 
+-- C / C' verdicts (E2E/Tests/NodeOps, review 2026-10-19 C')
+open FlareOperator.E2E.NodeOps FlareOperator.E2E.Tests.NodeOps in
+def partChecks : List (String × Bool) :=
+  let m : OwnV := { role := "master", version := 5, boot := "bA" }
+  let px : OwnV := { role := "proxy", version := 5, boot := "bA" }
+  let sl : OwnV := { role := "slave", version := 5, boot := "bB" }
+  let mB : OwnV := { role := "master", version := 6, boot := "bB" }
+  let smp := fun (t : Nat) (o r : OwnV) (nr : String) (ls : String) => ({ t, own := [("old", some o), ("rep", some r)], masterPodReady := some (nr == "True"), nodeReady := some nr, lease := some ls } : PartSample)
+  -- cut at 100, heal at 400; the node goes Unknown at 150, the lease stops
+  let noFail := (List.range 16).map fun i => smp (100 + i * 20) m sl (if i ≥ 3 then "Unknown" else "True") "L1"
+  let withFail := (List.range 16).map fun i => smp (100 + i * 20) m (if i ≥ 6 then mB else sl) (if i ≥ 3 then "Unknown" else "True") "L1"
+  let w := fun (n t : Nat) (ip : String) => ({ n, t, ip, key := s!"k{n}", value := "v", reply := "STORED" } : WriteRec)
+  let inj : Injection := { rulesInstalled := true, counters := [("r", some 9)], replicaToMaster := some false, operatorToMaster := some false, apiBefore := some true, apiAfter := some false, clientAcksAfterCut := 50 }
+  let base : PartObs := { nodeLevel := true, oldMaster := "old", replica := "rep", inj, tCut := 100, tHeal := 400, samples := noFail, oldAcks := [(w 1 250 "10.0.0.1", "local")], peerAcks := [(w 2 250 "10.0.0.2", "forwarded")], lostAcks := some 0, summary := "" }
+  let startsWith := fun (o : Option String) (p : String) => (o.map (·.startsWith p)).getD false
+  [
+    ("C': acfa862 shape — FORWARD-only rules, the worker still reaches the API server -> injection NOT established (never a verdict)",
+      startsWith (partVerdict { base with inj := { inj with apiAfter := some true } }) "PRECONDITION NOT MET"),
+    ("C': a rule that did not install, an unreadable counter, a cut path still open, or no client ack -> injection NOT established",
+      [{ inj with rulesInstalled := false }, { inj with counters := [("r", none)] }, { inj with replicaToMaster := some true },
+       { inj with operatorToMaster := none }, { inj with clientAcksAfterCut := 0 }].all fun i => startsWith (partVerdict { base with inj := i }) "PRECONDITION NOT MET"),
+    ("C': the node never NotReady/Unknown, or its Lease kept renewing -> injection NOT established",
+      startsWith (partVerdict { base with samples := noFail.map fun s => { s with nodeReady := some "True" } }) "PRECONDITION NOT MET"
+        && startsWith (partVerdict { base with samples := noFail.map fun s => { s with lease := some s!"L{s.t}" } }) "PRECONDITION NOT MET"),
+    ("C': established but no failover -> NOT VERIFIED (never a pass)",
+      startsWith (partVerdict base) "NOT VERIFIED"),
+    ("C': after a failover the old master acks LOCALLY while the new master, by its own view, is master and acks locally -> PRODUCT GAP (dual write)",
+      startsWith (partVerdict { base with samples := withFail, oldAcks := [(w 1 300 "o", "local")], peerAcks := [(w 2 300 "p", "local")] }) "PRODUCT GAP"),
+    ("C': the operator's map alone is not dual-write evidence: the new master never acked locally -> not PRODUCT GAP",
+      !startsWith (partVerdict { base with samples := withFail, oldAcks := [(w 1 300 "o", "local")], peerAcks := [(w 2 300 "p", "forwarded")] }) "PRODUCT GAP"),
+    ("C': an ack in the cut window whose path cannot be told from the own views -> UNOBSERVABLE; an unreadable final copy -> UNOBSERVABLE",
+      startsWith (partVerdict { base with oldAcks := [(w 1 250 "o", "unknown")] }) "UNOBSERVABLE"
+        && startsWith (partVerdict { base with lostAcks := none }) "UNOBSERVABLE"),
+    ("C: the links cut with both pods Ready, single master by own views, nothing lost -> pass (no failover is the expected design behaviour there)",
+      partVerdict { base with nodeLevel := false, samples := noFail.map fun s => { s with nodeReady := some "True" }, inj := { inj with apiBefore := none, apiAfter := none } } == none),
+    ("own view: a role counts only when the readings before and after agree on boot and role (restart or switch in between = unknown)",
+      ownRoleAt noFail "old" 150 == some "master"
+        && ownRoleAt [smp 100 m sl "True" "L", smp 102 px sl "True" "L"] "old" 101 == none
+        && ownRoleAt [smp 100 m sl "True" "L", smp 102 { m with boot := "bZ" } sl "True" "L"] "old" 101 == none
+        && ownRoleAt noFail "old" 9999 == none)
+  ]
+
 def checkDisruption (ctx : Ctx) : IO Unit := do
   for (n, ok) in dsChecks do check ctx n ok
   for (n, ok) in admChecks do check ctx n ok
+  for (n, ok) in partChecks do check ctx n ok
 
 /-- Decision 2026-10-16 (promotion-proxy-only-copy, 38952942796): a dead
     ex-slave is attributed to its partition ONLY by its persisted record,

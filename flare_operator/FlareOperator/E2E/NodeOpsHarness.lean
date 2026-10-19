@@ -351,29 +351,121 @@ def uncordon (node : String) : IO Unit := discard <| kubectl ["uncordon", node]
 def stopWorker (node : String) : IO (Except String String) := hostCmd "docker" ["stop", "-t", "0", node]
 def startWorker (node : String) : IO (Except String String) := hostCmd "docker" ["start", node]
 
-/-- Drop traffic between two addresses (both directions) on every kind node,
-    so pod-to-pod traffic across workers is cut wherever it is forwarded. -/
+/-- The kind node containers (empty = cannot be listed). -/
 def kindNodes : IO (List String) := do
   match ← hostCmd "kind" ["get", "nodes", "--name", "flare-e2e"] with
   | .ok o => return (o.splitOn "\n").map String.trim |>.filter (!·.isEmpty)
   | .error _ => return []
 
-def cutRule (a b : String) : List String := ["-s", a, "-d", b, "-j", "DROP"]
+/-! ## Fault injection: network cuts (review 2026-10-19 C')
 
-def cutBetween (a b : String) : IO Bool := do
-  let mut ok := true
-  for n in ← kindNodes do
-    for (x, y) in [(a, b), (b, a)] do
-      match ← hostCmd "docker" (["exec", n, "iptables", "-I", "FORWARD", "1"] ++ cutRule x y) with
-      | .ok _ => pure ()
-      | .error _ => ok := false
-  return ok
+    WHERE a packet meets netfilter decides which chain must drop it:
+    * pod <-> pod / pod <-> operator: the packets are ROUTED by the kind node
+      container that hosts the pod (veth -> eth0), so they cross that
+      container's FORWARD chain — a FORWARD rule on every node container;
+    * node <-> node (the kubelet -> API server, both kind containers on the
+      docker bridge): the packets are LOCALLY generated / delivered in each
+      container's own namespace — OUTPUT on the sender, INPUT on the
+      receiver, never FORWARD. A FORWARD-only rule leaves this path open
+      (acfa862 C': the master pod stayed Ready for the whole 330 s cut).
+    Every rule must install, every rule's packet counter is recorded before
+    the heal, and the cut is proven by real connections (see the probes);
+    nothing here is taken as done because a command was issued. -/
 
-def healBetween (a b : String) : IO Unit := do
-  for n in ← kindNodes do
-    for (x, y) in [(a, b), (b, a)] do
-      for _ in [0:3] do
-        discard <| hostCmd "docker" (["exec", n, "iptables", "-D", "FORWARD"] ++ cutRule x y)
+structure CutRule where
+  node : String
+  chain : String
+  src : String
+  dst : String
+  deriving Repr, BEq
+
+def CutRule.args (r : CutRule) : List String := ["-s", r.src, "-d", r.dst, "-j", "DROP"]
+def CutRule.label (r : CutRule) : String := s!"{r.node}:{r.chain} {r.src}->{r.dst}"
+
+/-- Pod-address pair: FORWARD, both directions, on every node container. -/
+def podCutRules (nodes : List String) (a b : String) : List CutRule :=
+  nodes.flatMap fun n => [{ node := n, chain := "FORWARD", src := a, dst := b }, { node := n, chain := "FORWARD", src := b, dst := a }]
+
+/-- Node-address pair (containers `na` at `ia`, `nb` at `ib`): OUTPUT on the
+    sender and INPUT on the receiver, both directions. -/
+def nodeCutRules (na ia nb ib : String) : List CutRule :=
+  [{ node := na, chain := "OUTPUT", src := ia, dst := ib }, { node := na, chain := "INPUT", src := ib, dst := ia },
+   { node := nb, chain := "OUTPUT", src := ib, dst := ia }, { node := nb, chain := "INPUT", src := ia, dst := ib }]
+
+/-- Install every rule. `.ok installed` only when ALL installed; on a
+    failure `.error (why, installed so far)` so the caller still removes
+    what it put in place. -/
+def installCuts (rules : List CutRule) : IO (Except (String × List CutRule) (List CutRule)) := do
+  if rules.isEmpty then return .error ("no rule to install (no kind node / address resolved)", [])
+  let mut done : List CutRule := []
+  for r in rules do
+    match ← hostCmd "docker" (["exec", r.node, "iptables", "-I", r.chain, "1"] ++ r.args) with
+    | .ok _ => done := done ++ [r]
+    | .error e => return .error (s!"{r.label}: {e}", done)
+  return .ok done
+
+/-- Remove the rules (every copy; idempotent). -/
+def removeCuts (rules : List CutRule) : IO Unit := do
+  for r in rules do
+    for _ in [0:3] do
+      discard <| hostCmd "docker" (["exec", r.node, "iptables", "-D", r.chain] ++ r.args)
+
+/-- Packets dropped by the rule so far (`none` = the rule is not there or
+    the counter cannot be read). -/
+def cutCounter (r : CutRule) : IO (Option Nat) := do
+  match ← hostCmd "docker" ["exec", r.node, "iptables", "-nvxL", r.chain] with
+  | .error _ => return none
+  | .ok out =>
+    return (out.splitOn "\n").findSome? fun l =>
+      let ws := (l.splitOn " ").filter (!·.isEmpty)
+      -- pkts bytes target prot opt in out source destination
+      match ws with
+      | pk :: _ :: "DROP" :: _ :: _ :: _ :: _ :: src :: dst :: _ =>
+        if src == r.src && dst == r.dst then pk.toNat? else none
+      | _ => none
+
+/-- Can node container `node` reach the API server at `cpIp`? `some true`
+    = an HTTP answer, `some false` = no connection within 3 s, `none` =
+    the probe itself could not run. -/
+def apiReachableFrom (node cpIp : String) : IO (Option Bool) := do
+  let out ← IO.Process.output { cmd := "docker", args := #["exec", node, "curl", "-sk", "-m", "3", "-o", "/dev/null", "-w", "%{http_code}", s!"https://{cpIp}:6443/healthz"] }
+  let code := out.stdout.trim
+  if out.exitCode == 0 && !code.isEmpty && code != "000" then return some true
+  else if out.exitCode == 28 || out.exitCode == 7 || code == "000" then return some false
+  else return none
+
+/-- Can a TCP connection to `ip:port` be opened from inside `pod`
+    (`container`)? `none` = the probe could not run (exec failed). -/
+def tcpFromPod (ns pod container ip : String) (port : Nat) : IO (Option Bool) := do
+  match ← kubectl ["exec", pod, "-n", ns, "-c", container, "--", "bash", "-c",
+      s!"if timeout 3 bash -c 'exec 3<>/dev/tcp/{ip}/{port}' 2>/dev/null; then echo OPEN; else echo CLOSED; fi"] with
+  | .ok o => return if containsSubstr o "OPEN" then some true else if containsSubstr o "CLOSED" then some false else none
+  | .error _ => return none
+
+/-- The node's Ready condition (`True` / `False` / `Unknown`). -/
+def nodeReady (node : String) : IO (Option String) := do
+  match ← kubectl ["get", "node", node, "-o", "jsonpath={.status.conditions[?(@.type==\"Ready\")].status}"] with
+  | .ok o => return if o.trim.isEmpty then none else some o.trim
+  | .error _ => return none
+
+/-- The node Lease's last heartbeat (kube-node-lease renewTime). -/
+def nodeLeaseRenew (node : String) : IO (Option String) := do
+  match ← kubectl ["get", "lease", node, "-n", "kube-node-lease", "-o", "jsonpath={.spec.renewTime}"] with
+  | .ok o => return if o.trim.isEmpty then none else some o.trim
+  | .error _ => return none
+
+/-- A flared node's OWN view, read by the client (debug pod) from its stats:
+    role in the map it accepted, that map's version, its boot id. -/
+structure OwnV where
+  role : String
+  version : Nat
+  boot : String
+  deriving Repr, BEq
+
+def ownVOf (out : String) : Option OwnV :=
+  match statOf out "own_role", (statOf out "node_map_version").bind (·.toNat?), statOf out "reconstruction_boot_id" with
+  | some r, some v, some b => if r == "unknown" then none else some { role := r, version := v, boot := b }
+  | _, _, _ => none
 
 /-- Delay every packet leaving a kind node by `ms` (tc netem on eth0), or
     remove the delay (`ms = 0`). Used to widen the window in which an

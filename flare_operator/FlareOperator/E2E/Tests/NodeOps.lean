@@ -111,6 +111,8 @@ structure DrainObs where
   missingMaster : Option Nat
   missingReplica : Option Nat
   summary : String
+  /-- both writer logs ended with their end marker -/
+  logsComplete : Bool := true
 
 /-- The target of A (design §1): the drain completes, every acknowledged
     write is on the final master AND on the rebuilt replica, redundancy is
@@ -125,6 +127,7 @@ def drainVerdict (o : DrainObs) (expectSameMaster : Bool) : Option String :=
       if mm != 0 then some s!"DATA: {mm} acknowledged write(s) missing on the final master {o.newMaster} (see missing.txt)"
       else if mr != 0 then some s!"DATA: {mr} acknowledged write(s) missing on the rebuilt replica (see missing.txt)"
       else if expectSameMaster && o.newMaster != some o.oldMaster then some s!"the master moved ({o.oldMaster} -> {o.newMaster}) on a replica drain"
+      else if !o.logsComplete then some (unobservable "a writer log was not confirmed complete (no end marker / cut-short last line): no known ack is missing, but 'every ack' is not shown")
       else none
 
 /-- Drain `which` worker (the master's or the replica's) under two writers:
@@ -160,11 +163,13 @@ private def drainRun (c : Ctx) (drainMaster : Bool) : IO (Except String DrainObs
     let rec_ := (← nowSec) - t0
     c.event s!"redundancy restored={red} after {rec_} s from the drain start"
     let (s3, _) ← observe c 10 (pure false)
-    let ws1? ← c.stopWriter "svc"
-    let ws2? ← c.stopWriter "peer"
+    let wl1? ← c.stopWriter "svc"
+    let wl2? ← c.stopWriter "peer"
     uncordon target.node
-    let (some ws1, some ws2) := (ws1?, ws2?)
-      | return .error (unobservable "a writer's record could not be read (never counted as 'no acknowledged write')")
+    let (some wl1, some wl2) := (wl1?, wl2?)
+      | return .error (unobservable "a writer's record could not be read or failed its integrity check (never counted as 'no acknowledged write')")
+    let ws1 := wl1.ws
+    let ws2 := wl2.ws
     let samples := s0 ++ s1 ++ s2 ++ s3
     let roles ← c.roles
     let newM := roles.bind (·.1)
@@ -178,7 +183,8 @@ private def drainRun (c : Ctx) (drainMaster : Bool) : IO (Except String DrainObs
     let summary := s!"{writerSummary "svc" samples ws1}; {writerSummary "peer" samples ws2}"
     c.art "report.txt" summary
     return .ok { drainRc := rc, drainOut := out, oldMaster := p.master.name, newMaster := newM, redundantAfter := red,
-                 recoverySec := rec_, writes := ws, missingMaster := mm, missingReplica := mr, summary }
+                 recoverySec := rec_, writes := ws, missingMaster := mm, missingReplica := mr, summary,
+                 logsComplete := wl1.complete && wl2.complete }
 
 private def drainTest (c : Ctx) (drainMaster : Bool) : IO TestResult := do
   match ← drainRun c drainMaster with
@@ -402,6 +408,7 @@ structure StopObs where
   /-- acknowledged writes after the promotion was seen (writes resumed) -/
   acksAfterPromotion : Nat := 0
   summary : String
+  logsComplete : Bool := true
 
 /-- Target of B: the eligible copy (the replica) is promoted; a returning or
     replaced copy does not displace it; redundancy comes back. Acknowledged
@@ -416,7 +423,9 @@ def stopVerdict (o : StopObs) : Option String :=
   else if o.finalMaster != some o.oldReplica then some s!"the promoted copy was displaced by {o.finalMaster} after the old worker came back"
   else match o.missingMaster with
     | none => some (unobservable "the final master's copy could not be read")
-    | some m => if m > o.lateMissing then some s!"DATA: {m - o.lateMissing} acknowledged write(s) missing on the final master that were acknowledged MORE than the async window before the stop" else none
+    | some m => if m > o.lateMissing then some s!"DATA: {m - o.lateMissing} acknowledged write(s) missing on the final master that were acknowledged MORE than the async window before the stop"
+      else if !o.logsComplete then some (unobservable "the writer log was not confirmed complete (no end marker / cut-short last line)")
+      else none
 
 private def stopRun (c : Ctx) (returns : Bool) : IO (Except String StopObs) := do
   match ← c.placement with
@@ -451,10 +460,11 @@ private def stopRun (c : Ctx) (returns : Bool) : IO (Except String StopObs) := d
       c.event s!"manual step: force-deleted {p.master.name} (its worker is stopped)"
     let (s3, red) ← observe c 420 (redundant c (if returns then none else some p.master.node))
     c.event s!"redundancy restored={red}"
-    let ws? ← c.stopWriter "svc"
+    let wl? ← c.stopWriter "svc"
     if !returns then discard <| startWorker p.master.node
-    let some ws := ws?
-      | return .error (unobservable "the writer's record could not be read (never counted as 'no acknowledged write')")
+    let some wl := wl?
+      | return .error (unobservable "the writer's record could not be read or failed its integrity check (never counted as 'no acknowledged write')")
+    let ws := wl.ws
     let samples := s0 ++ s1 ++ s2 ++ s3
     let finalM := (← c.roles).bind (·.1)
     let copies ← finalCopies c
@@ -470,7 +480,8 @@ private def stopRun (c : Ctx) (returns : Bool) : IO (Except String StopObs) := d
     let resumed := if prom then (ws.filter fun w => classify w.reply == .ack && w.t > tPromEpoch).length else 0
     return .ok { oldMaster := p.master.name, oldReplica := p.replica.name, promoted := promoted,
                  promotionSec := promSec, autoRedundant := auto, redundantAfter := red, finalMaster := finalM,
-                 missingMaster := mm, lateMissing := late, acksAfterPromotion := resumed, summary }
+                 missingMaster := mm, lateMissing := late, acksAfterPromotion := resumed, summary,
+                 logsComplete := wl.complete }
 
 private def stopTest (c : Ctx) (returns : Bool) : IO TestResult := do
   match ← stopRun c returns with
@@ -602,6 +613,8 @@ structure PartObs where
   oldAcks : List (WriteRec × String)
   peerAcks : List (WriteRec × String)
   lostAcks : Option Nat
+  /-- both writer logs ended with their end marker (no cut-short line) -/
+  logsComplete : Bool := true
   summary : String
 
 /-- Was the injection established? `none` = yes. -/
@@ -628,47 +641,82 @@ def injectionProblem (o : PartObs) : Option String :=
       else none
   else none
 
-/-- The pure verdict. `none` = pass — a MEASUREMENT pass: local / forwarded
-    are inferred from the nodes' own-role readings, not traced per request,
-    so it is never an acceptance of failover safety. -/
-def partVerdict (o : PartObs) : Option String :=
-  match injectionProblem o with
-  | some why => some (notSetUp s!"injection not established: {why}")
-  | none =>
+/-- Everything the C / C' run established, each finding on its own
+    (review of 1b74644): an Unknown somewhere never hides a defect observed
+    elsewhere. Dual write is INFERRED (own-role readings); lost acks are
+    DIRECT (the final copy against the acknowledged values). -/
+structure PartReport where
+  injection : Option String
+  failedOver : Bool
+  oldLocal : Nat
+  newLocal : Nat
+  /-- inferred: old-master local acks while the new master was master by its
+      own view / new-master local acks while the old one still was -/
+  oldDual : Nat
+  newDual : Nat
+  /-- direct -/
+  lost : Option Nat
+  /-- acks in the cut window whose path cannot be told -/
+  unknown : Nat
+  /-- acks in the cut window -/
+  inWindow : Nat
+  logsComplete : Bool
+  lastOldLocal : Option Nat
+  firstNewLocal : Option Nat
+  deriving Repr
+
+def partReport (o : PartObs) : PartReport :=
   let inCut := fun (w : WriteRec) => w.span.1 ≥ o.tCut && w.span.2 ≤ o.tHeal
-  let unknown := (o.oldAcks ++ o.peerAcks).filter fun (w, p) => inCut w && p == "unknown"
+  let all := (o.oldAcks ++ o.peerAcks).filter fun (w, _) => inCut w
   -- a promotion counts only when the replica's own view said master DURING
   -- the cut (a promotion first seen after the heal is not a failover)
   let reads := (o.samples.flatMap (·.reads)).filter fun r => r.pod == o.replica && r.ts ≥ o.tCut && r.te ≤ o.tHeal
-  let failedOver := reads.any fun r => (r.view.map (·.role)) == some "master"
   let oldLocal := o.oldAcks.filter fun (w, p) => inCut w && p == "local"
   let newLocal := o.peerAcks.filter fun (w, p) => inCut w && p == "local"
-  -- dual write, on ONE time base (the debug pod's clock): an old-master
-  -- local ack over whose whole span the new master was master by its own
-  -- view, and a new-master local ack over whose whole span the old master
-  -- was master by its own view
+  -- dual write, on ONE time base (the debug pod's clock)
   let oldDual := oldLocal.filter fun (w, _) => ownRoleOver o.samples o.replica w.span.1 w.span.2 == some "master"
   let newDual := newLocal.filter fun (w, _) => ownRoleOver o.samples o.oldMaster w.span.1 w.span.2 == some "master"
-  if !unknown.isEmpty then some (unobservable s!"{unknown.length} acknowledged write(s) in the cut window whose processing cannot be told from strictly bracketed own-view readings")
-  else match o.lostAcks with
-  | none => some (unobservable "the final master's copy could not be read")
-  | some n =>
-    if !oldDual.isEmpty && !newDual.isEmpty then
-      some s!"PRODUCT GAP (dual write, inferred from own-role readings): the old master acknowledged {oldDual.length} write(s) locally while the new master was master by its own view, and the new master {newDual.length} while the old one still was (cut {o.tCut}..{o.tHeal}); no fencing stops the old master (design decision point 2)"
-    else if n > 0 then some s!"DATA: {n} acknowledged write(s) missing on the final master after the heal"
-    else if o.nodeLevel then
-      if !failedOver then
-        some "NOT VERIFIED: the replica was not master by its own view at any time DURING the cut (no failover, or only after the heal) — availability after the partition and safety after a switch were not exercised"
-      else if newLocal.isEmpty then
-        some "NOT VERIFIED: after the failover the new master acknowledged no write locally during the cut (write availability on the new master not shown)"
-      else match (oldLocal.map (·.1.span.2)).max?, (newLocal.map (·.1.span.1)).min? with
-        | some lo, some fn => if lo ≥ fn then some s!"the old master still acknowledged locally until {lo}, not before the new master's first local ack at {fn}" else none
-        | _, _ => none
-    else if failedOver then
-      some "the replica became master while both pods stayed Ready (unexpected for C: no failover is expected while the operator only lost its connection)"
-    else if oldLocal.isEmpty then
-      some "NOT VERIFIED: the old master acknowledged no write locally during the cut (the single-master observation has no writes behind it)"
-    else none
+  { injection := injectionProblem o, failedOver := reads.any fun r => (r.view.map (·.role)) == some "master",
+    oldLocal := oldLocal.length, newLocal := newLocal.length, oldDual := oldDual.length, newDual := newDual.length,
+    lost := o.lostAcks, unknown := (all.filter (·.2 == "unknown")).length, inWindow := all.length,
+    logsComplete := o.logsComplete,
+    lastOldLocal := (oldLocal.map (·.1.span.2)).max?, firstNewLocal := (newLocal.map (·.1.span.1)).min? }
+
+def PartReport.render (r : PartReport) : String :=
+  s!"injection {(r.injection.map (s!"NOT established: " ++ ·)).getD "established"}; failover during the cut {r.failedOver}; local acks old {r.oldLocal} / new {r.newLocal}; dual write (inferred) old {r.oldDual} / new {r.newDual}; lost acks (direct) {r.lost}; coverage: {r.inWindow - r.unknown}/{r.inWindow} acks in the cut classified, {r.unknown} unknown; writer logs complete {r.logsComplete}"
+
+/-- The verdict from the report. Defects actually observed come first and
+    are never masked by an Unknown elsewhere; an Unknown then still blocks a
+    pass (it prevents the proof). `none` = pass — a MEASUREMENT pass (local
+    / forwarded inferred from own-role readings, not a per-request trace),
+    never an acceptance of failover safety. -/
+def partVerdict (o : PartObs) : Option String :=
+  let r := partReport o
+  let cov := s!" [{r.render}]"
+  match r.injection with
+  | some why => some (notSetUp s!"injection not established: {why}")
+  | none =>
+  if r.oldDual > 0 && r.newDual > 0 then
+    some (s!"PRODUCT GAP (dual write, inferred from own-role readings): the old master acknowledged {r.oldDual} write(s) locally while the new master was master by its own view, and the new master {r.newDual} while the old one still was (cut {o.tCut}..{o.tHeal}); no fencing stops the old master (design decision point 2)" ++ cov)
+  else if (r.lost.getD 0) > 0 then
+    some (s!"DATA: {r.lost.getD 0} acknowledged write(s) missing on the final master after the heal (direct)" ++ cov)
+  else if r.unknown > 0 then
+    some (unobservable s!"{r.unknown} acknowledged write(s) in the cut window whose processing cannot be told from strictly bracketed own-view readings — no defect observed in the classified part, but safety is not shown" ++ cov)
+  else if r.lost.isNone then some (unobservable "the final master's copy could not be read" ++ cov)
+  else if !r.logsComplete then some (unobservable "a writer log was not confirmed complete (no end marker / cut-short last line): the known acks are intact, completeness is not shown" ++ cov)
+  else if o.nodeLevel then
+    if !r.failedOver then
+      some ("NOT VERIFIED: the replica was not master by its own view at any time DURING the cut (no failover, or only after the heal) — availability after the partition and safety after a switch were not exercised" ++ cov)
+    else if r.newLocal == 0 then
+      some ("NOT VERIFIED: after the failover the new master acknowledged no write locally during the cut (write availability on the new master not shown)" ++ cov)
+    else match r.lastOldLocal, r.firstNewLocal with
+      | some lo, some fn => if lo ≥ fn then some (s!"the old master still acknowledged locally until {lo}, not before the new master's first local ack at {fn}" ++ cov) else none
+      | _, _ => none
+  else if r.failedOver then
+    some ("the replica became master while both pods stayed Ready (unexpected for C: no failover is expected while the operator only lost its connection)" ++ cov)
+  else if r.oldLocal == 0 then
+    some ("NOT VERIFIED: the old master acknowledged no write locally during the cut (the single-master observation has no writes behind it)" ++ cov)
+  else none
 
 /-- The debug pod's clock (the writers' time base). -/
 private def debugEpoch (c : Ctx) : IO (Option Nat) := do
@@ -814,15 +862,22 @@ private def partitionRun (c : Ctx) (nodeLevel : Bool) : IO (Except String PartOb
     c.event "healed"
     -- the observer keeps reading across the heal, then stops
     IO.sleep 8000
-    let ss ← obs.finish
+    let ss ← match ← obs.finish with
+      | .ok xs => pure xs
+      | .error e => return .error (unobservable s!"own-view observer: {e}")
     let some tHeal := tHeal? | return .error (unobservable "the debug pod's clock could not be read at the heal")
     let gaps := pods.map fun r => (r.name, maxReadingGap ss r.name tCut tHeal)
-    c.art "report.txt" s!"own-view readings {ss.length}; widest gap between readings during the cut {gaps} s (bracket limit {maxBracketSec} s)"
+    let span := pods.map fun r =>
+      let rs := (ss.flatMap (·.reads)).filter (·.pod == r.name)
+      (r.name, (rs.head?.map (·.ts)), (rs.getLast?.map (·.te)))
+    c.art "report.txt" s!"own-view observer: {ss.length} samples, ended normally; readings per pod first..last {span} (required {tCut}..{tHeal}); widest gap between readings during the cut {gaps} s (bracket limit {maxBracketSec} s) — the real interval with kubectl, not the unit fixture's"
     let (s2, _) ← observe c 180 (redundant c none)
-    let wsOld? ← c.stopWriter "old"
-    let wsPeer? ← c.stopWriter "peer"
-    let (some wsOld, some wsPeer) := (wsOld?, wsPeer?)
+    let wlOld? ← c.stopWriter "old"
+    let wlPeer? ← c.stopWriter "peer"
+    let (some wlOld, some wlPeer) := (wlOld?, wlPeer?)
       | return .error (unobservable "a writer's record could not be read or failed its integrity check (never counted as 'no acknowledged write')")
+    let wsOld := wlOld.ws
+    let wsPeer := wlPeer.ws
     let finalM := (← c.roles).bind (·.1)
     let copies ← finalCopies c
     let mcopy := finalM.bind fun n => (copies.lookup n).join
@@ -835,7 +890,8 @@ private def partitionRun (c : Ctx) (nodeLevel : Bool) : IO (Except String PartOb
     let summary := s!"{writerSummary "old" [] wsOld}; {writerSummary "peer" [] wsPeer}; own-view samples {ss.length}, widest reading gap in the cut {gaps}; samples after the heal {s2.length}"
     c.art "report.txt" summary
     return .ok { nodeLevel, oldMaster := p.master.name, replica := p.replica.name, inj, tCut, tHeal, samples := ss,
-                 oldAcks := acks wsOld, peerAcks := acks wsPeer, lostAcks := lost, summary }
+                 oldAcks := acks wsOld, peerAcks := acks wsPeer, lostAcks := lost, summary,
+                 logsComplete := wlOld.complete && wlPeer.complete }
 
 private def partitionTest (c : Ctx) (nodeLevel : Bool) : IO TestResult := do
   match ← partitionRun c nodeLevel with

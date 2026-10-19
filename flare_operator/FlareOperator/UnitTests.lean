@@ -1397,6 +1397,15 @@ def partChecks : List (String × Bool) :=
     ("C': an ack in the cut window whose path is unknown -> UNOBSERVABLE; an unreadable final copy -> UNOBSERVABLE",
       startsWith (partVerdict { base with oldAcks := [(ack 1 250 250 "o", "unknown")] }) "UNOBSERVABLE"
         && startsWith (partVerdict { base with lostAcks := none }) "UNOBSERVABLE"),
+    ("C': an Unknown elsewhere does not hide an observed dual write (PRODUCT GAP) or observed lost acks (DATA); the report keeps every finding",
+      let dual := { base with samples := withFail, oldAcks := [(ack 1 300 301 "o", "local"), (ack 5 205 205 "o", "unknown")], peerAcks := [(ack 2 300 301 "p", "local")] }
+      let lost := { base with oldAcks := [(ack 1 250 250 "o", "local"), (ack 5 205 205 "o", "unknown")], lostAcks := some 3 }
+      let r := partReport dual
+      startsWith (partVerdict dual) "PRODUCT GAP" && startsWith (partVerdict lost) "DATA"
+        && r.unknown == 1 && r.oldDual == 1 && r.newDual == 1 && ((partVerdict dual).map (containsSub · "1 unknown")).getD false),
+    ("C': incomplete writer logs: observed lost acks are still DATA; with none lost it is UNOBSERVABLE, not a pass",
+      startsWith (partVerdict { base with logsComplete := false, lostAcks := some 2 }) "DATA"
+        && startsWith (partVerdict { base with samples := withFail, oldAcks := [(ack 1 150 151 "o", "local")], peerAcks := [(ack 2 300 301 "p", "local")], logsComplete := false }) "UNOBSERVABLE"),
     ("C: links cut with both pods Ready, single master, the old master acked locally, nothing lost -> pass; no local ack at all -> NOT VERIFIED",
       let c : PartObs := { base with nodeLevel := false, samples := noFail.map fun s => { s with nodeReady := some "True" }, inj := { inj with apiBefore := none, apiAfter := none } }
       partVerdict c == none && startsWith (partVerdict { c with oldAcks := [] }) "NOT VERIFIED"),
@@ -1420,16 +1429,18 @@ def partChecks : List (String × Bool) :=
         && r.contains { node := "w", chain := "OUTPUT", src := "fc00::4", dst := "fc00::5" }
         && r.contains { node := "cp", chain := "INPUT", src := "fc00::4", dst := "fc00::5" }
         && !r.any (fun x => x.src.contains ':' != x.dst.contains ':')),
-    ("writer log: complete lines 1..N with an ack are accepted; only a cut-short LAST line is dropped (and reported)",
+    ("writer log: 1..N with an ack and the writer's END marker = complete; a cut-short last line or no marker = known acks kept but NOT complete",
       let good := "1 10 i k1 v STORED 9\n2 11 i k2 v NORESPONSE 10\n"
-      (parseWriterLog good).toOption.map (·.1.length) == some 2
-        && (parseWriterLog (good ++ "3 12 i k")).toOption.map (fun (ws, n) => (ws.length, n.isSome)) == some (2, true)),
-    ("writer log: empty, a corrupt middle line, a gap / repeat in the sequence, or no ack at all -> REJECTED (unobserved, never 'no write')",
+      (parseWriterLog (good ++ "END 2\n")).toOption.map (fun l => (l.ws.length, l.complete)) == some (2, true)
+        && (parseWriterLog good).toOption.map (fun l => (l.ws.length, l.complete)) == some (2, false)
+        && (parseWriterLog (good ++ "3 12 i k")).toOption.map (fun l => (l.ws.length, l.complete, l.note.isSome)) == some (2, false, true)),
+    ("writer log: empty, a corrupt middle line, a gap / repeat, no ack, or an END marker that disagrees with the records (a lost tail) -> REJECTED",
       (parseWriterLog "").toOption.isNone && (parseWriterLog "\n\n").toOption.isNone
         && (parseWriterLog "1 10 i k1 v STORED 9\ngarbage\n2 11 i k2 v STORED 10\n").toOption.isNone
         && (parseWriterLog "1 10 i k1 v STORED 9\n3 11 i k3 v STORED 10\n").toOption.isNone
         && (parseWriterLog "1 10 i k1 v STORED 9\n1 11 i k1 v STORED 10\n").toOption.isNone
-        && (parseWriterLog "1 10 i k1 v NORESPONSE 9\n2 11 i k2 v SERVER_ERROR 10\n").toOption.isNone),
+        && (parseWriterLog "1 10 i k1 v NORESPONSE 9\n2 11 i k2 v SERVER_ERROR 10\n").toOption.isNone
+        && (parseWriterLog "1 10 i k1 v STORED 9\nEND 5\n").toOption.isNone),
     ("API paths: usable = probed open + the kubelet's live peers; a family that only REFUSES (nothing listens) is not required; cannot-run is not open",
       let a : ApiPaths := { server := some ("flare-e2e-control-plane", 6443), resolved := ["172.18.0.5", "fc00::5"], before := [("172.18.0.5", .open_), ("fc00::5", .refused)], peersBefore := some ["172.18.0.5"] }
       let b : ApiPaths := { a with before := [("172.18.0.5", .cannotRun "x"), ("fc00::5", .open_)], peersBefore := some ["10.9.9.9"] }
@@ -1453,10 +1464,20 @@ def checkDisruption (ctx : Ctx) : IO Unit := do
   -- timeouts (scaled fixture: period 100 ms, the caller blocks 5 x 300 ms)
   let obs ← FlareOperator.E2E.NodeOps.startObserver IO.monoMsNow 100
   for _ in [0:5] do IO.sleep 300
-  let ts ← obs.finish
+  let ts := (← obs.finish).toOption.getD []
   let gaps := (ts.zip (ts.drop 1)).map fun (a, b) => b - a
-  check ctx s!"observer: readings continue while the caller blocks (n={ts.length}, widest gap {gaps.max?} ms, limit 250 ms)"
+  check ctx s!"observer: readings continue while the caller blocks (n={ts.length}, widest gap {gaps.max?} ms, limit 250 ms; a fake 0 ms reading — the real interval with kubectl is reported by each run)"
     (ts.length ≥ 10 && (gaps.max?.getD 0) < 250)
+  -- an observer whose reading throws is an ERROR at finish, not a shorter list
+  let n ← IO.mkRef 0
+  let bad ← FlareOperator.E2E.NodeOps.startObserver (do
+    n.modify (· + 1)
+    if (← n.get) > 3 then throw (IO.userError "reading failed")
+    return (← n.get)) 20
+  IO.sleep 300
+  let r ← bad.finish
+  check ctx "observer: an exception in a reading surfaces at finish (with the count so far), never a silently shorter list"
+    (match r with | .error e => containsSub e "3 reading" && containsSub e "reading failed" | .ok _ => false)
 
 /-- Decision 2026-10-16 (promotion-proxy-only-copy, 38952942796): a dead
     ex-slave is attributed to its partition ONLY by its persisted record,

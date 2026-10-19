@@ -269,7 +269,7 @@ def Ctx.sample (c : Ctx) : IO (Nat × Option String × List (String × String)) 
     Each line: n epoch address key value reply (NORESOLVE / NORESPONSE when
     not observed). -/
 def Ctx.startWriter (c : Ctx) (name host pfx : String) : IO Bool := do
-  let script := s!"n=0; out=/tmp/w-{name}.log; : > $out; rm -f /tmp/stop-{name}; while [ ! -f /tmp/stop-{name} ]; do n=$((n+1)); k={pfx}_$n; v=v$n; case {host} in *[a-z]*) ip=$(nslookup {host} 2>/dev/null | awk '/^Address/ \{a=$NF} END \{print a}');; *) ip={host};; esac; t0=$(date +%s); r=$(printf 'set %s 0 0 %d\\r\\n%s\\r\\n' \"$k\" $\{#v} \"$v\" | nc -w 3 \"$ip\" {c.cfg.flarePort} 2>/dev/null | head -1 | tr -d '\\r' | tr ' ' '_'); echo \"$n $(date +%s) $\{ip:-NORESOLVE} $k $v $\{r:-NORESPONSE} $t0\" >> $out; done"
+  let script := s!"n=0; out=/tmp/w-{name}.log; : > $out; rm -f /tmp/stop-{name}; while [ ! -f /tmp/stop-{name} ]; do n=$((n+1)); k={pfx}_$n; v=v$n; case {host} in *[a-z]*) ip=$(nslookup {host} 2>/dev/null | awk '/^Address/ \{a=$NF} END \{print a}');; *) ip={host};; esac; t0=$(date +%s); r=$(printf 'set %s 0 0 %d\\r\\n%s\\r\\n' \"$k\" $\{#v} \"$v\" | nc -w 3 \"$ip\" {c.cfg.flarePort} 2>/dev/null | head -1 | tr -d '\\r' | tr ' ' '_'); echo \"$n $(date +%s) $\{ip:-NORESOLVE} $k $v $\{r:-NORESPONSE} $t0\" >> $out; done; echo \"END $n\" >> $out"
   match ← kubectl ["exec", c.cfg.debugPod, "-n", c.cfg.«namespace», "--", "sh", "-c", s!"nohup sh -c '{script.replace "'" "'\\''"}' >/dev/null 2>&1 &"] with
   | .ok _ => c.event s!"writer {name} started against {host} (keys {pfx}_N)"; return true
   | .error e => c.event s!"writer {name} could not start: {e}"; return false
@@ -298,43 +298,71 @@ def parseWrites (out : String) : List WriteRec :=
     | [n, t, ip, k, v, r, t0] => (n.toNat?).bind fun n => (t.toNat?).bind fun t => (t0.toNat?).map fun t0 => { n, t, ip, key := k, value := v, reply := r, t0 }
     | _ => none
 
-/-- A writer's log, checked for completeness (review 2026-10-19): every
-    complete line parses, the sequence numbers are 1..N without a gap or a
-    repeat, at least one write was acknowledged. Only the LAST line may be cut
-    short (the writer was stopped mid-append): it is dropped and reported.
-    An empty, corrupt or gapped log is an error — never "no write". -/
-def parseWriterLog (out : String) : Except String (List WriteRec × Option String) := do
+/-- A writer's log after the stop. `complete` = it ends with the writer's own
+    `END <n>` marker, written AFTER its last record, with `n` = the number of
+    records: the writer stopped and nothing after record 1 was lost (a log
+    that lost its tail cannot pass on the 1..N sequence alone — the marker
+    carries N). -/
+structure WriterLog where
+  ws : List WriteRec
+  complete : Bool
+  note : Option String := none
+  deriving Repr
+
+/-- Check a writer log (review 2026-10-19/20): every complete line parses,
+    the sequence is 1..N with no gap or repeat, at least one write was
+    acknowledged. Only the LAST line may be cut short (the writer was stopped
+    mid-append): it is dropped and the log is then NOT complete (an ack may
+    have been in it). No end marker = not complete. An empty, corrupt or
+    gapped log is an error — never "no write". -/
+def parseWriterLog (out : String) : Except String WriterLog := do
   let endsNl := out.endsWith "\n"
   let ls := (out.splitOn "\n").filter (!·.isEmpty)
   if ls.isEmpty then throw "the writer log is empty"
+  let (body, marker) := match ls.getLast? with
+    | some l => if l.startsWith "END " then (ls.dropLast, (l.drop 4).trim.toNat?) else (ls, none)
+    | none => (ls, none)
   let mut ws : List WriteRec := []
   let mut note : Option String := none
   let mut i := 0
-  for l in ls do
+  for l in body do
     i := i + 1
     match parseWrites l with
     | [w] => ws := ws ++ [w]
     | _ =>
-      if i == ls.length && !endsNl then note := some s!"the last line was cut short and is not used: {l.take 80}"
+      if i == body.length && marker.isNone && !endsNl then note := some s!"the last line was cut short and is not used: {l.take 80}"
       else throw s!"line {i} of the writer log does not parse: {l.take 80}"
   let ns := ws.map (·.n)
   if ns != (List.range ws.length).map (· + 1) then
     throw s!"the writer log's sequence is not 1..{ws.length} (a gap, repeat or reorder: starts {ns.take 5})"
   if !ws.any (fun w => w.reply == "STORED") then throw "the writer log has no acknowledged write"
-  return (ws, note)
+  match marker with
+  | some n =>
+    if n != ws.length then throw s!"the writer's end marker says {n} records, the log has {ws.length} (records lost)"
+    return { ws, complete := true }
+  | none => return { ws, complete := false, note := some ((note.getD "") ++ " no end marker: the writer was not confirmed stopped") }
 
-def Ctx.stopWriter (c : Ctx) (name : String) : IO (Option (List WriteRec)) := do
-  discard <| execInDebugPod c.cfg.debugPod c.cfg.«namespace» s!"touch /tmp/stop-{name}"
-  IO.sleep 4000
+def Ctx.stopWriter (c : Ctx) (name : String) : IO (Option WriterLog) := do
+  match ← execInDebugPod c.cfg.debugPod c.cfg.«namespace» s!"touch /tmp/stop-{name}" with
+  | .error e => c.event s!"writer {name}: the stop request failed ({e.take 120})"; return none
+  | .ok _ => pure ()
+  -- wait (bounded) for the writer's own end marker
+  let mut ended := false
+  for _ in [0:20] do
+    if !ended then
+      match ← execInDebugPod c.cfg.debugPod c.cfg.«namespace» s!"tail -n 1 /tmp/w-{name}.log" with
+      | .ok o => if o.trim.startsWith "END " then ended := true else IO.sleep 1000
+      | .error _ => IO.sleep 1000
+  if !ended then c.event s!"writer {name}: no end marker within 20 s of the stop request"
   match ← execInDebugPod c.cfg.debugPod c.cfg.«namespace» s!"cat /tmp/w-{name}.log" with
   | .error e => c.event s!"writer {name}: the log cannot be read ({e.take 120})"; return none
   | .ok out =>
     match parseWriterLog out with
     | .error why => c.event s!"writer {name}: log REJECTED as unobserved — {why}"; return none
-    | .ok (ws, note) =>
-    if let some n := note then c.event s!"writer {name}: {n}"
-    for w in ws do c.art s!"writes-{name}.txt" s!"{w.n} {w.t} {w.ip} {w.key} {w.value} {w.reply} {w.t0}"
-    return some ws
+    | .ok wl =>
+    if let some n := wl.note then c.event s!"writer {name}: {n}"
+    for w in wl.ws do c.art s!"writes-{name}.txt" s!"{w.n} {w.t} {w.ip} {w.key} {w.value} {w.reply} {w.t0}"
+    return some wl
 
 /-- Reply classes: an acknowledgement, an explicit error, or unobserved. -/
 inductive Reply where
@@ -589,11 +617,14 @@ def startObserver {α : Type} (once : IO α) (periodMs : Nat) : IO (Observer α)
   let task ← IO.asTask (prio := .dedicated) (observerLoop once periodMs stop acc)
   return { stop, acc, task }
 
-/-- Stop and collect (waits for the iteration in progress). -/
-def Observer.finish {α : Type} (o : Observer α) : IO (List α) := do
+/-- Stop and collect (waits for the iteration in progress). An observer that
+    ended with an exception is an ERROR (with how many readings it had), never
+    a silently shorter list. -/
+def Observer.finish {α : Type} (o : Observer α) : IO (Except String (List α)) := do
   o.stop.set true
-  discard <| IO.wait o.task
-  return (← o.acc.get).toList
+  match ← IO.wait o.task with
+  | .ok () => return .ok (← o.acc.get).toList
+  | .error e => return .error s!"the observer failed after {(← o.acc.get).size} reading(s): {e}"
 
 /-- What has been observed so far (the observer keeps running). -/
 def Observer.sofar {α : Type} (o : Observer α) : IO (List α) := return (← o.acc.get).toList

@@ -133,3 +133,45 @@
 - **C' は注入が成立した**（初めて）: ルール 24 本（IPv6 を含む）。worker の ip6tables OUTPUT（::2→::5）が 1168 パケットを落とした。Lease は 14:38:26 から更新が止まり（切断 14:38:35）、node Ready は 86 サンプルで Unknown。operator は master Pod の NotReady を 76 s で dead と判断し、14:41:38 に replica を昇格した（`PROMOTION NOT LOSS-FREE`、旧 master は生きていて client が届く状態）。**IPv6 経路の仮説はカウンタと Lease 停止で強く裏付けられた**（kubelet の接続先そのものの記録は 062014f から）
 - それでも判定は UNOBSERVABLE（ACK 10877 件 / C は 2789 件の経路を判定できない）: 7fe906f では、probe の手順の間に読み取りの空白が残っていた（追加レビューの指摘どおり）。062014f の observer で直す
 - 二重 write の有無はこの run では判定していない（製品ギャップの測定は次の run）
+
+## 11. 分断時に旧 master の書込権限を失効させる — 製品設計の選択肢（提案のみ。未承認・未実装・既定動作は変えない）
+
+### 11.1 何が起きているか（7fe906f の C' で観測）
+
+master の worker が control-plane から切れると、node は Unknown になり、operator は Pod NotReady を 76 s で dead と判断して replica を昇格した。旧 master のプロセスは生きていて、client は届き、旧 master は自分の map で master のまま write を受けて ACK し続ける。operator は旧 master に届かないので、計画退避の fence（operator が arm / re-arm する短期 fence）は使えない。heal 後、旧 master は新しい履歴に従う側として再構築されるので、分断中に旧 master が ACK した write は失われる。**二重 write と ACK 済み write の喪失が同時に起こりうる**（判定は次の run の測定で出す）。
+
+### 11.2 守るべき安全条件
+
+S1. どの時点でも、1 つの partition で write を ACK できる node は高々 1 つ。
+S2. 新 master は、旧 master がもう ACK できないことが**証明された後**にだけ、最初の write を ACK する。
+S3. S1 / S2 は、分断、flared の停止・再開、operator の再起動・leader 交代、遅れて届く map や更新の下でも成り立つ。
+S4. 権限は時間か世代で失効する。operator からの明示の取り消しが届くことを前提にしない（分断では届かない）。
+
+### 11.3 選択肢
+
+| 案 | 仕組み | S1 / S2 | 可用性のコスト | 実装 |
+|---|---|---|---|---|
+| **A. master の書込リース + 世代** | operator（leader）が partition ごとに master へ `lease <partition> <epoch> <L 秒>` を更新し続ける。flared は**受信時刻からの単調時計**でリースを数え、期限内だけ write を受け付ける（入口は write fence と同じ admission）。期限が切れると自分で write を拒否する。昇格は、旧 master へ**最後にリースを送った時刻**から L + ドリフト余裕 + 最大 write 時間が経ってから。新 master は世代を上げ、その世代を永続化してから ACK を始める。古い世代の forwarded write / 複製は拒否 | 両方満たす（単調時計のドリフトに上限があるという仮定の下） | operator か制御経路が L 秒届かないと、**正常な master も write を止める**（現状は operator が止まっても write は続く）。failover は少なくとも L 延びる | flared: リース状態、admission の判定、`lease` 命令、stats。operator: reconcile pass と独立したリース更新タスク（障害中は 1 pass が 11〜15 s かかるので、pass ごとの更新では足りない）、昇格前の待ち、世代の永続化 |
+| B. 多数決による自己停止 | master は replica と witness（operator など）の過半数に届く間だけ write を受ける。孤立した旧 master は自分で止まる | 満たす（A と同じ時間の議論が必要） | witness の配置と運用が要る。1m+1s では witness 必須 | 大きい（会員管理・witness） |
+| C. 同期 ACK | replica が適用してから client に ACK する。replica から切れた旧 master は ACK できない | ACK 済みの喪失は防ぐ。二重 write の「受付」は残りうる（未 ACK で失敗） | 遅延が増える。replica 障害で write が止まる。止めないための縮退モードを入れるとギャップが戻る（MySQL semi-sync の timeout fallback と同じ） | 中（複製経路の同期化） |
+| D. client / proxy の世代トークン | client や proxy が世代を持って古い master を拒否する | 直接つなぐ client には効かない | 小 | client 側の対応が必要（範囲外） |
+| E. 旧 master が生きている可能性があるときは自動昇格しない | node / Pod が確実に止まっている証拠（判断点 3 の out-of-service taint、cloud API の停止確認）がある場合だけ昇格する | 満たす（自動昇格をしないので） | 分断では自動 failover しない（write 可能なのは旧 master 側だけ、client がそちらに届く場合だけ） | 小〜中 |
+
+### 11.4 A を採る場合に決める安全条件の詳細
+
+- **単調時計:** 経過時間は各 node の単調時計で測る。wall clock の同期は前提にしない。ドリフト率の上限 ρ を仮定し、昇格前の待ちは L·(1+ρ) + 余裕とする
+- **in-flight:** 期限切れの直前に admission を通った write が期限後に ACK されないようにする。残り時間が最大 write 時間より短ければ admission で拒否する（fence の in-flight 計上と同じ仕組みを使う）
+- **flared の停止・再開:** リースはメモリにだけ置く。再起動した flared はリースなしで始まり（write 拒否）、更新を受けるまで待つ。再起動で権限が延びることはない
+- **operator の再起動・leader 交代:** 新しい leader は、前の leader が最後に何を許可したか分からない前提で、昇格の前に L·(1+ρ) + 余裕を待つ。リース更新には leader の世代を付け、flared は古い世代からの更新を拒否する
+- **更新できないとき:** 期限が切れた master は write を拒否する。read は別の判断（stale read を許すか）
+- **計画退避との関係:** 計画退避の fence はリースの上に残す（期限内でも退避の準備では止める）。退避の grant はリースの世代にも束縛する
+
+### 11.5 ユーザー判断に上げる点（既定動作は黙って変えない）
+
+1. operator や制御経路が L 秒届かないときに、**正常な master の write が止まる**ことを受け入れるか（A / B の本質的な代償）
+2. L と余裕の値（固定値を決めず、まず kind で測定して提案する）。failover 時間がその分延びる
+3. A を実装するまでの間、旧 master が生きている可能性がある unready による昇格（今は 30 s で dead → 昇格）を続けるか、E のように止めるか。止めると分断と突然停止を区別できない場合に自動 failover しなくなる
+4. 同期 ACK（C）を、遅延と可用性を払ってでも組み合わせるか
+5. 期限切れ中の read を許すか
+
+推奨（判断前の提案）: A（リース + 世代）を本線にし、L は測定してから決める。それまでの既定動作は変えず、C' の測定（二重 write と ACK 喪失の件数）を判断材料として出す。

@@ -20,6 +20,7 @@ import FlareOperator.E2E.Helpers
 import FlareOperator.E2E.Setup
 import FlareOperator.E2E.NodeOpsHarness
 import FlareOperator.Kubectl
+import Lean.Data.Json
 
 namespace FlareOperator.E2E.Tests.NodeOps
 
@@ -269,6 +270,64 @@ private def holdTest (c : Ctx) : IO TestResult := do
     | some why => return .fail why
     | none => return .pass
 
+/-! ## #3: concurrent eviction requests (review 2026-10-19) -/
+
+/-- Exactly one request may be recorded out of simultaneous first evictions
+    of two pods; all are refused; neither pod is touched. -/
+def concurrentVerdict (allowed : Nat) (recordedNow : Nat) (statePod : Option String) (pods : List String) (intact : Bool) : Option String :=
+  if allowed > 0 then some s!"{allowed} of the simultaneous FIRST evictions were ALLOWED"
+  else if recordedNow != 1 then some s!"{recordedNow} requests were recorded out of the simultaneous evictions (exactly 1 expected: the others must lose the compare-and-swap or see the disruption in progress)"
+  else if !(statePod.any pods.contains) then some s!"status.disruption names {statePod}, not one of the requested pods {pods}"
+  else if !intact then some "a requested pod was deleted or replaced"
+  else none
+
+private def countRecorded (c : Ctx) : IO Nat := do
+  let log ← kubectlLogsLabel s!"app={c.cfg.operatorName}" c.cfg.«namespace» 10000000
+  return ((log.splitOn "\n").filter fun l => containsSubstr l "EVICTION REFUSED" && containsSubstr l "recorded; retry later").length
+
+private def disruptionPhase (c : Ctx) : IO (Option String × Option String) := do
+  match ← kubectl ["get", "flarecluster", c.cfg.name, "-n", c.cfg.«namespace», "-o", "jsonpath={.status.disruption}"] with
+  | .ok t =>
+    match Lean.Json.parse t.trim with
+    | .ok j => return ((j.getObjValAs? String "pod").toOption, (j.getObjValAs? String "phase").toOption)
+    | .error _ => return (none, none)
+  | .error _ => return (none, none)
+
+private def concurrentTest (c : Ctx) : IO TestResult := do
+  match ← c.placement with
+  | .error e => return .fail e
+  | .ok p =>
+    c.conditions ["#3: four FIRST evictions at once (master x2, replica x2), bare Eviction bodies (kubectl create --raw, background)"]
+    let ns := c.cfg.«namespace»
+    let before ← countRecorded c
+    let one := fun (pod : String) (i : Nat) =>
+      s!"(printf '%s' '\{\"apiVersion\":\"policy/v1\",\"kind\":\"Eviction\",\"metadata\":\{\"name\":\"{pod}\",\"namespace\":\"{ns}\"}}' | kubectl create --raw '/api/v1/namespaces/{ns}/pods/{pod}/eviction' -f - > /tmp/ev-conc-{i}.out 2>&1; echo $? > /tmp/ev-conc-{i}.rc) &"
+    let script := String.intercalate " " [one p.master.name 1, one p.master.name 2, one p.replica.name 3, one p.replica.name 4, "wait"]
+    discard <| IO.Process.output { cmd := "sh", args := #["-c", script] }
+    let mut allowed := 0
+    for i in [1, 2, 3, 4] do
+      let rc := (← IO.Process.output { cmd := "cat", args := #[s!"/tmp/ev-conc-{i}.rc"] }).stdout.trim
+      let out := (← IO.Process.output { cmd := "cat", args := #[s!"/tmp/ev-conc-{i}.out"] }).stdout.trim
+      c.art "concurrent.txt" s!"request {i} rc={rc}: {out}"
+      if rc == "0" then allowed := allowed + 1
+    IO.sleep 3000
+    let recorded := (← countRecorded c) - before
+    let (pod, phase) ← disruptionPhase c
+    let pods := (← c.pods).getD []
+    let intact := [p.master, p.replica].all fun x => pods.any fun q => q.name == x.name && q.uid == x.uid && !q.deleting
+    IO.eprintln s!"# [{c.test}] allowed={allowed}; recorded={recorded}; status.disruption={pod}/{phase}; pods intact={intact}"
+    let verdict := concurrentVerdict allowed recorded pod [p.master.name, p.replica.name] intact
+    -- let the recorded request run out (a grant nobody uses expires, an
+    -- unproven prepare aborts) before the next test
+    let (_, _) ← observe c 420 (do
+      let (_, ph) ← disruptionPhase c
+      return ph == some "aborted" || ph.isNone)
+    let (_, phEnd) ← disruptionPhase c
+    c.event s!"the recorded request ended as {phEnd}"
+    match verdict with
+    | some why => return .fail why
+    | none => return .pass
+
 def holdSuite : TestSuite :=
   let cfg := { cfgOf "node-hold" true false with evictionGuard := true }
   { name := "node-ops-hold"
@@ -279,6 +338,8 @@ def holdSuite : TestSuite :=
     onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
     afterEach := fun i => saveFullLogs cfg.«namespace» s!"after-test-{i}"
     tests := [
+      { name := "(#3) four FIRST evictions at once for the master and the replica: all refused, exactly ONE request recorded (the others lose the compare-and-swap or see it in progress), neither pod touched"
+        run := concurrentTest { cfg, suite := "node-ops-hold", test := "concurrent" } },
       { name := "(D) the replica is cut off and behind; a standard drain of the master's worker is HELD: the drain does not complete, the master is not deleted, and the requester is told why"
         run := holdTest { cfg, suite := "node-ops-hold", test := "d-behind" } }
     ] }

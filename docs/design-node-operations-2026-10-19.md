@@ -66,3 +66,29 @@
 - operator: `StateMachine/Disruption`（純粋）、`EvictionGuard`（webhook と prepare）、`status.disruption`（CRD）、webhook サーバ（127.0.0.1、TLS は sidecar）。単体 596 合格
 - chart: `evictionGuard`（既定 OFF）
 - E2E: `evictionGuard` を有効にしたハーネス。A / D はガードあり、`*-control` は同じ SHA でガードなし（対照）
+
+## 8. 対照の結果（acfa862、E2E 39217253658 / 39217262413 / 39217270748、single-suite）
+
+旧 SHA の証跡。下の §9 の修正の成功扱いにはしない。
+
+| シナリオ | ガードあり（node-ops-drain / -hold） | ガードなし（*-control） |
+|---|---|---|
+| A master の drain（後継の worker に 100 ms 遅延） | 合格。ACK 欠損 master 0 / replica 0。冗長性の回復まで 130 s。**fence 中の client エラー: svc writer 8095 件 / peer 150 件、約 46 s の窓**（判断点 4 の測定値） | **不合格: ACK 済み write 2 件が新 master から欠損**（ギャップを再現） |
+| A' replica の drain | 合格、欠損 0、回復 91 s | （未実施） |
+| D 後継遮断中の drain | 合格: drain は完了せず、master は削除されず、理由が requester に届いた | **不合格: 後継が遮断されたまま drain が完了** |
+| C 複製・制御経路の切断 | 合格、二重 write 0 | — |
+| C' master の worker を control-plane からも 330 s 切断 | 合格（測定）: 330 s の間 failover は起きず、master は 1 つ、二重 write 0、ACK 欠損 0 | — |
+
+C' で failover が起きなかった理由は未分解（node NotReady の後の Pod Ready の遷移と operator の unready 判定を次で確認する）。
+
+## 9. レビュー指摘（2026-10-19、対象 6f65ab7）への対応
+
+| # | 指摘 | 修正 | 反例テスト | 残余 |
+|---|---|---|---|---|
+| 1 | fence の TTL 切れ後に古い barrier を再利用しうる | flared: `fence_generation`（未 arm → arm の遷移ごとに +1、同一 token の継続 re-arm は不変）と、一度のロックで読む `write_fence::snapshot`。operator: fence を初めて見た時の generation（と boot id）を記録し、以後の各 step で一致を要求。不一致・未 arm = 継続性の喪失 → barrier を無効化して fencing に戻る（再 drain・barrier 再取得・後継の再追従）。committed map の切替後の喪失は abort（grant しない）。target の再起動（boot 変化）は abort | C++ `test_generation_proves_continuity_across_ttl`（TTL 跨ぎで gap 中の write が受理され、同 token の再 arm で generation が変わる）。Lean `#1 fence lapse ...`（gap で seq 60→75、古い barrier 60 では進まず、新 barrier 75 を要求）、未 arm、切替後の喪失、boot 変化 | grant 後の期限切れは、旧 master が自分の map で proxy であることを grant 条件で確認済みなので、再開した write は新 master へ転送される（#2）。切替前に失効して gap で受理された write は barrier の再取得で後継に要求する |
+| 2 | switched が operator の desired map だけ。successor を捨てていた | flared: `own_role` / `own_state` / `own_partition`（自分が受理した map）。operator: successor を fencing 時に **固定**（適用位置最大 → key 最小）。switch 確認 = committed map が切替済み、かつ target が自分の map で proxy、かつ固定した successor（同一 UID / boot / copy、Ready）が自分の map でその partition の master、かつ両者の `node_map_version` ≥ committed version、かつ fence が継続。planned switch 中は同じ partition の他コピーを昇格候補から外し（`plannedExcluded`）、commit 時にも他コピーの昇格を abort。grant 時に fence を release しない。切替後の abort では、旧 master が自分の map で master のままなら fence を維持する | Lean `#2 the switch is confirmed from the nodes' OWN maps`（desired map だけ、旧 map version、target が master のまま、successor が slave のまま、successor の boot 変化）、`#2 another candidate appears`、`chooseSuccessor`（候補複数）、`plannedExcluded`、切替後 abort の fence 維持 | 「旧 master の write 拒否」は fence と own_role=proxy で確認し、実際の書込試行による確認はしていない。own_role と node_map_version は別のロックで読む（version は単調なので、保守側にずれるだけ）。昇格時に history epoch は変わるため、切替後の successor の束縛は UID / boot / copy / partition |
+| 3 | admission と prepare の並行更新に排他も CAS もない | すべての状態変更を `commit` 1 本にした: プロセス内ロックの下で (a) lease を自分が保持し、開始時と同じ transitions、(b) 開始時と同じ leadership generation、(c) メモリ上の状態が判断の元と同じ、(d) クラスタの状態が判断の元と同じ、を確認してから、サーバ側 CAS（JSON patch の `test` で読んだ値と完全一致を要求、キーがなければ resourceVersion 条件付き merge）で書く。外れたら破棄（admission は「retry」で拒否、prepare は次の pass で再判断）。遅い読み取りはロックの外 | Lean `#3 commit`（lease なし、generation 変化、同時 admission、古い reconcile、読めない status）、`#3 ... compare-and-swap`（patch の形） | E2E での同時要求・リーダ交代・古い更新の試験はまだない（次の対象 suite で追加） |
+| 4 | replicaSafe が master items>0 だけで true | `replicaVerdict`: master が Ready で、自分の map でその partition の master、copy が健全（identity 一致・quarantine / partial / restored-unverified でない）。target は R3 eligible で、検証元が現 master の key、検証時の history が master の `rocksdb_source_epoch` と一致し、適用位置が master の latest sequence 以下。読めない = Unknown = 保留。target が空（0 件）なら lineage は不要（master の健全性は必要）。grant に master の key と binding を束縛し、admission と granted 中の毎 pass で再確認（変われば grant 撤回） | Lean `#4 replica`（非空 master で history 違い、検証元違い、master より先、not eligible、Unknown、legacy の空 epoch、master が自分の map で slave、copy 不健全 → すべて保留。毎 pass の再確認で撤回） | 適用位置の比較は repl_applied_lsn（master の LSN 空間）と master の latest sequence |
+| 5 | lazy expiry の fence 確認と remove が不可分でない | 削除全体を `write_fence::entry` で覆った（確認と in-flight 計上が 1 つのロック。fenced なら隠すだけ）。試験用 seam `set_entry_hook`（admit 直後、mutation の前に呼ばれる） | C++ `test_expire_lazy_delete_counted_when_fence_arms_mid_delete`（check と削除の間で arm → in-flight 1、削除は barrier に含まれる。fence 中の次の lazy expiry は削除せず sequence も動かない） | 内部 mutation の監査: client / proxy / cross-cluster（op_set / op_delete / op_incr 系。add / replace / cas / append / prepend / touch / gat / decr は op_set / op_incr の `_run_server` を継承）、flush_all、snapshot push、orphan purge、reaper chunk はすべて entry。copy_discard は master では動かない。WAL apply / tombstone 回収は replica 側。メタ CF への書込（master id、generation、history、partition binding）は data を持たず、barrier の後に sequence を進めても保守側（後継により多くの適用を要求するだけ） |
+
+検証の状態: 実装済み、単体試験のみ（ローカル Lean、C++ は CI でコンパイル）。対象 suite の E2E、固定 candidate の全体 CI、レビュー、本番承認はいずれも未。ガードの有効化、pf-dev の変更、safe-to-evict の変更、tag / publish はこの対応に含まない。

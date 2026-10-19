@@ -127,3 +127,9 @@
 - **writer の記録:** 完全性を検査する（全行が parse できる、通番 1..N に欠番・重複がない、ACK が 1 件以上ある。途中で切れた最終行だけは除外して報告する）。空・破損・欠番は未観測として拒否する（A / B / C 共通）
 - **heal 時の時計:** 読めなければ明示的に UNOBSERVABLE にする
 - 判断は変えていない: 昇格条件・operator の timeout はそのまま。これは測定ハーネスの修正で、分断中に旧 master の書込を止める製品の仕組み（判断点 2）は未解決
+
+### 8.4 partition の targeted run（7fe906f、E2E 39256682356）— どちらも UNOBSERVABLE（読み取りの空白）
+
+- **C' は注入が成立した**（初めて）: ルール 24 本（IPv6 を含む）。worker の ip6tables OUTPUT（::2→::5）が 1168 パケットを落とした。Lease は 14:38:26 から更新が止まり（切断 14:38:35）、node Ready は 86 サンプルで Unknown。operator は master Pod の NotReady を 76 s で dead と判断し、14:41:38 に replica を昇格した（`PROMOTION NOT LOSS-FREE`、旧 master は生きていて client が届く状態）。**IPv6 経路の仮説はカウンタと Lease 停止で強く裏付けられた**（kubelet の接続先そのものの記録は 062014f から）
+- それでも判定は UNOBSERVABLE（ACK 10877 件 / C は 2789 件の経路を判定できない）: 7fe906f では、probe の手順の間に読み取りの空白が残っていた（追加レビューの指摘どおり）。062014f の observer で直す
+- 二重 write の有無はこの run では判定していない（製品ギャップの測定は次の run）

@@ -203,3 +203,15 @@ master (旧)                 operator leader               新 master
 4. 期限切れ中の read を許すか
 
 提案: 方式の採用や既定変更はまだしない。次は (a) C' の測定（二重 write と ACK 喪失の件数）を出す、(b) RQ 方式の必要条件（特に leader 権限の終わりと発行停止の永続化、VM 停止時の時計）を設計レビューにかける。
+
+### 8.5 partition の targeted run（1b74644、E2E 39273383364）
+
+- **C: 合格（測定。failover の受入ではない）。** 経路の切断を立証（16 ルール、両経路は切断前 OPEN・切断後 timeout、client は届く）。両 Pod は Ready のまま、node 自身の view で master は 1 つ、ACK 欠損 0
+- **C': UNOBSERVABLE（3409 ACK）だが、artifact では二重 master が読める**（1b74644 の判定は Unknown を先に返すので、二重 write を報告していない。8a4f482 で直した）:
+  - kubelet の endpoint: `kubelet.conf` の server は `flare-e2e-control-plane:6443`。worker での解決は `fc00:f853:ccd:e793::4` と `172.18.0.4`、切断前はどちらも open。kubelet の実接続は切断前 `172.18.0.4`。切断後はどちらも timeout。7fe906f より前に Lease が更新され続けたのは、IPv4 を切っても IPv6 で再接続できたためと読める（IPv6 も切った 7fe906f 以降は Lease が止まる）
+  - 読み取りの最大間隔は 3 s（上限 12 s）
+  - 切断 16:22:40。replica は自分の view で **切断 186 s 後に master**。その後 operator は約 15 s ごとに map の version を上げた。旧 master は自分の view で切断中ずっと master（version は変わらず）、heal 後に proxy
+  - つまり **約 170 s、両方が自分の view で master**。旧 master への writer は最後の ACK が heal 後まで続き、replica への writer は replica が master になってから ACK が始まった
+  - 3409 件の Unknown は、新 master の version が変わる前後で strict bracket が成立しない区間（role が同じでも version が変われば途中の変化を否定できないので、未判定のまま）
+  - report の "0 local / 56293 unknown path" は集計の誤り（サンプルを渡していなかった）。node 自身の view による経路の集計に直した
+- 二重 write の判定（推定）と ACK 喪失（直接）は、8a4f482 以降の run で独立に出す

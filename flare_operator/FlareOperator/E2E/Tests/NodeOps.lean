@@ -887,7 +887,11 @@ private def partitionRun (c : Ctx) (nodeLevel : Bool) : IO (Except String PartOb
     let ipToPod := pods.map fun r => (r.ip, r.name)
     let acks := fun (ws : List WriteRec) => (ws.filter fun w => classify w.reply == .ack).map fun w => (w, ownPathOf ss ipToPod w)
     inj := { inj with clientAcksAfterCut := (wsOld.filter fun w => classify w.reply == .ack && w.t ≥ tCut + 5 && w.t ≤ tHeal).length }
-    let summary := s!"{writerSummary "old" [] wsOld}; {writerSummary "peer" [] wsPeer}; own-view samples {ss.length}, widest reading gap in the cut {gaps}; samples after the heal {s2.length}"
+    -- path counts from the nodes' OWN views (writerSummary's map-based
+    -- path is not used here: it was printed with no samples, i.e. all
+    -- 'unknown', in the 1b74644 run)
+    let paths := fun (xs : List (WriteRec × String)) => s!"local {(xs.filter (·.2 == "local")).length} / forwarded {(xs.filter (·.2 == "forwarded")).length} / unknown {(xs.filter (·.2 == "unknown")).length}"
+    let summary := s!"writer old: {wsOld.length} writes, own-view paths of its acks {paths (acks wsOld)}; writer peer: {wsPeer.length} writes, {paths (acks wsPeer)}; own-view samples {ss.length}, widest reading gap in the cut {gaps}; samples after the heal {s2.length}"
     c.art "report.txt" summary
     return .ok { nodeLevel, oldMaster := p.master.name, replica := p.replica.name, inj, tCut, tHeal, samples := ss,
                  oldAcks := acks wsOld, peerAcks := acks wsPeer, lostAcks := lost, summary,

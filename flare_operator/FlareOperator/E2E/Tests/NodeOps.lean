@@ -616,8 +616,8 @@ def injectionProblem (o : PartObs) : Option String :=
   else if i.operatorToMaster != some false then some s!"operator -> master is not proven cut (probe {i.operatorToMaster})"
   else if i.clientAcksAfterCut == 0 then some "the client did not reach the old master during the cut (no acknowledged write): not the scenario"
   else if o.nodeLevel then
-    if i.apiBefore != some true then some s!"the worker's API path was not proven open before the cut (probe {i.apiBefore})"
-    else if i.apiAfter != some false then some s!"the worker -> API server path is not proven cut (probe {i.apiAfter})"
+    if i.apiBefore != some true then some s!"no API server path the kubelet can use was established before the cut (probe {i.apiBefore}; see api-endpoint.txt)"
+    else if i.apiAfter != some false then some s!"not every usable worker -> API server path is proven cut (probe {i.apiAfter}: {i.apiProbes})"
     else if !inCut.any (fun s => s.nodeReady == some "Unknown" || s.nodeReady == some "False") then
       some s!"the master's node never went NotReady/Unknown during the cut (Ready seen: {(inCut.filterMap (·.nodeReady)).eraseDups})"
     else
@@ -676,31 +676,30 @@ private def debugEpoch (c : Ctx) : IO (Option Nat) := do
   | .ok o => return o.trim.toNat?
   | .error _ => return none
 
-/-- Sample every ~2 s for `secs`: map roles (timeline), both pods' OWN
-    views (client side), the master pod's Ready, its node's Ready and Lease. -/
-private partial def partObserve (c : Ctx) (secs : Nat) (pods : List PodRow) (node : String) (master : String) : IO (List PartSample) := do
-  let deadline := (← nowSec) + secs
-  let mut acc : List PartSample := []
-  repeat
-    discard <| c.sample
-    let t ← epochNow
-    let mut reads : List Reading := []
-    for p in pods do
-      let ts ← debugEpoch c
-      let v := (← c.stats p.ip).bind ownVOf
-      let te ← debugEpoch c
-      match ts, te with
-      | some a, some b => reads := reads ++ [{ pod := p.name, ts := a, te := b, view := v }]
-      | _, _ => pure ()   -- no time base: the reading is not used
-    let mp := ((← c.pods).getD []).find? (·.name == master)
-    let nr ← nodeReady node
-    let ls ← nodeLeaseRenew node
-    let ownTxt := String.intercalate " " (reads.map fun r => s!"{r.pod}[{r.ts}..{r.te}]=" ++ ((r.view.map fun (x : OwnV) => x.role ++ "/v" ++ toString x.version ++ "/" ++ x.boot.take 8).getD "?"))
-    c.art "own.txt" s!"{t} {ownTxt} node={nr} lease={ls} masterReady={mp.map (·.ready)}"
-    acc := acc ++ [{ t, reads, masterPodReady := mp.map (·.ready), nodeReady := nr, lease := ls }]
-    if (← nowSec) ≥ deadline then return acc
-    IO.sleep 2000
-  return acc
+/-- ONE observation: both pods' own views (each read with the debug pod's
+    clock before / after, one exec), the master pod's Ready, its node's
+    Ready and Lease. Run by the background observer. -/
+private def partOnce (c : Ctx) (pods : List PodRow) (node : String) (master : String) : IO PartSample := do
+  let t ← epochNow
+  let mut reads : List Reading := []
+  for p in pods do
+    match ← c.statsTimed p.ip with
+    | some (a, b, o) => reads := reads ++ [{ pod := p.name, ts := a, te := b, view := o.bind ownVOf }]
+    | none => pure ()   -- no time base: the reading is not used
+  let mp := ((← c.pods).getD []).find? (·.name == master)
+  let nr ← nodeReady node
+  let ls ← nodeLeaseRenew node
+  let ownTxt := String.intercalate " " (reads.map fun r => s!"{r.pod}[{r.ts}..{r.te}]=" ++ ((r.view.map fun (x : OwnV) => x.role ++ "/v" ++ toString x.version ++ "/" ++ x.boot.take 8).getD "?"))
+  c.art "own.txt" s!"{t} {ownTxt} node={nr} lease={ls} masterReady={mp.map (·.ready)}"
+  return { t, reads, masterPodReady := mp.map (·.ready), nodeReady := nr, lease := ls }
+
+/-- The widest gap between consecutive readings of `pod` that overlap
+    [a, b] (`none` = fewer than two readings there). -/
+def maxReadingGap (ss : List PartSample) (pod : String) (a b : Nat) : Option Nat :=
+  let rs := ((ss.flatMap (·.reads)).filter fun r => r.pod == pod && r.te ≥ a && r.ts ≤ b)
+  match rs with
+  | [] | [_] => none
+  | r :: rest => some ((rest.foldl (fun (acc : Nat × Nat) x => (max acc.1 (x.ts - acc.2), x.te)) (0, r.te)).1)
 
 /-- Every address of a kind node container (IPv4 and, on the dual-stack
     kind network, IPv6). -/
@@ -714,13 +713,29 @@ private def operatorPod (c : Ctx) : IO (Option String) := do
   | .ok o => return if o.trim.isEmpty then none else some o.trim
   | .error _ => return none
 
-/-- `nodeLevel` = also cut the master's worker from the control-plane node
-    (kubelet -> API server, OUTPUT/INPUT) so the node goes NotReady. -/
+/-- The API paths the master's worker can use, established BEFORE the cut:
+    the kubelet's configured server (kubelet.conf `server:` only), how the
+    worker resolves it, a probe of each address (open / timed-out / refused
+    = nothing listens / cannot-run), and the kubelet's live connections.
+    Usable = probed open, plus every live peer (a peer that is not probed
+    open is still cut). -/
+structure ApiPaths where
+  server : Option (String × Nat)
+  resolved : List String
+  before : List (String × ApiProbe)
+  peersBefore : Option (List String)
+  deriving Repr
+
+def ApiPaths.usable (a : ApiPaths) : List String :=
+  ((a.before.filter (·.2 == .open_)).map (·.1) ++ (a.peersBefore.getD [])).eraseDups
+
+/-- `nodeLevel` = also cut the master's worker from the API server on every
+    path its kubelet can use, so the node goes NotReady. -/
 private def partitionRun (c : Ctx) (nodeLevel : Bool) : IO (Except String PartObs) := do
   match ← c.placement with
   | .error e => return .error e
   | .ok p =>
-    c.conditions [s!"scenario C: cut master<->replica and operator<->master (pod addresses, FORWARD on every kind node){if nodeLevel then " and the master's worker <-> control-plane (node addresses, OUTPUT/INPUT in both containers)" else ""}; the client (debug pod) reaches both. kind single-host cut: not proof of a real AZ failure"]
+    c.conditions [s!"scenario C: cut master<->replica and operator<->master (pod addresses, FORWARD on every kind node){if nodeLevel then " and the master's worker <-> every API server path its kubelet uses (node addresses, OUTPUT/INPUT)" else ""}; the client (debug pod) reaches both. kind single-host cut: not proof of a real AZ failure"]
     match ← seed c p s!"seed{c.test}" with
     | .error e => return .error e
     | .ok () =>
@@ -730,82 +745,94 @@ private def partitionRun (c : Ctx) (nodeLevel : Bool) : IO (Except String PartOb
     let cpIps ← dockerIps cp
     let wIps ← dockerIps p.master.node
     let nodes ← kindNodes
-    if opIp.isEmpty || !nodes.contains cp || !nodes.contains p.master.node || (nodeLevel && (cpIps.isEmpty || wIps.isEmpty)) then
+    if opIp.isEmpty || !nodes.contains cp || !nodes.contains p.master.node || (nodeLevel && wIps.isEmpty) then
       return .error (notSetUp s!"addresses / kind nodes for the cut not resolved (operator {opIp}, nodes {nodes}, cp {cpIps}, worker {wIps})")
-    -- the API probes go to every control-plane address the worker has a
-    -- family for
-    let apiTargets := cpIps.filter fun a => wIps.any fun b => b.contains ':' == a.contains ':'
-    let probeApi := fun (_ : Unit) => do
-      let mut r : List (String × Option Bool) := []
-      for a in apiTargets do r := r ++ [(a, ← apiReachableFrom p.master.node a)]
-      return r
-    let allIs := fun (v : Bool) (xs : List (String × Option Bool)) => !xs.isEmpty && xs.all (·.2 == some v)
+    -- the kubelet's real API endpoint and the paths usable before the cut
+    let api : ApiPaths ← if !nodeLevel then pure ({ server := none, resolved := [], before := [], peersBefore := none } : ApiPaths) else do
+      let srv ← kubeletServer p.master.node
+      let port := (srv.map (·.2)).getD 6443
+      let res ← match srv with | some (h, _) => resolveOn p.master.node h | none => pure []
+      let mut pr : List (String × ApiProbe) := []
+      for a in res do pr := pr ++ [(a, ← apiProbe p.master.node a port)]
+      let peers ← establishedPeers p.master.node port
+      pure ({ server := srv, resolved := res, before := pr, peersBefore := peers } : ApiPaths)
+    let apiPort := (api.server.map (·.2)).getD 6443
+    if nodeLevel then
+      c.art "api-endpoint.txt" s!"kubelet server {api.server}; resolved {api.resolved}; probes before {api.before.map fun (a, r) => s!"{a}={r.label}"}; kubelet established peers before {api.peersBefore}; usable {api.usable}"
+    let usable := api.usable
+    -- every usable API address is cut on the worker; on the control-plane
+    -- too when it is one of its addresses
+    let wFor := fun (addr : String) => wIps.filter fun w => w.contains ':' == addr.contains ':'
+    let apiRules := usable.flatMap fun addr => (wFor addr).flatMap fun w =>
+      [{ node := p.master.node, chain := "OUTPUT", src := w, dst := addr : CutRule }, { node := p.master.node, chain := "INPUT", src := addr, dst := w }]
+        ++ (if cpIps.contains addr then [{ node := cp, chain := "OUTPUT", src := addr, dst := w : CutRule }, { node := cp, chain := "INPUT", src := w, dst := addr }] else [])
     let pods := (← c.pods).getD []
     if !(← c.startWriter "old" p.master.ip "wo") || !(← c.startWriter "peer" p.replica.ip "wr") then
       return .error (notSetUp "a writer did not start")
-    let apiB ← if nodeLevel then probeApi () else pure []
-    let apiBefore := if !nodeLevel then none else if allIs true apiB then some true else none
-    let rules := podCutRules nodes p.master.ip p.replica.ip ++ podCutRules nodes p.master.ip opIp
-      ++ (if nodeLevel then nodeCutRulesAll p.master.node wIps cp cpIps else [])
-    let s0 ← partObserve c 10 pods p.master.node p.master.name
+    let rules := podCutRules nodes p.master.ip p.replica.ip ++ podCutRules nodes p.master.ip opIp ++ (if nodeLevel then apiRules else [])
+    -- the observer runs on its own from here to after the heal
+    let obs ← startObserver (partOnce c pods p.master.node p.master.name) 1500
+    discard <| observe c 10 (pure false)
     let rBefore ← tcpFromPod c.cfg.«namespace» p.replica.name "flared" p.master.ip c.cfg.flarePort
     let oBefore ← tcpFromPod c.cfg.«namespace» opPod "flare-operator" p.master.ip c.cfg.flarePort
-    let some tCut ← debugEpoch c | return .error (notSetUp "the debug pod's clock cannot be read")
+    let some tCut ← debugEpoch c | do discard <| obs.finish; return .error (notSetUp "the debug pod's clock cannot be read")
     let (installed, rulesOk, rulesWhy) ← match ← installCuts rules with
       | .ok r => pure (r, true, "")
       | .error (why, part) => pure (part, false, why)
     c.event s!"cut: {installed.length}/{rules.length} rules installed{if rulesOk then "" else s!" — FAILED: {rulesWhy}"}"
-    let mut inj : Injection := { rulesInstalled := rulesOk, rulesWhy, replicaToMasterBefore := rBefore, operatorToMasterBefore := oBefore }
-    let mut s1 : List PartSample := []
-    let mut tHeal := tCut
+    let mut inj : Injection := { rulesInstalled := rulesOk, rulesWhy, replicaToMasterBefore := rBefore, operatorToMasterBefore := oBefore,
+                                 apiBefore := if !nodeLevel then none else if usable.isEmpty then some false else some true }
+    let mut tHeal? : Option Nat := none
     try
-      -- keep reading the own views across the probe step (no gap)
-      let sA ← partObserve c 0 pods p.master.node p.master.name
-      s1 := sA
       IO.sleep 5000
-      let apiA ← if nodeLevel then probeApi () else pure []
-      inj := { inj with apiProbes := apiTargets.map fun a => (a, apiB.lookup a |>.join, apiA.lookup a |>.join) }
+      let mut after : List (String × ApiProbe) := []
+      if nodeLevel then
+        for a in usable do after := after ++ [(a, ← apiProbe p.master.node a apiPort)]
+      let peersAfter ← if nodeLevel then establishedPeers p.master.node apiPort else pure none
       inj := { inj with
+        apiProbes := after.map fun (a, r) => (a, (api.before.lookup a).map (· == .open_), some (r == .open_)),
         replicaToMaster := ← tcpFromPod c.cfg.«namespace» p.replica.name "flared" p.master.ip c.cfg.flarePort,
         operatorToMaster := ← tcpFromPod c.cfg.«namespace» opPod "flare-operator" p.master.ip c.cfg.flarePort,
-        -- some false = EVERY family timed out; some true = one is open;
+        -- some false = EVERY usable path timed out; some true = one is open;
         -- none = a probe could not tell
-        apiAfter := if !nodeLevel then none else if allIs false apiA then some false
-          else if apiA.any (·.2 == some true) then some true else none,
-        apiBefore }
+        apiAfter := if !nodeLevel then none else if !after.isEmpty && after.all (·.2 == .timedOut) then some false
+          else if after.any (·.2 == .open_) then some true else none }
+      if nodeLevel then
+        c.art "api-endpoint.txt" s!"probes after the cut {after.map fun (a, r) => s!"{a}={r.label}"}; established peers after {peersAfter}"
       c.event s!"probes after the cut: replica->master open={inj.replicaToMaster} operator->master open={inj.operatorToMaster} worker->API before={inj.apiBefore} after={inj.apiAfter}"
-      s1 := s1 ++ (← partObserve c 0 pods p.master.node p.master.name)
       if rulesOk then
-        s1 := s1 ++ (← partObserve c (if nodeLevel then 330 else 90) pods p.master.node p.master.name)
+        discard <| observe c (if nodeLevel then 330 else 90) (pure false)
       let mut cs : List (String × Option Nat) := []
       for r in installed do
         let n ← cutCounter r
         cs := cs ++ [(r.label, n)]
         c.art "cuts.txt" s!"{r.label} dropped {(n.map toString).getD "?"} packets"
       inj := { inj with counters := cs }
-      tHeal := (← debugEpoch c).getD 0
+      tHeal? ← debugEpoch c
     finally
       removeCuts installed
     c.event "healed"
-    -- readings right after the heal bracket the last writes of the cut
-    let sH ← partObserve c 6 pods p.master.node p.master.name
+    -- the observer keeps reading across the heal, then stops
+    IO.sleep 8000
+    let ss ← obs.finish
+    let some tHeal := tHeal? | return .error (unobservable "the debug pod's clock could not be read at the heal")
+    let gaps := pods.map fun r => (r.name, maxReadingGap ss r.name tCut tHeal)
+    c.art "report.txt" s!"own-view readings {ss.length}; widest gap between readings during the cut {gaps} s (bracket limit {maxBracketSec} s)"
     let (s2, _) ← observe c 180 (redundant c none)
-    let s3 ← partObserve c 6 pods p.master.node p.master.name
     let wsOld? ← c.stopWriter "old"
     let wsPeer? ← c.stopWriter "peer"
     let (some wsOld, some wsPeer) := (wsOld?, wsPeer?)
-      | return .error (unobservable "a writer's record could not be read (never counted as 'no acknowledged write')")
+      | return .error (unobservable "a writer's record could not be read or failed its integrity check (never counted as 'no acknowledged write')")
     let finalM := (← c.roles).bind (·.1)
     let copies ← finalCopies c
     let mcopy := finalM.bind fun n => (copies.lookup n).join
     let lost ← match mcopy with
       | some d => pure (some (← recordMissing c "master" (wsOld ++ wsPeer) d))
       | none => pure none
-    let ss := s0 ++ s1 ++ sH ++ s3
     let ipToPod := pods.map fun r => (r.ip, r.name)
     let acks := fun (ws : List WriteRec) => (ws.filter fun w => classify w.reply == .ack).map fun w => (w, ownPathOf ss ipToPod w)
     inj := { inj with clientAcksAfterCut := (wsOld.filter fun w => classify w.reply == .ack && w.t ≥ tCut + 5 && w.t ≤ tHeal).length }
-    let summary := s!"{writerSummary "old" [] wsOld}; {writerSummary "peer" [] wsPeer}; samples during the cut {s1.length}; samples after the heal {s2.length}"
+    let summary := s!"{writerSummary "old" [] wsOld}; {writerSummary "peer" [] wsPeer}; own-view samples {ss.length}, widest reading gap in the cut {gaps}; samples after the heal {s2.length}"
     c.art "report.txt" summary
     return .ok { nodeLevel, oldMaster := p.master.name, replica := p.replica.name, inj, tCut, tHeal, samples := ss,
                  oldAcks := acks wsOld, peerAcks := acks wsPeer, lostAcks := lost, summary }

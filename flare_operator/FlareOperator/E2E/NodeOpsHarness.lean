@@ -131,6 +131,17 @@ def Ctx.roles (c : Ctx) : IO (Option (Option String × List String)) := do
   let s := (v.filter fun e => e.role == 1 && e.partition == 0).map (podOfFqdn ·.fqdn)
   return some (m, s)
 
+/-- The stats of the pod at `ip` with the debug pod's clock just before and
+    just after (one exec): (ts, te, stats). -/
+def Ctx.statsTimed (c : Ctx) (ip : String) : IO (Option (Nat × Nat × Option String)) := do
+  match ← execInDebugPod c.cfg.debugPod c.cfg.«namespace» s!"date +%s; printf 'stats\\r\\nquit\\r\\n' | nc -w 3 {ip} {c.cfg.flarePort}; date +%s" with
+  | .error _ => return none
+  | .ok o =>
+    let ls := (o.splitOn "\n").map String.trim |>.filter (!·.isEmpty)
+    match ls.head?.bind (·.toNat?), ls.getLast?.bind (·.toNat?) with
+    | some a, some b => return some (a, b, if containsSubstr o "END" then some o else none)
+    | _, _ => return none
+
 /-- One flared stat of the pod at `ip` (from the debug pod). -/
 def Ctx.stats (c : Ctx) (ip : String) : IO (Option String) := do
   match ← execInDebugPod c.cfg.debugPod c.cfg.«namespace» s!"printf 'stats\\r\\nquit\\r\\n' | nc -w 3 {ip} {c.cfg.flarePort}" with
@@ -287,13 +298,41 @@ def parseWrites (out : String) : List WriteRec :=
     | [n, t, ip, k, v, r, t0] => (n.toNat?).bind fun n => (t.toNat?).bind fun t => (t0.toNat?).map fun t0 => { n, t, ip, key := k, value := v, reply := r, t0 }
     | _ => none
 
+/-- A writer's log, checked for completeness (review 2026-10-19): every
+    complete line parses, the sequence numbers are 1..N without a gap or a
+    repeat, at least one write was acknowledged. Only the LAST line may be cut
+    short (the writer was stopped mid-append): it is dropped and reported.
+    An empty, corrupt or gapped log is an error — never "no write". -/
+def parseWriterLog (out : String) : Except String (List WriteRec × Option String) := do
+  let endsNl := out.endsWith "\n"
+  let ls := (out.splitOn "\n").filter (!·.isEmpty)
+  if ls.isEmpty then throw "the writer log is empty"
+  let mut ws : List WriteRec := []
+  let mut note : Option String := none
+  let mut i := 0
+  for l in ls do
+    i := i + 1
+    match parseWrites l with
+    | [w] => ws := ws ++ [w]
+    | _ =>
+      if i == ls.length && !endsNl then note := some s!"the last line was cut short and is not used: {l.take 80}"
+      else throw s!"line {i} of the writer log does not parse: {l.take 80}"
+  let ns := ws.map (·.n)
+  if ns != (List.range ws.length).map (· + 1) then
+    throw s!"the writer log's sequence is not 1..{ws.length} (a gap, repeat or reorder: starts {ns.take 5})"
+  if !ws.any (fun w => w.reply == "STORED") then throw "the writer log has no acknowledged write"
+  return (ws, note)
+
 def Ctx.stopWriter (c : Ctx) (name : String) : IO (Option (List WriteRec)) := do
   discard <| execInDebugPod c.cfg.debugPod c.cfg.«namespace» s!"touch /tmp/stop-{name}"
   IO.sleep 4000
   match ← execInDebugPod c.cfg.debugPod c.cfg.«namespace» s!"cat /tmp/w-{name}.log" with
-  | .error _ => return none
+  | .error e => c.event s!"writer {name}: the log cannot be read ({e.take 120})"; return none
   | .ok out =>
-    let ws := parseWrites out
+    match parseWriterLog out with
+    | .error why => c.event s!"writer {name}: log REJECTED as unobserved — {why}"; return none
+    | .ok (ws, note) =>
+    if let some n := note then c.event s!"writer {name}: {n}"
     for w in ws do c.art s!"writes-{name}.txt" s!"{w.n} {w.t} {w.ip} {w.key} {w.value} {w.reply} {w.t0}"
     return some ws
 
@@ -449,17 +488,69 @@ def cutCounter (r : CutRule) : IO (Option Nat) := do
         if r.v6 && (src == r.src || src == r.src ++ "/128") && (dst == r.dst || dst == r.dst ++ "/128") then pk.toNat? else none
       | _ => none
 
-/-- Can node container `node` reach the API server at `cpIp`? `some true`
-    = an HTTP answer, `some false` = the connection TIMED OUT (curl 28: what
-    a DROP rule produces), `none` = anything else (curl missing, refused, DNS,
-    TLS...) — never taken as a cut. -/
-def apiReachableFrom (node cpIp : String) : IO (Option Bool) := do
-  let host := if cpIp.contains ':' then s!"[{cpIp}]" else cpIp
-  let out ← IO.Process.output { cmd := "docker", args := #["exec", node, "curl", "-gsk", "-m", "3", "-o", "/dev/null", "-w", "%{http_code}", s!"https://{host}:6443/healthz"] }
+/-- What one HTTPS probe of an API server address found. -/
+inductive ApiProbe where
+  /-- an HTTP answer -/
+  | open_
+  /-- the connection timed out (what a DROP rule produces) -/
+  | timedOut
+  /-- refused / unreachable at once: nothing listens there (not a cut) -/
+  | refused
+  /-- the probe itself could not run or ended otherwise -/
+  | cannotRun (why : String)
+  deriving Repr, BEq
+
+def ApiProbe.label : ApiProbe → String
+  | .open_ => "open" | .timedOut => "timed-out" | .refused => "refused" | .cannotRun w => s!"cannot-run({w})"
+
+def apiProbe (node addr : String) (port : Nat) : IO ApiProbe := do
+  let host := if addr.contains ':' then s!"[{addr}]" else addr
+  let out ← IO.Process.output { cmd := "docker", args := #["exec", node, "curl", "-gsk", "-m", "3", "-o", "/dev/null", "-w", "%{http_code}", s!"https://{host}:{port}/healthz"] }
   let code := out.stdout.trim
-  if out.exitCode == 0 && !code.isEmpty && code != "000" then return some true
-  else if out.exitCode == 28 then return some false
-  else return none
+  if out.exitCode == 0 && !code.isEmpty && code != "000" then return .open_
+  else if out.exitCode == 28 then return .timedOut
+  else if out.exitCode == 7 then return .refused
+  else return .cannotRun s!"exit {out.exitCode}"
+
+/-- The API server the node's kubelet is configured for: (host, port) from
+    the `server:` line of /etc/kubernetes/kubelet.conf (only that line is
+    read; no credential leaves the container). -/
+def kubeletServer (node : String) : IO (Option (String × Nat)) := do
+  match ← hostCmd "docker" ["exec", node, "sh", "-c", "grep -m1 -E '^[[:space:]]*server:' /etc/kubernetes/kubelet.conf"] with
+  | .error _ => return none
+  | .ok o =>
+    let url := ((o.trim.drop "server:".length).trim.replace "https://" "")
+    let (host, port) := match url.splitOn "]:" with
+      | [h, p] => (h.drop 1, p)
+      | _ => match url.splitOn ":" with
+        | [h, p] => (h, p)
+        | _ => (url, "443")
+    return (port.trim.toNat?).map fun n => (host, n)
+
+/-- How the node resolves `host` (every address, both families). An IP
+    literal resolves to itself. -/
+def resolveOn (node host : String) : IO (List String) := do
+  if host.all (fun ch => ch.isDigit || ch == '.') || host.contains ':' then return [host]
+  match ← hostCmd "docker" ["exec", node, "getent", "ahosts", host] with
+  | .error _ => return []
+  | .ok o => return ((o.splitOn "\n").filterMap fun l => (l.trim.splitOn " ").head?.filter (!·.isEmpty)).eraseDups
+
+/-- Peer addresses from `ss -Htn state established` lines (Recv-Q Send-Q
+    Local Peer); IPv6 in brackets, IPv4-mapped IPv6 as IPv4. -/
+def parseSsPeers (o : String) : List String :=
+  ((o.splitOn "\n").filterMap fun l =>
+    match (l.trim.splitOn " ").filter (!·.isEmpty) with
+    | [_, _, _, peer] | [_, _, _, peer, _] =>
+      let a := if peer.startsWith "[" then (peer.drop 1).takeWhile (· != ']') else (peer.dropRightWhile (· != ':')).dropRight 1
+      if a.isEmpty then none else some (a.replace "::ffff:" "")
+    | _ => none).eraseDups
+
+/-- The peers of the node's ESTABLISHED TCP connections to `port` (the
+    kubelet's live API connections, among any others to that port). -/
+def establishedPeers (node : String) (port : Nat) : IO (Option (List String)) := do
+  match ← hostCmd "docker" ["exec", node, "ss", "-Htn", "state", "established", s!"( dport = :{port} )"] with
+  | .error _ => return none
+  | .ok o => return some (parseSsPeers o)
 
 /-- Can a TCP connection to `ip:port` be opened from inside `pod`
     (`container`)? `some true` = OPEN, `some false` = the connect TIMED OUT
@@ -473,6 +564,39 @@ def tcpFromPod (ns pod container ip : String) (port : Nat) : IO (Option Bool) :=
     else if containsSubstr o "PROBE=124" then return some false
     else return none
   | .error _ => return none
+
+/-- A background observer: runs `once` in its own task, then waits
+    `periodMs`, until `stop` is set; every result is appended in order. It
+    is independent of whatever the caller does meanwhile (rule installation,
+    probes with their timeouts, counter collection), so their duration never
+    opens a gap in the observations. -/
+structure Observer (α : Type) where
+  stop : IO.Ref Bool
+  acc : IO.Ref (Array α)
+  task : Task (Except IO.Error Unit)
+
+partial def observerLoop {α : Type} (once : IO α) (periodMs : Nat) (stop : IO.Ref Bool) (acc : IO.Ref (Array α)) : IO Unit := do
+  if ← stop.get then return
+  let x ← once
+  acc.modify (·.push x)
+  if ← stop.get then return
+  IO.sleep periodMs.toUInt32
+  observerLoop once periodMs stop acc
+
+def startObserver {α : Type} (once : IO α) (periodMs : Nat) : IO (Observer α) := do
+  let stop ← IO.mkRef false
+  let acc ← IO.mkRef #[]
+  let task ← IO.asTask (prio := .dedicated) (observerLoop once periodMs stop acc)
+  return { stop, acc, task }
+
+/-- Stop and collect (waits for the iteration in progress). -/
+def Observer.finish {α : Type} (o : Observer α) : IO (List α) := do
+  o.stop.set true
+  discard <| IO.wait o.task
+  return (← o.acc.get).toList
+
+/-- What has been observed so far (the observer keeps running). -/
+def Observer.sofar {α : Type} (o : Observer α) : IO (List α) := return (← o.acc.get).toList
 
 /-- The node's Ready condition (`True` / `False` / `Unknown`). -/
 def nodeReady (node : String) : IO (Option String) := do

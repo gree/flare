@@ -119,3 +119,11 @@
 - **C'（node 単位）: PRECONDITION NOT MET。** ルールは全 20 本設置され、worker の OUTPUT（172.18.0.4→172.18.0.5）で 62、control-plane の OUTPUT（逆向き）で 243 パケットを落とした。worker → API server の IPv4 probe は切断前 OPEN、切断後 timeout。**それでも node Lease は 10 s ごとに更新を続けた**（node Ready は 107 サンプル中 Unknown 4 回、Pod NotReady 2 回だけ）。仮説（未確定）: kind の docker network は dual-stack なので、kubelet は IPv6 で API server に届いていた。修正: node アドレスの組は両コンテナの全 family（IPv6 は ip6tables）で切り、API probe も全 family で、切断前は全部 OPEN・切断後は全部 timeout を要求する。次の run で IPv6 ルールのカウンタと Lease を見て確かめる
 - **C（経路のみ）: UNOBSERVABLE。** ACK 3248 件の経路を判定できなかった。原因（artifact で確定）: 切断直後の probe 中（約 11 s）と、heal 後の待機中に own view の読み取りが途切れ、strict bracket（12 s 以内）が成立しなかった。判定規則は正しく働いた（不明を 0 扱いしない）。修正: 切断直後、probe の後、heal 直後にも読み取る
 - Pod 間の経路（FORWARD）は全経路でカウンタが正（46 / 141 / 42 など）。replica → master と operator → master は切断前 OPEN・切断後 timeout
+
+### 8.3 追加レビュー（7fe906f に対して）で直したこと（ハーネスのみ）
+
+- **観測の空白:** own view の読み取りを別タスクの observer（約 1.5 s 周期）にした。ルール設置・probe（timeout を含む）・counter 収集の長さに左右されない。読み取り 1 回は exec 1 回で、前後に debug pod の時計を読む。切断中の読み取り間隔の最大を report に記録する。ローカルの単体試験（周期 100 ms、呼び出し側が 300 ms × 5 回ブロック）で最大間隔 110 ms（上限 250 ms）を確認した
+- **kubelet の実 endpoint:** test kind node の `kubelet.conf` の `server:` 行だけを読み（認証情報は読まない）、名前解決の結果、各アドレスの probe（open / timed-out / refused = listen なし / cannot-run）、kubelet の ESTABLISHED 接続先（切断前・後）を `api-endpoint.txt` に記録する。切断対象 = 切断前に open だった経路 + kubelet の実接続先。切断後はそのすべてが timeout であることを要求する。refused の family（listen していない）は要求しない。cannot-run は open 扱いにしない
+- **writer の記録:** 完全性を検査する（全行が parse できる、通番 1..N に欠番・重複がない、ACK が 1 件以上ある。途中で切れた最終行だけは除外して報告する）。空・破損・欠番は未観測として拒否する（A / B / C 共通）
+- **heal 時の時計:** 読めなければ明示的に UNOBSERVABLE にする
+- 判断は変えていない: 昇格条件・operator の timeout はそのまま。これは測定ハーネスの修正で、分断中に旧 master の書込を止める製品の仕組み（判断点 2）は未解決

@@ -1420,6 +1420,26 @@ def partChecks : List (String × Bool) :=
         && r.contains { node := "w", chain := "OUTPUT", src := "fc00::4", dst := "fc00::5" }
         && r.contains { node := "cp", chain := "INPUT", src := "fc00::4", dst := "fc00::5" }
         && !r.any (fun x => x.src.contains ':' != x.dst.contains ':')),
+    ("writer log: complete lines 1..N with an ack are accepted; only a cut-short LAST line is dropped (and reported)",
+      let good := "1 10 i k1 v STORED 9\n2 11 i k2 v NORESPONSE 10\n"
+      (parseWriterLog good).toOption.map (·.1.length) == some 2
+        && (parseWriterLog (good ++ "3 12 i k")).toOption.map (fun (ws, n) => (ws.length, n.isSome)) == some (2, true)),
+    ("writer log: empty, a corrupt middle line, a gap / repeat in the sequence, or no ack at all -> REJECTED (unobserved, never 'no write')",
+      (parseWriterLog "").toOption.isNone && (parseWriterLog "\n\n").toOption.isNone
+        && (parseWriterLog "1 10 i k1 v STORED 9\ngarbage\n2 11 i k2 v STORED 10\n").toOption.isNone
+        && (parseWriterLog "1 10 i k1 v STORED 9\n3 11 i k3 v STORED 10\n").toOption.isNone
+        && (parseWriterLog "1 10 i k1 v STORED 9\n1 11 i k1 v STORED 10\n").toOption.isNone
+        && (parseWriterLog "1 10 i k1 v NORESPONSE 9\n2 11 i k2 v SERVER_ERROR 10\n").toOption.isNone),
+    ("API paths: usable = probed open + the kubelet's live peers; a family that only REFUSES (nothing listens) is not required; cannot-run is not open",
+      let a : ApiPaths := { server := some ("flare-e2e-control-plane", 6443), resolved := ["172.18.0.5", "fc00::5"], before := [("172.18.0.5", .open_), ("fc00::5", .refused)], peersBefore := some ["172.18.0.5"] }
+      let b : ApiPaths := { a with before := [("172.18.0.5", .cannotRun "x"), ("fc00::5", .open_)], peersBefore := some ["10.9.9.9"] }
+      a.usable == ["172.18.0.5"] && b.usable == ["fc00::5", "10.9.9.9"]),
+    ("ss peers: IPv4, bracketed IPv6 and IPv4-mapped IPv6 peers are read; other lines are not",
+      parseSsPeers "0 0 172.18.0.4:41234 172.18.0.5:6443\n0 0 [fc00::4]:5555 [fc00::5]:6443\n0 0 [::ffff:172.18.0.4]:1 [::ffff:172.18.0.6]:6443\njunk\n"
+        == ["172.18.0.5", "fc00::5", "172.18.0.6"]),
+    ("reading gap: the widest gap between consecutive readings of a pod in a window",
+      let r := fun (ts te : Nat) => ({ t := ts, reads := [{ pod := "x", ts, te, view := none }], masterPodReady := none, nodeReady := none, lease := none } : PartSample)
+      maxReadingGap [r 100 101, r 103 104, r 110 111] "x" 100 120 == some 6 && maxReadingGap [r 100 101] "x" 100 120 == none),
     ("writer records: the send time is kept (span [t0, t]); an older line without it is widened conservatively",
       (parseWrites "7 1005 10.0.0.1 k7 v7 STORED 1003").head?.map (·.span) == some (1003, 1005)
         && (parseWrites "7 1005 10.0.0.1 k7 v7 STORED").head?.map (·.span) == some (1001, 1005))
@@ -1429,6 +1449,14 @@ def checkDisruption (ctx : Ctx) : IO Unit := do
   for (n, ok) in dsChecks do check ctx n ok
   for (n, ok) in admChecks do check ctx n ok
   for (n, ok) in partChecks do check ctx n ok
+  -- the observer keeps its period while the caller blocks on probes and
+  -- timeouts (scaled fixture: period 100 ms, the caller blocks 5 x 300 ms)
+  let obs ← FlareOperator.E2E.NodeOps.startObserver IO.monoMsNow 100
+  for _ in [0:5] do IO.sleep 300
+  let ts ← obs.finish
+  let gaps := (ts.zip (ts.drop 1)).map fun (a, b) => b - a
+  check ctx s!"observer: readings continue while the caller blocks (n={ts.length}, widest gap {gaps.max?} ms, limit 250 ms)"
+    (ts.length ≥ 10 && (gaps.max?.getD 0) < 250)
 
 /-- Decision 2026-10-16 (promotion-proxy-only-copy, 38952942796): a dead
     ex-slave is attributed to its partition ONLY by its persisted record,

@@ -24,6 +24,7 @@
  *	the protocol and the WAL-retention/pinning rationale)
  */
 #include "op_repl_snapshot_push.h"
+#include "write_fence.h"
 #include "bwlimitter.h"
 #include "connection_tcp.h"
 #include "util.h"
@@ -119,6 +120,11 @@ int op_repl_snapshot_push::_parse_text_server_parameters() {
  *	freshness, then receive files + WAL tail and swap them in.
  */
 int op_repl_snapshot_push::_run_server() {
+	// planned-eviction write fence (write_fence.h)
+	write_fence::entry fence_entry;
+	if (fence_entry.fenced()) {
+		return this->_send_result(result_server_error, "fenced");
+	}
 	// refused BEFORE anything else (role routing, relay, freshness): with the
 	// switch off this node takes no push in any role
 	if (!op_repl_snapshot_push::accept_push) {

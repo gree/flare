@@ -13,6 +13,7 @@
   Kept as many small definitions on purpose: one large `do` block of checks
   made the elaborator crawl.
 -/
+import FlareOperator.StateMachine.Disruption
 import Lean.Data.Json
 import FlareOperator.Migration.Provision
 import FlareOperator.Migration.Types
@@ -1131,6 +1132,92 @@ def checkExMasterReturn (ctx : Ctx) : IO Unit := do
 
 @[noinline] def arRefill (st : FlareClusterState) (hold : Bool) (data excl known blocked : List String) : FlareClusterState :=
   K8sReconciler.promoteMasterlessPartition st 0 ["m:12121", "s:12121"] [] data excl hold known blocked
+
+/-- Planned eviction (docs/design-node-operations-2026-10-19.md): the
+    admission decision and the prepare steps, as data (see arChecks). -/
+def dsChecks : List (String × Bool) :=
+  let b0 : Disruption.Binding := { podUid := "u0", bootId := "b0", copyId := "c0", historyEpoch := "2:e", partition := 0 }
+  let bS : Disruption.Binding := { podUid := "u1", bootId := "b1", copyId := "c1", historyEpoch := "2:e", partition := 0 }
+  let master : Disruption.PodNow := { name := "n0", uid := "u0", flared := true, binding := some b0, isProxy := false, target := some .master }
+  let req : Disruption.EvictionReq := { podName := "n0" }
+  let d1 := Disruption.admit none (some master) req 100 7 true "r1" 300
+  let st : Disruption.State := match d1 with | .denyRecord _ s => s | _ => { id := "x", pod := "x", target := .master, binding := b0, attempt := 0, phase := .aborted, requestedAt := 0, deadline := 0, leaseEpoch := 0 }
+  let obs : Disruption.Obs := { now := 110, leaseEpoch := 7, targetPresent := true, targetRole := some .master, successor := some ("n1", bS), successorApplied := some 50, fence := none, targetLatestSeq := some 60, switched := false, replicaSafe := true, blockers := [] }
+  let (s1, a1) := Disruption.step st obs
+  let tok := s1.fenceToken.getD ""
+  let (s2, _) := Disruption.step s1 { obs with fence := some (tok, 0) }
+  let (s3, _) := Disruption.step s2 { obs with fence := some (tok, 2) }
+  let (s4, _) := Disruption.step s2 { obs with fence := some (tok, 0) }
+  let (s5, _) := Disruption.step s4 { obs with fence := some (tok, 0), successorApplied := some 59 }
+  let (s6, a6) := Disruption.step s4 { obs with fence := some (tok, 0), successorApplied := some 60 }
+  let (s7, a7) := Disruption.step s6 { obs with fence := some (tok, 0), switched := true }
+  let proxyNow := { master with isProxy := true }
+  let granted := s7
+  [
+    ("eviction: the FIRST eviction of a flared master is refused and records a request",
+      match d1 with | .denyRecord _ s => s.phase == .requested && s.pod == "n0" && s.attempt == 1 && s.binding == b0 | _ => false),
+    ("eviction: a dry run is refused and records nothing",
+      match Disruption.admit none (some master) { req with dryRun := true } 100 7 true "r1" 300 with | .deny _ => true | _ => false),
+    ("eviction: an unreadable pod is refused (fail closed)",
+      !(Disruption.admit none none req 100 7 true "r1" 300).allowed),
+    ("eviction: a UID precondition that does not match the pod is refused",
+      !(Disruption.admit none (some master) { req with preconditionUid := some "zz" } 100 7 true "r1" 300).allowed),
+    ("eviction: a pod that is not flared is allowed",
+      (Disruption.admit none (some { master with flared := false }) req 100 7 true "r1" 300).allowed),
+    ("eviction: another pod while a disruption is in progress is refused",
+      !(Disruption.admit (some st) (some { master with name := "n1", uid := "u1" }) { podName := "n1" } 105 7 true "r2" 300).allowed),
+    ("eviction: the same pod during the prepare is refused (not prepared)",
+      !(Disruption.admit (some s4) (some master) req 120 7 true "r2" 300).allowed),
+    ("prepare: requested + eligible successor on another node -> fencing, fence armed with the request's token",
+      s1.phase == .fencing && s1.successor == some "n1" && a1 == [.armFence "n0" "r1-1" Disruption.fenceTtlSec]),
+    ("prepare: no eligible successor -> held at requested with the reason",
+      let (h, _) := Disruption.step st { obs with successor := none }
+      h.phase == .requested && containsSub h.reason "no eligible successor"),
+    ("prepare: a blocker holds a request but aborts a prepare already fencing (fence released)",
+      let (h, _) := Disruption.step st { obs with blockers := ["rebuild in progress"] }
+      let (ab, aa) := Disruption.step s3 { obs with fence := some (tok, 1), blockers := ["rebuild in progress"] }
+      h.phase == .requested && ab.phase == .aborted && aa.contains (.releaseFence "n0" tok)),
+    ("prepare: fence seen -> draining; in-flight mutations keep it draining",
+      s2.phase == .draining && s3.phase == .draining && containsSub s3.reason "in-flight"),
+    ("prepare: in-flight 0 -> the barrier is FIXED at the target's latest sequence",
+      s4.phase == .applying && s4.barrier == some 60),
+    ("prepare: the successor below the barrier keeps applying; at the barrier -> switching (roles switched)",
+      s5.phase == .applying && s6.phase == .switching && a6.contains (.switchRoles "n0" "n1")),
+    ("prepare: the switch confirmed -> granted (bounded) and the fence released",
+      s7.phase == .granted && s7.grantExpiresAt == some 230 && a7.contains (.releaseFence "n0" tok)),
+    ("prepare: a successor that changed identity (boot / copy) aborts and releases the fence",
+      let (ab, aa) := Disruption.step s4 { obs with fence := some (tok, 0), successor := some ("n1", { bS with bootId := "b9" }) }
+      ab.phase == .aborted && aa.contains (.releaseFence "n0" tok)),
+    ("prepare: a leadership change aborts; before the switch the fence is released, after it it is not",
+      let (ab, aa) := Disruption.step s4 { obs with leaseEpoch := 8 }
+      let (ab2, aa2) := Disruption.step s6 { obs with leaseEpoch := 8 }
+      ab.phase == .aborted && aa.contains (.releaseFence "n0" tok) && ab2.phase == .aborted && !aa2.contains (.releaseFence "n0" tok)),
+    ("prepare: the deadline passes -> aborted",
+      (Disruption.step s4 { obs with now := 401, fence := some (tok, 0) }).1.phase == .aborted),
+    ("eviction: a valid grant (same UID / boot / copy / partition, target now proxy, successor healthy) is allowed",
+      (Disruption.admit (some granted) (some proxyNow) req 150 7 true "r2" 300).allowed),
+    ("eviction: grant refused when expired, pod replaced, flared restarted, copy changed, not demoted, or successor unhealthy",
+      !(Disruption.admit (some granted) (some proxyNow) req 231 7 true "r2" 300).allowed
+        && !(Disruption.admit (some granted) (some { proxyNow with uid := "u9" }) req 150 7 true "r2" 300).allowed
+        && !(Disruption.admit (some granted) (some { proxyNow with binding := some { b0 with bootId := "b9" } }) req 150 7 true "r2" 300).allowed
+        && !(Disruption.admit (some granted) (some { proxyNow with binding := some { b0 with copyId := "c9" } }) req 150 7 true "r2" 300).allowed
+        && !(Disruption.admit (some granted) (some master) req 150 7 true "r2" 300).allowed
+        && !(Disruption.admit (some granted) (some proxyNow) req 150 7 false "r2" 300).allowed),
+    ("prepare: an unused grant expires -> aborted (cancelled), no fence action",
+      let (ab, aa) := Disruption.step granted { obs with now := 240, switched := true }
+      ab.phase == .aborted && !aa.any (fun a => match a with | .releaseFence _ _ => true | .armFence _ _ _ => true | _ => false)),
+    ("eviction: after an aborted attempt the next request starts attempt 2",
+      match Disruption.admit (some { s4 with phase := .aborted }) (some master) req 150 7 true "r3" 300 with
+      | .denyRecord _ s => s.attempt == 2 | _ => false),
+    ("prepare: a replica target is granted only when the master is healthy and it is not the only copy",
+      let rs : Disruption.State := { st with target := .replica }
+      let (g, _) := Disruption.step rs { obs with targetRole := some .replica }
+      let (h, _) := Disruption.step rs { obs with targetRole := some .replica, replicaSafe := false }
+      g.phase == .granted && h.phase == .requested && containsSub h.reason "only copy")
+  ]
+
+def checkDisruption (ctx : Ctx) : IO Unit := do
+  for (n, ok) in dsChecks do check ctx n ok
 
 /-- Decision 2026-10-16 (promotion-proxy-only-copy, 38952942796): a dead
     ex-slave is attributed to its partition ONLY by its persisted record,
@@ -2710,6 +2797,7 @@ def run : IO UInt32 := do
   checkFailoverLagHold ctx
   checkExMasterReturn ctx
   checkAttributedRejoin ctx
+  checkDisruption ctx
   checkNodeMapRecovery ctx
   checkRepairSource ctx
   checkPodRows ctx

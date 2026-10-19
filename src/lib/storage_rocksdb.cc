@@ -25,6 +25,7 @@
  *  $Id$
  */
 #include "app.h"
+#include "write_fence.h"
 #include <sys/statvfs.h>
 #include <sys/vfs.h>
 #include "storage_rocksdb.h"
@@ -1998,7 +1999,9 @@ int storage_rocksdb::get(entry& e, result& r, int b) {
 		// bypass the WAL and diverge the followers). version_equal so a delete is
 		// skipped if the key was re-set between the read and here. e already holds
 		// the current header (version/expire) from _unserialize_header above.
-		if (expired && !this->_lazy_expiry_delete) {
+		if (expired && (!this->_lazy_expiry_delete || write_fence::active())) {
+			// (also while the planned-eviction write fence is armed: this
+			// node makes no mutation of its own then)
 			// Not the partition master: the value is hidden (not_found
 			// above) but stays on disk; the master's delete arrives through
 			// the replication stream.

@@ -27,6 +27,7 @@
  *	$Id$
  */
 #include <boost/lexical_cast.hpp>
+#include "write_fence.h"
 #include "app.h"
 #include "op_set.h"
 #include "queue_proxy_write.h"
@@ -112,6 +113,15 @@ int op_set::_parse_binary_request(const binary_request_header& header, const cha
 }
 
 int op_set::_run_server() {
+	// planned-eviction write fence (write_fence.h): refused, or counted in
+	// flight until this mutation has finished
+	write_fence::entry fence_entry;
+	if (fence_entry.fenced()) {
+		if (this->_entry.option & storage::option_noreply) {
+			return 0;
+		}
+		return this->_send_result(result_server_error, "fenced");
+	}
 	stats_object->increment_cmd_set();
 
 	// pre-proxy (proxy if node is not master in request-partition)

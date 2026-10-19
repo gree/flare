@@ -9,6 +9,7 @@
  *	implementation of gree::flare::op_orphan_purge
  */
 #include "op_orphan_purge.h"
+#include "write_fence.h"
 #include "key_resolver.h"
 #ifdef HAVE_LIBROCKSDB
 #include "storage_rocksdb.h"
@@ -53,6 +54,11 @@ int op_orphan_purge::_parse_text_server_parameters() {
 }
 
 int op_orphan_purge::_run_server() {
+	// planned-eviction write fence (write_fence.h)
+	write_fence::entry fence_entry;
+	if (fence_entry.fenced()) {
+		return this->_send_result(result_server_error, "fenced");
+	}
 #ifdef HAVE_LIBROCKSDB
 	if (!this->_storage || this->_storage->get_type() != storage::type_rocksdb) {
 		return this->_send_result(result_server_error, "not_supported");

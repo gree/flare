@@ -27,6 +27,7 @@
  *	$Id$
  */
 #include "app.h"
+#include "write_fence.h"
 #include "op_delete.h"
 #include "queue_proxy_write.h"
 #include "binary_request_header.h"
@@ -92,6 +93,15 @@ int op_delete::_parse_binary_request(const binary_request_header& header, const 
 }
 
 int op_delete::_run_server() {
+	// planned-eviction write fence (write_fence.h): refused, or counted in
+	// flight until this mutation has finished
+	write_fence::entry fence_entry;
+	if (fence_entry.fenced()) {
+		if (this->_entry.option & storage::option_noreply) {
+			return 0;
+		}
+		return this->_send_result(result_server_error, "fenced");
+	}
 	// pre-proxy (proxy if node is not master in request-partition)
 	shared_queue_proxy_write q;
 	cluster::proxy_request r_proxy = this->_cluster->pre_proxy_write(this, q);

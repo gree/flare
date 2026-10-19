@@ -23,6 +23,7 @@
  *	implementation of gree::flare::handler_reaper
  */
 #include "handler_reaper.h"
+#include "write_fence.h"
 #include "op_delete.h"
 #include "ini_option.h"
 
@@ -98,6 +99,14 @@ int handler_reaper::run() {
 			// Re-check ownership between chunks: if we lost mastership mid-sweep
 			// (failover), stop issuing deletes immediately.
 			if (!this->_is_reap_target()) {
+				aborted = true;
+				break;
+			}
+			// planned-eviction write fence: a chunk is a mutation like any
+			// other (refused while fenced, counted in flight until its deletes
+			// are applied and queued for the replicas)
+			write_fence::entry fence_entry;
+			if (fence_entry.fenced()) {
 				aborted = true;
 				break;
 			}

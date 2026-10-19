@@ -27,6 +27,7 @@
  *	$Id$
  */
 #include "op_flush_all.h"
+#include "write_fence.h"
 
 namespace gree {
 namespace flare {
@@ -131,6 +132,11 @@ int op_flush_all::_parse_text_server_parameters() {
  *	@todo support expire parameter
  */
 int op_flush_all::_run_server() {
+	// planned-eviction write fence (write_fence.h)
+	write_fence::entry fence_entry;
+	if (fence_entry.fenced()) {
+		return this->_send_result(result_server_error, "fenced");
+	}
 	if (!this->_flush_all_enabled) {
 		log_warning("flush_all refused (flush-all-enabled = false)", 0);
 		return this->_send_result(result_server_error, "flush_all disabled by configuration");

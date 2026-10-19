@@ -27,6 +27,7 @@
  *	$Id$
  */
 #include "app.h"
+#include "write_fence.h"
 #include "op_stats.h"
 #include "binary_request_header.h"
 #include "binary_response_header.h"
@@ -256,6 +257,15 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 	// decision 2026-10-08: the map made this node a master over a copy it
 	// refuses to serve (0 = not refused)
 	_send_stat("promotion_refused"		, cl->is_promotion_refused() ? 1 : 0);
+	{
+		// planned-eviction write fence (write_fence.h)
+		const string ft = write_fence::token();
+		_send_stat("fence_active"			, ft.empty() ? 0 : 1);
+		_send_stat("fence_token"			, ft.empty() ? string("-") : ft);
+		_send_stat("fence_remaining_sec"	, write_fence::remaining_sec());
+		_send_stat("fence_in_flight"		, write_fence::in_flight());
+		_send_stat("fence_refused"			, write_fence::refused());
+	}
 	{
 		// R3: the source this node's copy is eligible for. eligible=0 means
 		// local reads are withdrawn and the node must not be promoted until

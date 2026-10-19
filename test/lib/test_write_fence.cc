@@ -161,7 +161,8 @@ namespace test_write_fence
 			cut_assert_equal_string("SERVER_ERROR fenced\r\n", dynamic_cast<connection_sstream&>(*c).get_output().c_str());
 		}
 		{
-			shared_connection c(new connection_sstream("\r\n"));
+			// the same empty input test_op_flush_all parses
+			shared_connection c(new connection_sstream(std::string()));
 			test_op_flush_all op(c);
 			cut_assert_equal_int(0, op._parse_text_server_parameters());
 			op._run_server();

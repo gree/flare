@@ -192,6 +192,12 @@ def placementVerdict (masterPod : Option String) (replicas : List String) (pods 
 /-- Wait (bounded) for one master and one ACTIVE replica of partition 0, both
     Ready, on different data workers with a spare worker; record it. -/
 def Ctx.placement (c : Ctx) (timeoutSec : Nat := 300) : IO (Except String Placement) := do
+  -- a fault injected during the operator's startup grace (dead-node
+  -- detection off) measures the grace, not the product (39197119445 B:
+  -- the worker stopped 57 s before "grace period over")
+  let graceOver ← waitForCondition "operator past its startup grace period" 300 do
+    return containsSubstr (← kubectlLogsLabel s!"app={c.cfg.operatorName}" c.cfg.«namespace» 10000000) "grace period over"
+  if !graceOver then return .error (notSetUp "the operator never logged the end of its startup grace period")
   let mut last : Except String Placement := .error (notSetUp "not observed")
   let deadline := (← nowSec) + timeoutSec
   repeat

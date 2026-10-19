@@ -140,38 +140,66 @@
 
 master の worker が control-plane から切れると、node は Unknown になり、operator は Pod NotReady を 76 s で dead と判断して replica を昇格した。旧 master のプロセスは生きていて、client は届き、旧 master は自分の map で master のまま write を受けて ACK し続ける。operator は旧 master に届かないので、計画退避の fence（operator が arm / re-arm する短期 fence）は使えない。heal 後、旧 master は新しい履歴に従う側として再構築されるので、分断中に旧 master が ACK した write は失われる。**二重 write と ACK 済み write の喪失が同時に起こりうる**（判定は次の run の測定で出す）。
 
-### 11.2 守るべき安全条件
+### 11.2 守るべき安全条件（精密化、レビュー 8a4f482）
 
-S1. どの時点でも、1 つの partition で write を ACK できる node は高々 1 つ。
-S2. 新 master は、旧 master がもう ACK できないことが**証明された後**にだけ、最初の write を ACK する。
-S3. S1 / S2 は、分断、flared の停止・再開、operator の再起動・leader 交代、遅れて届く map や更新の下でも成り立つ。
-S4. 権限は時間か世代で失効する。operator からの明示の取り消しが届くことを前提にしない（分断では届かない）。
+- **権限区間:** node が「ACK する client write を commit してよい」実時間の区間。client に ACK が届く時刻は権限の時刻ではない（送信済みの ACK がネットワークで遅れて届くことはありうるし、それ自体は違反ではない）
+- **S1:** 1 つの partition の旧 master と新 master の権限区間は重ならない
+- **S2:** ACK した write はすべて、その node の権限区間の中で commit されている（commit の後、ACK を送る前に権限を検証する。下の 11.4）
+- **S3:** S1 / S2 は、分断、遅延・重複・再送されたメッセージ、flared の停止（SIGSTOP、スケジューラの停止、無限に長い停止を含む）と再開、operator の再起動・leader 交代の下でも成り立つ
+- **S4:** 権限は時間か世代で失効する。取り消しのメッセージが届くことを前提にしない
+- **範囲外（明記）:** 非同期複製なので、旧 master が権限内で commit して ACK し、replica にまだ届いていない write は、昇格後に失われうる（突然停止 B と同じ「無損失ではない」）。リースはこれを防がない。防ぐには同期 ACK（C、条件付き）が必要
 
-### 11.3 選択肢
+### 11.3 選択肢（保証欄は「必要条件を満たした場合」の提案。どれも未証明・未実装）
 
-| 案 | 仕組み | S1 / S2 | 可用性のコスト | 実装 |
-|---|---|---|---|---|
-| **A. master の書込リース + 世代** | operator（leader）が partition ごとに master へ `lease <partition> <epoch> <L 秒>` を更新し続ける。flared は**受信時刻からの単調時計**でリースを数え、期限内だけ write を受け付ける（入口は write fence と同じ admission）。期限が切れると自分で write を拒否する。昇格は、旧 master へ**最後にリースを送った時刻**から L + ドリフト余裕 + 最大 write 時間が経ってから。新 master は世代を上げ、その世代を永続化してから ACK を始める。古い世代の forwarded write / 複製は拒否 | 両方満たす（単調時計のドリフトに上限があるという仮定の下） | operator か制御経路が L 秒届かないと、**正常な master も write を止める**（現状は operator が止まっても write は続く）。failover は少なくとも L 延びる | flared: リース状態、admission の判定、`lease` 命令、stats。operator: reconcile pass と独立したリース更新タスク（障害中は 1 pass が 11〜15 s かかるので、pass ごとの更新では足りない）、昇格前の待ち、世代の永続化 |
-| B. 多数決による自己停止 | master は replica と witness（operator など）の過半数に届く間だけ write を受ける。孤立した旧 master は自分で止まる | 満たす（A と同じ時間の議論が必要） | witness の配置と運用が要る。1m+1s では witness 必須 | 大きい（会員管理・witness） |
-| C. 同期 ACK | replica が適用してから client に ACK する。replica から切れた旧 master は ACK できない | ACK 済みの喪失は防ぐ。二重 write の「受付」は残りうる（未 ACK で失敗） | 遅延が増える。replica 障害で write が止まる。止めないための縮退モードを入れるとギャップが戻る（MySQL semi-sync の timeout fallback と同じ） | 中（複製経路の同期化） |
-| D. client / proxy の世代トークン | client や proxy が世代を持って古い master を拒否する | 直接つなぐ client には効かない | 小 | client 側の対応が必要（範囲外） |
-| E. 旧 master が生きている可能性があるときは自動昇格しない | node / Pod が確実に止まっている証拠（判断点 3 の out-of-service taint、cloud API の停止確認）がある場合だけ昇格する | 満たす（自動昇格をしないので） | 分断では自動 failover しない（write 可能なのは旧 master 側だけ、client がそちらに届く場合だけ） | 小〜中 |
+| 案 | 仕組み | S1 / S2 が成り立つための必要条件（未証明） | 可用性のコスト |
+|---|---|---|---|
+| A. master の書込リース | 下の 11.4（RQ 方式）。**旧案（受信起点の TTL・送信起点の待ち）は撤回**: 遅延した grant で旧 master の権限が昇格の後まで延びる反例がある（11.5 の 1） | 期限を master 自身の要求送信時刻に束縛する、nonce の一回限りの受理、期限後に届いた grant の破棄、commit 後・ACK 前の権限検証、停止中も進む時計（CLOCK_BOOTTIME 相当）とドリフト上限、grant を出せる leader の権限の終わりが分かること、leader をまたぐ発行停止の永続化 | operator / 制御経路が L 届かないと正常な master も write を止める。failover は少なくとも L + 余裕だけ延びる |
+| B. 多数決 | 単なる到達性の多数決ではない。term（世代）付きの投票、1 term に 1 票の排他、会員（voter 集合）の変更手順、票の永続化が要る（Raft の leader 選出と同等） | term と票の永続化、会員変更の安全な手順、時間に頼る部分は A と同じ議論 | witness が必須（1m+1s）。実装は大きい |
+| C. 同期 ACK | replica が適用してから ACK する | 同期先の選び方（どの replica が「同期済み」か）、同期済みの replica だけを昇格させる規則、replica 側の永続性（tmpfs では再起動で消える）、同期先が落ちたときに縮退しない（縮退するとギャップが戻る） | 遅延が増える。同期先の障害で write が止まる |
+| D. client / proxy の世代トークン | client や proxy が世代を持つ | 直接つなぐ client には効かない | 小 |
+| E. 停止が確認できるまで自動昇格しない | **taint・node NotReady・Pod 削除要求は、どれも旧プロセスや書込が止まった証明ではない。**「out-of-service taint を付けたから昇格してよい」は禁止。停止の証明は、実際の fencing（例: cloud API で VM の停止完了を確認する、電源を切る）だけ | 停止完了を確認する仕組み（kind では docker の停止確認、本番では環境ごとの仕組み）。確認できなければ昇格しない | 分断（旧側が生きている）では自動 failover しない |
 
-### 11.4 A を採る場合に決める安全条件の詳細
+### 11.4 A を検討する場合の候補プロトコル（RQ、提案のみ）
 
-- **単調時計:** 経過時間は各 node の単調時計で測る。wall clock の同期は前提にしない。ドリフト率の上限 ρ を仮定し、昇格前の待ちは L·(1+ρ) + 余裕とする
-- **in-flight:** 期限切れの直前に admission を通った write が期限後に ACK されないようにする。残り時間が最大 write 時間より短ければ admission で拒否する（fence の in-flight 計上と同じ仕組みを使う）
-- **flared の停止・再開:** リースはメモリにだけ置く。再起動した flared はリースなしで始まり（write 拒否）、更新を受けるまで待つ。再起動で権限が延びることはない
-- **operator の再起動・leader 交代:** 新しい leader は、前の leader が最後に何を許可したか分からない前提で、昇格の前に L·(1+ρ) + 余裕を待つ。リース更新には leader の世代を付け、flared は古い世代からの更新を拒否する
-- **更新できないとき:** 期限が切れた master は write を拒否する。read は別の判断（stale read を許すか）
-- **計画退避との関係:** 計画退避の fence はリースの上に残す（期限内でも退避の準備では止める）。退避の grant はリースの世代にも束縛する
+時刻の起点を、master が**自分で要求を送った時刻**にする。
 
-### 11.5 ユーザー判断に上げる点（既定動作は黙って変えない）
+```
+master (旧)                 operator leader               新 master
+  q: renew(nonce=n) を送る ─────▶
+     （自分の時計で q を記録）      受信、発行停止していなければ
+                              ◀───── grant(n) を返す
+  r: grant(n) を受ける
+     r < q + L なら有効、期限 = q + L   （r は期限に影響しない）
+     r ≥ q + L なら破棄
+     nonce n は 1 回だけ受理
+  ...
+                              S: この partition への発行を止める
+                                 （権威ある記録に永続化してから）
+                              新 master の開始 ≥ max(S, 前の leader たちが
+                                 grant を出せた最後の時刻) + L + 余裕 ──▶  開始
+```
 
-1. operator や制御経路が L 秒届かないときに、**正常な master の write が止まる**ことを受け入れるか（A / B の本質的な代償）
-2. L と余裕の値（固定値を決めず、まず kind で測定して提案する）。failover 時間がその分延びる
-3. A を実装するまでの間、旧 master が生きている可能性がある unready による昇格（今は 30 s で dead → 昇格）を続けるか、E のように止めるか。止めると分断と突然停止を区別できない場合に自動 failover しなくなる
-4. 同期 ACK（C）を、遅延と可用性を払ってでも組み合わせるか
-5. 期限切れ中の read を許すか
+- grant は「その grant が答える要求を master が送った時刻」から L で切れる。grant がいつ届いても（遅延・重複・再送でも）期限は延びない。期限後に届いた grant は破棄する。古い nonce の grant は無視する
+- 発行した側（operator）の記録: 発行を止めた事実と時刻の基準を、leader をまたいで読める権威ある記録（CAS 付き）に永続化してから止める。新しい leader は、前の leader が grant を出せた最後の時刻（前の leader 自身の leader 権限の終わり）より後からしか数えない。**前の leader の権限の終わりを、前の leader 自身が知って止まれること**（leader 権限も要求起点で数え、期限後は grant を出さない）が前提。これがないと、停止していた旧 leader が再開して grant を出し続ける反例がある（11.5 の 3）
+- **commit の線形化点:** write は admission で権限を確認し（早く断るため）、**commit の後、ACK を送る前**に、停止中も進む時計で権限をもう一度確認する。期限が過ぎていれば ACK しない（client にはエラー。その write は旧 master のコピーに残るが、heal 後の再構築で捨てられ、ACK されていないので S2 違反ではない）。admission だけの確認では、admission と commit の間の停止で期限後の commit が ACK される（11.5 の 4）
+- **時計:** Linux の CLOCK_MONOTONIC は OS suspend 中に進まないので使わない。CLOCK_BOOTTIME（suspend 中も進む）を前提にする。SIGSTOP やスケジューラの停止の間も BOOTTIME は進む。VM の停止（hypervisor による一時停止・live migration）で guest の時計がどう振る舞うかは環境依存で、**ドリフト上限 ρ の仮定がそこで破れうる**。根拠のない最大 write 時間や L(1+ρ) の式で安全とは言わない
+- **無限の停止:** commit 後の確認があれば、どこで無限に止まっても S2 は破れない（確認の前で止まれば、再開時に期限切れで ACK しない。確認の後で止まれば、commit は権限内で済んでいて、ACK が遅れて届くだけ）。S1（権限区間が重ならない）は、新 master の開始が旧 master の期限より後であることだけに依存し、旧 master の停止の長さには依存しない
+- **flared の再起動:** リースはメモリにだけ置く。再起動した flared はリースなしで始まり、新しい要求から数え直す
+- **更新できないとき:** 期限が切れた master は write を拒否する（可用性の代償。read は別の判断）
 
-推奨（判断前の提案）: A（リース + 世代）を本線にし、L は測定してから決める。それまでの既定動作は変えず、C' の測定（二重 write と ACK 喪失の件数）を判断材料として出す。
+### 11.5 反例（設計モデル `StateMachine/WriteLeaseModel.lean` と単体試験 `leaseChecks` で再現。モデルは製品コードではない）
+
+1. **受信起点の TTL（撤回した案）:** L = 10。t0 に grant を送る → 20 s 遅延 → 旧 master が t20 に受信し、t30 まで有効。送信起点で待つ operator は t11 に新 master を許可 → **t20〜t30 で重なる**
+2. **RQ:** 同じ遅延（要求 t0、grant の到着 t20 ≥ t0 + L）は破棄される。速やかな grant（到着 t2）は [t2, t10)、新 master の t11 とは重ならない。重複・再送した grant は期限を延ばさない
+3. **leader 交代:** 停止していた旧 leader が t15 に再開し、t14 に送られた要求に grant → 旧 master は [t15, t24)。新 leader が自分の停止時刻（t0）だけから数えると t11 に開始して**重なる**。旧 leader が grant を出せた最後の時刻（t15）から数えると t26 で重ならない（旧 leader が自分の期限で止まれることが前提）
+4. **停止（pause）:** 期限 t10。t5 に admission → 停止 → t15 に commit。admission だけの確認では ACK される（**期限外の commit を ACK**）。commit 後の確認（t15）では ACK しない
+5. commit が t8（期限内）で、確認の前に停止して t12 → ACK しない（未確定。ACK されていないので違反ではない）。停止なし（確認 t9）→ ACK、権限内の commit
+
+### 11.6 ユーザー判断に上げる点（既定動作は黙って変えない）
+
+1. operator や制御経路が L 届かないときに、**正常な master の write が止まる**ことを受け入れるか（A / B の本質的な代償）。ただし、この承認で A の方式や L の値が安全になるわけではない（上の必要条件の証明・レビューが別に要る）
+2. A を実装・検証するまでの間、旧 master が生きている可能性がある unready による昇格（今は 30 s で dead → 昇格）を続けるか、E（停止の確認ができるまで昇格しない）に寄せるか
+3. 同期 ACK（C）の条件（同期先・昇格・永続性）を満たす前提で、遅延と可用性を払うか
+4. 期限切れ中の read を許すか
+
+提案: 方式の採用や既定変更はまだしない。次は (a) C' の測定（二重 write と ACK 喪失の件数）を出す、(b) RQ 方式の必要条件（特に leader 権限の終わりと発行停止の永続化、VM 停止時の時計）を設計レビューにかける。

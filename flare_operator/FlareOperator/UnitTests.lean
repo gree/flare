@@ -35,6 +35,7 @@ import FlareOperator.E2E.TraceMatch
 import FlareOperator.E2E.Helpers
 import FlareOperator.E2E.PromotionTimeline
 import FlareOperator.E2E.Tests.NodeOps
+import FlareOperator.StateMachine.WriteLeaseModel
 import FlareOperator.StateMachine.SourceEligibility
 import FlareOperator.StateMachine.RebuildConcurrency
 import FlareOperator.StateMachine.AuthoritativeHistory
@@ -1456,10 +1457,42 @@ def partChecks : List (String × Bool) :=
         && (parseWrites "7 1005 10.0.0.1 k7 v7 STORED").head?.map (·.span) == some (1001, 1005))
   ]
 
+-- §11 write-authority DESIGN MODEL (not product code): the review's
+-- counterexamples, one real-time axis, perfect clocks
+open FlareOperator.WriteLeaseModel in
+def leaseChecks : List (String × Bool) :=
+  let L := 10
+  let forever : Interval := { start := 0, stop := 1000 }
+  [
+    ("lease model RX (rejected): a grant sent at 0 and delayed 20 s gives the old master [20,30); RX promotes at 11 -> the authorities OVERLAP",
+      let old := rxAuthority 20 L
+      let new : Interval := { forever with start := rxNewStart 0 L 1 }
+      old == { start := 20, stop := 30 } && old.overlaps new),
+    ("lease model RQ: the same delayed grant (request sent at 0, arriving at 20 >= 0 + L) is DISCARDED; a prompt one gives [2,10) and the new master at 11 does not overlap",
+      rqAuthority { nonce := 1, sentAt := 0 } { nonce := 1, recvAt := 20 } L == none
+        && rqAuthority { nonce := 1, sentAt := 0 } { nonce := 1, recvAt := 2 } L == some { start := 2, stop := 10 }
+        && !({ start := 2, stop := 10 } : Interval).overlaps { forever with start := rqNewStart 0 0 L 1 }),
+    ("lease model RQ: a duplicate / replayed grant cannot extend the lease (the nonce is used once; another nonce is ignored)",
+      let m1 := rqApply { outstanding := some { nonce := 1, sentAt := 0 } } { nonce := 1, recvAt := 2 } L
+      let m2 := rqApply m1 { nonce := 1, recvAt := 9 } L
+      let m3 := rqApply { m1 with outstanding := some { nonce := 2, sentAt := 5 } } { nonce := 1, recvAt := 6 } L
+      m1.expiry == 10 && m2 == m1 && m3.expiry == 10),
+    ("lease model RQ, leader change: a paused OLD leader resuming at 15 grants a request sent at 14 -> [15,24); a new leader counting only its own stop (0) starts at 11 and OVERLAPS; counting the end of the old leader's authority to grant (15) it starts at 26 and does not",
+      let old := (rqAuthority { nonce := 7, sentAt := 14 } { nonce := 7, recvAt := 15 } L).getD { start := 0, stop := 0 }
+      old == { start := 15, stop := 24 }
+        && old.overlaps { forever with start := rqNewStart 0 0 L 1 }
+        && !old.overlaps { forever with start := rqNewStart 0 15 L 1 }),
+    ("lease model, pause: admitted at 5 inside the lease (expiry 10), paused, committed at 15 — an admission-only check ACKs a commit outside the authority; a check after the commit does not ACK it",
+      !ackSafe 5 15 15 10 false && ackSafe 5 15 15 10 true && !acked 5 15 15 10 true),
+    ("lease model, pause after the commit: committed at 8 inside the lease; a pause before the post-commit check (12) -> not acknowledged (in doubt, never ACKed); no pause (9) -> ACKed, committed inside the authority",
+      !acked 5 8 12 10 true && acked 5 8 9 10 true && ackSafe 5 8 9 10 true)
+  ]
+
 def checkDisruption (ctx : Ctx) : IO Unit := do
   for (n, ok) in dsChecks do check ctx n ok
   for (n, ok) in admChecks do check ctx n ok
   for (n, ok) in partChecks do check ctx n ok
+  for (n, ok) in leaseChecks do check ctx n ok
   -- the observer keeps its period while the caller blocks on probes and
   -- timeouts (scaled fixture: period 100 ms, the caller blocks 5 x 300 ms)
   let obs ← FlareOperator.E2E.NodeOps.startObserver IO.monoMsNow 100

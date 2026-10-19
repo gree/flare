@@ -1238,7 +1238,16 @@ def admChecks : List (String × Bool) :=
     ("disruption state round-trips through its JSON (status.disruption); empty = none; garbage is an error, never none",
       let st : Disruption.State := { id := "e1", pod := "n0", target := .master, binding := { podUid := "u", bootId := "b", copyId := "c", historyEpoch := "2:e", partition := 0 }, attempt := 2, phase := .applying, requestedAt := 5, deadline := 600, leaseEpoch := 3, successor := some "n1:1", barrier := some 77, fenceToken := some "e1-2", reason := "x" }
       (DisruptionJson.parse (DisruptionJson.render (some st))).toOption == some (some st)
-        && (DisruptionJson.parse "").toOption == some none && (DisruptionJson.parse "{bad").toOption.isNone)
+        && (DisruptionJson.parse "").toOption == some none && (DisruptionJson.parse "{bad").toOption.isNone),
+    ("unready: dead after the tick count, or after the wall time once seen NotReady on two ticks (slow passes do not stretch it)",
+      K8sReconciler.unreadyDead 6 0 1000 2 6 30000
+        && K8sReconciler.unreadyDead 2 0 30000 2 6 30000
+        && !K8sReconciler.unreadyDead 1 0 90000 2 6 30000
+        && !K8sReconciler.unreadyDead 3 0 29999 2 6 30000),
+    ("unready: the first-seen time starts with the streak and is kept while it lasts",
+      K8sReconciler.unreadySince [] [("a", 1)] 500 == [("a", 500)]
+        && K8sReconciler.unreadySince [("a", 500)] [("a", 2)] 9000 == [("a", 500)]
+        && K8sReconciler.unreadySince [("a", 500)] [("a", 1)] 9000 == [("a", 9000)])
   ]
 
 def checkDisruption (ctx : Ctx) : IO Unit := do

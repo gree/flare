@@ -1244,6 +1244,20 @@ def exMasterBackEmpty (state : FlareClusterState) (pIdx : Nat)
     n.lastMasterOf == Int.ofNat pIdx && n.state != FlareState.Down
       && livePodKeys.contains key && knownEmptyKeys.contains key)
 
+/-- A present pod that stays NotReady is treated as dead after `deadTicks`
+    consecutive operator ticks — or, once it has been NotReady for at least
+    `minTicks` ticks, after `deadMs` of WALL time since it was first seen
+    NotReady (node operations 2026-10-19: with a worker unreachable each pass
+    took 11-15 s, so 6 ticks meant ~90 s instead of the ~30 s the tick count
+    stands for; 39197119445). `minTicks` keeps one slow observation from
+    counting. -/
+def unreadyDead (streak sinceMs nowMs minTicks deadTicks deadMs : Nat) : Bool :=
+  streak ≥ deadTicks || (streak ≥ minTicks && nowMs ≥ sinceMs + deadMs)
+
+/-- First time (ms) each NotReady key was seen in its current streak. -/
+def unreadySince (prev : List (String × Nat)) (streaks : List (String × Nat)) (nowMs : Nat) : List (String × Nat) :=
+  streaks.map fun (k, n) => (k, if n ≤ 1 then nowMs else (prev.lookup k).getD nowMs)
+
 /-- Copies attributed to partition `pIdx` that were NOT observed this tick
     (decision 2026-10-16: "the only copy" is not "the only copy observed"):
     a non-master member (partition, ex-master marker or a dead ex-slave's

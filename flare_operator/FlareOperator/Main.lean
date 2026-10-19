@@ -305,6 +305,10 @@ initialize parkedIdleRef : IO.Ref (List String) ← IO.mkRef []
     so a node whose cause did not change is not resumed every pass. -/
 initialize resumedAtRef : IO.Ref (List (String × Nat)) ← IO.mkRef []
 
+/-- When each NotReady pod was first seen in its current streak (mono ms),
+    and which ones were already reported dead (one CRITICAL per streak). -/
+initialize unreadySinceRef : IO.Ref (List (String × Nat)) ← IO.mkRef []
+initialize unreadyReportedRef : IO.Ref (List String) ← IO.mkRef []
 /-- Planned eviction (EvictionGuard): the persisted disruption, whether it
     could be loaded (false = fail closed), the node keys the pass must treat
     as draining, and this leader's generation. -/
@@ -1446,10 +1450,17 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       let fresh := K8sReconciler.rejoinedAfterDown (← downAtCommitRef.get) (← stateRef.get) ++ leftActive
       let newUnready := K8sReconciler.unreadyStreaks prevUnready notReadyKeys (← stateRef.get) fresh
       unreadyCyclesRef.set newUnready
-      let unhealthyKeys := (newUnready.filter (fun kv => kv.2 ≥ unreadyDeadCycles)).map Prod.fst
+      let nowMs ← IO.monoMsNow
+      let since := K8sReconciler.unreadySince (← unreadySinceRef.get) newUnready nowMs
+      unreadySinceRef.set since
+      let unreadyDeadMs := 1000 * (((← IO.getEnv "FLARE_UNREADY_DEAD_SECONDS").bind (·.toNat?)).getD (unreadyDeadCycles * 5))
+      let deadNow := fun ((k, n) : String × Nat) => K8sReconciler.unreadyDead n ((since.lookup k).getD nowMs) nowMs 2 unreadyDeadCycles unreadyDeadMs
+      let unhealthyKeys := (newUnready.filter deadNow).map Prod.fst
+      let reported ← unreadyReportedRef.get
       for (k, n) in newUnready do
-        if n == unreadyDeadCycles then
-          IO.eprintln s!"[flare-operator] CRITICAL: node {k} pod is PRESENT but has been NotReady for {n} ticks -> treating it as dead (flared crashed or wedged); failover/refill will act on it"
+        if deadNow (k, n) && !reported.contains k then
+          IO.eprintln s!"[flare-operator] CRITICAL: node {k} pod is PRESENT but has been NotReady for {n} ticks / {(nowMs - (since.lookup k).getD nowMs) / 1000} s -> treating it as dead (flared crashed or wedged, or its node is unreachable); failover/refill will act on it"
+      unreadyReportedRef.set (unhealthyKeys ++ (reported.filter fun k => newUnready.any (·.1 == k) && !unhealthyKeys.contains k))
 
       -- Topology for zone-aware placement; [] on unlabeled clusters.
       let nodeZones ← Bridge.listNodeZones

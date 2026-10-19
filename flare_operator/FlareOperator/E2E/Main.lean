@@ -116,6 +116,8 @@ def main (args : List String) : IO UInt32 :=
     Tests.NodeOps.holdSuite,
     Tests.NodeOps.stopSuite,
     Tests.NodeOps.partitionSuite,
+    Tests.NodeOps.drainControlSuite,
+    Tests.NodeOps.holdControlSuite,
     Tests.ContinuousReplicationLimits.historyHeldSuite,
     Tests.ContinuousReplicationLimits.historyIntentSuite,
     Tests.ContinuousReplicationLimits.forwardWindowSuite,

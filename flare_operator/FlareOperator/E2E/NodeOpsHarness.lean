@@ -369,4 +369,16 @@ def healBetween (a b : String) : IO Unit := do
       for _ in [0:3] do
         discard <| hostCmd "docker" (["exec", n, "iptables", "-D", "FORWARD"] ++ cutRule x y)
 
+/-- Delay every packet leaving a kind node by `ms` (tc netem on eth0), or
+    remove the delay (`ms = 0`). Used to widen the window in which an
+    acknowledged write has not reached the replica yet, so a drain that does
+    not wait for it can be caught losing it (deterministic enough to compare
+    old and new code; the delay is recorded in the conditions). -/
+def netemDelay (node : String) (ms : Nat) : IO Bool := do
+  discard <| hostCmd "docker" ["exec", node, "tc", "qdisc", "del", "dev", "eth0", "root"]
+  if ms == 0 then return true
+  match ← hostCmd "docker" ["exec", node, "tc", "qdisc", "add", "dev", "eth0", "root", "netem", "delay", s!"{ms}ms"] with
+  | .ok _ => return true
+  | .error e => IO.eprintln s!"# netem on {node} failed: {e}"; return false
+
 end FlareOperator.E2E.NodeOps

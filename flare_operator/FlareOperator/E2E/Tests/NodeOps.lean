@@ -142,6 +142,10 @@ private def drainRun (c : Ctx) (drainMaster : Bool) : IO (Except String DrainObs
     let other := if drainMaster then p.replica else p.master
     if !(← c.startWriter "svc" (svcHost c) "ws") then return .error (notSetUp "writer svc did not start")
     if !(← c.startWriter "peer" (podHost c other.name) "wp") then return .error (notSetUp "writer peer did not start")
+    -- widen the replication window: the successor's worker answers 100 ms late
+    let delayed ← if drainMaster then netemDelay other.node 100 else pure false
+    if delayed then c.event s!"netem: 100 ms delay on {other.node} (successor {other.name})"
+    c.art "conditions.txt" s!"netem delay on the successor's worker: {if delayed then "100 ms" else "none"}"
     let (s0, _) ← observe c 10 (pure false)
     c.event s!"drain of {target.node} ({target.name}) starts"
     let t0 ← nowSec
@@ -150,6 +154,7 @@ private def drainRun (c : Ctx) (drainMaster : Bool) : IO (Except String DrainObs
     let (rc, out) := (← drainResult stem).getD ("timeout", "")
     for l in out.splitOn "\n" do c.art "drain.txt" l
     c.event s!"drain finished rc={rc} (completed={done})"
+    if delayed then discard <| netemDelay other.node 0
     let (s2, red) ← observe c 420 (redundant c (some target.node))
     let rec_ := (← nowSec) - t0
     c.event s!"redundancy restored={red} after {rec_} s from the drain start"
@@ -276,6 +281,38 @@ def holdSuite : TestSuite :=
     tests := [
       { name := "(D) the replica is cut off and behind; a standard drain of the master's worker is HELD: the drain does not complete, the master is not deleted, and the requester is told why"
         run := holdTest { cfg, suite := "node-ops-hold", test := "d-behind" } }
+    ] }
+
+/-- CONTROLS (design §4.5: compare old and new on the same SHA): the same A
+    and D scenarios with the eviction guard OFF — the behaviour without the
+    planned-eviction controls. Expected: A may lose acknowledged writes under
+    the 100 ms successor delay; D completes the drain (not held). -/
+def drainControlSuite : TestSuite :=
+  let cfg := cfgOf "node-drain-c" true false
+  { name := "node-ops-drain-control"
+    setup := do deployCluster cfg; IO.sleep 50000
+    teardown := do
+      for w in ← dataWorkers do uncordon w
+      cleanupCluster cfg
+    onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
+    afterEach := fun i => saveFullLogs cfg.«namespace» s!"after-test-{i}"
+    tests := [
+      { name := "(A, CONTROL: no eviction guard) standard kubectl drain of the MASTER's worker under continuous writes with the successor delayed 100 ms: every acknowledged write on the new master and the rebuilt replica (expected to FAIL without the guard)"
+        run := drainTest { cfg, suite := "node-ops-drain-control", test := "a-master-control" } true }
+    ] }
+
+def holdControlSuite : TestSuite :=
+  let cfg := cfgOf "node-hold-c" true false
+  { name := "node-ops-hold-control"
+    setup := do deployCluster cfg; IO.sleep 50000
+    teardown := do
+      for w in ← dataWorkers do uncordon w
+      cleanupCluster cfg
+    onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
+    afterEach := fun i => saveFullLogs cfg.«namespace» s!"after-test-{i}"
+    tests := [
+      { name := "(D, CONTROL: no eviction guard) the replica is cut off and behind; a standard drain of the master's worker: held? (expected to FAIL without the guard)"
+        run := holdTest { cfg, suite := "node-ops-hold-control", test := "d-behind-control" } }
     ] }
 
 /-! ## B: sudden worker stop -/
@@ -456,7 +493,9 @@ private def partitionExecute (c : Ctx) (nodeLevel : Bool) (p : Placement) (pairs
   let (s0, _) ← observe c 10 (pure false)
   for (a, b) in pairs do discard <| cutBetween a b
   c.event s!"cut {pairs}"
-  let (s1, _) ← observe c (if nodeLevel then 150 else 90) (pure false)
+  -- long enough for the node to go NotReady AND the operator to act (B
+  -- measured promotion after 151-168 s), so a dual-master window is reached
+  let (s1, _) ← observe c (if nodeLevel then 330 else 90) (pure false)
   for (a, b) in pairs do healBetween a b
   c.event "healed"
   let (s2, _) ← observe c 180 (redundant c none)

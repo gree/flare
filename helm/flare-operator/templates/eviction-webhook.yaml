@@ -1,0 +1,74 @@
+{{- if and .Values.operator.enabled .Values.evictionGuard.enabled }}
+{{- /*
+  Planned-eviction admission webhook (docs/design-node-operations-2026-10-19.md).
+  pods/eviction CREATE in THIS namespace goes to the leader operator, which
+  refuses the first eviction of a flared pod (code 429: drain / autoscaler
+  retry), prepares (fence, barrier, switch) and allows a later retry only
+  with a valid grant. Selected by namespace: the Eviction object carries no
+  pod labels, so an objectSelector would miss it. failurePolicy Fail: with
+  no operator answering, flared evictions are refused (operator pods are
+  NOT flared pods and are allowed).
+*/}}
+{{- $svc := printf "%s-webhook" (include "flare-operator.fullname" .) }}
+{{- $ns := .Values.namespace }}
+{{- $ca := genCA "flare-eviction-ca" 3650 }}
+{{- $cert := genSignedCert (printf "%s.%s.svc" $svc $ns) nil (list (printf "%s.%s.svc" $svc $ns) (printf "%s.%s.svc.cluster.local" $svc $ns)) 3650 $ca }}
+apiVersion: v1
+kind: Secret
+type: kubernetes.io/tls
+metadata:
+  name: {{ include "flare-operator.fullname" . }}-webhook-tls
+  namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.labels" . | nindent 4 }}
+data:
+  tls.crt: {{ $cert.Cert | b64enc }}
+  tls.key: {{ $cert.Key | b64enc }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $svc }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.labels" . | nindent 4 }}
+spec:
+  ports:
+    - port: 443
+      targetPort: webhook
+      protocol: TCP
+      name: webhook
+  selector:
+    {{- include "flare-operator.selectorLabels" . | nindent 4 }}
+    flare.gree.net/role: leader
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: {{ include "flare-operator.fullname" . }}-eviction-{{ $ns }}
+  labels:
+    {{- include "flare-operator.labels" . | nindent 4 }}
+webhooks:
+  - name: eviction.flare.gree.net
+    admissionReviewVersions: ["v1"]
+    sideEffects: NoneOnDryRun
+    failurePolicy: Fail
+    timeoutSeconds: {{ .Values.evictionGuard.timeoutSeconds }}
+    matchPolicy: Equivalent
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ $ns }}
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods/eviction"]
+        scope: Namespaced
+    clientConfig:
+      caBundle: {{ $ca.Cert | b64enc }}
+      service:
+        name: {{ $svc }}
+        namespace: {{ $ns }}
+        path: /evict
+        port: 443
+{{- end }}

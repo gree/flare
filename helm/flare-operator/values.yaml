@@ -415,6 +415,23 @@ cluster:
       memory: 1Gi
 
 # Monitoring objects (require the Prometheus Operator CRDs).
+# Planned-eviction admission webhook (docs/design-node-operations-2026-10-19.md):
+# kubectl drain / the cluster autoscaler evict a flared pod only after the
+# operator has prepared it (fence, barrier on another node, role switch).
+# OFF by default: NOT production-approved; enabling it also needs the CRD with
+# status.disruption. With it on and no operator answering, flared evictions
+# are refused (failurePolicy Fail).
+evictionGuard:
+  enabled: false
+  tlsImage: alpine/socat:1.8.0.0
+  timeoutSeconds: 5
+  tlsResources:
+    requests:
+      cpu: 10m
+      memory: 16Mi
+    limits:
+      memory: 64Mi
+
 monitoring:
   serviceMonitor:
     enabled: false

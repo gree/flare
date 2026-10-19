@@ -87,6 +87,29 @@ spec:
             {{- toYaml .Values.readinessProbe | nindent 12 }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+        {{- if .Values.evictionGuard.enabled }}
+        # TLS for the planned-eviction admission webhook: the operator serves
+        # it in plain HTTP on 127.0.0.1:9444 (FLARE_WEBHOOK_PORT); this
+        # sidecar terminates TLS (docs/design-node-operations-2026-10-19.md).
+        - name: webhook-tls
+          image: {{ .Values.evictionGuard.tlsImage }}
+          imagePullPolicy: IfNotPresent
+          args: ["OPENSSL-LISTEN:9443,reuseaddr,fork,cert=/tls/tls.crt,key=/tls/tls.key,verify=0", "TCP:127.0.0.1:9444"]
+          ports:
+            - name: webhook
+              containerPort: 9443
+              protocol: TCP
+          volumeMounts:
+            - name: webhook-tls
+              mountPath: /tls
+              readOnly: true
+          resources:
+            {{- toYaml .Values.evictionGuard.tlsResources | nindent 12 }}
+      volumes:
+        - name: webhook-tls
+          secret:
+            secretName: {{ include "flare-operator.fullname" . }}-webhook-tls
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

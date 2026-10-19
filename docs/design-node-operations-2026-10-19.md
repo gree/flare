@@ -215,3 +215,17 @@ master (旧)                 operator leader               新 master
   - 3409 件の Unknown は、新 master の version が変わる前後で strict bracket が成立しない区間（role が同じでも version が変われば途中の変化を否定できないので、未判定のまま）
   - report の "0 local / 56293 unknown path" は集計の誤り（サンプルを渡していなかった）。node 自身の view による経路の集計に直した
 - 二重 write の判定（推定）と ACK 喪失（直接）は、8a4f482 以降の run で独立に出す
+
+### 8.6 partition の targeted run（280d928、E2E 39287794350）— C' で製品ギャップを測定
+
+- **C: 合格（測定、failover の受入ではない）**
+- **C': PRODUCT GAP（判断点 2）。** 判定と独立の findings（report の全文）:
+  - 注入: 成立（kubelet の server `flare-e2e-control-plane:6443` は worker で `fc00:f853:ccd:e793::5` と `172.18.0.5` に解決、切断前はどちらも open、kubelet の実接続は `172.18.0.5`、切断後はどちらも timeout）
+  - 読み取り: 193 サンプル、例外なく終了。各 pod の読み取りは必要区間（1792432042..1792432392）を前後で覆い、切断中の最大間隔は 2 s
+  - 交代: replica は自分の view で切断から 184 s 後（1792432226）に master。旧 master は heal（1792432396）まで自分の view で master。operator のログは unready → dead → `PROMOTION NOT LOSS-FREE` → `PROMOTION committed`
+  - **二重 write（推定、own view）:** 旧 master の local ACK 22778 件が新 master が master だった間に、新 master の local ACK 22167 件が旧 master がまだ master だった間にあった（約 170 s）
+  - **ACK 喪失（直接、最終 master のコピーと比較）: 47618 件。** すべて旧 master が ACK した write（`wo_*`）で、ACK の時刻は 1792432150〜1792432396（切断の 108 s 後から heal まで）。旧 master は heal 後に proxy になり、その間の write は新しい履歴に含まれない
+  - 判定のカバレッジ: 切断区間の ACK 102476 件のうち 97086 件を判定、5390 件は未判定（新 master の version が変わる前後）
+  - writer の記録: 両方とも END マーカーまで完全
+- 製品の意味: 計画外の分断で旧 master が生きていて client が届く場合、現行の自動昇格（unready で dead → 昇格）は二重 master を作り、旧 master が ACK した write を大量に失う。これは §11 の判断（write 権限の失効の仕組み、またはそれまでの自動昇格の扱い）の材料。既定動作は変えていない
+- 喪失が切断直後ではなく 108 s 後の ACK から始まる理由は未分解（推定しない。次に replica の適用位置の時系列で確かめる）

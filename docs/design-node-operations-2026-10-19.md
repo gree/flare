@@ -45,3 +45,24 @@
 ## 5. 報告の区分
 
 各項目を 実装済み / CI 済み（固定 candidate の全体 CI） / レビュー済み / 本番承認 に分けて報告する。現時点ではすべて未。既存の公開 tag（rc67 など）は変更しない。
+
+## 6. 現状の再現（c27ff35、E2E 39197113290 / 39197119445、multi-node kind）
+
+ガードなしの現行コード。single-suite なので候補の証拠ではない。
+
+| シナリオ | 結果 | 測定値 |
+|---|---|---|
+| A master の drain | 合格 | drain 完了（rc 0）。ACK 済み write の欠損は master・replica とも 0。冗長性の回復まで 70 s。書き込みは各 writer で約 30/s、遅延の注入なし。**後継への遅延がないと、喪失の窓がほぼ開かない**（A は acfa862 で後継の worker に 100 ms の netem を入れて再測定する） |
+| A' replica の drain | 合格 | 欠損 0、冗長性の回復まで 77 s |
+| **D replica 遅延中の drain** | **不合格（ギャップを再現）** | 後継を遮断した状態で drain が完了した。静的 PDB は保留しない |
+| B worker 停止 → 同じデータで復帰（PVC） | 合格 | 昇格まで **151 s**。内訳: 停止 → Pod Ready=false が +44 s（node monitor grace）、Ready=false → 昇格が約 107 s。後者は `FLARE_UNREADY_DEAD_CYCLES=6` サイクル分で、到達不能時は 1 サイクルが延びている（推定、未分解）。手動操作なしで 180 s 待っても**冗長性は戻らない**（Pod は到達不能 node 上に残る）。worker の復帰後に回復した。ACK 欠損 0 |
+| B' worker 停止 → tmpfs 喪失 | 合格 | 昇格まで 168 s。自動回復なし。停止を確認した上で Pod を強制削除し、空き worker で再構築された（判断点 3） |
+| C 複製経路と制御経路の切断（node は Ready） | 合格 | master は 1 つのまま（failover なし）。二重 write 0、ACK 欠損 0 |
+| C' master の worker を control-plane からも切断 | 判定不能 | 150 s の切断中に failover が起きなかったので、二重 write の時間帯に届いていない（acfa862 で 330 s に延長） |
+
+## 7. 実装の現状（acfa862、未レビュー、全体 CI 未実施）
+
+- flared: write fence（`fence arm|release|status`、TTL、in-flight カウンタ、全 mutation 入口と reaper / lazy expiry）。C++ 単体試験 `test_write_fence` は CI で初めてコンパイルする
+- operator: `StateMachine/Disruption`（純粋）、`EvictionGuard`（webhook と prepare）、`status.disruption`（CRD）、webhook サーバ（127.0.0.1、TLS は sidecar）。単体 596 合格
+- chart: `evictionGuard`（既定 OFF）
+- E2E: `evictionGuard` を有効にしたハーネス。A / D はガードあり、`*-control` は同じ SHA でガードなし（対照）

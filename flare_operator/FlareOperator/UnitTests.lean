@@ -14,6 +14,7 @@
   made the elaborator crawl.
 -/
 import FlareOperator.K8s.DisruptionJson
+import FlareOperator.EvictionGuard
 import FlareOperator.K8s.Admission
 import FlareOperator.StateMachine.Disruption
 import Lean.Data.Json
@@ -1140,21 +1141,31 @@ def checkExMasterReturn (ctx : Ctx) : IO Unit := do
 def dsChecks : List (String × Bool) :=
   let b0 : Disruption.Binding := { podUid := "u0", bootId := "b0", copyId := "c0", historyEpoch := "2:e", partition := 0 }
   let bS : Disruption.Binding := { podUid := "u1", bootId := "b1", copyId := "c1", historyEpoch := "2:e", partition := 0 }
+  let bT : Disruption.Binding := { podUid := "u2", bootId := "b2", copyId := "c2", historyEpoch := "2:e", partition := 0 }
   let master : Disruption.PodNow := { name := "n0", uid := "u0", flared := true, binding := some b0, isProxy := false, target := some .master }
   let req : Disruption.EvictionReq := { podName := "n0" }
   let d1 := Disruption.admit none (some master) req 100 7 true "r1" 300
   let st : Disruption.State := match d1 with | .denyRecord _ s => s | _ => { id := "x", pod := "x", target := .master, binding := b0, attempt := 0, phase := .aborted, requestedAt := 0, deadline := 0, leaseEpoch := 0 }
-  let obs : Disruption.Obs := { now := 110, leaseEpoch := 7, targetPresent := true, targetRole := some .master, successor := some ("n1", bS), successorApplied := some 50, fence := none, targetLatestSeq := some 60, switched := false, replicaSafe := true, blockers := [] }
+  let ownM : Disruption.OwnView := { role := "master", partition := 0, mapVersion := 10 }
+  let succ : Disruption.SuccObs := { key := "n1", binding := bS, eligible := true, ready := true, applied := some 50, own := some { role := "slave", partition := 0, mapVersion := 10 } }
+  let obs : Disruption.Obs := { now := 110, leaseEpoch := 7, targetPresent := true, targetBoot := some "b0", targetRole := some .master, targetOwn := some ownM, candidates := [succ], fence := none, targetLatestSeq := some 60, blockers := [] }
   let (s1, a1) := Disruption.step st obs
   let tok := s1.fenceToken.getD ""
-  let (s2, _) := Disruption.step s1 { obs with fence := some (tok, 0) }
-  let (s3, _) := Disruption.step s2 { obs with fence := some (tok, 2) }
-  let (s4, _) := Disruption.step s2 { obs with fence := some (tok, 0) }
-  let (s5, _) := Disruption.step s4 { obs with fence := some (tok, 0), successorApplied := some 59 }
-  let (s6, a6) := Disruption.step s4 { obs with fence := some (tok, 0), successorApplied := some 60 }
-  let (s7, a7) := Disruption.step s6 { obs with fence := some (tok, 0), switched := true }
+  let f := fun (n g : Nat) => some ({ token := tok, inFlight := n, generation := g } : Disruption.FenceObs)
+  let (s2, _) := Disruption.step s1 { obs with fence := f 0 4 }
+  let (s3, _) := Disruption.step s2 { obs with fence := f 2 4 }
+  let (s4, _) := Disruption.step s2 { obs with fence := f 0 4 }
+  let (s5, _) := Disruption.step s4 { obs with fence := f 0 4, candidates := [{ succ with applied := some 59 }] }
+  let (s6, a6) := Disruption.step s4 { obs with fence := f 0 4, candidates := [{ succ with applied := some 60 }] }
+  -- the switch: committed map + both nodes' own maps at v11
+  let swObs : Disruption.Obs := { obs with fence := f 0 4, targetRole := none, desiredSwitched := true, desiredVersion := 11, targetOwn := some { role := "proxy", partition := -1, mapVersion := 11 }, candidates := [{ succ with applied := some 60, own := some { role := "master", partition := 0, mapVersion := 11 } }] }
+  let (s7, a7) := Disruption.step s6 swObs
   let proxyNow := { master with isProxy := true }
   let granted := s7
+  -- replica target
+  let rs : Disruption.State := { st with target := .replica }
+  let rep : Disruption.ReplicaObs := { masterKey := some "n1", masterBinding := some bS, masterOwn := some ownM, masterSourceEpoch := some "2:e", masterSeq := some 100, masterSound := true, targetSourceState := some "eligible", targetReadSource := some "n1", targetReadSourceEpoch := some "2:e", targetApplied := some 90, targetItems := some 500 }
+  let robs : Disruption.Obs := { obs with targetRole := some .replica, replica := rep }
   [
     ("eviction: the FIRST eviction of a flared master is refused and records a request",
       match d1 with | .denyRecord _ s => s.phase == .requested && s.pod == "n0" && s.attempt == 1 && s.binding == b0 | _ => false),
@@ -1170,32 +1181,81 @@ def dsChecks : List (String × Bool) :=
       !(Disruption.admit (some st) (some { master with name := "n1", uid := "u1" }) { podName := "n1" } 105 7 true "r2" 300).allowed),
     ("eviction: the same pod during the prepare is refused (not prepared)",
       !(Disruption.admit (some s4) (some master) req 120 7 true "r2" 300).allowed),
-    ("prepare: requested + eligible successor on another node -> fencing, fence armed with the request's token",
-      s1.phase == .fencing && s1.successor == some "n1" && a1 == [.armFence "n0" "r1-1" Disruption.fenceTtlSec]),
+    ("prepare: requested + eligible successor on another node -> fencing, successor PINNED, fence armed with the request's token",
+      s1.phase == .fencing && s1.successor == some "n1" && s1.successorBinding == some bS && a1 == [.armFence "n0" "r1-1" Disruption.fenceTtlSec]),
+    ("prepare: several candidates -> the highest applied position is pinned, then the smallest key; ineligible ones never",
+      (Disruption.chooseSuccessor [{ succ with key := "n2", applied := some 40 }, succ, { succ with key := "n3", applied := some 99, eligible := false }]).map (·.key) == some "n1"
+        && (Disruption.chooseSuccessor [{ succ with key := "n2" }, succ]).map (·.key) == some "n1"
+        && (Disruption.chooseSuccessor [{ succ with eligible := false }]).isNone),
     ("prepare: no eligible successor -> held at requested with the reason",
-      let (h, _) := Disruption.step st { obs with successor := none }
+      let (h, _) := Disruption.step st { obs with candidates := [] }
       h.phase == .requested && containsSub h.reason "no eligible successor"),
     ("prepare: a blocker holds a request but aborts a prepare already fencing (fence released)",
       let (h, _) := Disruption.step st { obs with blockers := ["rebuild in progress"] }
-      let (ab, aa) := Disruption.step s3 { obs with fence := some (tok, 1), blockers := ["rebuild in progress"] }
+      let (ab, aa) := Disruption.step s3 { obs with fence := f 1 4, blockers := ["rebuild in progress"] }
       h.phase == .requested && ab.phase == .aborted && aa.contains (.releaseFence "n0" tok)),
-    ("prepare: fence seen -> draining; in-flight mutations keep it draining",
-      s2.phase == .draining && s3.phase == .draining && containsSub s3.reason "in-flight"),
+    ("prepare: fence seen -> draining with its generation recorded; in-flight mutations keep it draining",
+      s2.phase == .draining && s2.fenceGen == some 4 && s3.phase == .draining && containsSub s3.reason "in-flight"),
     ("prepare: in-flight 0 -> the barrier is FIXED at the target's latest sequence",
       s4.phase == .applying && s4.barrier == some 60),
-    ("prepare: the successor below the barrier keeps applying; at the barrier -> switching (roles switched)",
+    ("prepare: the successor below the barrier keeps applying; at the barrier -> switching, only to the PINNED successor",
       s5.phase == .applying && s6.phase == .switching && a6.contains (.switchRoles "n0" "n1")),
-    ("prepare: the switch confirmed -> granted (bounded) and the fence released",
-      s7.phase == .granted && s7.grantExpiresAt == some 230 && a7.contains (.releaseFence "n0" tok)),
+    -- review 2026-10-19 #1: the fence lapsed (TTL crossed) between the barrier and the switch
+    ("#1 fence lapse: a NEW generation (same token re-armed after the TTL) voids the barrier and re-fences; the old barrier is never reused",
+      -- a write was acknowledged in the gap: the target is at 75 now
+      let (l, la) := Disruption.step s4 { obs with fence := f 0 5, targetLatestSeq := some 75, candidates := [{ succ with applied := some 60 }] }
+      let (l2, _) := Disruption.step l { obs with fence := f 0 5, targetLatestSeq := some 75 }
+      let (l3, _) := Disruption.step l2 { obs with fence := f 0 5, targetLatestSeq := some 75 }
+      let (l4, _) := Disruption.step l3 { obs with fence := f 0 5, targetLatestSeq := some 75, candidates := [{ succ with applied := some 60 }] }
+      l.phase == .fencing && l.barrier.isNone && l.fenceGen.isNone && l.lapses == 1 && la.contains (.armFence "n0" tok Disruption.fenceTtlSec)
+        && containsSub l.reason "60 -> 75"
+        && l2.phase == .draining && l2.fenceGen == some 5 && l3.phase == .applying && l3.barrier == some 75
+        -- the successor at the OLD barrier (60) is not enough any more
+        && l4.phase == .applying),
+    ("#1 fence lapse: the fence not armed at all (released / expired, not re-armed yet) also voids the barrier",
+      let (l, _) := Disruption.step s6 { obs with fence := none, candidates := [{ succ with applied := some 60 }] }
+      l.phase == .fencing && l.barrier.isNone),
+    ("#1 fence lapse after the committed map switched: aborted, NOT granted",
+      let (l, _) := Disruption.step s6 { swObs with fence := f 0 5 }
+      l.phase == .aborted && containsSub l.reason "not granted"),
+    ("#1 the target flared restarted (boot changed: its in-memory fence is gone, the generation restarts) -> aborted",
+      (Disruption.step s4 { obs with targetBoot := some "b9", fence := f 0 4 }).1.phase == .aborted),
+    ("#2 the switch is confirmed from the nodes' OWN maps: committed map alone, the target still master in its own map, an old map version, or the successor not master in its own map -> not granted",
+      let w1 := (Disruption.step s6 { swObs with targetOwn := some ownM }).1
+      let w2 := (Disruption.step s6 { swObs with targetOwn := some { role := "proxy", partition := -1, mapVersion := 10 } }).1
+      let w3 := (Disruption.step s6 { swObs with candidates := [{ succ with own := some { role := "slave", partition := 0, mapVersion := 11 } }] }).1
+      let w4 := (Disruption.step s6 { swObs with desiredSwitched := false }).1
+      let w5 := (Disruption.step s6 { swObs with candidates := [{ succ with own := some { role := "master", partition := 0, mapVersion := 11 }, binding := { bS with bootId := "b9" } }] }).1
+      w1.phase == .switching && containsSub w1.reason "still acts as master" && w2.phase == .switching && containsSub w2.reason "has not accepted"
+        && w3.phase == .switching && w4.phase == .switching && w5.phase == .aborted),
+    ("#2 the switch confirmed by both nodes -> granted (bounded); the fence is KEPT (not released at the grant)",
+      s7.phase == .granted && s7.grantExpiresAt == some 230 && !a7.contains (.releaseFence "n0" tok)),
+    ("#2 another candidate appears / the pinned one loses eligibility -> aborted, never re-pinned to the other",
+      let (ab, _) := Disruption.step s4 { obs with fence := f 0 4, candidates := [{ succ with eligible := false }, { succ with key := "n2", binding := bT }] }
+      let (ab2, _) := Disruption.step s4 { obs with fence := f 0 4, candidates := [{ succ with key := "n2", binding := bT }] }
+      ab.phase == .aborted && ab2.phase == .aborted && ab.successor == some "n1"),
+    ("#2 planned switch: every other copy of the target's partition is withheld from promotion",
+      let partOf := fun (k : String) => if k == "n9" then some (1 : Int) else some (0 : Int)
+      Disruption.plannedExcluded [("n0", "n1")] partOf ["n1", "n2", "n9", "n0"] == ["n2"]
+        && Disruption.plannedExcluded [] partOf ["n1", "n2"] == []),
     ("prepare: a successor that changed identity (boot / copy) aborts and releases the fence",
-      let (ab, aa) := Disruption.step s4 { obs with fence := some (tok, 0), successor := some ("n1", { bS with bootId := "b9" }) }
+      let (ab, aa) := Disruption.step s4 { obs with fence := f 0 4, candidates := [{ succ with binding := { bS with bootId := "b9" } }] }
       ab.phase == .aborted && aa.contains (.releaseFence "n0" tok)),
-    ("prepare: a leadership change aborts; before the switch the fence is released, after it it is not",
+    ("prepare: a leadership change aborts; before the switch the fence is released, after it it is held",
       let (ab, aa) := Disruption.step s4 { obs with leaseEpoch := 8 }
       let (ab2, aa2) := Disruption.step s6 { obs with leaseEpoch := 8 }
-      ab.phase == .aborted && aa.contains (.releaseFence "n0" tok) && ab2.phase == .aborted && !aa2.contains (.releaseFence "n0" tok)),
+      ab.phase == .aborted && aa.contains (.releaseFence "n0" tok) && ab.fenceToken.isNone
+        && ab2.phase == .aborted && !aa2.contains (.releaseFence "n0" tok) && ab2.fenceToken == some tok),
+    ("#2 aborted after the switch: the old master is kept fenced while it still acts as master in its own map; released if the committed map made it master again; let lapse once it is a proxy",
+      let ab2 := (Disruption.step s6 { obs with leaseEpoch := 8 }).1
+      let (h1, ha1) := Disruption.step ab2 { swObs with targetOwn := some ownM }
+      let (h2, ha2) := Disruption.step ab2 { obs with fence := f 0 4 }
+      let (h3, ha3) := Disruption.step ab2 swObs
+      ha1 == [.armFence "n0" tok Disruption.fenceTtlSec] && h1.fenceToken == some tok
+        && ha2 == [.releaseFence "n0" tok] && h2.fenceToken.isNone
+        && ha3 == [] && h3.fenceToken.isNone),
     ("prepare: the deadline passes -> aborted",
-      (Disruption.step s4 { obs with now := 401, fence := some (tok, 0) }).1.phase == .aborted),
+      (Disruption.step s4 { obs with now := 401, fence := f 0 4 }).1.phase == .aborted),
     ("eviction: a valid grant (same UID / boot / copy / partition, target now proxy, successor healthy) is allowed",
       (Disruption.admit (some granted) (some proxyNow) req 150 7 true "r2" 300).allowed),
     ("eviction: grant refused when expired, pod replaced, flared restarted, copy changed, not demoted, or successor unhealthy",
@@ -1205,17 +1265,41 @@ def dsChecks : List (String × Bool) :=
         && !(Disruption.admit (some granted) (some { proxyNow with binding := some { b0 with copyId := "c9" } }) req 150 7 true "r2" 300).allowed
         && !(Disruption.admit (some granted) (some master) req 150 7 true "r2" 300).allowed
         && !(Disruption.admit (some granted) (some proxyNow) req 150 7 false "r2" 300).allowed),
-    ("prepare: an unused grant expires -> aborted (cancelled), no fence action",
-      let (ab, aa) := Disruption.step granted { obs with now := 240, switched := true }
-      ab.phase == .aborted && !aa.any (fun a => match a with | .releaseFence _ _ => true | .armFence _ _ _ => true | _ => false)),
+    ("prepare: an unused grant expires -> aborted (cancelled) and the kept fence released",
+      let (ab, aa) := Disruption.step granted { swObs with now := 240 }
+      ab.phase == .aborted && aa.contains (.releaseFence "n0" tok)),
+    ("prepare: a granted master that acts as master again in its own map -> aborted",
+      (Disruption.step granted { swObs with targetOwn := some ownM }).1.phase == .aborted),
     ("eviction: after an aborted attempt the next request starts attempt 2",
       match Disruption.admit (some { s4 with phase := .aborted }) (some master) req 150 7 true "r3" 300 with
       | .denyRecord _ s => s.attempt == 2 | _ => false),
-    ("prepare: a replica target is granted only when the master is healthy and it is not the only copy",
-      let rs : Disruption.State := { st with target := .replica }
-      let (g, _) := Disruption.step rs { obs with targetRole := some .replica }
-      let (h, _) := Disruption.step rs { obs with targetRole := some .replica, replicaSafe := false }
-      g.phase == .granted && h.phase == .requested && containsSub h.reason "only copy")
+    -- review 2026-10-19 #4
+    ("#4 replica: granted on lineage evidence and the master it relied on is bound in the grant",
+      let (g, _) := Disruption.step rs robs
+      g.phase == .granted && g.successor == some "n1" && g.successorBinding == some bS),
+    ("#4 replica: a NON-EMPTY master is not enough — another history, validated against another node, applied beyond the master, not eligible, or unknown -> held",
+      let h := fun (r : Disruption.ReplicaObs) => (Disruption.step rs { robs with replica := r }).1
+      let x1 := h { rep with targetReadSourceEpoch := some "1:old" }
+      let x2 := h { rep with targetApplied := some 101 }
+      let x3 := h { rep with targetReadSource := some "n7" }
+      let x4 := h { rep with targetSourceState := some "ineligible" }
+      let x5 := h { rep with targetApplied := none }
+      let x6 := h { rep with masterKey := none }
+      let x7 := h { rep with targetReadSourceEpoch := some "" }
+      let x8 := h { rep with masterOwn := some { ownM with role := "slave" } }
+      let x9 := h { rep with masterSound := false }
+      [x1, x2, x3, x4, x5, x6, x7, x8, x9].all (·.phase == .requested)
+        && containsSub x1.reason "may hold updates the master lacks" && containsSub x2.reason "beyond the master"
+        && containsSub x5.reason "unknown"),
+    ("#4 replica: a target holding no data at all needs no lineage (the master is still required healthy)",
+      (Disruption.step rs { robs with replica := { rep with targetItems := some 0, targetReadSourceEpoch := some "1:old" } }).1.phase == .granted
+        && (Disruption.step rs { robs with replica := { rep with targetItems := some 0, masterKey := none } }).1.phase == .requested),
+    ("#4 replica: the grant is re-checked every pass — evidence gone or another master -> withdrawn (back to requested)",
+      let (g, _) := Disruption.step rs robs
+      let (w1, _) := Disruption.step g { robs with now := 120, replica := { rep with targetApplied := some 101 } }
+      let (w2, _) := Disruption.step g { robs with now := 120, replica := { rep with masterKey := some "n2", masterBinding := some bT } }
+      let (k, _) := Disruption.step g { robs with now := 120 }
+      w1.phase == .requested && w2.phase == .requested && k.phase == .granted)
   ]
 
 /-- The pods/eviction AdmissionReview (K8s/Admission): parse and reply. -/
@@ -1236,9 +1320,27 @@ def admChecks : List (String × Bool) :=
       let m := Admission.malformedResponse notEviction "x"
       containsSub m "\"allowed\":false" && containsSub m "rq1"),
     ("disruption state round-trips through its JSON (status.disruption); empty = none; garbage is an error, never none",
-      let st : Disruption.State := { id := "e1", pod := "n0", target := .master, binding := { podUid := "u", bootId := "b", copyId := "c", historyEpoch := "2:e", partition := 0 }, attempt := 2, phase := .applying, requestedAt := 5, deadline := 600, leaseEpoch := 3, successor := some "n1:1", barrier := some 77, fenceToken := some "e1-2", reason := "x" }
+      let st : Disruption.State := { id := "e1", pod := "n0", target := .master, binding := { podUid := "u", bootId := "b", copyId := "c", historyEpoch := "2:e", partition := 0 }, attempt := 2, phase := .applying, requestedAt := 5, deadline := 600, leaseEpoch := 3, successor := some "n1:1", barrier := some 77, fenceToken := some "e1-2", fenceGen := some 3, lapses := 2, reason := "x" }
       (DisruptionJson.parse (DisruptionJson.render (some st))).toOption == some (some st)
         && (DisruptionJson.parse "").toOption == some none && (DisruptionJson.parse "{bad").toOption.isNone),
+    ("#3 commit: refused unless THIS pod holds the lease at the same generation, and the state (here and in the cluster) is still the one decided from",
+      let a : Disruption.State := { id := "e1", pod := "n0", target := .master, binding := { podUid := "u", bootId := "b", copyId := "c", historyEpoch := "2:e", partition := 0 }, attempt := 1, phase := .requested, requestedAt := 5, deadline := 600, leaseEpoch := 3 }
+      let b := { a with phase := .fencing }
+      let c := { a with id := "e2", pod := "n1" }
+      EvictionGuard.commitGate false 3 3 (some a) (some a) (.ok (some a)) == some (.failed "this pod does not hold the operator lease")
+        && (match EvictionGuard.commitGate true 4 3 (some a) (some a) (.ok (some a)) with | some (.stale _) => true | _ => false)
+        -- a concurrent admission recorded another request in this operator
+        && (match EvictionGuard.commitGate true 3 3 (some c) none (.ok (some c)) with | some (.stale _) => true | _ => false)
+        -- an old reconcile decided from `a` after another writer moved it to `b`
+        && (match EvictionGuard.commitGate true 3 3 (some a) (some a) (.ok (some b)) with | some (.stale _) => true | _ => false)
+        && (match EvictionGuard.commitGate true 3 3 (some a) (some a) (.error "x") with | some (.failed _) => true | _ => false)
+        && EvictionGuard.commitGate true 3 3 (some a) (some a) (.ok (some a)) == none
+        && EvictionGuard.commitGate true 3 3 none none (.ok none) == none),
+    ("#3 commit: the status write is a compare-and-swap (JSON-patch test of the exact value read; resourceVersion when the key is absent)",
+      let (t1, p1) := EvictionGuard.casPatch (some "OLD") "41" none
+      let (t2, p2) := EvictionGuard.casPatch none "41" none
+      t1 == "json" && containsSub p1 "\"op\":\"test\"" && containsSub p1 "\"value\":\"OLD\"" && containsSub p1 "\"op\":\"replace\""
+        && t2 == "merge" && containsSub p2 "\"resourceVersion\":\"41\""),
     ("unready: dead after the tick count, or after the wall time once seen NotReady on two ticks (slow passes do not stretch it)",
       K8sReconciler.unreadyDead 6 0 1000 2 6 30000
         && K8sReconciler.unreadyDead 2 0 30000 2 6 30000

@@ -314,8 +314,9 @@ initialize unreadyReportedRef : IO.Ref (List String) ← IO.mkRef []
     as draining, and this leader's generation. -/
 initialize disruptionRef : IO.Ref (Option Disruption.State) ← IO.mkRef none
 initialize disruptionLoadOkRef : IO.Ref Bool ← IO.mkRef false
-initialize plannedDrainRef : IO.Ref (List String) ← IO.mkRef []
+initialize plannedDrainRef : IO.Ref (List (String × String)) ← IO.mkRef []
 initialize leaderEpochRef : IO.Ref Nat ← IO.mkRef 0
+initialize disruptionLock : Std.BaseMutex ← Std.BaseMutex.new
 /-- The masterless CRITICAL's last line per partition (summary, ms): logged
     on change or every 60 s, not every pass (decision 2026-10-16). -/
 initialize masterlessLogRef : IO.Ref (List (Nat × (String × Nat))) ← IO.mkRef []
@@ -1467,7 +1468,7 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       -- Terminating (deletionTimestamp) pods → graceful drain in the FSM.
       -- planned eviction: the target of a prepared switch drains like a
       -- terminating pod (promotion through the normal commit path)
-      let planned := (← plannedDrainRef.get).filter fun k => pods.any (Bridge.PodInfo.toNodeKey · == k)
+      let planned := ((← plannedDrainRef.get).map (·.1)).filter fun k => pods.any (Bridge.PodInfo.toNodeKey · == k)
       let termKeys := Bridge.terminatingPodKeys pods ++ planned.filter (!(Bridge.terminatingPodKeys pods).contains ·)
       -- Data-bearing probe (curr_items > 0 per pod) for the masterless
       -- refill's empty-master guard. GATED: per-pod execs cost seconds on a
@@ -1715,10 +1716,16 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
         else if left > 0 then
           IO.eprintln s!"[flare-operator] pinned successor {k} dropped: its pod is no longer the validated incarnation ({sid} -> {nowId})"
       pinnedSuccessorRef.set keptPins
-      let ranked := pinnedFirst ++ cls.ranked.filter (!pinnedFirst.contains ·)
+      -- planned eviction (review 2026-10-19 #2): in the partition of a
+      -- planned switch only the PINNED successor may take over; every other
+      -- copy of that partition is withheld (unfit) for the switch
+      let plannedPairs ← plannedDrainRef.get
+      let stNow ← stateRef.get
+      let plannedOut := Disruption.plannedExcluded plannedPairs (fun k => (stNow.lookupNode k).map (·.partition)) cls.ranked
+      let ranked := (pinnedFirst ++ cls.ranked.filter (!pinnedFirst.contains ·)).filter (!plannedOut.contains ·)
       let nPartsHolders ← desiredPartitionsRef.get
       pure (.PodListResponse podKeys (Bridge.podZones pods nodeZones) termKeys dataKeys unhealthyKeys heldKeys
-              (cls.unfit ++ (notReadyActive ++ sourceIneligible).filter (!cls.unfit.contains ·)) cls.unproven ranked knownEmpty
+              (cls.unfit ++ ((notReadyActive ++ sourceIneligible) ++ plannedOut).filter (!cls.unfit.contains ·)) cls.unproven ranked knownEmpty
               ((← promotionEvidenceRef.get).filterMap fun (k, c, _) => if c.promotable then none else some k)
               (match ← historyStoreRef.get with
                 | some st => (List.range nPartsHolders).filterMap fun p =>
@@ -1960,6 +1967,16 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
     let blocked := promoted.filter r3w.contains
     if !blocked.isEmpty then
       IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {blocked}: its stats could not be read completely on this pass (R3 Unknown) — a copy that cannot be confirmed is not promoted; nothing from this pass is committed, the next pass reads again"
+      promotionAbortedRef.set true
+      return
+    -- planned eviction (review 2026-10-19 #2): in the partition of a planned
+    -- switch only the pinned successor may be promoted
+    let wrong := Disruption.plannedExcluded (← plannedDrainRef.get)
+      (fun k => match ucs.lookupNode k with
+        | some n => if n.role == FlareRole.Master then some n.partition else (cur.lookupNode k).map (·.partition)
+        | none => (cur.lookupNode k).map (·.partition)) promoted
+    if !wrong.isEmpty then
+      IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {wrong}: a planned switch pinned another successor for its partition — nothing from this pass is committed"
       promotionAbortedRef.set true
       return
     -- decision 2026-10-08: promote only a candidate classified promotable on
@@ -3808,7 +3825,16 @@ def main (args : List String) : IO Unit := do
     IO.eprintln s!"[flare-operator] CRITICAL: status.disruption cannot be read ({e}): every flared eviction is refused until it is fixed (RUNBOOK #planned-eviction)"
   let guardEnv : EvictionGuard.Env := {
     crName, ns, stateRef, disruptionRef, loadOkRef := disruptionLoadOkRef, plannedRef := plannedDrainRef,
-    epochRef := leaderEpochRef, migrationBusy := do return (← migrationRef.get) != MigrationPhase.None }
+    epochRef := leaderEpochRef, migrationBusy := do return (← migrationRef.get) != MigrationPhase.None,
+    -- every disruption commit re-checks the lease: held by THIS pod, not
+    -- expired, and no takeover since this leadership started (review #3)
+    leaderOk := do
+      let (leaseName, identity) ← historyLeaseRef.get
+      if leaseName.isEmpty then return false
+      match ← getLease leaseName ns with
+      | .ok lease => return lease.holderIdentity == identity && !lease.expired && lease.transitions == transitions
+      | .error _ => return false,
+    lock := disruptionLock }
   let webhookPort : UInt16 := (((← IO.getEnv "FLARE_WEBHOOK_PORT").bind (·.toNat?)).getD 9444).toUInt16
   WebhookServer.serveBackground webhookPort (fun _ body => EvictionGuard.handleReview guardEnv body)
 

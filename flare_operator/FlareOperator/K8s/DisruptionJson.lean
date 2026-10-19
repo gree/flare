@@ -41,7 +41,8 @@ def toJson (s : State) : Json :=
     ("requestedAt", Json.num s.requestedAt), ("deadline", Json.num s.deadline), ("leaseEpoch", Json.num s.leaseEpoch),
     ("successor", optStr s.successor),
     ("successorBinding", match s.successorBinding with | some b => bindingJson b | none => Json.null),
-    ("fenceToken", optStr s.fenceToken), ("barrier", optNat s.barrier),
+    ("fenceToken", optStr s.fenceToken), ("fenceGen", optNat s.fenceGen), ("barrier", optNat s.barrier),
+    ("lapses", Json.num s.lapses),
     ("grantExpiresAt", optNat s.grantExpiresAt), ("reason", Json.str s.reason)]
 
 def ofJson (j : Json) : Except String State := do
@@ -59,7 +60,8 @@ def ofJson (j : Json) : Except String State := do
            requestedAt := ← j.getObjValAs? Nat "requestedAt", deadline := ← j.getObjValAs? Nat "deadline",
            leaseEpoch := ← j.getObjValAs? Nat "leaseEpoch", successor := optS "successor",
            successorBinding := (bindingOf (j.getObjValD "successorBinding")).toOption,
-           fenceToken := optS "fenceToken", barrier := optN "barrier", grantExpiresAt := optN "grantExpiresAt",
+           fenceToken := optS "fenceToken", fenceGen := optN "fenceGen", barrier := optN "barrier",
+           lapses := (optN "lapses").getD 0, grantExpiresAt := optN "grantExpiresAt",
            reason := (optS "reason").getD "" }
 
 /-- `""` / absent = no disruption; unparsable = an error (never "none"). -/

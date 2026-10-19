@@ -281,6 +281,14 @@ spec:
                     restart and counters are not re-baselined.
                   type: object
                   x-kubernetes-preserve-unknown-fields: true
+                disruption:
+                  description: |
+                    Planned eviction in progress (docs/design-node-operations-2026-10-19.md):
+                    the request, its prepare phase (fence, barrier, switch) and the
+                    grant, as a JSON string. Written by the operator BEFORE it acts
+                    and read back on start; an unparsable value refuses every
+                    flared eviction (fail closed). Empty = none.
+                  type: string
       subresources:
         status: {}
       additionalPrinterColumns:

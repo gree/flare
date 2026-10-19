@@ -42,6 +42,8 @@ import FlareOperator.StateMachine.RebuildConcurrency
 import FlareOperator.StateMachine.CopyDiscardApproval
 import FlareOperator.StateMachine.PromotionEvidence
 import FlareOperator.StateMachine.AuthoritativeHistory
+import FlareOperator.EvictionGuard
+import FlareOperator.Server.WebhookServer
 
 namespace FlareOperator
 
@@ -303,6 +305,13 @@ initialize parkedIdleRef : IO.Ref (List String) ← IO.mkRef []
     so a node whose cause did not change is not resumed every pass. -/
 initialize resumedAtRef : IO.Ref (List (String × Nat)) ← IO.mkRef []
 
+/-- Planned eviction (EvictionGuard): the persisted disruption, whether it
+    could be loaded (false = fail closed), the node keys the pass must treat
+    as draining, and this leader's generation. -/
+initialize disruptionRef : IO.Ref (Option Disruption.State) ← IO.mkRef none
+initialize disruptionLoadOkRef : IO.Ref Bool ← IO.mkRef false
+initialize plannedDrainRef : IO.Ref (List String) ← IO.mkRef []
+initialize leaderEpochRef : IO.Ref Nat ← IO.mkRef 0
 /-- The masterless CRITICAL's last line per partition (summary, ms): logged
     on change or every 60 s, not every pass (decision 2026-10-16). -/
 initialize masterlessLogRef : IO.Ref (List (Nat × (String × Nat))) ← IO.mkRef []
@@ -1445,7 +1454,10 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       -- Topology for zone-aware placement; [] on unlabeled clusters.
       let nodeZones ← Bridge.listNodeZones
       -- Terminating (deletionTimestamp) pods → graceful drain in the FSM.
-      let termKeys := Bridge.terminatingPodKeys pods
+      -- planned eviction: the target of a prepared switch drains like a
+      -- terminating pod (promotion through the normal commit path)
+      let planned := (← plannedDrainRef.get).filter fun k => pods.any (Bridge.PodInfo.toNodeKey · == k)
+      let termKeys := Bridge.terminatingPodKeys pods ++ planned.filter (!(Bridge.terminatingPodKeys pods).contains ·)
       -- Data-bearing probe (curr_items > 0 per pod) for the masterless
       -- refill's empty-master guard. GATED: per-pod execs cost seconds on a
       -- loaded node, and running them EVERY tick stretched the reconcile
@@ -3769,6 +3781,25 @@ def main (args : List String) : IO Unit := do
   if restoredPhase != MigrationPhase.None then
     IO.eprintln s!"[flare-operator] restored migrationPhase={restoredPhase.toString} from CR status"
   let migrationRef ← IO.mkRef restoredPhase
+  -- Planned eviction (EvictionGuard): this leader's generation, the
+  -- persisted disruption (unreadable = every flared eviction refused), and
+  -- the admission endpoint (plain HTTP on 127.0.0.1, TLS terminated by the
+  -- sidecar the chart adds; unused when no webhook is configured).
+  leaderEpochRef.set gen
+  match ← EvictionGuard.load crName ns with
+  | .ok d =>
+    disruptionRef.set d
+    disruptionLoadOkRef.set true
+    if let some st := d then
+      IO.eprintln s!"[flare-operator] planned eviction restored from status: {st.id} {st.pod} {st.phase.label} (generation {st.leaseEpoch}; this leader {gen})"
+  | .error e =>
+    disruptionLoadOkRef.set false
+    IO.eprintln s!"[flare-operator] CRITICAL: status.disruption cannot be read ({e}): every flared eviction is refused until it is fixed (RUNBOOK #planned-eviction)"
+  let guardEnv : EvictionGuard.Env := {
+    crName, ns, stateRef, disruptionRef, loadOkRef := disruptionLoadOkRef, plannedRef := plannedDrainRef,
+    epochRef := leaderEpochRef, migrationBusy := do return (← migrationRef.get) != MigrationPhase.None }
+  let webhookPort : UInt16 := (((← IO.getEnv "FLARE_WEBHOOK_PORT").bind (·.toNat?)).getD 9444).toUInt16
+  WebhookServer.serveBackground webhookPort (fun _ body => EvictionGuard.handleReview guardEnv body)
 
   -- Startup grace period: skip dead node detection for the first N reconcile cycles
   -- to let all pods register via TCP and appear in the K8s ready list.
@@ -3879,6 +3910,11 @@ def main (args : List String) : IO Unit := do
       reconcileOnceFSM stateRef crdRef migrationRef graceCyclesRef trippedRef prepareCyclesRef unreadyCyclesRef podKeysRef podAddrsRef unreachCyclesRef reachSlotRef ledgerRef ledgerAvailableRef ledgerDirtyRef episodesRef pendingBroadcastRef topologyAuditRef downCyclesRef emptyMasterStreakRef probeSlotRef pendingConfRef masterSnapshotRef driftTickRef metrics leaseName identity crName ns
     catch e =>
       IO.eprintln s!"[flare-operator] reconcile error: {e}"
+    -- planned eviction: advance the prepare (persisted before any action)
+    try
+      EvictionGuard.prepareStep guardEnv
+    catch e =>
+      IO.eprintln s!"[flare-operator] planned eviction step error: {e}"
     let endTime ← IO.monoMsNow
     let durationMs := endTime - startTime
     let durationSeconds := durationMs.toFloat / 1000.0

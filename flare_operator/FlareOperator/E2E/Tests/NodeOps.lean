@@ -181,8 +181,38 @@ private def drainTest (c : Ctx) (drainMaster : Bool) : IO TestResult := do
     | some why => return .fail why
     | none => return .pass
 
+/-- EV-01 / EV-05 (dry run): a bare policy/v1 Eviction (no labels) for the
+    master reaches the webhook and is refused; a dry run records nothing; an
+    Eviction whose UID precondition does not match is refused. -/
+private def rawEvictionTest (c : Ctx) : IO TestResult := do
+  match ← c.placement with
+  | .error e => return .fail e
+  | .ok p =>
+    c.conditions ["EV-01/EV-05: bare Eviction bodies posted to pods/eviction (kubectl create --raw)"]
+    let ns := c.cfg.«namespace»
+    let post := fun (dry : Bool) (uid : Option String) => do
+      let pre := match uid with | some u => s!",\"deleteOptions\":\{\"preconditions\":\{\"uid\":\"{u}\"}}" | none => ""
+      let body := s!"\{\"apiVersion\":\"policy/v1\",\"kind\":\"Eviction\",\"metadata\":\{\"name\":\"{p.master.name}\",\"namespace\":\"{ns}\"}{pre}}"
+      let path := s!"/api/v1/namespaces/{ns}/pods/{p.master.name}/eviction{if dry then "?dryRun=All" else ""}"
+      let out ← IO.Process.output { cmd := "sh", args := #["-c", s!"printf '%s' '{body}' | kubectl create --raw '{path}' -f - 2>&1"] }
+      c.art "raw-eviction.txt" s!"dry={dry} uid={uid} rc={out.exitCode}: {out.stdout.trim}"
+      return (out.exitCode, out.stdout ++ out.stderr)
+    let (rc1, o1) ← post true none
+    let (rc2, o2) ← post false (some "00000000-0000-0000-0000-000000000000")
+    let st ← kubectl ["get", "flarecluster", c.cfg.name, "-n", ns, "-o", "jsonpath={.status.disruption}"]
+    let recorded := match st with | .ok t => !t.trim.isEmpty | .error _ => true
+    let pods := (← c.pods).getD []
+    let stillThere := pods.any fun q => q.name == p.master.name && q.uid == p.master.uid && !q.deleting
+    IO.eprintln s!"# [{c.test}] dry run rc={rc1}: {o1.trim.take 200}; bad UID rc={rc2}: {o2.trim.take 200}; recorded={recorded}; master intact={stillThere}"
+    if rc1 == 0 then return .fail "the dry-run eviction of the master was ALLOWED"
+    if !containsSubstr o1 "flare" then return .fail s!"the dry-run refusal did not come from the flare webhook: {o1.trim.take 300}"
+    if rc2 == 0 then return .fail "an eviction with a mismatched UID precondition was ALLOWED"
+    if recorded then return .fail "a dry run / refused precondition recorded a disruption"
+    if !stillThere then return .fail "the master pod was deleted or replaced"
+    return .pass
+
 def drainSuite : TestSuite :=
-  let cfg := cfgOf "node-drain" true false
+  let cfg := { cfgOf "node-drain" true false with evictionGuard := true }
   { name := "node-ops-drain"
     setup := do deployCluster cfg; IO.sleep 50000
     teardown := do
@@ -191,6 +221,8 @@ def drainSuite : TestSuite :=
     onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
     afterEach := fun i => saveFullLogs cfg.«namespace» s!"after-test-{i}"
     tests := [
+      { name := "(EV-01/05) a bare Eviction for the master (no labels) reaches the flare webhook and is refused; a dry run and a mismatched UID precondition record nothing and leave the pod"
+        run := rawEvictionTest { cfg, suite := "node-ops-drain", test := "ev-raw" } },
       { name := "(A) standard kubectl drain of the MASTER's worker under continuous writes (service + proxy paths): the drain completes through the Eviction API with the PDB honoured; every acknowledged write is on the new master and on the replica rebuilt on another worker; redundancy is restored on workers other than the drained one (reply classes, error window and recovery time recorded)"
         run := drainTest { cfg, suite := "node-ops-drain", test := "a-master" } true },
       { name := "(A') standard kubectl drain of the REPLICA's worker under continuous writes: the master stays, every acknowledged write is on it and on the replica rebuilt on another worker"
@@ -233,7 +265,7 @@ private def holdTest (c : Ctx) : IO TestResult := do
     | none => return .pass
 
 def holdSuite : TestSuite :=
-  let cfg := cfgOf "node-hold" true false
+  let cfg := { cfgOf "node-hold" true false with evictionGuard := true }
   { name := "node-ops-hold"
     setup := do deployCluster cfg; IO.sleep 50000
     teardown := do

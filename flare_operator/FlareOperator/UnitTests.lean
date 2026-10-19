@@ -13,6 +13,8 @@
   Kept as many small definitions on purpose: one large `do` block of checks
   made the elaborator crawl.
 -/
+import FlareOperator.K8s.DisruptionJson
+import FlareOperator.K8s.Admission
 import FlareOperator.StateMachine.Disruption
 import Lean.Data.Json
 import FlareOperator.Migration.Provision
@@ -1216,8 +1218,32 @@ def dsChecks : List (String × Bool) :=
       g.phase == .granted && h.phase == .requested && containsSub h.reason "only copy")
   ]
 
+/-- The pods/eviction AdmissionReview (K8s/Admission): parse and reply. -/
+def admChecks : List (String × Bool) :=
+  let body := "{\"apiVersion\":\"admission.k8s.io/v1\",\"kind\":\"AdmissionReview\",\"request\":{\"uid\":\"rq1\",\"kind\":{\"group\":\"policy\",\"version\":\"v1\",\"kind\":\"Eviction\"},\"resource\":{\"group\":\"\",\"version\":\"v1\",\"resource\":\"pods\"},\"subResource\":\"eviction\",\"name\":\"n0\",\"namespace\":\"ns1\",\"operation\":\"CREATE\",\"dryRun\":true,\"object\":{\"apiVersion\":\"policy/v1\",\"kind\":\"Eviction\",\"metadata\":{\"name\":\"n0\",\"namespace\":\"ns1\"},\"deleteOptions\":{\"preconditions\":{\"uid\":\"u0\"}}}}}"
+  let notEviction := body.replace "\"subResource\":\"eviction\"" "\"subResource\":\"status\""
+  [
+    ("admission: a pods/eviction review is parsed (uid, pod, namespace, dry run, UID precondition)",
+      (Admission.parseEvictionReview body).toOption == some { uid := "rq1", podName := "n0", «namespace» := "ns1", dryRun := true, preconditionUid := some "u0" }),
+    ("admission: anything but pods/eviction is not taken for one",
+      (Admission.parseEvictionReview notEviction).toOption.isNone && (Admission.parseEvictionReview "not json").toOption.isNone),
+    ("admission: a refusal carries code 429 and the message (drain / autoscaler retry); an allowance carries no status",
+      let r := Admission.reviewResponse "rq1" false "flare: held"
+      let a := Admission.reviewResponse "rq1" true "ok"
+      containsSub r "\"allowed\":false" && containsSub r "\"code\":429" && containsSub r "flare: held" && containsSub r "\"uid\":\"rq1\""
+        && containsSub a "\"allowed\":true" && !containsSub a "\"status\""),
+    ("admission: a malformed review is refused (fail closed), echoing its uid when readable",
+      let m := Admission.malformedResponse notEviction "x"
+      containsSub m "\"allowed\":false" && containsSub m "rq1"),
+    ("disruption state round-trips through its JSON (status.disruption); empty = none; garbage is an error, never none",
+      let st : Disruption.State := { id := "e1", pod := "n0", target := .master, binding := { podUid := "u", bootId := "b", copyId := "c", historyEpoch := "2:e", partition := 0 }, attempt := 2, phase := .applying, requestedAt := 5, deadline := 600, leaseEpoch := 3, successor := some "n1:1", barrier := some 77, fenceToken := some "e1-2", reason := "x" }
+      (DisruptionJson.parse (DisruptionJson.render (some st))).toOption == some (some st)
+        && (DisruptionJson.parse "").toOption == some none && (DisruptionJson.parse "{bad").toOption.isNone)
+  ]
+
 def checkDisruption (ctx : Ctx) : IO Unit := do
   for (n, ok) in dsChecks do check ctx n ok
+  for (n, ok) in admChecks do check ctx n ok
 
 /-- Decision 2026-10-16 (promotion-proxy-only-copy, 38952942796): a dead
     ex-slave is attributed to its partition ONLY by its persisted record,

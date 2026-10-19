@@ -139,6 +139,12 @@ structure ClusterConfig where
   /-- A PodDisruptionBudget over the flared pods, as the chart renders it
       (`cluster.pdb.maxUnavailable`); `none` = no PDB (most suites). -/
   pdbMaxUnavailable : Option Nat := none
+  /-- The planned-eviction admission webhook (design-node-operations): a TLS
+      sidecar (socat) in the operator pod, a CA + serving cert made with
+      openssl on the runner, a Service and a ValidatingWebhookConfiguration
+      for `pods/eviction` CREATE selected by this namespace. -/
+  evictionGuard : Bool := false
+  tlsSidecarImage : String := "alpine/socat:1.8.0.0"
   deriving Repr
 
 /-- Image tag used for the flared container in this cluster. -/
@@ -295,6 +301,8 @@ def operatorDeploymentYaml (cfg : ClusterConfig) : String :=
       s!"\n            - name: {k}\n              value: \"{v}\""))
   let name := cfg.operatorName
   let ns := cfg.«namespace»
+  let guardSidecar := if !cfg.evictionGuard then "" else
+    s!"\n        - name: webhook-tls\n          image: {cfg.tlsSidecarImage}\n          imagePullPolicy: IfNotPresent\n          args: [\"OPENSSL-LISTEN:9443,reuseaddr,fork,cert=/tls/tls.crt,key=/tls/tls.key,verify=0\", \"TCP:127.0.0.1:9444\"]\n          ports:\n            - containerPort: 9443\n              name: webhook\n          volumeMounts:\n            - name: webhook-tls\n              mountPath: /tls\n              readOnly: true\n      volumes:\n        - name: webhook-tls\n          secret:\n            secretName: {name}-webhook-tls"
   s!"apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -339,7 +347,7 @@ spec:
             limits:
               cpu: 500m
               # ceiling, not a reservation - see operatorDeploymentYaml
-              memory: 1Gi
+              memory: 1Gi{guardSidecar}
 ---
 apiVersion: v1
 kind: Service
@@ -646,6 +654,69 @@ def approveFirstBuild (cfg : ClusterConfig) : IO Unit := do
     IO.sleep 2000
   IO.eprintln s!"# WARNING: could not approve the first build of {cfg.name}"
 
+/-- The planned-eviction webhook objects (cfg.evictionGuard): a CA and a
+    serving certificate made with openssl, the TLS Secret the sidecar mounts,
+    the Service, and a ValidatingWebhookConfiguration for `pods/eviction`
+    CREATE selected by THIS namespace (the Eviction object carries no pod
+    labels, so no objectSelector), failurePolicy Fail, NoneOnDryRun, 5 s. -/
+def setupEvictionWebhook (cfg : ClusterConfig) : IO Unit := do
+  let ns := cfg.«namespace»
+  let svc := s!"{cfg.operatorName}-webhook"
+  let dir := s!"/tmp/flare-webhook-{ns}"
+  let script := s!"set -e; rm -rf {dir}; mkdir -p {dir}; cd {dir}; " ++
+    "openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=flare-e2e-ca -keyout ca.key -out ca.crt 2>/dev/null; " ++
+    s!"openssl req -newkey rsa:2048 -nodes -subj /CN={svc}.{ns}.svc -keyout tls.key -out tls.csr 2>/dev/null; " ++
+    s!"printf 'subjectAltName=DNS:{svc}.{ns}.svc,DNS:{svc}.{ns}.svc.cluster.local\\n' > ext.cnf; " ++
+    "openssl x509 -req -in tls.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 2 -extfile ext.cnf -out tls.crt 2>/dev/null; " ++
+    s!"kubectl -n {ns} create secret tls {cfg.operatorName}-webhook-tls --cert tls.crt --key tls.key --dry-run=client -o yaml | kubectl apply -f - >/dev/null; " ++
+    "base64 < ca.crt | tr -d '\\n' > ca.b64"
+  let out ← IO.Process.output { cmd := "sh", args := #["-c", script] }
+  if out.exitCode != 0 then
+    throw (IO.userError s!"webhook certificates: {out.stderr.trim}")
+  let ca := (← IO.FS.readFile s!"{dir}/ca.b64").trim
+  applyYaml s!"apiVersion: v1
+kind: Service
+metadata:
+  name: {svc}
+  namespace: {ns}
+spec:
+  selector:
+    app: {cfg.operatorName}
+  ports:
+    - port: 443
+      targetPort: 9443
+      protocol: TCP
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: flare-eviction-{ns}
+webhooks:
+  - name: eviction.flare.gree.net
+    admissionReviewVersions: [\"v1\"]
+    sideEffects: NoneOnDryRun
+    failurePolicy: Fail
+    timeoutSeconds: 5
+    matchPolicy: Equivalent
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {ns}
+    rules:
+      - apiGroups: [\"\"]
+        apiVersions: [\"v1\"]
+        operations: [\"CREATE\"]
+        resources: [\"pods/eviction\"]
+        scope: Namespaced
+    clientConfig:
+      caBundle: {ca}
+      service:
+        name: {svc}
+        namespace: {ns}
+        path: /evict
+        port: 443
+"
+  IO.eprintln s!"# eviction webhook flare-eviction-{ns} -> {svc}.{ns}.svc (TLS sidecar {cfg.tlsSidecarImage})"
+
 /-- Deploy a full cluster: namespace → CRD/RBAC → FlareCluster CR → partition services →
     debug pod → empty ConfigMap → operator → StatefulSet -/
 def deployCluster (cfg : ClusterConfig) : IO Unit := do
@@ -762,6 +833,7 @@ def deployCluster (cfg : ClusterConfig) : IO Unit := do
   let _ ← kubectlWaitReady s!"pod/{cfg.debugPod}" cfg.«namespace» 60
 
   -- Deploy operator
+  if cfg.evictionGuard then setupEvictionWebhook cfg
   applyYaml (operatorDeploymentYaml cfg)
 
   -- Wait for operator to be ready.
@@ -868,6 +940,8 @@ def deploySecondCluster (cfg : ClusterConfig) : IO Unit := do
 def cleanupCluster (cfg : ClusterConfig) : IO Unit := do
   IO.eprintln s!"# Cleaning up cluster '{cfg.name}'"
   let ns := cfg.«namespace»
+  if cfg.evictionGuard then
+    discard <| kubectl ["delete", "validatingwebhookconfiguration", s!"flare-eviction-{ns}", "--ignore-not-found"]
   kubectlDelete "flarecluster" cfg.name ns
   kubectlDelete "statefulset" s!"{cfg.name}-nodes" ns
   kubectlDelete "deployment" cfg.operatorName ns

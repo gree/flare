@@ -47,6 +47,7 @@
 #include <dirent.h>
 #include <cerrno>
 #include <copy_switch_fs.h>
+#include <write_fence.h>
 #include <rocksdb/db.h>
 #include <rocksdb/options.h>
 
@@ -1121,6 +1122,57 @@ void test_expire_lazy_delete_on_get() {
 	cut_assert_equal_int(0, static_cast<int>(s->count()));           // physically gone
 	cut_assert_equal_int(1, static_cast<int>(s->get_expire_reaped()));
 
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// Review 2026-10-19 #5: the lazy-expiry delete is ONE fenced mutation. The
+// fence is armed exactly between the entry's check and the remove (the entry
+// hook): the delete must already be counted in flight then, so a barrier is
+// never read while it is pending, and the barrier read once in-flight is 0
+// covers it. With the old separate active() check the delete ran uncounted.
+namespace {
+	storage_rocksdb*	fence_race_storage = NULL;
+	uint64_t			fence_race_in_flight = 0;
+	uint64_t			fence_race_seq = 0;
+	bool				fence_race_armed = false;
+	void fence_race_arm_hook() {
+		string why;
+		fence_race_armed = write_fence::arm("tok-race", 30, why);
+		fence_race_in_flight = write_fence::in_flight();
+		fence_race_seq = fence_race_storage->get_latest_sequence_number();
+		write_fence::set_entry_hook(NULL);
+	}
+}
+
+void test_expire_lazy_delete_counted_when_fence_arms_mid_delete() {
+	write_fence::reset_for_test();
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	s->set_lazy_expiry_delete(true);
+	cut_assert_equal_int(0, storage_set_string_expire(s, "k", "v", 1));
+	cut_assert_equal_int(0, storage_set_string_expire(s, "k2", "v", 1));
+	fence_race_storage = s;
+	write_fence::set_entry_hook(fence_race_arm_hook);
+
+	string out;
+	cut_assert_equal_int(-1, storage_get_string(s, "k", out));
+	cut_assert_true(fence_race_armed);
+	// armed while the delete was between its check and its apply: counted
+	cut_assert_equal_int(1, static_cast<int>(fence_race_in_flight));
+	// it entered before the fence, so it completes (and is in the barrier)
+	cut_assert_equal_int(0, static_cast<int>(write_fence::in_flight()));
+	cut_assert_equal_int(1, static_cast<int>(s->get_expire_reaped()));
+	const uint64_t barrier = s->get_latest_sequence_number();
+	cut_assert_true(barrier > fence_race_seq);
+
+	// while fenced: the next lazy expiry is refused (hidden, not deleted)
+	// and the sequence does not move past the barrier
+	cut_assert_equal_int(-1, storage_get_string(s, "k2", out));
+	cut_assert_equal_int(1, static_cast<int>(s->get_expire_reaped()));
+	cut_assert_equal_int(1, static_cast<int>(s->get_expire_filtered()));
+	cppcut_assert_equal(barrier, s->get_latest_sequence_number());
+	cut_assert_equal_int(1, static_cast<int>(s->count()));
+
+	write_fence::reset_for_test();
 	drop_rocksdb(s, wal_master_dir);
 }
 

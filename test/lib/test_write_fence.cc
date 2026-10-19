@@ -86,6 +86,37 @@ namespace test_write_fence
 		cut_assert_true(write_fence::arm("t2", 10, why));		// another token may arm now
 	}
 
+	// Review 2026-10-19 #1: a lapse is visible. The same-token re-arm of a
+	// fence still armed keeps the generation; a re-arm after the TTL lapsed
+	// (same token) gets a NEW generation, and a mutation acknowledged in the
+	// gap is exactly what a barrier from the old generation would miss.
+	void test_generation_proves_continuity_across_ttl()
+	{
+		std::string why;
+		cut_assert_equal_int(0, static_cast<int>(write_fence::generation()));
+		cut_assert_true(write_fence::arm("t1", 10, why));
+		const uint64_t g1 = write_fence::generation();
+		cut_assert_equal_int(1, static_cast<int>(g1));
+		fake_now += 9;
+		cut_assert_true(write_fence::arm("t1", 10, why));		// continuous
+		cppcut_assert_equal(g1, write_fence::generation());
+		fake_now += 11;											// lapsed (TTL crossed)
+		cut_assert_false(write_fence::active());
+		{
+			write_fence::entry w;								// a write is accepted in the gap
+			cut_assert_false(w.fenced());
+		}
+		cut_assert_true(write_fence::arm("t1", 10, why));		// same token, same TTL
+		const write_fence::status st = write_fence::snapshot();
+		cut_assert_true(st.active);
+		cut_assert_equal_string("t1", st.token.c_str());
+		cppcut_assert_equal(g1 + 1, st.generation);			// NOT the generation of the barrier
+		// a release, then an arm: a new generation too
+		cut_assert_true(write_fence::release("t1"));
+		cut_assert_true(write_fence::arm("t1", 10, why));
+		cppcut_assert_equal(g1 + 2, write_fence::generation());
+	}
+
 	void test_invalid_arguments()
 	{
 		std::string why;
@@ -178,7 +209,7 @@ namespace test_write_fence
 			test_op_fence op(c);
 			cut_assert_equal_int(0, op._parse_text_server_parameters());
 			op._run_server();
-			cut_assert_equal_string("STAT fence_active 1\r\nSTAT fence_token tok\r\nSTAT fence_remaining_sec 20\r\nSTAT fence_in_flight 0\r\nEND\r\n",
+			cut_assert_equal_string("STAT fence_active 1\r\nSTAT fence_token tok\r\nSTAT fence_remaining_sec 20\r\nSTAT fence_in_flight 0\r\nSTAT fence_generation 1\r\nEND\r\n",
 				dynamic_cast<connection_sstream&>(*c).get_output().c_str());
 		}
 		{
@@ -193,7 +224,7 @@ namespace test_write_fence
 			test_op_fence op(c);
 			cut_assert_equal_int(0, op._parse_text_server_parameters());
 			op._run_server();
-			cut_assert_equal_string("STAT fence_active 0\r\nSTAT fence_token -\r\nSTAT fence_remaining_sec 0\r\nSTAT fence_in_flight 0\r\nEND\r\n",
+			cut_assert_equal_string("STAT fence_active 0\r\nSTAT fence_token -\r\nSTAT fence_remaining_sec 0\r\nSTAT fence_in_flight 0\r\nSTAT fence_generation 1\r\nEND\r\n",
 				dynamic_cast<connection_sstream&>(*c).get_output().c_str());
 		}
 		{

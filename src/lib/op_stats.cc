@@ -258,13 +258,28 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 	// refuses to serve (0 = not refused)
 	_send_stat("promotion_refused"		, cl->is_promotion_refused() ? 1 : 0);
 	{
-		// planned-eviction write fence (write_fence.h)
-		const string ft = write_fence::token();
-		_send_stat("fence_active"			, ft.empty() ? 0 : 1);
-		_send_stat("fence_token"			, ft.empty() ? string("-") : ft);
-		_send_stat("fence_remaining_sec"	, write_fence::remaining_sec());
-		_send_stat("fence_in_flight"		, write_fence::in_flight());
-		_send_stat("fence_refused"			, write_fence::refused());
+		// planned-eviction write fence (write_fence.h): one consistent
+		// reading, so the in-flight count and the generation belong to the
+		// same fence as the token
+		const write_fence::status fs = write_fence::snapshot();
+		_send_stat("fence_active"			, fs.active ? 1 : 0);
+		_send_stat("fence_token"			, fs.active ? fs.token : string("-"));
+		_send_stat("fence_remaining_sec"	, fs.remaining_sec);
+		_send_stat("fence_in_flight"		, fs.in_flight);
+		_send_stat("fence_refused"			, fs.refused);
+		_send_stat("fence_generation"		, fs.generation);
+	}
+	{
+		// this node's own assignment in the node map it has ACCEPTED (the
+		// planned switch is confirmed from these, not from the operator's
+		// desired map: review 2026-10-19 #2)
+		cluster::role r = cluster::role_proxy;
+		cluster::state st = cluster::state_active;
+		int partition = -1;
+		const bool known = cl->get_own_assignment(r, st, partition);
+		_send_stat("own_role"				, known ? cluster::role_cast(r) : string("unknown"));
+		_send_stat("own_state"				, known ? cluster::state_cast(st) : string("unknown"));
+		_send_stat("own_partition"			, known ? partition : -1);
 	}
 	{
 		// R3: the source this node's copy is eligible for. eligible=0 means

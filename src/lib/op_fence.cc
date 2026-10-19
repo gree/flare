@@ -62,11 +62,12 @@ int op_fence::_run_server() {
 		}
 		log_notice("write fence released (token=%s)", this->_token.c_str());
 	}
-	const string token = write_fence::token();
+	// one consistent reading (the generation proves continuity, write_fence.h)
+	const write_fence::status fs = write_fence::snapshot();
 	char line[BUFSIZ];
-	snprintf(line, sizeof(line), "STAT fence_active %d\r\nSTAT fence_token %s\r\nSTAT fence_remaining_sec %u\r\nSTAT fence_in_flight %llu\r\n",
-		token.empty() ? 0 : 1, token.empty() ? "-" : token.c_str(), write_fence::remaining_sec(),
-		static_cast<unsigned long long>(write_fence::in_flight()));
+	snprintf(line, sizeof(line), "STAT fence_active %d\r\nSTAT fence_token %s\r\nSTAT fence_remaining_sec %u\r\nSTAT fence_in_flight %llu\r\nSTAT fence_generation %llu\r\n",
+		fs.active ? 1 : 0, fs.active ? fs.token.c_str() : "-", fs.remaining_sec,
+		static_cast<unsigned long long>(fs.in_flight), static_cast<unsigned long long>(fs.generation));
 	this->_connection->write(line, strlen(line));
 	return this->_send_result(result_end);
 }

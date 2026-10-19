@@ -1999,21 +1999,29 @@ int storage_rocksdb::get(entry& e, result& r, int b) {
 		// bypass the WAL and diverge the followers). version_equal so a delete is
 		// skipped if the key was re-set between the read and here. e already holds
 		// the current header (version/expire) from _unserialize_header above.
-		if (expired && (!this->_lazy_expiry_delete || write_fence::active())) {
-			// (also while the planned-eviction write fence is armed: this
-			// node makes no mutation of its own then)
+		if (expired && !this->_lazy_expiry_delete) {
 			// Not the partition master: the value is hidden (not_found
 			// above) but stays on disk; the master's delete arrives through
 			// the replication stream.
 			this->_expire_filtered.incr();
 		} else if (expired) {
-			result r_remove;
-			// behavior_skip_timestamp so remove() reports result_deleted rather
-			// than result_not_found for the (known-expired) entry it deletes.
-			if (this->remove(e, r_remove,
-						(b & behavior_skip_lock) | behavior_skip_timestamp | behavior_version_equal) == 0
-					&& r_remove == result_deleted) {
-				this->_expire_reaped.incr();
+			// The delete is a mutation like any other: the planned-eviction
+			// fence entry covers the WHOLE remove (refused while armed, else
+			// counted in flight until it is applied). A separate active()
+			// check let an arm land between the check and the remove, so an
+			// uncounted delete could follow the barrier (review 2026-10-19 #5).
+			write_fence::entry fence_entry;
+			if (fence_entry.fenced()) {
+				this->_expire_filtered.incr();
+			} else {
+				result r_remove;
+				// behavior_skip_timestamp so remove() reports result_deleted rather
+				// than result_not_found for the (known-expired) entry it deletes.
+				if (this->remove(e, r_remove,
+							(b & behavior_skip_lock) | behavior_skip_timestamp | behavior_version_equal) == 0
+						&& r_remove == result_deleted) {
+					this->_expire_reaped.incr();
+				}
 			}
 		}
 		return error;

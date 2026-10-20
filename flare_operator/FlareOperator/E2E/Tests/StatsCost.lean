@@ -1,0 +1,197 @@
+/-
+  E2E/Tests/StatsCost.lean — `stats-cost`: the cost a stats call puts on a
+  replica that holds identity records (pf-dev 2026-10-20: plain stats
+  scanned the whole replication-metadata family, ~15 s and ~0.7 core).
+
+  A MEASUREMENT on ONE candidate SHA, not a comparison of rc67 with the fix:
+  it separates the cost of the scan by alternating, on the same cluster and
+  at the same call rate, phases of plain `stats` (the fixed path: no scan)
+  and of `stats tombstones` (the exact scan, i.e. what every plain stats
+  used to do). The phases run in ABBA order (plain, exact, exact, plain)
+  after a warm-up, so load order and cache warm-up are not attributed to
+  either side. Compaction is not controlled (recorded only as the RocksDB
+  pending-compaction stats before and after each phase).
+
+  Per phase: the replica container's CPU (cgroup), CFS throttling (periods
+  and time, against a 1-core limit as on pf-dev), each call's response time,
+  forwards dropped / in flight, and the replication lag of a write burst made
+  during the phase (seconds until the replica's item count matches the
+  master's). Numbers are reported for review; the test asserts only that
+  every reading was observed and the semantics hold (plain stats carries no
+  scan result it did not observe: `repl_tombstones_known`, the exact count
+  equals the observation right after it). No SLO is decided here.
+-/
+import FlareOperator.E2E.Framework
+import FlareOperator.E2E.Helpers
+import FlareOperator.E2E.Setup
+
+namespace FlareOperator.E2E.Tests.StatsCost
+
+open FlareOperator.E2E
+open FlareOperator.E2E.Helpers
+open FlareOperator.E2E.Setup
+open FlareOperator.Kubectl
+
+private def cfg : ClusterConfig := {
+  name := "stats-cost"
+  «namespace» := "flare-stats-cost"
+  partitions := 1
+  replicas := 2
+  operatorName := "flare-operator"
+  debugPod := "debug-stats-cost"
+  storageBackend := "rocksdb"
+  -- identity forwarding only (as pf-dev after 2026-10-20): the replica keeps
+  -- one identity record per forwarded key; no WAL follow
+  extraFlaredConf := "repl-identity-forward = true"
+  flaredCpuLimit := "1"
+}
+
+/-- Keys to load (FLARE_E2E_STATS_COST_KEYS, default 300000). -/
+private def keysCount : IO Nat := return (((← IO.getEnv "FLARE_E2E_STATS_COST_KEYS").bind String.toNat?).getD 300000)
+
+private def statVal (out key : String) : Option String :=
+  (out.splitOn "\n").findSome? fun line =>
+    let t := (line.trim.replace "\r" "")
+    if t.startsWith s!"STAT {key} " then some ((t.drop s!"STAT {key} ".length).trim) else none
+
+private def debug (cmd : String) : IO (Except String String) := execInDebugPod cfg.debugPod cfg.«namespace» cmd
+
+/-- One call from the debug pod with its response time (ms, debug pod clock). -/
+private def timedCall (ip cmd : String) : IO (Option (Nat × String)) := do
+  match ← debug s!"s=$(date +%s%N); out=$(printf '{cmd}\\r\\n' | nc -w 60 {ip} {cfg.flarePort}); e=$(date +%s%N); echo \"MS=$(( (e-s)/1000000 ))\"; echo \"$out\"" with
+  | .error _ => return none
+  | .ok o =>
+    match (o.splitOn "\n").head?.bind (fun l => if l.startsWith "MS=" then (l.drop 3).trim.toNat? else none) with
+    | some ms => return if (o.splitOn "END").length > 1 then some (ms, o) else none
+    | none => return none
+
+/-- The replica container's CPU (ns) and CFS counters, cgroup v2 or v1. -/
+private def cgroupCpu (pod : String) : IO (Option (Nat × Nat × Nat × Nat)) := do
+  match ← kubectl ["exec", pod, "-n", cfg.«namespace», "-c", "flared", "--", "sh", "-c",
+      "if [ -f /sys/fs/cgroup/cpu.stat ]; then awk '/^usage_usec/{u=$2*1000} /^nr_periods/{p=$2} /^nr_throttled/{t=$2} /^throttled_usec/{tt=$2*1000} END{print u, p, t, tt}' /sys/fs/cgroup/cpu.stat; else u=$(cat /sys/fs/cgroup/cpuacct/cpuacct.usage); awk -v u=$u '/^nr_periods/{p=$2} /^nr_throttled/{t=$2} /^throttled_time/{tt=$2} END{print u, p, t, tt}' /sys/fs/cgroup/cpu/cpu.stat; fi"] with
+  | .error _ => return none
+  | .ok o =>
+    match (o.trim.splitOn " ").map String.toNat? with
+    | [some u, some p, some t, some tt] => return some (u, p, t, tt)
+    | _ => return none
+
+structure Phase where
+  label : String
+  cpuCores : Float
+  periods : Nat
+  throttled : Nat
+  throttledSec : Float
+  calls : Nat
+  failedCalls : Nat
+  latMedianMs : Nat
+  latMaxMs : Nat
+  droppedDelta : Int
+  lagSec : Option Nat
+  deriving Repr
+
+private def median (xs : List Nat) : Nat :=
+  let s := xs.mergeSort (· ≤ ·)
+  s.getD (s.length / 2) 0
+
+private def statNat (ip key : String) : IO (Option Nat) := do
+  match ← timedCall ip "stats" with
+  | some (_, o) => return (statVal o key).bind (·.toNat?)
+  | none => return none
+
+/-- Bulk writes from the debug pod in one connection (noreply). -/
+private def bulk (ip pfx : String) (n : Nat) (del : Bool := false) : IO Bool := do
+  let line := if del then s!"delete {pfx}_%d noreply\\r\\n" else s!"set {pfx}_%d 0 0 1 noreply\\r\\nv\\r\\n"
+  match ← debug s!"seq 1 {n} | awk '\{printf \"{line}\", $1}' | nc -w 30 {ip} {cfg.flarePort} >/dev/null 2>&1; echo OK" with
+  | .ok o => return (o.splitOn "OK").length > 1
+  | .error _ => return false
+
+/-- Seconds until the replica's item count equals the master's (≤ 300). -/
+private def lag (mIp sIp : String) : IO (Option Nat) := do
+  let t0 ← IO.monoMsNow
+  for _ in [0:300] do
+    match ← statNat mIp "curr_items", ← statNat sIp "curr_items" with
+    | some a, some b => if a == b then return some (((← IO.monoMsNow) - t0) / 1000)
+    | _, _ => pure ()
+    IO.sleep 1000
+  return none
+
+private def runPhase (label cmd : String) (sPod mIp sIp : String) (secs intervalMs : Nat) (burstPfx : String) : IO (Except String Phase) := do
+  let some (u0, p0, t0, tt0) ← cgroupCpu sPod | return .error "the replica's cgroup CPU counters cannot be read"
+  let d0 := (← statNat sIp "proxy_write_dropped").getD 0
+  let w0 ← IO.monoMsNow
+  -- a write burst at the start of the phase: its replication lag is measured
+  if !(← bulk mIp burstPfx 20000) then return .error "the phase's write burst failed"
+  let deadline := w0 + secs * 1000
+  let mut lats : List Nat := []
+  let mut failed := 0
+  repeat
+    match ← timedCall sIp cmd with
+    | some (ms, _) => lats := lats ++ [ms]
+    | none => failed := failed + 1
+    if (← IO.monoMsNow) ≥ deadline then break
+    IO.sleep intervalMs.toUInt32
+  let w1 ← IO.monoMsNow
+  let some (u1, p1, t1, tt1) ← cgroupCpu sPod | return .error "the replica's cgroup CPU counters cannot be read"
+  let d1 := (← statNat sIp "proxy_write_dropped").getD d0
+  let lg ← lag mIp sIp
+  let wall := (w1 - w0).toFloat / 1000.0
+  return .ok { label, cpuCores := (u1 - u0).toFloat / 1.0e9 / wall, periods := p1 - p0, throttled := t1 - t0,
+               throttledSec := (tt1 - tt0).toFloat / 1.0e9, calls := lats.length, failedCalls := failed,
+               latMedianMs := median lats, latMaxMs := lats.foldl max 0,
+               droppedDelta := (Int.ofNat d1) - (Int.ofNat d0), lagSec := lg }
+
+private def fmt (p : Phase) : String :=
+  s!"{p.label}: cpu {p.cpuCores} core; throttled {p.throttled}/{p.periods} periods ({p.throttledSec} s); calls {p.calls} ok / {p.failedCalls} failed, median {p.latMedianMs} ms, max {p.latMaxMs} ms; forwards dropped +{p.droppedDelta}; burst lag {(p.lagSec.map toString).getD "not converged"} s"
+
+private def measure : IO TestResult := do
+  let entries := parseNodeSync (← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync")
+  let some mFqdn := findMasterFqdn entries 0 | return .fail "no P0 master in the operator's map"
+  let some sE := entries.find? (fun e => e.fqdn != mFqdn) | return .fail "no replica in the operator's map"
+  let podOf := fun (f : String) => (f.splitOn ".").head?.getD f
+  let (mPod, sPod) := (podOf mFqdn, podOf sE.fqdn)
+  let (some mIp, some sIp) := (← getPodIp mPod cfg.«namespace», ← getPodIp sPod cfg.«namespace») | return .fail "pod IPs not resolved"
+  -- identity records on the replica: keys written to the master are
+  -- forwarded with their identity; a tenth are deleted (tombstones)
+  let n ← keysCount
+  IO.eprintln s!"# stats-cost: loading {n} keys (+{n / 10} deletes) through the master {mPod}"
+  if !(← bulk mIp "sc" n) then return .fail "the bulk load failed"
+  if !(← bulk mIp "sc" (n / 10) (del := true)) then return .fail "the bulk deletes failed"
+  let some l0 ← lag mIp sIp | return .fail "the replica did not converge after the load"
+  IO.eprintln s!"# stats-cost: replica converged {l0} s after the load"
+  -- semantics: before any count, plain stats has no value (not 0)
+  let some (_, plain0) ← timedCall sIp "stats" | return .fail "plain stats unreadable"
+  let known0 := statVal plain0 "repl_tombstones_known"
+  let some (scanMs, exact) ← timedCall sIp "stats tombstones" | return .fail "the exact count failed"
+  let exactN := (statVal exact "repl_tombstones").bind (·.toNat?)
+  let some (_, plain1) ← timedCall sIp "stats" | return .fail "plain stats unreadable"
+  IO.eprintln s!"# stats-cost: before a count known={known0} value={statVal plain0 "repl_tombstones"}; exact {exactN} in {scanMs} ms; plain after it known={statVal plain1 "repl_tombstones_known"} value={statVal plain1 "repl_tombstones"} age={statVal plain1 "repl_tombstones_age_sec"}"
+  if known0 == some "1" then return .fail "plain stats reported a count before any count was taken"
+  if (statVal plain0 "repl_tombstones").isSome then return .fail "plain stats carried a tombstone value with no observation (unknown must not be a number)"
+  if exactN.isNone || statVal plain1 "repl_tombstones" != exactN.map toString then
+    return .fail "the observation after the exact count does not equal the count"
+  -- warm-up, then ABBA, same rate (one call every 2 s), 120 s each
+  let secs := 120
+  let iv := 2000
+  discard <| runPhase "warm-up (exact)" "stats tombstones" sPod mIp sIp 30 iv "sw"
+  let mut phases : List Phase := []
+  for (i, label, cmd) in [(1, "A1 plain", "stats"), (2, "B1 exact scan", "stats tombstones"), (3, "B2 exact scan", "stats tombstones"), (4, "A2 plain", "stats")] do
+    match ← runPhase label cmd sPod mIp sIp secs iv s!"sb{i}" with
+    | .ok p => phases := phases ++ [p]; IO.eprintln s!"# stats-cost: {fmt p}"
+    | .error e => return .fail (s!"UNOBSERVABLE (not a performance verdict): phase {label}: {e}")
+  if phases.any (·.calls == 0) then return .fail "UNOBSERVABLE: a phase completed no call"
+  IO.eprintln s!"# stats-cost RESULT (one candidate SHA; scan cost separated by alternating phases, NOT rc67 vs the fix; compaction not controlled): {String.intercalate " | " (phases.map fmt)}"
+  return .pass
+
+def suite : TestSuite := {
+  name := "stats-cost"
+  setup := do
+    deployCluster cfg
+    IO.sleep 50000
+  teardown := cleanupCluster cfg
+  onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
+  tests := [
+    { name := "stats cost on a replica with identity records: plain stats (no scan) vs the exact scan, alternated ABBA at the same rate; CPU, throttling, response time, dropped forwards, burst lag reported (measurement, no SLO)"
+      run := measure }
+  ] }
+
+end FlareOperator.E2E.Tests.StatsCost

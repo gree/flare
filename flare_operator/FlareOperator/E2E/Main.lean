@@ -39,6 +39,7 @@ import FlareOperator.E2E.Tests.VCaptureResources
 import FlareOperator.E2E.Tests.ReplicaRepair
 import FlareOperator.E2E.Tests.ContinuousReplication
 import FlareOperator.E2E.Tests.ContinuousReplicationLimits
+import FlareOperator.E2E.Tests.StatsCost
 import FlareOperator.E2E.Tests.PrepareEvidence
 import FlareOperator.E2E.Tests.NativeMetrics
 import FlareOperator.E2E.Tests.BlueGreenMigration
@@ -111,6 +112,7 @@ def main (args : List String) : IO UInt32 :=
     Tests.ContinuousReplicationLimits.promotionDisconnectedSuite,
     Tests.ContinuousReplicationLimits.promotionDisconnectedEmptySuite,
     Tests.ContinuousReplicationLimits.promotionProxyOnlySuite,
+    Tests.StatsCost.suite,
     Tests.ContinuousReplicationLimits.historyHeldSuite,
     Tests.ContinuousReplicationLimits.historyIntentSuite,
     Tests.ContinuousReplicationLimits.forwardWindowSuite,

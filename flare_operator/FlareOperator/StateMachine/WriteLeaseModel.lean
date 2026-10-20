@@ -104,4 +104,89 @@ def acked (admit commit postCheck expiry : Nat) (checkAfterCommit : Bool) : Bool
 def ackSafe (admit commit postCheck expiry : Nat) (checkAfterCommit : Bool) : Bool :=
   !acked admit commit postCheck expiry checkAfterCommit || commit < expiry
 
+
+/-! ## The post-commit check is bound to the SAME grant (review of 9124993)
+
+A write remembers the grant (term, lease generation) it was admitted under.
+The lease generation moves on every lapse -> valid transition (like the
+planned-eviction fence generation); a renewal without a lapse keeps it. The
+post-commit check passes only if that same grant is still valid: a grant
+received meanwhile by another thread (a new term, or the same term after a
+lapse) does not acknowledge a commit made outside it. -/
+
+structure GrantId where
+  term : Nat
+  gen : Nat
+  deriving Repr, BEq
+
+/-- The lease the node holds at check time: its grant and expiry. -/
+structure Held where
+  id : GrantId
+  expiry : Nat
+  deriving Repr, BEq
+
+/-- Naive: ACK if ANY lease is valid at the check. -/
+def ackedNaive (admitted : GrantId) (atCheck : Held) (postCheck : Nat) : Bool :=
+  let _ := admitted
+  postCheck < atCheck.expiry
+
+/-- Bound: ACK only if the lease valid at the check is the one admitted under. -/
+def ackedBound (admitted : GrantId) (atCheck : Held) (postCheck : Nat) : Bool :=
+  atCheck.id == admitted && postCheck < atCheck.expiry
+
+/-! ## Membership: solo, replicated, and the authority handover
+
+The authoritative membership (persisted by the operator, compare-and-swap,
+term-numbered) says per partition whether a SUCCESSOR exists: a replica that
+passed the existing eligibility checks (copy / history / not rebuilding)
+and that the master has ACKNOWLEDGED as a successor.
+
+* solo: no successor in the membership. Nothing can be promoted without a
+  membership change, and a successor can only be added with the master's
+  acknowledgement, so the master writes WITHOUT a lease (requirement 1: not
+  stopped for nothing). "I cannot see a slave" is never solo: only the
+  authoritative membership is.
+* replicated: the master writes only while it holds authority from the
+  operator (a request-bound lease) OR a promise from EVERY successor (each
+  successor refuses promotion until the promise ends). An operator outage
+  alone does not stop it while it reaches its successors (no control-plane
+  single point of failure for writes).
+* promotion of successor r: the operator has stopped granting (persisted),
+  waited L + margin after the last moment any leader could grant, r holds no
+  unexpired promise to the old master, and r passes the existing checks.
+* solo -> replicated: r is made a successor (promotable) only AFTER the master
+  acknowledged the change (it is then lease / promise bound).
+* replicated -> solo: the membership commit removing r comes FIRST; the
+  master drops the lease requirement only after it learns of that commit. -/
+
+inductive Mode where
+  | solo
+  | replicated
+  deriving Repr, BEq
+
+/-- The old master's authority end under the membership rule. `none` =
+    unbounded (solo). `leaseEnd` = its operator lease (0 = none), `promises`
+    = each successor's promise end. -/
+def masterAuthorityEnd (mode : Mode) (leaseEnd : Nat) (promises : List Nat) : Option Nat :=
+  match mode with
+  | .solo => none
+  | .replicated => some (max leaseEnd (if promises.isEmpty then 0 else promises.foldl min promises.head!))
+
+/-- When successor r may start as the new master (`none` = never): only in
+    replicated mode, after the operator's wait and after r's own promise to
+    the old master ended. -/
+def promotionStart (mode : Mode) (operatorStop earlierLeadersEnd L margin rPromiseEnd : Nat) : Option Nat :=
+  match mode with
+  | .solo => none
+  | .replicated => some (max (rqNewStart operatorStop earlierLeadersEnd L margin) rPromiseEnd)
+
+/-- S1 for one handover: the old master's authority [from, end) and the new
+    master's [start, ∞) do not overlap. -/
+def handoverSafe (oldFrom : Nat) (oldEnd : Option Nat) (newStart : Option Nat) : Bool :=
+  match newStart with
+  | none => true
+  | some st => match oldEnd with
+    | none => false          -- unbounded old authority and a promotion: overlap
+    | some e => !({ start := oldFrom, stop := e } : Interval).overlaps { start := st, stop := st + 1000000 }
+
 end FlareOperator.WriteLeaseModel

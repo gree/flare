@@ -264,14 +264,27 @@ def Ctx.sample (c : Ctx) : IO (Nat × Option String × List (String × String)) 
 
 /-! ## Client writers (in the debug pod) -/
 
-/-- Start a writer that sets `<prefix>_<n>` = `v<n>` against `host` (a DNS
-    name resolved on every write, or an IP) until /tmp/stop-<name> exists.
-    Each line: n epoch address key value reply (NORESOLVE / NORESPONSE when
-    not observed). -/
+/-- The key and value prefix of one writer run: unique per suite, test and
+    start (epoch), so a later writer on the same cluster never meets an
+    earlier writer's identical key=value (280d928: C left wo_1..wo_29471 =
+    v1..v29471 and C' reused them, so C' writes that never arrived looked
+    delivered). Shell-safe: [a-z0-9-] only. -/
+def writerRunId (suite test name : String) (startEpoch : Nat) : String :=
+  let clean := fun (x : String) => String.map (fun ch => if ch.isAlphanum then ch.toLower else '-') x
+  s!"{clean suite}-{clean test}-{clean name}-{startEpoch}"
+
+def writerKey (pfx runId : String) (n : Nat) : String := s!"{pfx}_{runId}_{n}"
+def writerValue (runId : String) (n : Nat) : String := s!"v{runId}-{n}"
+
+/-- Start a writer that sets `<prefix>_<run>_<n>` = `v<run>-<n>` against
+    `host` (a DNS name resolved on every write, or an IP) until
+    /tmp/stop-<name> exists, then appends `END <n>`. Each line: n epoch
+    address key value reply t0 (NORESOLVE / NORESPONSE when not observed). -/
 def Ctx.startWriter (c : Ctx) (name host pfx : String) : IO Bool := do
-  let script := s!"n=0; out=/tmp/w-{name}.log; : > $out; rm -f /tmp/stop-{name}; while [ ! -f /tmp/stop-{name} ]; do n=$((n+1)); k={pfx}_$n; v=v$n; case {host} in *[a-z]*) ip=$(nslookup {host} 2>/dev/null | awk '/^Address/ \{a=$NF} END \{print a}');; *) ip={host};; esac; t0=$(date +%s); r=$(printf 'set %s 0 0 %d\\r\\n%s\\r\\n' \"$k\" $\{#v} \"$v\" | nc -w 3 \"$ip\" {c.cfg.flarePort} 2>/dev/null | head -1 | tr -d '\\r' | tr ' ' '_'); echo \"$n $(date +%s) $\{ip:-NORESOLVE} $k $v $\{r:-NORESPONSE} $t0\" >> $out; done; echo \"END $n\" >> $out"
+  let runId := writerRunId c.suite c.test name (← epochNow)
+  let script := s!"n=0; out=/tmp/w-{name}.log; : > $out; rm -f /tmp/stop-{name}; while [ ! -f /tmp/stop-{name} ]; do n=$((n+1)); k={pfx}_{runId}_$n; v=v{runId}-$n; case {host} in *[a-z]*) ip=$(nslookup {host} 2>/dev/null | awk '/^Address/ \{a=$NF} END \{print a}');; *) ip={host};; esac; t0=$(date +%s); r=$(printf 'set %s 0 0 %d\\r\\n%s\\r\\n' \"$k\" $\{#v} \"$v\" | nc -w 3 \"$ip\" {c.cfg.flarePort} 2>/dev/null | head -1 | tr -d '\\r' | tr ' ' '_'); echo \"$n $(date +%s) $\{ip:-NORESOLVE} $k $v $\{r:-NORESPONSE} $t0\" >> $out; done; echo \"END $n\" >> $out"
   match ← kubectl ["exec", c.cfg.debugPod, "-n", c.cfg.«namespace», "--", "sh", "-c", s!"nohup sh -c '{script.replace "'" "'\\''"}' >/dev/null 2>&1 &"] with
-  | .ok _ => c.event s!"writer {name} started against {host} (keys {pfx}_N)"; return true
+  | .ok _ => c.event s!"writer {name} started against {host} (keys {writerKey pfx runId 0}.., values {writerValue runId 0}..)"; return true
   | .error e => c.event s!"writer {name} could not start: {e}"; return false
 
 structure WriteRec where

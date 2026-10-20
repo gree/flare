@@ -1452,6 +1452,12 @@ def partChecks : List (String × Bool) :=
     ("reading gap: the widest gap between consecutive readings of a pod in a window",
       let r := fun (ts te : Nat) => ({ t := ts, reads := [{ pod := "x", ts, te, view := none }], masterPodReady := none, nodeReady := none, lease := none } : PartSample)
       maxReadingGap [r 100 101, r 103 104, r 110 111] "x" 100 120 == some 6 && maxReadingGap [r 100 101] "x" 100 120 == none),
+    ("writer keys: two writer runs with the same prefix on the same cluster never share a key or a value (280d928: C's wo_N=vN made C' undelivered writes look delivered)",
+      let a := writerRunId "node-ops-partition" "c-links" "old" 1792431900
+      let b := writerRunId "node-ops-partition" "c-node" "old" 1792432031
+      let c := writerRunId "node-ops-partition" "c-node" "old" 1792432999
+      a != b && b != c && writerKey "wo" a 5 != writerKey "wo" b 5 && writerValue a 5 != writerValue b 5
+        && (writerKey "wo" b 7).all (fun ch => ch.isAlphanum || ch == '_' || ch == '-')),
     ("writer records: the send time is kept (span [t0, t]); an older line without it is widened conservatively",
       (parseWrites "7 1005 10.0.0.1 k7 v7 STORED 1003").head?.map (·.span) == some (1003, 1005)
         && (parseWrites "7 1005 10.0.0.1 k7 v7 STORED").head?.map (·.span) == some (1001, 1005))
@@ -1484,6 +1490,28 @@ def leaseChecks : List (String × Bool) :=
         && !old.overlaps { forever with start := rqNewStart 0 15 L 1 }),
     ("lease model, pause: admitted at 5 inside the lease (expiry 10), paused, committed at 15 — an admission-only check ACKs a commit outside the authority; a check after the commit does not ACK it",
       !ackSafe 5 15 15 10 false && ackSafe 5 15 15 10 true && !acked 5 15 15 10 true),
+    ("lease model, grant binding: admitted under (term 1, gen 1), paused, committed at 15; meanwhile another thread took a grant (term 3) valid until 31; at the check (22) a naive 'any lease valid' ACKs; the check bound to the admitting grant does not",
+      let g1 : GrantId := { term := 1, gen := 1 }
+      let g3 : Held := { id := { term := 3, gen := 1 }, expiry := 31 }
+      ackedNaive g1 g3 22 && !ackedBound g1 g3 22
+        -- the same grant renewed without a lapse still ACKs; after a lapse (gen 2) it does not
+        && ackedBound g1 { id := g1, expiry := 30 } 22 && !ackedBound g1 { id := { g1 with gen := 2 }, expiry := 30 } 22),
+    ("membership, solo: no successor in the authoritative membership -> the master writes without a lease and is never stopped by the operator's absence; nothing can be promoted",
+      masterAuthorityEnd .solo 0 [] == none && promotionStart .solo 0 0 L 1 0 == none && handoverSafe 0 none (promotionStart .solo 0 0 L 1 0)),
+    ("membership, the local-view mistake: the membership has a successor but the master decides 'no slave visible = solo' (unbounded) and the operator promotes at 11 -> OVERLAP; bound by its lease (end 10) -> safe",
+      !handoverSafe 0 none (some 11) && handoverSafe 0 (masterAuthorityEnd .replicated 10 []) (promotionStart .replicated 0 0 L 1 0)),
+    ("membership, operator down but the successor reachable: the successor's renewed promise (to 100) keeps the master writing, and the successor refuses promotion until then -> no stop, no overlap",
+      masterAuthorityEnd .replicated 10 [100] == some 100 && promotionStart .replicated 0 0 L 1 100 == some 100
+        && handoverSafe 0 (masterAuthorityEnd .replicated 10 [100]) (promotionStart .replicated 0 0 L 1 100)),
+    ("membership, C' (master cut from the operator AND the successor): authority ends at its last lease / promise (12); promotion at max(operator wait 11, promise end 12) = 12 -> safe; ignoring the successor's promise (11) -> OVERLAP",
+      handoverSafe 0 (masterAuthorityEnd .replicated 10 [12]) (promotionStart .replicated 0 0 L 1 12)
+        && !handoverSafe 0 (masterAuthorityEnd .replicated 10 [12]) (some (rqNewStart 0 0 L 1))),
+    ("membership, solo -> replicated: a replica made promotable BEFORE the master acknowledged the change (master still solo, unbounded) -> OVERLAP; after the acknowledgement (lease-bound) -> safe",
+      !handoverSafe 0 (masterAuthorityEnd .solo 0 []) (promotionStart .replicated 0 0 L 1 0)
+        && handoverSafe 0 (masterAuthorityEnd .replicated 10 []) (promotionStart .replicated 0 0 L 1 0)),
+    ("membership, replicated -> solo: the master dropping the lease BEFORE the membership removed the successor (still promotable) -> OVERLAP; removal first (nothing promotable) -> safe",
+      !handoverSafe 0 (masterAuthorityEnd .solo 0 []) (promotionStart .replicated 0 0 L 1 0)
+        && handoverSafe 0 (masterAuthorityEnd .solo 0 []) (promotionStart .solo 0 0 L 1 0)),
     ("lease model, pause after the commit: committed at 8 inside the lease; a pause before the post-commit check (12) -> not acknowledged (in doubt, never ACKed); no pause (9) -> ACKed, committed inside the authority",
       !acked 5 8 12 10 true && acked 5 8 9 10 true && ackSafe 5 8 9 10 true)
   ]

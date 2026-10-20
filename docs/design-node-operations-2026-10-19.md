@@ -224,8 +224,49 @@ master (旧)                 operator leader               新 master
   - 読み取り: 193 サンプル、例外なく終了。各 pod の読み取りは必要区間（1792432042..1792432392）を前後で覆い、切断中の最大間隔は 2 s
   - 交代: replica は自分の view で切断から 184 s 後（1792432226）に master。旧 master は heal（1792432396）まで自分の view で master。operator のログは unready → dead → `PROMOTION NOT LOSS-FREE` → `PROMOTION committed`
   - **二重 write（推定、own view）:** 旧 master の local ACK 22778 件が新 master が master だった間に、新 master の local ACK 22167 件が旧 master がまだ master だった間にあった（約 170 s）
-  - **ACK 喪失（直接、最終 master のコピーと比較）: 47618 件。** すべて旧 master が ACK した write（`wo_*`）で、ACK の時刻は 1792432150〜1792432396（切断の 108 s 後から heal まで）。旧 master は heal 後に proxy になり、その間の write は新しい履歴に含まれない
+  - **ACK 喪失（直接、最終 master のコピーと比較）: 少なくとも 47618 件**（`wo_29472`〜`wo_77089`、旧 master が ACK した write）。**総数と開始時刻は主張しない**: ハーネスの不具合で、同じ cluster で先に走った C の writer が `wo_1`〜`wo_29471` = `v1`〜`v29471` を残しており（C の最後の ACK が `wo_29471`）、C' の writer は同じ key と値を `wo_1` から書き直した。そのため C' の `wo_1`〜`wo_29471` は「届いた」ように見えるが、C' の配送の証拠にはならない（この区間の C' の損失は未判定）。「切断の 108 s 後から欠損」はこの重なりで説明がつく（C' の最初の欠損 `wo_29472` = C の最後の key + 1、artifact で確定）
   - 判定のカバレッジ: 切断区間の ACK 102476 件のうち 97086 件を判定、5390 件は未判定（新 master の version が変わる前後）
   - writer の記録: 両方とも END マーカーまで完全
 - 製品の意味: 計画外の分断で旧 master が生きていて client が届く場合、現行の自動昇格（unready で dead → 昇格）は二重 master を作り、旧 master が ACK した write を大量に失う。これは §11 の判断（write 権限の失効の仕組み、またはそれまでの自動昇格の扱い）の材料。既定動作は変えていない
-- 喪失が切断直後ではなく 108 s 後の ACK から始まる理由は未分解（推定しない。次に replica の適用位置の時系列で確かめる）
+- 修正: writer の key と値を suite / test / writer / 開始時刻で一意にした（`writerRunId`、回帰の単体試験あり）。既存の証跡は消さない
+
+
+## 12. 要件（ユーザー、2026-10-20）と実現方式（提案。未承認・未実装・既定動作は変えない）
+
+### 12.1 要件
+
+| # | 要件 | 守ること |
+|---|---|---|
+| R1 | master が使えなくても、後継がいなければ止めない（単独で書き続ける） | 「後継がいない」は master のローカルな見え方ではなく、権威ある membership で決める（slave が見えない ≠ slave がいない: 分断の反例） |
+| R2 | 到達可能で使える後継がいれば、有限時間で自動的に切り替える | 到達可能は必要条件にすぎない。copy / history / 再構築中などの既存の適格性確認はそのまま |
+| R3 | 切り替えの後、旧 master に届く client がいても二重 write にしない | controller から届かないことと、全 client から届かないことは同じではない（C' は client が旧 master に届く分断） |
+| R4 | 制御系（operator）を write の単一障害点にしない | operator が落ちても、master と後継がつながっていれば write は続く |
+
+### 12.2 方式（設計モデル `WriteLeaseModel` で反例を確認したもの）
+
+- **権威ある membership:** operator が partition ごとに `{term, master, successors, mode}` を永続化する（compare-and-swap、term 番号付き）。successor は、既存の適格性確認を通り、**master が successor として承認した** replica だけ
+- **solo（successor なし）:** master はリースなしで書き続ける（R1）。successor は master の承認なしには作れないので、昇格の対象が存在しない
+- **replicated（successor あり）:** master は、operator のリース（要求起点、§11.4）**または全 successor の約束**（約束の間はその successor が昇格を拒否する）のどちらかがある間だけ ACK する。operator が落ちても、successor に届いていれば書き続ける（R4）
+- **昇格（R2）:** operator が発行停止を永続化し、どの leader も grant を出せた最後の時刻から L + 余裕を待ち、昇格させる successor が旧 master への約束を持っていないこと、既存の適格性確認を通ることを満たしたら、新しい term を CAS で commit してから新 master にリースを渡す。新 master は新しい term のリースを持つまで ACK しない
+- **旧 master（R3）:** リースも約束も切れたら ACK しない。commit 後の確認は、admission の時の grant（term と lease generation）と同じ grant が有効かを見る（別の thread が受け取った新しい grant では ACK しない）
+- **遷移の順序:**
+  - solo → replicated: master が承認してから（リース / 約束に縛られてから）replica を昇格可能にする
+  - replicated → solo: membership から successor を外す commit が先。master はそれを知ってからリースの要求を外す
+- **operator の leader 権限:** grant を出す権限も要求起点で数える（leader が自分で Lease の更新を送った時刻から、期限前に止まる）。**K8s Lease を読んだだけで leader 権限があることにしない。** 今の `getLease` は renewTime（wall clock）と現在時刻の比較なので、そのままでは前提を満たさない（実装時に直す対象）
+- **環境の前提（保証の一部として明示）:** 停止中も進む単調時計（CLOCK_BOOTTIME）とドリフト上限。VM の一時停止で時計の仮定が破れうる点は残る。client の経路や入口を環境で制限できる（例: 旧 master への client 経路を Service 経由に限り、Service から外す）なら R3 の補強になるが、直接 Pod に届く client がいれば保証にならない
+
+### 12.3 モデルで確かめた反例（`leaseChecks`）
+
+- 受信起点の TTL: 遅延した grant で重なる（撤回済み）
+- 要求起点: 遅延・重複・再送の grant は期限を延ばさない。停止していた旧 leader の grant は、旧 leader の権限の終わりを数えれば重ならない
+- pause: admission だけの確認は期限外の commit を ACK する。commit 後の確認でも、**admission と別の grant**（別 thread が受けた新しい term）で ACK すると期限外の commit を ACK する → 同じ grant に結び付ける
+- membership: ローカルに「slave が見えない = solo」とすると重なる。solo → replicated で master の承認前に昇格可能にすると重なる。replicated → solo で successor を外す前にリースをやめると重なる
+- operator 停止・successor 到達可能: 約束で書き続け、successor は昇格を拒否するので重ならない
+- C'（operator と successor の両方から切れる）: 最後のリース / 約束で権限が切れ、昇格はそれ以降。successor の約束を待たずに昇格すると重なる
+
+### 12.4 残る判断と影響
+
+1. **C' と同じ状況（master が operator と全 successor から切れ、client だけが届く）では、master は L の後に write を止める。** R3 を満たすには避けられない。止まるのはその master にしか届かない client の write だけで、切り替え後は新 master で書ける
+2. **L の値:** 切り替えにかかる時間は、検知（今は unready の 30 s 規則）+ L + 余裕。測定してから提案する
+3. **非同期複製の損失は残る:** 旧 master が successor から切れた後、リースの残り（最大 L）の間に ACK した write は、昇格後に失われうる（B と同じ「無損失ではない」）。減らすには、successor に届かなくなった時点で約束の更新を止める・同期 ACK（§11.3 C）などの追加の判断が要る
+4. 実装の範囲（承認後）: flared（リース・約束・grant に結び付いた commit 後の確認）、operator（membership の永続化と遷移、要求起点の leader 権限、発行停止の永続化）、E2E（C' で二重 write 0、R1 の solo 継続、R4 の operator 停止中の継続）

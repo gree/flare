@@ -3527,6 +3527,109 @@ void test_tombstone_live_count_raw_batch_overlay_and_seed_at_reopen() {
 	cut_assert_true(eq4);
 }
 
+// review of fbcda71 (P2): a raw batch whose counts cannot be computed is
+// refused BEFORE its write — a read error other than NotFound in either
+// handler, an operation that is not counted, a batch that cannot be walked —
+// so neither count ever takes a partial delta while staying valid
+namespace {
+	// one tombstone and one data key, then the state that must not move
+	void raw_batch_base(storage_rocksdb* s) {
+		rocksdb::WriteBatch b;
+		b.Put(s->debug_meta_cf(), "t0", "2:e|1|1");
+		b.Put("d0", "v");
+		s->apply_batch(b);
+	}
+	void raw_batch_probe(storage_rocksdb* s, rocksdb::WriteBatch& b) {
+		b.Put(s->debug_meta_cf(), "t1", "2:e|2|1");
+		b.Put("d1", "v");
+	}
+}
+
+void test_raw_batch_refused_when_a_count_read_fails() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	raw_batch_base(s);
+	int rc[4];
+	for (int which = 1; which <= 2; which++) {
+		s->set_count_get_fail_for_test(which);
+		rocksdb::WriteBatch b;
+		raw_batch_probe(s, b);
+		rc[(which - 1) * 2] = s->apply_batch(b);
+		rc[(which - 1) * 2 + 1] = s->apply_batch_with_lsn(b, 99);
+	}
+	s->set_count_get_fail_for_test(0);
+	uint64_t live = 0, exact = 0;
+	const bool eq = live_equals_exact(s, live, exact);
+	const uint64_t items = s->count();
+	const uint64_t lsn = s->get_repl_last_lsn();
+	drop_rocksdb(s, wal_master_dir);
+	for (int i = 0; i < 4; i++) {
+		cut_assert_equal_int(-1, rc[i]);
+	}
+	cut_assert_true(eq);
+	cppcut_assert_equal(static_cast<uint64_t>(1), exact);   // t1 not written
+	cppcut_assert_equal(static_cast<uint64_t>(1), items);   // d1 not written
+	cut_assert_true(lsn != 99);                             // nor the LSN marker
+}
+
+void test_raw_batch_with_an_uncounted_operation_is_refused() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	raw_batch_base(s);
+	rocksdb::WriteBatch m;
+	raw_batch_probe(s, m);
+	m.Merge("d0", "x");
+	const int rm = s->apply_batch(m);
+	rocksdb::WriteBatch r;
+	raw_batch_probe(s, r);
+	r.DeleteRange(s->debug_meta_cf(), "a", "z");
+	const int rr = s->apply_batch_with_lsn(r, 99);
+	uint64_t live = 0, exact = 0;
+	const bool eq = live_equals_exact(s, live, exact);
+	const uint64_t items = s->count();
+	drop_rocksdb(s, wal_master_dir);
+	cut_assert_equal_int(-1, rm);
+	cut_assert_equal_int(-1, rr);
+	cut_assert_true(eq);
+	cppcut_assert_equal(static_cast<uint64_t>(1), exact);
+	cppcut_assert_equal(static_cast<uint64_t>(1), items);
+}
+
+void test_raw_batch_that_cannot_be_walked_is_refused() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	raw_batch_base(s);
+	rocksdb::WriteBatch good;
+	raw_batch_probe(s, good);
+	// the rep cut short inside its last record
+	const string rep = good.Data();
+	rocksdb::WriteBatch bad(rep.substr(0, rep.size() - 2));
+	const int r = s->apply_batch(bad);
+	uint64_t live = 0, exact = 0;
+	const bool eq = live_equals_exact(s, live, exact);
+	const uint64_t items = s->count();
+	drop_rocksdb(s, wal_master_dir);
+	cut_assert_equal_int(-1, r);
+	cut_assert_true(eq);
+	cppcut_assert_equal(static_cast<uint64_t>(1), exact);
+	cppcut_assert_equal(static_cast<uint64_t>(1), items);
+}
+
+// the live count describes the open copy: unknown while closed, exact again
+// after the seed at open (never the closed copy's value)
+void test_tombstone_live_count_unknown_while_closed() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	raw_batch_base(s);
+	uint64_t live = 0, exact = 0;
+	const bool before = s->get_repl_tombstones_live(live);
+	s->close();
+	const bool closed = s->get_repl_tombstones_live(live);
+	s->open();
+	const bool eq = live_equals_exact(s, live, exact);
+	drop_rocksdb(s, wal_master_dir);
+	cut_assert_true(before);
+	cut_assert_false(closed);
+	cut_assert_true(eq);
+	cppcut_assert_equal(static_cast<uint64_t>(1), live);
+}
+
 void test_tombstone_live_count_below_zero_is_unknown_not_wrapped() {
 	storage_rocksdb* s = make_rocksdb(wal_master_dir);
 	uint64_t live = 0;

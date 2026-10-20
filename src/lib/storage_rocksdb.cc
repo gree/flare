@@ -187,6 +187,17 @@ storage_rocksdb::storage_rocksdb(
 	pthread_rwlock_init(&this->_mutex_master_id, NULL);
 	pthread_mutex_init(&this->_mutex_rebuild_status, NULL);
 	pthread_mutex_init(&this->_mutex_switch_unresolved, NULL);
+	this->_wholelock_writers_waiting = 0;
+	this->_tomb_copy_epoch = 0;
+	pthread_mutex_init(&this->_tomb_count_mutex, NULL);
+	pthread_mutex_init(&this->_tomb_obs_mutex, NULL);
+	this->_tomb_obs_known = false;
+	this->_tomb_obs_value = 0;
+	this->_tomb_obs_at.tv_sec = 0;
+	this->_tomb_obs_at.tv_nsec = 0;
+	this->_tomb_scans = 0;
+	this->_tomb_scan_hook = NULL;
+	this->_tomb_scan_fail_for_test = false;
 	this->_data_path = this->_data_dir + "/flare.rocksdb";
 	this->_setup_rocksdb_options();
 }
@@ -201,6 +212,8 @@ storage_rocksdb::~storage_rocksdb() {
 	this->_close_db();
 	pthread_rwlock_destroy(&this->_repl_apply_lock);
 	pthread_rwlock_destroy(&this->_mutex_generations);
+	pthread_mutex_destroy(&this->_tomb_count_mutex);
+	pthread_mutex_destroy(&this->_tomb_obs_mutex);
 	pthread_mutex_destroy(&this->_resync_failure_mutex);
 	pthread_mutex_destroy(&this->_orphan_scan_mutex);
 	pthread_rwlock_destroy(&this->_mutex_master_id);
@@ -807,7 +820,7 @@ int storage_rocksdb::switch_to_staging(const string& attempt, const string& expe
 			return -1;
 		}
 	}
-	pthread_rwlock_wrlock(&this->_mutex_wholelock);
+	this->_wholelock_wrlock_copy_change();
 	int r = -1;
 	do {
 		if (this->_db != NULL) {
@@ -1065,7 +1078,7 @@ int storage_rocksdb::adopt_history(const string& master_id, const string& epoch,
 	if (adopted.empty()) {
 		return -1;
 	}
-	pthread_rwlock_wrlock(&this->_mutex_wholelock);
+	this->_wholelock_wrlock_copy_change();
 	int r = -1;
 	do {
 		// inherited replication metadata (a checkpoint carries the source's)
@@ -2252,7 +2265,7 @@ int storage_rocksdb::truncate(int b) {
 	// clear the header cache. Same locking convention as
 	// storage_tcb::truncate().
 	if ((b & behavior_skip_lock) == 0) {
-		pthread_rwlock_wrlock(&this->_mutex_wholelock);
+		this->_wholelock_wrlock_copy_change();
 		this->_mutex_slot_wrlock_all();
 	}
 
@@ -2964,7 +2977,7 @@ int storage_rocksdb::swap_in_snapshot(const string& staging_dir, uint64_t checkp
 	// handle is torn down and rebuilt. The node is a Prepare slave during
 	// reconstruction (balance 0, readiness-gated NotReady), so nothing
 	// user-visible is interrupted.
-	pthread_rwlock_wrlock(&this->_mutex_wholelock);
+	this->_wholelock_wrlock_copy_change();
 
 	int r = -1;
 	do {
@@ -3646,7 +3659,7 @@ int storage_rocksdb::hard_reset() {
 	// empty. Same teardown/reopen as swap_in_snapshot, minus the staging
 	// swap — reconstruction reseeds the data afterwards. The caller guarantees
 	// this is not the last good copy (slave / reconstructing node only).
-	pthread_rwlock_wrlock(&this->_mutex_wholelock);
+	this->_wholelock_wrlock_copy_change();
 	int r = -1;
 	do {
 		if (this->_db != NULL) {
@@ -3715,7 +3728,7 @@ int storage_rocksdb::quarantine_reset(string& moved_to) {
 			}
 		}
 	}
-	pthread_rwlock_wrlock(&this->_mutex_wholelock);
+	this->_wholelock_wrlock_copy_change();
 	int r = -1;
 	do {
 		string cid = this->get_copy_id();
@@ -4744,28 +4757,113 @@ uint64_t storage_rocksdb::collect_tombstones(uint64_t budget) {
 	return n;
 }
 
-uint64_t storage_rocksdb::get_repl_tombstones() {
+void storage_rocksdb::_wholelock_wrlock_copy_change() {
+	__sync_add_and_fetch(&this->_wholelock_writers_waiting, 1);
+	pthread_rwlock_wrlock(&this->_mutex_wholelock);
+	__sync_sub_and_fetch(&this->_wholelock_writers_waiting, 1);
+	// the copy (or its metadata) changes now: an observation of the copy
+	// before is not one of the copy after, and a scan that started before
+	// cannot publish into the new epoch
+	pthread_mutex_lock(&this->_tomb_obs_mutex);
+	this->_tomb_copy_epoch++;
+	this->_tomb_obs_known = false;
+	pthread_mutex_unlock(&this->_tomb_obs_mutex);
+}
+
+int storage_rocksdb::count_repl_tombstones(uint64_t& n, string& why) {
+	n = 0;
+	if (pthread_mutex_trylock(&this->_tomb_count_mutex) != 0) {
+		why = "busy: another count is running";
+		return -1;
+	}
+	__sync_add_and_fetch(&this->_tomb_scans, 1);
 	pthread_rwlock_rdlock(&this->_mutex_wholelock);
+	int r = -1;
 	if (this->_db == NULL || this->_cf_meta == NULL) {
-		pthread_rwlock_unlock(&this->_mutex_wholelock);
-		return 0;
-	}
-	rocksdb::ReadOptions ro = this->_read_options;
-	ro.fill_cache = false;
-	rocksdb::Iterator* it = this->_db->NewIterator(ro, this->_cf_meta);
-	if (it == NULL) {
-		pthread_rwlock_unlock(&this->_mutex_wholelock);
-		return 0;
-	}
-	uint64_t n = 0;
-	for (it->SeekToFirst(); it->Valid(); it->Next()) {
-		const string v = it->value().ToString();
-		if (v.size() >= 2 && v.substr(v.size() - 2) == "|1") {
-			n++;
+		why = "not open";
+	} else {
+		pthread_mutex_lock(&this->_tomb_obs_mutex);
+		const uint64_t epoch = this->_tomb_copy_epoch;
+		pthread_mutex_unlock(&this->_tomb_obs_mutex);
+		const rocksdb::Snapshot* snap = this->_db->GetSnapshot();
+		struct timespec at;
+		clock_gettime(CLOCK_MONOTONIC, &at);
+		rocksdb::ReadOptions ro = this->_read_options;
+		ro.fill_cache = false;
+		ro.snapshot = snap;
+		rocksdb::Iterator* it = this->_db->NewIterator(ro, this->_cf_meta);
+		if (it == NULL) {
+			why = "no iterator";
+		} else {
+			uint64_t count = 0;
+			uint64_t seen = 0;
+			bool cancelled = false;
+			for (it->SeekToFirst(); it->Valid(); it->Next()) {
+				const rocksdb::Slice v = it->value();
+				if (v.size() >= 2 && v[v.size() - 2] == '|' && v[v.size() - 1] == '1') {
+					count++;
+				}
+				if ((++seen & 1023) == 0) {
+					if (this->_tomb_scan_hook != NULL) {
+						this->_tomb_scan_hook(this);
+					}
+					// a copy change is waiting for the whole-DB lock: give way
+					if (__sync_add_and_fetch(&this->_wholelock_writers_waiting, 0) > 0) {
+						cancelled = true;
+						break;
+					}
+				}
+			}
+			const rocksdb::Status st = this->_tomb_scan_fail_for_test ? rocksdb::Status::IOError("test") : it->status();
+			delete it;
+			if (cancelled) {
+				why = "cancelled: a copy change is waiting (nothing published)";
+			} else if (!st.ok()) {
+				why = "incomplete: " + st.ToString() + " (nothing published)";
+			} else {
+				pthread_mutex_lock(&this->_tomb_obs_mutex);
+				if (this->_tomb_copy_epoch == epoch) {
+					this->_tomb_obs_known = true;
+					this->_tomb_obs_value = count;
+					this->_tomb_obs_at = at;
+					n = count;
+					r = 0;
+				} else {
+					why = "the copy changed during the count (nothing published)";
+				}
+				pthread_mutex_unlock(&this->_tomb_obs_mutex);
+			}
 		}
+		this->_db->ReleaseSnapshot(snap);
 	}
-	delete it;
 	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	pthread_mutex_unlock(&this->_tomb_count_mutex);
+	return r;
+}
+
+bool storage_rocksdb::get_repl_tombstones_observed(uint64_t& n, uint64_t& age_sec) {
+	pthread_mutex_lock(&this->_tomb_obs_mutex);
+	const bool known = this->_tomb_obs_known;
+	n = this->_tomb_obs_value;
+	const struct timespec at = this->_tomb_obs_at;
+	pthread_mutex_unlock(&this->_tomb_obs_mutex);
+	if (!known) {
+		age_sec = 0;
+		return false;
+	}
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	age_sec = now.tv_sec > at.tv_sec ? static_cast<uint64_t>(now.tv_sec - at.tv_sec) : 0;
+	return true;
+}
+
+uint64_t storage_rocksdb::get_repl_tombstones() {
+	uint64_t n = 0;
+	string why;
+	if (this->count_repl_tombstones(n, why) < 0) {
+		log_warning("tombstone count failed: %s", why.c_str());
+		return static_cast<uint64_t>(-1);
+	}
 	return n;
 }
 

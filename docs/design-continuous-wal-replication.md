@@ -638,7 +638,7 @@ flared owns delivery and reconnection; the operator observes and decides.
 | `repl_last_reason` | reason for the last reconnect or rebuild (`lsn_purged`, `master_id_mismatch`, `crc_mismatch`, `peer_unreachable`, …) |
 | `repl_forward_applied` / `repl_forward_skipped` | changes applied / skipped by rule (c) from the forwarding path |
 | `repl_wal_skipped_superseded` | WAL changes skipped because forwarding had already applied them — the coexistence health signal |
-| `repl_tombstones` | live tombstone count (resource bound, §3.5) |
+| `repl_tombstones` | in plain `stats`: the LAST OBSERVATION of the live tombstone count (resource bound, §3.5), present only with `repl_tombstones_known 1`, with `repl_tombstones_age_sec` (monotonic seconds since the RocksDB snapshot it was counted at). No observation (none yet, or the copy changed since) = `repl_tombstones_known 0` and no value — never 0. The exact count is `stats tombstones` (O(N) scan of the metadata family, one at a time, gives way to a copy change, publishes nothing if cancelled or incomplete) |
 
 ### 5.2 What must not be treated as evidence
 

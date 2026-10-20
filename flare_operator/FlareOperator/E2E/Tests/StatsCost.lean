@@ -102,19 +102,21 @@ private def statNat (ip key : String) : IO (Option Nat) := do
   | some (_, o) => return (statVal o key).bind (·.toNat?)
   | none => return none
 
-/-- Bulk writes from the debug pod in one connection (noreply). -/
-private def bulk (ip pfx : String) (n : Nat) (del : Bool := false) : IO Bool := do
-  let line := if del then s!"delete {pfx}_%d noreply\\r\\n" else s!"set {pfx}_%d 0 0 1 noreply\\r\\nv\\r\\n"
-  match ← debug s!"seq 1 {n} | awk '\{printf \"{line}\", $1}' | nc -w 30 {ip} {cfg.flarePort} >/dev/null 2>&1; echo OK" with
-  | .ok o => return (o.splitOn "OK").length > 1
+/-- Bulk writes of keys `pfx_lo..pfx_hi` in one connection, WITH replies:
+true only when every one answered STORED / DELETED. Not noreply: a noreply
+client write is forwarded to the replica as noreply too (fire-and-forget,
+`op_set::_parse_text_client_parameters` reads nothing), so a connection
+reset loses the writes in flight with no retry and no proxy_write_dropped —
+edc6377 39382996034: master 40000 / replica 39180 after chunk 1, two
+connection resets, dropped 0. That is a separate finding, not what this
+suite measures. `quit` makes the server close, so nc does not idle out. -/
+private def bulkRange (ip pfx : String) (lo hi : Nat) (del : Bool) : IO Bool := do
+  let (line, ok) := if del then (s!"delete {pfx}_%d\\r\\n", "DELETED") else (s!"set {pfx}_%d 0 0 1\\r\\nv\\r\\n", "STORED")
+  match ← debug s!"(seq {lo} {hi} | awk '\{printf \"{line}\", $1}'; printf 'quit\\r\\n') | nc -w 30 {ip} {cfg.flarePort} | grep -c '^{ok}'" with
+  | .ok o => return o.trim.toNat? == some (hi - lo + 1)
   | .error _ => return false
 
-/-- Bulk writes of keys `pfx_lo..pfx_hi` (noreply, one connection). -/
-private def bulkRange (ip pfx : String) (lo hi : Nat) (del : Bool) : IO Bool := do
-  let line := if del then s!"delete {pfx}_%d noreply\\r\\n" else s!"set {pfx}_%d 0 0 1 noreply\\r\\nv\\r\\n"
-  match ← debug s!"seq {lo} {hi} | awk '\{printf \"{line}\", $1}' | nc -w 30 {ip} {cfg.flarePort} >/dev/null 2>&1; echo OK" with
-  | .ok o => return (o.splitOn "OK").length > 1
-  | .error _ => return false
+private def bulk (ip pfx : String) (n : Nat) (del : Bool := false) : IO Bool := bulkRange ip pfx 1 n del
 
 /-- Why the replica did not converge: both counts and the forwarding counters. -/
 private def notConverged (mIp sIp what : String) : IO String := do

@@ -3400,7 +3400,11 @@ namespace {
 		if (tomb_hook_calls++ == 0) {
 			tomb_hook_storage = s;
 			tomb_hook_thread_started = pthread_create(&tomb_hook_thread, NULL, tomb_truncate_main, NULL) == 0;
-			usleep(200 * 1000);   // the truncate is now waiting for the whole-DB lock
+			// deterministic: return only once the truncate is WAITING for the
+			// whole-DB lock (bounded: 10 s)
+			for (int i = 0; tomb_hook_thread_started && i < 1000 && s->debug_wholelock_writers_waiting() == 0; i++) {
+				usleep(10 * 1000);
+			}
 		}
 	}
 }
@@ -3408,27 +3412,35 @@ namespace {
 void test_tombstone_observation_plain_stats_never_scans() {
 	storage_rocksdb* s = make_rocksdb(wal_master_dir);
 	put_identity_records(s, 50, 7);
-	uint64_t n = 99, age = 99;
+	uint64_t n0 = 99, age0 = 99, n1 = 0, age1 = 99, n2 = 0, age2 = 0, exact = 0;
 	const uint64_t scans0 = s->get_repl_tombstone_scans();
 	// no observation yet: unknown (and NOT 0), and asking scans nothing
-	cut_assert_false(s->get_repl_tombstones_observed(n, age));
-	cppcut_assert_equal(scans0, s->get_repl_tombstone_scans());
+	const bool known0 = s->get_repl_tombstones_observed(n0, age0);
+	const uint64_t scans1 = s->get_repl_tombstone_scans();
 	// the exact count, then the observation it leaves
 	string why;
-	cut_assert_equal_int(0, s->count_repl_tombstones(n, why));
-	cppcut_assert_equal(static_cast<uint64_t>(7), n);
-	cppcut_assert_equal(scans0 + 1, s->get_repl_tombstone_scans());
-	cut_assert_true(s->get_repl_tombstones_observed(n, age));
-	cppcut_assert_equal(static_cast<uint64_t>(7), n);
-	cut_assert_operator(age, <=, static_cast<uint64_t>(1));
+	const int rc = s->count_repl_tombstones(exact, why);
+	const uint64_t scans2 = s->get_repl_tombstone_scans();
+	const bool known1 = s->get_repl_tombstones_observed(n1, age1);
 	// a later delete: the OBSERVATION stays what it was (its age tells how
 	// old), the exact count sees it; reading the observation scans nothing
 	put_identity_records(s, 0, 8);
-	cut_assert_true(s->get_repl_tombstones_observed(n, age));
-	cppcut_assert_equal(static_cast<uint64_t>(7), n);
-	cppcut_assert_equal(scans0 + 1, s->get_repl_tombstone_scans());
-	cppcut_assert_equal(static_cast<uint64_t>(8), s->get_repl_tombstones());
+	const bool known2 = s->get_repl_tombstones_observed(n2, age2);
+	const uint64_t scans3 = s->get_repl_tombstone_scans();
+	const uint64_t exact2 = s->get_repl_tombstones();
 	drop_rocksdb(s, wal_master_dir);
+	cut_assert_false(known0);
+	cppcut_assert_equal(scans0, scans1);
+	cut_assert_equal_int(0, rc);
+	cppcut_assert_equal(static_cast<uint64_t>(7), exact);
+	cppcut_assert_equal(scans0 + 1, scans2);
+	cut_assert_true(known1);
+	cppcut_assert_equal(static_cast<uint64_t>(7), n1);
+	cut_assert_operator(age1, <=, static_cast<uint64_t>(1));
+	cut_assert_true(known2);
+	cppcut_assert_equal(static_cast<uint64_t>(7), n2);
+	cppcut_assert_equal(scans2, scans3);
+	cppcut_assert_equal(static_cast<uint64_t>(8), exact2);
 }
 
 void test_tombstone_observation_dropped_by_a_copy_change() {
@@ -3438,12 +3450,17 @@ void test_tombstone_observation_dropped_by_a_copy_change() {
 	string why;
 	cut_assert_equal_int(0, s->count_repl_tombstones(n, why));
 	cut_assert_true(s->get_repl_tombstones_observed(n, age));
-	// truncate replaces the copy: the old observation is not one of the new copy
-	cut_assert_equal_int(0, s->truncate());
-	cut_assert_false(s->get_repl_tombstones_observed(n, age));
-	cut_assert_equal_int(0, s->count_repl_tombstones(n, why));
-	cppcut_assert_equal(static_cast<uint64_t>(0), n);
+	// truncate is a copy change: the observation taken before it is dropped
+	// (truncate keeps the reserved replication metadata, so a new count
+	// finds the identity records again — it must be COUNTED, not carried over)
+	const int tr = s->truncate();
+	const bool still = s->get_repl_tombstones_observed(n, age);
+	const int rc = s->count_repl_tombstones(n, why);
 	drop_rocksdb(s, wal_master_dir);
+	cut_assert_equal_int(0, tr);
+	cut_assert_false(still);
+	cut_assert_equal_int(0, rc);
+	cppcut_assert_equal(static_cast<uint64_t>(3), n);
 }
 
 void test_tombstone_count_one_at_a_time() {
@@ -3454,13 +3471,14 @@ void test_tombstone_count_one_at_a_time() {
 	s->set_tombstone_scan_hook(tomb_hook_busy);
 	uint64_t n = 0;
 	string why;
-	cut_assert_equal_int(0, s->count_repl_tombstones(n, why));
+	const int rc = s->count_repl_tombstones(n, why);
 	s->set_tombstone_scan_hook(NULL);
+	drop_rocksdb(s, wal_master_dir);
+	cut_assert_equal_int(0, rc);
 	cppcut_assert_equal(static_cast<uint64_t>(600), n);
 	// the second count, started while the first ran, was refused
 	cut_assert_equal_int(-1, tomb_hook_inner_rc);
 	cut_assert_true(tomb_hook_inner_why.find("busy") != string::npos);
-	drop_rocksdb(s, wal_master_dir);
 }
 
 void test_tombstone_count_gives_way_to_a_copy_change_and_publishes_nothing() {
@@ -3471,14 +3489,18 @@ void test_tombstone_count_gives_way_to_a_copy_change_and_publishes_nothing() {
 	s->set_tombstone_scan_hook(tomb_hook_copy_change);
 	uint64_t n = 0, age = 0;
 	string why;
-	cut_assert_equal_int(-1, s->count_repl_tombstones(n, why));
+	const int rc = s->count_repl_tombstones(n, why);
 	s->set_tombstone_scan_hook(NULL);
-	cut_assert_true(why.find("cancelled") != string::npos);
-	cut_assert_true(tomb_hook_thread_started);
-	pthread_join(tomb_hook_thread, NULL);
+	if (tomb_hook_thread_started) {
+		pthread_join(tomb_hook_thread, NULL);
+	}
 	// nothing was published, and the copy change dropped any observation
-	cut_assert_false(s->get_repl_tombstones_observed(n, age));
+	const bool known = s->get_repl_tombstones_observed(n, age);
 	drop_rocksdb(s, wal_master_dir);
+	cut_assert_true(tomb_hook_thread_started);
+	cut_assert_equal_int(-1, rc);
+	cut_assert_true(why.find("cancelled") != string::npos);
+	cut_assert_false(known);
 }
 
 void test_tombstone_count_incomplete_iterator_publishes_nothing() {
@@ -3487,11 +3509,13 @@ void test_tombstone_count_incomplete_iterator_publishes_nothing() {
 	uint64_t n = 0, age = 0;
 	string why;
 	s->set_tombstone_scan_fail_for_test(true);
-	cut_assert_equal_int(-1, s->count_repl_tombstones(n, why));
+	const int rc = s->count_repl_tombstones(n, why);
 	s->set_tombstone_scan_fail_for_test(false);
-	cut_assert_true(why.find("incomplete") != string::npos);
-	cut_assert_false(s->get_repl_tombstones_observed(n, age));
+	const bool known = s->get_repl_tombstones_observed(n, age);
 	drop_rocksdb(s, wal_master_dir);
+	cut_assert_equal_int(-1, rc);
+	cut_assert_true(why.find("incomplete") != string::npos);
+	cut_assert_false(known);
 }
 
 // A delete, then an older put for the same key: the key stays deleted. This

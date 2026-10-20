@@ -102,6 +102,7 @@ jobs:
             {"group":"node-ops","suites":"node-ops-drain,node-ops-hold"},
             {"group":"node-ops-faults","suites":"node-ops-stop,node-ops-partition"},
             {"group":"node-ops-control","suites":"node-ops-drain-control,node-ops-hold-control"},
+            {"group":"stats-cost","suites":"stats-cost"},
             {"group":"continuous-replication","suites":"copy-retention-measure,continuous-replication,continuous-replication-scale,continuous-replication-sustained,continuous-replication-outage,continuous-replication-outage-tmpfs,visibility-bench"}
           ]'
           all=$(echo "$default" | jq -r '[.[].suites] | join(",")')

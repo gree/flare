@@ -40,6 +40,7 @@ import FlareOperator.E2E.Tests.ReplicaRepair
 import FlareOperator.E2E.Tests.ContinuousReplication
 import FlareOperator.E2E.Tests.ContinuousReplicationLimits
 import FlareOperator.E2E.Tests.NodeOps
+import FlareOperator.E2E.Tests.StatsCost
 import FlareOperator.E2E.Tests.PrepareEvidence
 import FlareOperator.E2E.Tests.NativeMetrics
 import FlareOperator.E2E.Tests.BlueGreenMigration
@@ -117,6 +118,7 @@ def main (args : List String) : IO UInt32 :=
     Tests.NodeOps.stopSuite,
     Tests.NodeOps.partitionSuite,
     Tests.NodeOps.drainControlSuite,
+    Tests.StatsCost.suite,
     Tests.NodeOps.holdControlSuite,
     Tests.ContinuousReplicationLimits.historyHeldSuite,
     Tests.ContinuousReplicationLimits.historyIntentSuite,

@@ -3560,6 +3560,38 @@ void test_raw_batch_that_cannot_be_walked_is_refused() {
 	cppcut_assert_equal(static_cast<uint64_t>(1), items);
 }
 
+// curr_items counts the default (data) family only: a metadata row with
+// the same key name is not an item (a meta-only Put/Delete moved it before,
+// and default Put + meta Delete of one key in one batch netted 0, not +1)
+void test_raw_batch_curr_items_ignores_the_metadata_family() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	const uint64_t i0 = s->count();
+	rocksdb::WriteBatch a;                                   // meta only
+	a.Put(s->debug_meta_cf(), "k1", "2:e|1|0");
+	const int ra = s->apply_batch(a);
+	const uint64_t i1 = s->count();
+	rocksdb::WriteBatch b;                                   // both families, one key
+	b.Put("k2", "v");
+	b.Delete(s->debug_meta_cf(), "k2");
+	const int rb = s->apply_batch(b);
+	const uint64_t i2 = s->count();
+	rocksdb::WriteBatch c;                                   // meta delete of a live key
+	c.Delete(s->debug_meta_cf(), "k2");
+	const int rc = s->apply_batch_with_lsn(c, 7);
+	const uint64_t i3 = s->count();
+	s->close();
+	s->open();                                               // the exact seed agrees
+	const uint64_t i4 = s->count();
+	drop_rocksdb(s, wal_master_dir);
+	cut_assert_equal_int(0, ra);
+	cut_assert_equal_int(0, rb);
+	cut_assert_equal_int(0, rc);
+	cppcut_assert_equal(i0, i1);
+	cppcut_assert_equal(i0 + 1, i2);
+	cppcut_assert_equal(i0 + 1, i3);
+	cppcut_assert_equal(i3, i4);
+}
+
 // the live count describes the open copy: unknown while closed, exact again
 // after the seed at open (never the closed copy's value)
 void test_tombstone_live_count_unknown_while_closed() {

@@ -4214,14 +4214,16 @@ public:
 	curr_items_delta_handler(rocksdb::DB* db_, const rocksdb::ReadOptions* ro_, bool inject_get_error_ = false):
 			db(db_), ro(ro_), delta(0), inject_get_error(inject_get_error_) {}
 
-	rocksdb::Status PutCF(uint32_t, const rocksdb::Slice& key, const rocksdb::Slice&) override {
-		return this->_track(key.ToString(), true);
+	// only the default (data) family holds live keys: a replication-metadata
+	// row of the same key name is not an item (it moved curr_items before)
+	rocksdb::Status PutCF(uint32_t cf, const rocksdb::Slice& key, const rocksdb::Slice&) override {
+		return cf == 0 ? this->_track(key.ToString(), true) : rocksdb::Status::OK();
 	}
-	rocksdb::Status DeleteCF(uint32_t, const rocksdb::Slice& key) override {
-		return this->_track(key.ToString(), false);
+	rocksdb::Status DeleteCF(uint32_t cf, const rocksdb::Slice& key) override {
+		return cf == 0 ? this->_track(key.ToString(), false) : rocksdb::Status::OK();
 	}
-	rocksdb::Status SingleDeleteCF(uint32_t, const rocksdb::Slice& key) override {
-		return this->_track(key.ToString(), false);
+	rocksdb::Status SingleDeleteCF(uint32_t cf, const rocksdb::Slice& key) override {
+		return this->DeleteCF(cf, key);
 	}
 	// flare never writes these; counting them is not defined, so the batch
 	// is refused (the default handler would skip a default-family Merge)

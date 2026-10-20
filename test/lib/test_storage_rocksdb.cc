@@ -3409,58 +3409,137 @@ namespace {
 	}
 }
 
-void test_tombstone_observation_plain_stats_never_scans() {
-	storage_rocksdb* s = make_rocksdb(wal_master_dir);
-	put_identity_records(s, 50, 7);
-	uint64_t n0 = 99, age0 = 99, n1 = 0, age1 = 99, n2 = 0, age2 = 0, exact = 0;
-	const uint64_t scans0 = s->get_repl_tombstone_scans();
-	// no observation yet: unknown (and NOT 0), and asking scans nothing
-	const bool known0 = s->get_repl_tombstones_observed(n0, age0);
-	const uint64_t scans1 = s->get_repl_tombstone_scans();
-	// the exact count, then the observation it leaves
-	string why;
-	const int rc = s->count_repl_tombstones(exact, why);
-	const uint64_t scans2 = s->get_repl_tombstone_scans();
-	const bool known1 = s->get_repl_tombstones_observed(n1, age1);
-	// a later delete: the OBSERVATION stays what it was (its age tells how
-	// old), the exact count sees it; reading the observation scans nothing
-	put_identity_records(s, 0, 8);
-	const bool known2 = s->get_repl_tombstones_observed(n2, age2);
-	const uint64_t scans3 = s->get_repl_tombstone_scans();
-	const uint64_t exact2 = s->get_repl_tombstones();
-	drop_rocksdb(s, wal_master_dir);
-	cut_assert_false(known0);
-	cppcut_assert_equal(scans0, scans1);
-	cut_assert_equal_int(0, rc);
-	cppcut_assert_equal(static_cast<uint64_t>(7), exact);
-	cppcut_assert_equal(scans0 + 1, scans2);
-	cut_assert_true(known1);
-	cppcut_assert_equal(static_cast<uint64_t>(7), n1);
-	cut_assert_operator(age1, <=, static_cast<uint64_t>(1));
-	cut_assert_true(known2);
-	cppcut_assert_equal(static_cast<uint64_t>(7), n2);
-	cppcut_assert_equal(scans2, scans3);
-	cppcut_assert_equal(static_cast<uint64_t>(8), exact2);
+// the live count equals the exact scan (the invariant every case below checks)
+namespace {
+	bool live_equals_exact(storage_rocksdb* s, uint64_t& live, uint64_t& exact) {
+		const bool valid = s->get_repl_tombstones_live(live);
+		exact = s->get_repl_tombstones();
+		return valid && live == exact;
+	}
 }
 
-void test_tombstone_observation_dropped_by_a_copy_change() {
+void test_tombstone_live_count_forwarded_transitions() {
 	storage_rocksdb* s = make_rocksdb(wal_master_dir);
-	put_identity_records(s, 10, 3);
-	uint64_t n = 0, age = 0;
-	string why;
-	cut_assert_equal_int(0, s->count_repl_tombstones(n, why));
-	cut_assert_true(s->get_repl_tombstones_observed(n, age));
-	// truncate is a copy change: the observation taken before it is dropped
-	// (truncate keeps the reserved replication metadata, so a new count
-	// finds the identity records again — it must be COUNTED, not carried over)
-	const int tr = s->truncate();
-	const bool still = s->get_repl_tombstones_observed(n, age);
-	const int rc = s->count_repl_tombstones(n, why);
+	const string epoch = s->get_source_epoch();
+	const string inc = s->get_incarnation();
+	uint64_t live = 0, exact = 0;
+	const uint64_t scans0 = s->get_repl_tombstone_scans();
+	bool ok0 = s->get_repl_tombstones_live(live);   // seeded at open: 0
+	const uint64_t l0 = live;
+	const uint64_t scans1 = s->get_repl_tombstone_scans();   // reading it scans nothing
+	storage::entry d1; d1.key = "k";
+	s->apply_forwarded_change(epoch, inc, 10, d1, true);          // absent -> deleted: +1
+	s->get_repl_tombstones_live(live); const uint64_t l1 = live;
+	storage::entry d2; d2.key = "k";
+	s->apply_forwarded_change(epoch, inc, 11, d2, true);          // deleted -> deleted: 0
+	s->get_repl_tombstones_live(live); const uint64_t l2 = live;
+	storage::entry p1; fill_entry(p1, "k", "v");
+	s->apply_forwarded_change(epoch, inc, 12, p1, false);         // deleted -> put: -1
+	s->get_repl_tombstones_live(live); const uint64_t l3 = live;
+	storage::entry p2; fill_entry(p2, "k", "v2");
+	s->apply_forwarded_change(epoch, inc, 13, p2, false);         // put -> put: 0
+	storage::entry old; old.key = "k";
+	const storage_rocksdb::apply_outcome refused = s->apply_forwarded_change(epoch, inc, 5, old, true);  // superseded: 0
+	s->get_repl_tombstones_live(live); const uint64_t l4 = live;
+	storage::entry d3; d3.key = "j";
+	s->apply_forwarded_change(epoch, inc, 14, d3, true);          // absent -> deleted: +1
+	const bool eq = live_equals_exact(s, live, exact);
 	drop_rocksdb(s, wal_master_dir);
-	cut_assert_equal_int(0, tr);
-	cut_assert_false(still);
-	cut_assert_equal_int(0, rc);
-	cppcut_assert_equal(static_cast<uint64_t>(3), n);
+	cut_assert_true(ok0);
+	cppcut_assert_equal(static_cast<uint64_t>(0), l0);
+	cppcut_assert_equal(scans0, scans1);
+	cppcut_assert_equal(static_cast<uint64_t>(1), l1);
+	cppcut_assert_equal(static_cast<uint64_t>(1), l2);
+	cppcut_assert_equal(static_cast<uint64_t>(0), l3);
+	cut_assert_true(refused != storage_rocksdb::apply_applied);
+	cppcut_assert_equal(static_cast<uint64_t>(0), l4);
+	cut_assert_true(eq);
+	cppcut_assert_equal(static_cast<uint64_t>(1), live);
+}
+
+// a decoded WAL batch touching the same key twice: the in-batch overlay
+// counts absent -> deleted (+1), deleted -> deleted (0); the collection that
+// runs in the same window drops what the position passed (-dropped). The
+// live count stays equal to the exact scan throughout.
+void test_tombstone_live_count_wal_batch_overlay_and_collection() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	const string epoch = s->get_source_epoch();
+	const string inc = s->get_incarnation();
+	uint64_t live = 0, exact = 0;
+	// a forwarded delete far ahead (label 1000): not collectable by this batch
+	storage::entry far; far.key = "far";
+	s->apply_forwarded_change(epoch, inc, 1000, far, true);
+	cut_assert_equal_int(0, s->set_repl_last_lsn(9));
+	rocksdb::WriteBatch b;
+	b.Delete("w");
+	b.Delete("w");
+	uint64_t applied = 0, skipped = 0;
+	storage_rocksdb::apply_outcome refusal;
+	const int r = s->apply_wal_batch(epoch, inc, 10, b, applied, skipped, refusal);
+	const uint64_t dropped = s->get_repl_tombstones_dropped();
+	const bool eq = live_equals_exact(s, live, exact);
+	drop_rocksdb(s, wal_master_dir);
+	cut_assert_equal_int(0, r);
+	cut_assert_true(eq);
+	// "far" stays; "w" (labels 10, 11 <= the new position 11) may be collected
+	cppcut_assert_equal(static_cast<uint64_t>(2) - (dropped > 0 ? 1 : 0), live);
+}
+
+void test_tombstone_live_count_raw_batch_overlay_and_seed_at_reopen() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	uint64_t live = 0, exact = 0;
+	// one raw batch, the same key twice: absent -> tombstone -> not: 0;
+	// another key: absent -> tombstone: +1
+	rocksdb::WriteBatch b1;
+	b1.Put(s->debug_meta_cf(), "x", "2:e|5|1");
+	b1.Put(s->debug_meta_cf(), "x", "2:e|6|0");
+	b1.Put(s->debug_meta_cf(), "y", "2:e|7|1");
+	b1.Put("data-key", "not metadata");                      // the data family does not count
+	const int r1 = s->apply_batch(b1);
+	const bool eq1 = live_equals_exact(s, live, exact);
+	const uint64_t l1 = live;
+	// a delete of a tombstone row: -1
+	rocksdb::WriteBatch b2;
+	b2.Delete(s->debug_meta_cf(), "y");
+	const int r2 = s->apply_batch(b2);
+	s->get_repl_tombstones_live(live);
+	const uint64_t l2 = live;
+	// add one more, then reopen: the in-memory count is seeded again by the
+	// exact scan (a crash loses nothing the scan does not restore)
+	rocksdb::WriteBatch b3;
+	b3.Put(s->debug_meta_cf(), "z", "2:e|8|1");
+	s->apply_batch(b3);
+	s->close();
+	s->open();
+	const bool eq3 = live_equals_exact(s, live, exact);
+	const uint64_t l3 = live;
+	// truncate keeps the metadata family: unchanged and still exact
+	s->truncate();
+	const bool eq4 = live_equals_exact(s, live, exact);
+	drop_rocksdb(s, wal_master_dir);
+	cut_assert_equal_int(0, r1);
+	cut_assert_true(eq1);
+	cppcut_assert_equal(static_cast<uint64_t>(1), l1);
+	cut_assert_equal_int(0, r2);
+	cppcut_assert_equal(static_cast<uint64_t>(0), l2);
+	cut_assert_true(eq3);
+	cppcut_assert_equal(static_cast<uint64_t>(1), l3);
+	cut_assert_true(eq4);
+}
+
+void test_tombstone_live_count_below_zero_is_unknown_not_wrapped() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	uint64_t live = 0;
+	s->debug_tomb_add(-1);       // an impossible delta (a missed / double count)
+	const bool valid = s->get_repl_tombstones_live(live);
+	// the next seed (reopen) makes it exact and valid again
+	s->close();
+	s->open();
+	uint64_t exact = 0;
+	const bool eq = live_equals_exact(s, live, exact);
+	drop_rocksdb(s, wal_master_dir);
+	cut_assert_false(valid);
+	cut_assert_true(eq);
 }
 
 void test_tombstone_count_one_at_a_time() {
@@ -3487,35 +3566,30 @@ void test_tombstone_count_gives_way_to_a_copy_change_and_publishes_nothing() {
 	tomb_hook_calls = 0;
 	tomb_hook_thread_started = false;
 	s->set_tombstone_scan_hook(tomb_hook_copy_change);
-	uint64_t n = 0, age = 0;
+	uint64_t n = 0;
 	string why;
 	const int rc = s->count_repl_tombstones(n, why);
 	s->set_tombstone_scan_hook(NULL);
 	if (tomb_hook_thread_started) {
 		pthread_join(tomb_hook_thread, NULL);
 	}
-	// nothing was published, and the copy change dropped any observation
-	const bool known = s->get_repl_tombstones_observed(n, age);
 	drop_rocksdb(s, wal_master_dir);
 	cut_assert_true(tomb_hook_thread_started);
 	cut_assert_equal_int(-1, rc);
 	cut_assert_true(why.find("cancelled") != string::npos);
-	cut_assert_false(known);
 }
 
 void test_tombstone_count_incomplete_iterator_publishes_nothing() {
 	storage_rocksdb* s = make_rocksdb(wal_master_dir);
 	put_identity_records(s, 10, 2);
-	uint64_t n = 0, age = 0;
+	uint64_t n = 0;
 	string why;
 	s->set_tombstone_scan_fail_for_test(true);
 	const int rc = s->count_repl_tombstones(n, why);
 	s->set_tombstone_scan_fail_for_test(false);
-	const bool known = s->get_repl_tombstones_observed(n, age);
 	drop_rocksdb(s, wal_master_dir);
 	cut_assert_equal_int(-1, rc);
 	cut_assert_true(why.find("incomplete") != string::npos);
-	cut_assert_false(known);
 }
 
 // A delete, then an older put for the same key: the key stays deleted. This
@@ -3572,6 +3646,12 @@ void test_apply_rule_old_put_refused_after_tombstone_collected() {
 	cut_assert_equal_int(0, s->apply_wal_batch(epoch, inc_for_batch, 30, empty_batch, applied, skipped, refusal));
 	cut_assert_operator(s->get_repl_last_lsn(), >=, static_cast<uint64_t>(20));
 	cppcut_assert_equal(static_cast<uint64_t>(0), s->get_repl_tombstones());   // collected
+	{
+		// the live counter followed the collection (-dropped, inside the same window)
+		uint64_t live = 99;
+		cut_assert_true(s->get_repl_tombstones_live(live));
+		cppcut_assert_equal(static_cast<uint64_t>(0), live);
+	}
 
 	storage::entry late;
 	fill_entry(late, "k", "v1");

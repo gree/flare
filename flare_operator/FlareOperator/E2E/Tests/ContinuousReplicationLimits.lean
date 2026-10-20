@@ -94,9 +94,9 @@ private def Ctx.statStr (c : Ctx) (ip key : String) : IO (Option String) := do
 
 private def Ctx.currItems (c : Ctx) (ip : String) : IO Nat := return (← c.statNat ip "curr_items").getD 0
 
-/-- The EXACT tombstone count (`stats tombstones`, an O(N) scan; a plain
-    `stats` only carries the last observation since the pf-dev 2026-10-20
-    fix). `none` = not counted (busy, cancelled, incomplete or unreadable):
+/-- The EXACT tombstone count (`stats tombstones`, an O(N) scan, kept for
+    verification; plain `stats` carries the live delta counter since the
+    pf-dev 2026-10-20 fix). `none` = not counted (busy, cancelled, incomplete or unreadable):
     never taken as 0. -/
 private def Ctx.tombstonesExact (c : Ctx) (ip : String) : IO (Option Nat) := do
   match ← execInDebugPod c.cfg.debugPod c.cfg.«namespace» s!"printf 'stats tombstones\r\n' | nc -w 10 {ip} {c.cfg.flarePort}" with

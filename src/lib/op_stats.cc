@@ -414,18 +414,18 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 			_send_stat("repl_forward_lock_wait_us_max"      , rdb->get_repl_forward_lock_wait_us_max());
 			_send_stat("repl_tombstones_dropped"            , rdb->get_repl_tombstones_dropped());
 			{
-				// the last OBSERVATION, never a scan (a plain stats used to
-				// scan the whole metadata family here: ~15 s, ~0.7 core on a
+				// the LIVE count: a delta counter kept with every metadata
+				// write and seeded by an exact scan at open (O(1) here; plain
+				// stats used to scan the whole family: ~15 s and ~0.7 core on a
 				// replica with millions of identity records, pf-dev
-				// 2026-10-20). Unknown is reported as unknown, never as 0;
-				// `stats tombstones` counts exactly.
+				// 2026-10-20). Invalid (a failed seed, an impossible delta) is
+				// reported as unknown, never as 0; `stats tombstones` counts
+				// exactly for verification.
 				uint64_t tn = 0;
-				uint64_t tage = 0;
-				const bool tknown = rdb->get_repl_tombstones_observed(tn, tage);
-				_send_stat("repl_tombstones_known"          , tknown ? 1 : 0);
-				if (tknown) {
+				const bool tvalid = rdb->get_repl_tombstones_live(tn);
+				_send_stat("repl_tombstones_known"          , tvalid ? 1 : 0);
+				if (tvalid) {
 					_send_stat("repl_tombstones"            , tn);
-					_send_stat("repl_tombstones_age_sec"    , tage);
 				}
 			}
 			_send_stat("rocksdb_repl_last_lsn"              , rdb->get_repl_last_lsn());

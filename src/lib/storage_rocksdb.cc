@@ -188,14 +188,10 @@ storage_rocksdb::storage_rocksdb(
 	pthread_mutex_init(&this->_mutex_rebuild_status, NULL);
 	pthread_mutex_init(&this->_mutex_switch_unresolved, NULL);
 	this->_wholelock_writers_waiting = 0;
-	this->_tomb_copy_epoch = 0;
 	pthread_mutex_init(&this->_tomb_count_mutex, NULL);
-	pthread_mutex_init(&this->_tomb_obs_mutex, NULL);
-	this->_tomb_obs_known = false;
-	this->_tomb_obs_value = 0;
-	this->_tomb_obs_at.tv_sec = 0;
-	this->_tomb_obs_at.tv_nsec = 0;
 	this->_tomb_scans = 0;
+	this->_tomb_live = 0;
+	this->_tomb_live_valid = 0;
 	this->_tomb_scan_hook = NULL;
 	this->_tomb_scan_fail_for_test = false;
 	this->_data_path = this->_data_dir + "/flare.rocksdb";
@@ -213,7 +209,6 @@ storage_rocksdb::~storage_rocksdb() {
 	pthread_rwlock_destroy(&this->_repl_apply_lock);
 	pthread_rwlock_destroy(&this->_mutex_generations);
 	pthread_mutex_destroy(&this->_tomb_count_mutex);
-	pthread_mutex_destroy(&this->_tomb_obs_mutex);
 	pthread_mutex_destroy(&this->_resync_failure_mutex);
 	pthread_mutex_destroy(&this->_orphan_scan_mutex);
 	pthread_rwlock_destroy(&this->_mutex_master_id);
@@ -1099,6 +1094,7 @@ int storage_rocksdb::adopt_history(const string& master_id, const string& epoch,
 			break;
 		}
 		this->_cf_meta = fresh;
+		this->_tomb_set(0, true, "metadata family recreated empty (history adopted)");
 		this->_tombstone_sweep_cursor.clear();
 		const string next_incarnation = _mint_generation(this->get_incarnation());
 		rocksdb::WriteBatch b;
@@ -1501,6 +1497,9 @@ rocksdb::Status storage_rocksdb::_open_db(const string& path) {
 		}
 		this->_cf_meta = cf;
 	}
+	// every DB handle (open, reopen, swap, staging switch, resets) starts
+	// with an exact live tombstone count: the counter is in memory only
+	this->_seed_repl_tombstones_by_scan(has_meta ? "open" : "open (new metadata family)");
 	return rocksdb::Status::OK();
 }
 
@@ -3090,6 +3089,7 @@ int storage_rocksdb::swap_in_snapshot(const string& staging_dir, uint64_t checkp
 					break;
 				}
 				this->_cf_meta = fresh;
+				this->_tomb_set(0, true, "metadata family recreated empty (snapshot swap)");
 			}
 			this->_tombstone_sweep_cursor.clear();
 
@@ -4250,6 +4250,53 @@ private:
 		this->overlay[k] = present_after;
 	}
 };
+
+// Live tombstone accounting for a raw replicated batch: only operations on
+// the replication-metadata family count. The row each operation replaces
+// comes from an earlier operation of the same batch (overlay) or the DB.
+class tombstone_delta_handler : public rocksdb::WriteBatch::Handler {
+public:
+	rocksdb::DB* db;
+	const rocksdb::ReadOptions* ro;
+	rocksdb::ColumnFamilyHandle* meta;
+	std::map<std::string, bool> overlay;	// key -> is a tombstone after this op
+	int64_t delta;
+
+	tombstone_delta_handler(rocksdb::DB* db_, const rocksdb::ReadOptions* ro_, rocksdb::ColumnFamilyHandle* meta_):
+			db(db_), ro(ro_), meta(meta_), delta(0) {}
+
+	rocksdb::Status PutCF(uint32_t cf, const rocksdb::Slice& key, const rocksdb::Slice& value) override {
+		if (this->meta != NULL && cf == this->meta->GetID()) {
+			this->_track(key.ToString(), value.size() >= 2 && value[value.size() - 2] == '|' && value[value.size() - 1] == '1');
+		}
+		return rocksdb::Status::OK();
+	}
+	rocksdb::Status DeleteCF(uint32_t cf, const rocksdb::Slice& key) override {
+		if (this->meta != NULL && cf == this->meta->GetID()) {
+			this->_track(key.ToString(), false);
+		}
+		return rocksdb::Status::OK();
+	}
+	rocksdb::Status SingleDeleteCF(uint32_t cf, const rocksdb::Slice& key) override {
+		return this->DeleteCF(cf, key);
+	}
+
+private:
+	void _track(const std::string& k, bool tomb_after) {
+		bool tomb_before = false;
+		std::map<std::string, bool>::iterator it = this->overlay.find(k);
+		if (it != this->overlay.end()) {
+			tomb_before = it->second;
+		} else {
+			std::string v;
+			if (this->db->Get(*this->ro, this->meta, k, &v).ok()) {
+				tomb_before = v.size() >= 2 && v[v.size() - 2] == '|' && v[v.size() - 1] == '1';
+			}
+		}
+		this->delta += (tomb_after ? 1 : 0) - (tomb_before ? 1 : 0);
+		this->overlay[k] = tomb_after;
+	}
+};
 }	// anonymous namespace
 
 namespace {
@@ -4323,29 +4370,41 @@ void test_apply_pause() {
 }	// anonymous namespace
 
 int storage_rocksdb::apply_batch(const rocksdb::WriteBatch& batch) {
+	// the apply lock in read mode excludes the tombstone collection (which
+	// holds it exclusively) between the delta handlers' reads and the write;
+	// lock order _repl_apply_lock -> whole-DB -> slots
+	pthread_rwlock_rdlock(&this->_repl_apply_lock);
 	const std::vector<int> slots = this->_lock_batch_slots(batch);
 	if (this->_db == NULL) {
 		this->_unlock_batch_slots(slots);
+		pthread_rwlock_unlock(&this->_repl_apply_lock);
 		return -1;
 	}
 	// O(1) curr_items bookkeeping for the replica path: replicated batches
 	// bypass set()/remove(), so walk the batch for its live-key delta first.
 	curr_items_delta_handler h(this->_db, &this->_read_options);
+	tombstone_delta_handler th(this->_db, &this->_read_options, this->_cf_meta);
 	const_cast<rocksdb::WriteBatch&>(batch).Iterate(&h);
+	const_cast<rocksdb::WriteBatch&>(batch).Iterate(&th);
 	test_apply_pause();
 	// WriteBatch is passed as const reference, but Write() needs non-const pointer
 	rocksdb::WriteBatch* batch_ptr = const_cast<rocksdb::WriteBatch*>(&batch);
 	rocksdb::Status status = this->_db->Write(this->_write_options, batch_ptr);
-	this->_unlock_batch_slots(slots);
 	if (!status.ok()) {
+		this->_unlock_batch_slots(slots);
+		pthread_rwlock_unlock(&this->_repl_apply_lock);
 		log_err("WriteBatch apply failed: %s", status.ToString().c_str());
 		return -1;
 	}
+	// counted after the successful write, inside the same locks
 	if (h.delta > 0) {
 		this->_curr_items.add(static_cast<uint64_t>(h.delta));
 	} else if (h.delta < 0) {
 		this->_curr_items.sub(static_cast<uint64_t>(-h.delta));
 	}
+	this->_tomb_add(th.delta, "replicated batch");
+	this->_unlock_batch_slots(slots);
+	pthread_rwlock_unlock(&this->_repl_apply_lock);
 	return 0;
 }
 
@@ -4585,6 +4644,9 @@ storage_rocksdb::apply_outcome storage_rocksdb::apply_forwarded_change(const str
 		} else if (!is_delete && !existed) {
 			this->_curr_items.incr();
 		}
+		// live tombstones: the metadata row this write replaced (read above,
+		// under the same slot lock) against the one it wrote
+		this->_tomb_add((is_delete ? 1 : 0) - ((mr == 0 && current.deleted) ? 1 : 0), "apply_forwarded_change");
 		e.seq_label = label;
 	} while (0);
 
@@ -4741,6 +4803,9 @@ uint64_t storage_rocksdb::_collect_tombstones_locked(uint64_t budget) {
 			return 0;
 		}
 		this->_repl_tombstones_dropped.add(dropped);
+		// under the same exclusive apply lock as the write: no forwarded
+		// change can move the counter in between
+		this->_tomb_add(-static_cast<int64_t>(dropped), "tombstone collection");
 	}
 	return dropped;
 }
@@ -4761,13 +4826,6 @@ void storage_rocksdb::_wholelock_wrlock_copy_change() {
 	__sync_add_and_fetch(&this->_wholelock_writers_waiting, 1);
 	pthread_rwlock_wrlock(&this->_mutex_wholelock);
 	__sync_sub_and_fetch(&this->_wholelock_writers_waiting, 1);
-	// the copy (or its metadata) changes now: an observation of the copy
-	// before is not one of the copy after, and a scan that started before
-	// cannot publish into the new epoch
-	pthread_mutex_lock(&this->_tomb_obs_mutex);
-	this->_tomb_copy_epoch++;
-	this->_tomb_obs_known = false;
-	pthread_mutex_unlock(&this->_tomb_obs_mutex);
 }
 
 int storage_rocksdb::count_repl_tombstones(uint64_t& n, string& why) {
@@ -4782,12 +4840,7 @@ int storage_rocksdb::count_repl_tombstones(uint64_t& n, string& why) {
 	if (this->_db == NULL || this->_cf_meta == NULL) {
 		why = "not open";
 	} else {
-		pthread_mutex_lock(&this->_tomb_obs_mutex);
-		const uint64_t epoch = this->_tomb_copy_epoch;
-		pthread_mutex_unlock(&this->_tomb_obs_mutex);
 		const rocksdb::Snapshot* snap = this->_db->GetSnapshot();
-		struct timespec at;
-		clock_gettime(CLOCK_MONOTONIC, &at);
 		rocksdb::ReadOptions ro = this->_read_options;
 		ro.fill_cache = false;
 		ro.snapshot = snap;
@@ -4817,21 +4870,12 @@ int storage_rocksdb::count_repl_tombstones(uint64_t& n, string& why) {
 			const rocksdb::Status st = this->_tomb_scan_fail_for_test ? rocksdb::Status::IOError("test") : it->status();
 			delete it;
 			if (cancelled) {
-				why = "cancelled: a copy change is waiting (nothing published)";
+				why = "cancelled: a copy change is waiting";
 			} else if (!st.ok()) {
-				why = "incomplete: " + st.ToString() + " (nothing published)";
+				why = "incomplete: " + st.ToString();
 			} else {
-				pthread_mutex_lock(&this->_tomb_obs_mutex);
-				if (this->_tomb_copy_epoch == epoch) {
-					this->_tomb_obs_known = true;
-					this->_tomb_obs_value = count;
-					this->_tomb_obs_at = at;
-					n = count;
-					r = 0;
-				} else {
-					why = "the copy changed during the count (nothing published)";
-				}
-				pthread_mutex_unlock(&this->_tomb_obs_mutex);
+				n = count;
+				r = 0;
 			}
 		}
 		this->_db->ReleaseSnapshot(snap);
@@ -4841,20 +4885,57 @@ int storage_rocksdb::count_repl_tombstones(uint64_t& n, string& why) {
 	return r;
 }
 
-bool storage_rocksdb::get_repl_tombstones_observed(uint64_t& n, uint64_t& age_sec) {
-	pthread_mutex_lock(&this->_tomb_obs_mutex);
-	const bool known = this->_tomb_obs_known;
-	n = this->_tomb_obs_value;
-	const struct timespec at = this->_tomb_obs_at;
-	pthread_mutex_unlock(&this->_tomb_obs_mutex);
-	if (!known) {
-		age_sec = 0;
-		return false;
+bool storage_rocksdb::get_repl_tombstones_live(uint64_t& n) {
+	const int64_t v = __sync_add_and_fetch(&this->_tomb_live, 0);
+	n = v > 0 ? static_cast<uint64_t>(v) : 0;
+	return __sync_add_and_fetch(&this->_tomb_live_valid, 0) != 0 && v >= 0;
+}
+
+void storage_rocksdb::_tomb_add(int64_t delta, const char* where) {
+	if (delta == 0) {
+		return;
 	}
-	struct timespec now;
-	clock_gettime(CLOCK_MONOTONIC, &now);
-	age_sec = now.tv_sec > at.tv_sec ? static_cast<uint64_t>(now.tv_sec - at.tv_sec) : 0;
-	return true;
+	const int64_t v = __sync_add_and_fetch(&this->_tomb_live, delta);
+	if (v < 0 && __sync_add_and_fetch(&this->_tomb_live_valid, 0) != 0) {
+		// cannot happen when every metadata write is accounted for: a missed
+		// path or a double count. Unknown from now on, never a wrapped value.
+		__sync_lock_test_and_set(&this->_tomb_live_valid, 0);
+		log_err("CRITICAL: the live tombstone count went below zero (%lld after %lld at %s): reported UNKNOWN until the next exact seed", (long long)v, (long long)delta, where);
+	}
+}
+
+void storage_rocksdb::_tomb_set(uint64_t n, bool valid, const char* why) {
+	__sync_lock_test_and_set(&this->_tomb_live, static_cast<int64_t>(n));
+	__sync_lock_test_and_set(&this->_tomb_live_valid, valid ? 1 : 0);
+	log_notice("repl_tombstones set to %llu (%s)%s", (unsigned long long)n, why, valid ? "" : " — INVALID, reported unknown");
+}
+
+void storage_rocksdb::_seed_repl_tombstones_by_scan(const char* why) {
+	if (this->_db == NULL || this->_cf_meta == NULL) {
+		this->_tomb_set(0, false, "no metadata family");
+		return;
+	}
+	struct timespec t0, t1;
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	rocksdb::ReadOptions ro = this->_read_options;
+	ro.fill_cache = false;
+	rocksdb::Iterator* it = this->_db->NewIterator(ro, this->_cf_meta);
+	uint64_t count = 0;
+	uint64_t rows = 0;
+	for (it->SeekToFirst(); it->Valid(); it->Next()) {
+		rows++;
+		const rocksdb::Slice v = it->value();
+		if (v.size() >= 2 && v[v.size() - 2] == '|' && v[v.size() - 1] == '1') {
+			count++;
+		}
+	}
+	const bool ok = it->status().ok();
+	delete it;
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	const long ms = (t1.tv_sec - t0.tv_sec) * 1000L + (t1.tv_nsec - t0.tv_nsec) / 1000000L;
+	log_notice("repl_tombstones seeded by an exact scan (%s): %llu tombstone(s) in %llu metadata row(s), %ld ms%s",
+		why, (unsigned long long)count, (unsigned long long)rows, ms, ok ? "" : " — scan FAILED: count INVALID");
+	this->_tomb_set(ok ? count : 0, ok, why);
 }
 
 uint64_t storage_rocksdb::get_repl_tombstones() {
@@ -4938,6 +5019,7 @@ int storage_rocksdb::apply_wal_batch(const string& source_epoch, const string& i
 		std::map<string, repl_meta> overlay;
 		std::map<string, bool> exists_overlay;
 		int64_t items_delta = 0;
+		int64_t tomb_delta = 0;
 		bool failed = false;
 
 		for (size_t i = 0; i < decoder.changes.size(); i++) {
@@ -4990,6 +5072,9 @@ int storage_rocksdb::apply_wal_batch(const string& source_epoch, const string& i
 				exists_overlay[c.key] = true;
 			}
 			this->_stage_repl_meta(out, c.key, source_epoch, c.label, c.is_delete);
+			// the row it replaces: from the overlay (an earlier change of this
+			// batch) or the DB (`have` / `current` above)
+			tomb_delta += (c.is_delete ? 1 : 0) - ((have && current.deleted) ? 1 : 0);
 			repl_meta staged;
 			staged.epoch = source_epoch;
 			staged.label = c.label;
@@ -5027,6 +5112,7 @@ int storage_rocksdb::apply_wal_batch(const string& source_epoch, const string& i
 		} else if (items_delta < 0) {
 			this->_curr_items.sub(static_cast<uint64_t>(-items_delta));
 		}
+		this->_tomb_add(tomb_delta, "apply_wal_batch");
 		rc = 0;
 	} while (0);
 
@@ -5058,9 +5144,12 @@ int storage_rocksdb::apply_wal_batch(const string& source_epoch, const string& i
 }
 
 int storage_rocksdb::apply_batch_with_lsn(const rocksdb::WriteBatch& batch, uint64_t master_lsn) {
+	// see apply_batch: excludes the tombstone collection
+	pthread_rwlock_rdlock(&this->_repl_apply_lock);
 	const std::vector<int> slots = this->_lock_batch_slots(batch);
 	const int r = this->_apply_batch_with_lsn_locked(batch, master_lsn);
 	this->_unlock_batch_slots(slots);
+	pthread_rwlock_unlock(&this->_repl_apply_lock);
 	return r;
 }
 
@@ -5086,7 +5175,9 @@ int storage_rocksdb::_apply_batch_with_lsn_locked(const rocksdb::WriteBatch& bat
 	// O(1) curr_items bookkeeping (the LSN marker is a reserved key and is
 	// excluded by the handler).
 	curr_items_delta_handler h(this->_db, &this->_read_options);
+	tombstone_delta_handler th(this->_db, &this->_read_options, this->_cf_meta);
 	merged.Iterate(&h);
+	merged.Iterate(&th);
 	test_apply_pause();
 
 	rocksdb::Status status = this->_db->Write(this->_write_options, &merged);
@@ -5100,6 +5191,7 @@ int storage_rocksdb::_apply_batch_with_lsn_locked(const rocksdb::WriteBatch& bat
 	} else if (h.delta < 0) {
 		this->_curr_items.sub(static_cast<uint64_t>(-h.delta));
 	}
+	this->_tomb_add(th.delta, "replicated batch");
 	log_debug("apply_batch_with_lsn success (lsn=%llu, batch_bytes=%zu)",
 		(unsigned long long)master_lsn, batch.Data().size());
 	return 0;

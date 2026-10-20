@@ -548,27 +548,29 @@ public:
 	/**
 	 *	Tombstone count (pf-dev 2026-10-20: the full metadata scan used to
 	 *	run inside EVERY plain `stats`, ~15 s and ~0.7 core on a replica with
-	 *	millions of identity records). Two calls:
+	 *	millions of identity records). The live count is now a DELTA counter,
+	 *	like curr_items: seeded by an exact scan of the metadata family
+	 *	whenever a DB handle is opened (_open_db: open, reopen, swap, staging
+	 *	switch, resets; the duration is logged), 0 when the family is
+	 *	recreated empty, and moved after every SUCCESSFUL metadata write,
+	 *	inside the same locks as the write (forwarded change, decoded WAL
+	 *	batch with its in-batch overlay, raw replicated batch, tombstone GC).
+	 *	absent / not deleted -> deleted +1, deleted -> not deleted / absent -1,
+	 *	deleted -> deleted 0; a refused or failed write moves nothing. It is
+	 *	in memory only: a crash loses nothing that the open-time scan does not
+	 *	restore. A delta that would go below zero, or a failed seed scan,
+	 *	marks the count INVALID (reported unknown, never 0) until the next
+	 *	seed.
 	 *
-	 *	* count_repl_tombstones: the EXACT count, a full scan of the
-	 *	  replication-metadata family under one RocksDB snapshot. O(N). At
-	 *	  most one count runs at a time (another caller gets "busy"). It
-	 *	  gives way to a copy change: when swap / truncate / reset / staging /
-	 *	  history adoption waits for the whole-DB lock, the scan stops and
-	 *	  publishes nothing ("cancelled"). An iterator that ends with an
-	 *	  error publishes nothing ("incomplete"). On success the result is
-	 *	  the count AT THE SNAPSHOT, which is also kept as the last
-	 *	  observation.
-	 *	* get_repl_tombstones_observed: the last observation, never a scan.
-	 *	  false = no observation for THIS copy (none yet, or the copy was
-	 *	  changed since: the observation is dropped by the copy change and an
-	 *	  older scan cannot bring it back). age_sec = monotonic seconds since
-	 *	  the snapshot the count was taken at (not since it finished). The
-	 *	  count is an observation: later deliveries and collection change the
-	 *	  real number; the age says how old it is.
+	 *	* get_repl_tombstones_live: O(1); false = invalid.
+	 *	* count_repl_tombstones: the EXACT count for verification, a full
+	 *	  scan under one RocksDB snapshot (O(N)), one at a time ("busy"),
+	 *	  giving way to a copy change waiting for the whole-DB lock
+	 *	  ("cancelled"), and an error if the iterator ends badly
+	 *	  ("incomplete"). It does not touch the live counter.
 	 */
 	int count_repl_tombstones(uint64_t& n, std::string& why);
-	bool get_repl_tombstones_observed(uint64_t& n, uint64_t& age_sec);
+	bool get_repl_tombstones_live(uint64_t& n);
 	/** exact count for tests; returns (uint64_t)-1 on failure */
 	uint64_t get_repl_tombstones();
 	/** test seams: scans started so far; a hook called every 1024 entries */
@@ -576,21 +578,24 @@ public:
 	void set_tombstone_scan_hook(void (*hook)(storage_rocksdb*)) { this->_tomb_scan_hook = hook; }
 	void set_tombstone_scan_fail_for_test(bool on) { this->_tomb_scan_fail_for_test = on; }
 	int debug_wholelock_writers_waiting() { return __sync_add_and_fetch(&this->_wholelock_writers_waiting, 0); }
+	void debug_tomb_add(int64_t d) { this->_tomb_add(d, "test"); }
 private:
 	/** the whole-DB lock in write mode for a COPY change: first marks a
-	    writer as waiting (a running count stops), then drops the tombstone
-	    observation and moves the copy epoch once the lock is held */
+	    writer as waiting, so a running exact count stops */
 	void _wholelock_wrlock_copy_change();
 	volatile int				_wholelock_writers_waiting;
-	uint64_t					_tomb_copy_epoch;		// under _tomb_obs_mutex
-	pthread_mutex_t				_tomb_count_mutex;		// one count at a time (trylock)
-	pthread_mutex_t				_tomb_obs_mutex;
-	bool						_tomb_obs_known;
-	uint64_t					_tomb_obs_value;
-	struct timespec				_tomb_obs_at;			// CLOCK_MONOTONIC at the snapshot
+	pthread_mutex_t				_tomb_count_mutex;		// one exact count at a time (trylock)
 	uint64_t					_tomb_scans;
 	void						(*_tomb_scan_hook)(storage_rocksdb*);
 	bool						_tomb_scan_fail_for_test;
+	/** the live delta counter (see above) */
+	volatile int64_t			_tomb_live;
+	volatile int				_tomb_live_valid;
+	void _tomb_add(int64_t delta, const char* where);
+	void _tomb_set(uint64_t n, bool valid, const char* why);
+	/** exact scan of the metadata family into the live counter (DB handle
+	    held by the caller) */
+	void _seed_repl_tombstones_by_scan(const char* why);
 public:
 	// Test-only accessor: lets a unit test build a batch that targets the
 	// replication-metadata family, which is what a source that has applied

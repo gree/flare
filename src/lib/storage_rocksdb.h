@@ -575,6 +575,7 @@ public:
 	uint64_t get_repl_tombstone_scans() { return __sync_add_and_fetch(&this->_tomb_scans, 0); }
 	void set_tombstone_scan_hook(void (*hook)(storage_rocksdb*)) { this->_tomb_scan_hook = hook; }
 	void set_tombstone_scan_fail_for_test(bool on) { this->_tomb_scan_fail_for_test = on; }
+	int debug_wholelock_writers_waiting() { return __sync_add_and_fetch(&this->_wholelock_writers_waiting, 0); }
 private:
 	/** the whole-DB lock in write mode for a COPY change: first marks a
 	    writer as waiting (a running count stops), then drops the tombstone

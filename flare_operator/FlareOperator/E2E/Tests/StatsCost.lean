@@ -55,9 +55,14 @@ private def statVal (out key : String) : Option String :=
 
 private def debug (cmd : String) : IO (Except String String) := execInDebugPod cfg.debugPod cfg.«namespace» cmd
 
-/-- One call from the debug pod with its response time (ms, debug pod clock). -/
+/-- One call from the debug pod with its response time (ms from the debug
+pod's /proc/uptime, 10 ms resolution). busybox `date` has no `%N` (it
+printed `…%N`, the arithmetic failed and EVERY call — the convergence
+checks included — read as none: 9c2d5ac 39365950386 and 25c18c0
+39374110632 were this, not a replica that did not converge). `quit` closes
+the connection, so nc does not idle out its -w. -/
 private def timedCall (ip cmd : String) : IO (Option (Nat × String)) := do
-  match ← debug s!"s=$(date +%s%N); out=$(printf '{cmd}\\r\\n' | nc -w 60 {ip} {cfg.flarePort}); e=$(date +%s%N); echo \"MS=$(( (e-s)/1000000 ))\"; echo \"$out\"" with
+  match ← debug s!"s=$(cut -d' ' -f1 /proc/uptime); out=$(printf '{cmd}\\r\\nquit\\r\\n' | nc -w 60 {ip} {cfg.flarePort}); e=$(cut -d' ' -f1 /proc/uptime); echo \"MS=$(echo $s $e | awk '\{printf \"%d\", ($2-$1)*1000}')\"; echo \"$out\"" with
   | .error _ => return none
   | .ok o =>
     match (o.splitOn "\n").head?.bind (fun l => if l.startsWith "MS=" then (l.drop 3).trim.toNat? else none) with
@@ -168,8 +173,8 @@ private def measure : IO TestResult := do
   -- forwarded with their identity; a tenth are deleted (tombstones)
   let n ← keysCount
   IO.eprintln s!"# stats-cost: loading {n} keys (+{n / 10} deletes) through the master {mPod}"
-  -- in chunks of 20000, each followed by convergence (9c2d5ac: one 300k
-  -- noreply burst never converged and said nothing about why)
+  -- in chunks of 20000, each followed by convergence (kept; the earlier
+  -- "non-convergence" was the broken stats reader above)
   let chunk := 20000
   for i in [0:(n + chunk - 1) / chunk] do
     if !(← bulkRange mIp "sc" (i * chunk + 1) (min n ((i + 1) * chunk)) false) then return .fail s!"the bulk load failed at chunk {i}"

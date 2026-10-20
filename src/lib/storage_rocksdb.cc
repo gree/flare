@@ -5240,6 +5240,10 @@ int storage_rocksdb::_apply_batch_with_lsn_locked(const rocksdb::WriteBatch& bat
 	tombstone_delta_handler th(this->_db, &this->_read_options, this->_cf_meta, this->_count_get_fail_for_test == 2);
 	const rocksdb::Status hs = this->_count_batch(merged, h, th);
 	if (!hs.ok()) {
+		// as its Write would have: a Corruption (a batch that cannot be
+		// walked, a corrupt read) latches corrupted, so a slave self-heals
+		// (test_swap_in_snapshot_clears_corruption_latch)
+		(void)this->_note_write_status(hs, "apply_batch_with_lsn (counting)");
 		log_err("apply_batch_with_lsn refused before its write (lsn=%llu): its counts cannot be computed (%s)",
 			(unsigned long long)master_lsn, hs.ToString().c_str());
 		return -1;

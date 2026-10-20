@@ -18,8 +18,7 @@
   during the phase (seconds until the replica's item count matches the
   master's). Numbers are reported for review; the test asserts only that
   every reading was observed and the semantics hold (plain stats carries no
-  scan result it did not observe: `repl_tombstones_known`, the exact count
-  equals the observation right after it). No SLO is decided here.
+  scan, its live count equals the exact scan when writes are quiet). No SLO is decided here.
 -/
 import FlareOperator.E2E.Framework
 import FlareOperator.E2E.Helpers
@@ -158,17 +157,16 @@ private def measure : IO TestResult := do
   if !(← bulk mIp "sc" (n / 10) (del := true)) then return .fail "the bulk deletes failed"
   let some l0 ← lag mIp sIp | return .fail "the replica did not converge after the load"
   IO.eprintln s!"# stats-cost: replica converged {l0} s after the load"
-  -- semantics: before any count, plain stats has no value (not 0)
+  -- semantics: plain stats carries the LIVE count (a delta counter seeded at
+  -- open), O(1); it must equal the exact scan once writes are quiet
   let some (_, plain0) ← timedCall sIp "stats" | return .fail "plain stats unreadable"
-  let known0 := statVal plain0 "repl_tombstones_known"
   let some (scanMs, exact) ← timedCall sIp "stats tombstones" | return .fail "the exact count failed"
   let exactN := (statVal exact "repl_tombstones").bind (·.toNat?)
   let some (_, plain1) ← timedCall sIp "stats" | return .fail "plain stats unreadable"
-  IO.eprintln s!"# stats-cost: before a count known={known0} value={statVal plain0 "repl_tombstones"}; exact {exactN} in {scanMs} ms; plain after it known={statVal plain1 "repl_tombstones_known"} value={statVal plain1 "repl_tombstones"} age={statVal plain1 "repl_tombstones_age_sec"}"
-  if known0 == some "1" then return .fail "plain stats reported a count before any count was taken"
-  if (statVal plain0 "repl_tombstones").isSome then return .fail "plain stats carried a tombstone value with no observation (unknown must not be a number)"
+  IO.eprintln s!"# stats-cost: live before={statVal plain0 "repl_tombstones"} (known={statVal plain0 "repl_tombstones_known"}); exact {exactN} in {scanMs} ms; live after={statVal plain1 "repl_tombstones"}"
+  if statVal plain1 "repl_tombstones_known" != some "1" then return .fail "plain stats reports the live tombstone count as unknown"
   if exactN.isNone || statVal plain1 "repl_tombstones" != exactN.map toString then
-    return .fail "the observation after the exact count does not equal the count"
+    return .fail s!"the live count ({statVal plain1 "repl_tombstones"}) differs from the exact scan ({exactN})"
   -- warm-up, then ABBA, same rate (one call every 2 s), 120 s each
   let secs := 120
   let iv := 2000

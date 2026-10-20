@@ -309,3 +309,8 @@ master (旧)                 operator leader               新 master
 | 返事を先に送って記録が後 | 記録が消えて 16 に昇格、M は 20 まで → 重なる | 22 まで拒否 |
 
 **モデル化していないもの:** 2 台の時計のドリフト、メッセージの消失・重複の一般形、prepare の期限、leader 交代の途中での中断・再開、複数の successor、operator のリースとの組み合わせ。実装の前に、これらを同じ形のイベント列と不変条件で閉じる。
+
+### 8.7 partition の targeted run（a6ba116、E2E 39345347481）— writer の key を一意にした最初の測定
+
+- C: 合格（測定。failover の受入ではない）
+- C': PRODUCT GAP。注入成立、切断中に failover あり。二重 write（推定、own view）旧 master 19080 / 新 master 18424 件。**ACK 喪失（直接）67239 件**（key が試験ごとに一意なので、前の試験の残りで「届いた」ように見える分はない）。判定のカバレッジ 84145 / 88869 件、writer の記録は完全

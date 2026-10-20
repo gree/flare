@@ -1512,6 +1512,35 @@ def leaseChecks : List (String × Bool) :=
     ("membership, replicated -> solo: the master dropping the lease BEFORE the membership removed the successor (still promotable) -> OVERLAP; removal first (nothing promotable) -> safe",
       !handoverSafe 0 (masterAuthorityEnd .solo 0 []) (promotionStart .replicated 0 0 L 1 0)
         && handoverSafe 0 (masterAuthorityEnd .solo 0 []) (promotionStart .solo 0 0 L 1 0)),
+    -- event model (review of a6ba116): sequences, P = 10, margin = 1
+    ("promise events, asymmetric partition (operator cut from M only; M and R reach each other): WITHOUT prepare-stops-promises M renews for ever, every promotion attempt to 60 is refused -> no finite switchover (R2 fails)",
+      let evs := renewals 0 60 ++ [Ev.prepare 15 1] ++ ((List.range 9).map fun i => Ev.promote (20 + i * 5) 1)
+      let st := run { stopOnPrepare := false } {} {} evs
+      st.newStart.isNone && inv st),
+    ("promise events, asymmetric partition WITH prepare: R rejects renewals from 15, its last promise runs to 22, M's to 20; promotion at 25 -> finite switchover and no overlap",
+      let evs := renewals 0 60 ++ [Ev.prepare 15 1] ++ ((List.range 9).map fun i => Ev.promote (20 + i * 5) 1)
+      let st := run {} {} {} evs
+      st.newStart == some 25 && st.mPromiseEnd == 20 && inv st),
+    ("promise events, operator absent (R4): M and R keep renewing, M's authority keeps moving (to 70), nothing is promoted",
+      let st := run {} {} {} (renewals 0 60)
+      st.mPromiseEnd == 70 && st.newStart.isNone && inv st),
+    ("promise events, R restarts and FORGETS (tmpfs): promised to 32, M holds to 30; restart at 23 -> promotion at 25 OVERLAPS unless R waits P + margin after its start (34)",
+      let evs := renewals 0 20 ++ [Ev.rRestart 23 false, Ev.prepare 24 1, Ev.promote 25 1, Ev.promote 30 1, Ev.promote 34 1]
+      let bad := run { waitAfterRestart := false } {} {} evs
+      let good := run {} {} {} evs
+      bad.newStart == some 25 && !inv bad && good.newStart == some 34 && inv good),
+    ("promise events, a DELAYED older 'solo' config (generation 2) reaching M after generation 3 (replicated again): accepted -> M unbounded and the promotion OVERLAPS; ignored by generation -> safe",
+      let evs := [Ev.commit 5 2 true, Ev.commit 8 3 false, Ev.mConfig 10 3 false, Ev.mConfig 12 2 true, Ev.prepare 20 3, Ev.promote 30 3]
+      let bad := run { genCheck := false } {} {} evs
+      let good := run {} {} {} evs
+      !inv bad && good.newStart == some 30 && inv good && !good.mSolo),
+    ("promise events, an EXCLUDED successor (the store moved to generation 2, solo) promoted under the old generation 1 -> refused by the store's compare-and-swap",
+      (run {} {} {} [Ev.commit 5 2 true, Ev.prepare 20 1, Ev.promote 30 1]).newStart.isNone),
+    ("promise events, R replies BEFORE recording its promise: it forgets it and is promoted at 16 while M holds to 20 -> OVERLAP; recorded first -> refused until 22",
+      let evs := renewals 0 10 ++ [Ev.prepare 15 1, Ev.promote 16 1, Ev.promote 22 1]
+      let bad := run { recordBeforeReply := false } {} {} evs
+      let good := run {} {} {} evs
+      bad.newStart == some 16 && !inv bad && good.newStart == some 22 && inv good),
     ("lease model, pause after the commit: committed at 8 inside the lease; a pause before the post-commit check (12) -> not acknowledged (in doubt, never ACKed); no pause (9) -> ACKed, committed inside the authority",
       !acked 5 8 12 10 true && acked 5 8 9 10 true && ackSafe 5 8 9 10 true)
   ]

@@ -281,7 +281,11 @@ def writerValue (runId : String) (n : Nat) : String := s!"v{runId}-{n}"
     /tmp/stop-<name> exists, then appends `END <n>`. Each line: n epoch
     address key value reply t0 (NORESOLVE / NORESPONSE when not observed). -/
 def Ctx.startWriter (c : Ctx) (name host pfx : String) : IO Bool := do
-  let runId := writerRunId c.suite c.test name (← epochNow)
+  -- seconds + the monotonic nanoseconds and the process id: two starts in
+  -- the same second (same or another harness process) do not collide
+  let ns ← IO.monoNanosNow
+  let pid ← IO.Process.getPID
+  let runId := s!"{writerRunId c.suite c.test name (← epochNow)}-{pid}-{ns % 1000000000000}"
   let script := s!"n=0; out=/tmp/w-{name}.log; : > $out; rm -f /tmp/stop-{name}; while [ ! -f /tmp/stop-{name} ]; do n=$((n+1)); k={pfx}_{runId}_$n; v=v{runId}-$n; case {host} in *[a-z]*) ip=$(nslookup {host} 2>/dev/null | awk '/^Address/ \{a=$NF} END \{print a}');; *) ip={host};; esac; t0=$(date +%s); r=$(printf 'set %s 0 0 %d\\r\\n%s\\r\\n' \"$k\" $\{#v} \"$v\" | nc -w 3 \"$ip\" {c.cfg.flarePort} 2>/dev/null | head -1 | tr -d '\\r' | tr ' ' '_'); echo \"$n $(date +%s) $\{ip:-NORESOLVE} $k $v $\{r:-NORESPONSE} $t0\" >> $out; done; echo \"END $n\" >> $out"
   match ← kubectl ["exec", c.cfg.debugPod, "-n", c.cfg.«namespace», "--", "sh", "-c", s!"nohup sh -c '{script.replace "'" "'\\''"}' >/dev/null 2>&1 &"] with
   | .ok _ => c.event s!"writer {name} started against {host} (keys {writerKey pfx runId 0}.., values {writerValue runId 0}..)"; return true

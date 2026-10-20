@@ -255,7 +255,7 @@ master (旧)                 operator leader               新 master
 - **operator の leader 権限:** grant を出す権限も要求起点で数える（leader が自分で Lease の更新を送った時刻から、期限前に止まる）。**K8s Lease を読んだだけで leader 権限があることにしない。** 今の `getLease` は renewTime（wall clock）と現在時刻の比較なので、そのままでは前提を満たさない（実装時に直す対象）
 - **環境の前提（保証の一部として明示）:** 停止中も進む単調時計（CLOCK_BOOTTIME）とドリフト上限。VM の一時停止で時計の仮定が破れうる点は残る。client の経路や入口を環境で制限できる（例: 旧 master への client 経路を Service 経由に限り、Service から外す）なら R3 の補強になるが、直接 Pod に届く client がいれば保証にならない
 
-### 12.3 モデルで確かめた反例（`leaseChecks`）
+### 12.3 具体例の検査（`leaseChecks`。期限を比較する純関数による例であって、遷移の証明ではない）
 
 - 受信起点の TTL: 遅延した grant で重なる（撤回済み）
 - 要求起点: 遅延・重複・再送の grant は期限を延ばさない。停止していた旧 leader の grant は、旧 leader の権限の終わりを数えれば重ならない
@@ -270,3 +270,42 @@ master (旧)                 operator leader               新 master
 2. **L の値:** 切り替えにかかる時間は、検知（今は unready の 30 s 規則）+ L + 余裕。測定してから提案する
 3. **非同期複製の損失は残る:** 旧 master が successor から切れた後、リースの残り（最大 L）の間に ACK した write は、昇格後に失われうる（B と同じ「無損失ではない」）。減らすには、successor に届かなくなった時点で約束の更新を止める・同期 ACK（§11.3 C）などの追加の判断が要る
 4. 実装の範囲（承認後）: flared（リース・約束・grant に結び付いた commit 後の確認）、operator（membership の永続化と遷移、要求起点の leader 権限、発行停止の永続化）、E2E（C' で二重 write 0、R1 の solo 継続、R4 の operator 停止中の継続）
+
+### 12.5 successor の約束の遷移（レビュー a6ba116 への設計差分。提案のみ、未承認・未実装）
+
+**約束の束縛:** 1 つの約束は (partition, term, membership generation, M の identity = pod UID / boot / copy, R の identity, nonce) に束縛する。M 側の期限は **M が要求を送った時刻 q から P**（自分の時計）。R 側は、受信時刻から P + 余裕の間は昇格を受けないと**記録してから**返事を送る（記録が先、返事が後）。受け取った時点から TTL を延ばすことはしない。
+
+**R（successor）の状態:**
+
+| 状態 | 約束 | 昇格 | 入り方 |
+|---|---|---|---|
+| FOLLOWING | 発行・更新する | 受けない | 通常 |
+| PREPARING | **新規も更新も拒否**（既発行分の期限は記録に残る） | 記録した最後の約束の期限 + 余裕を過ぎ、かつ起動から P + 余裕を過ぎてから受ける | operator の prepare（intent id, generation 付き）を**永続化してから** operator に応答 |
+| PROMOTED | 発行しない | — | store が term t+1（master = R）を CAS で commit したことを R が確認し、term を永続化してから write を受け始める |
+| （中断） | 再開する | 受けない | 同じ intent id の unprepare、または prepare の期限（下）が過ぎたとき |
+
+- **有限時間（R2）:** 切り替え ≤ 検知 + prepare が R に届くまで + P + 余裕（operator のリースがあれば、その期限の待ちとの大きい方）。operator が R に届くことが前提
+- **operator 不在（R4）:** prepare が来なければ R は FOLLOWING のまま約束を続けるので、M と R がつながっていれば M は書き続ける
+- **非対称の分断**（operator → M だけ不達、M ↔ R と operator ↔ R は通る）: prepare で R が更新を止めるので、M の約束は最後の要求から P で切れ、M は write を止め、昇格はその後。prepare がないと M は約束を更新し続けて、切り替えが永久に起きない（反例）
+- **prepare の期限:** prepare には期限 T を付けて永続化する。T までに昇格が commit されなければ R は自分で FOLLOWING に戻る。operator が prepare の後に消えても、write が止まったままにならない。昇格の commit は T − 余裕より前に限る（未モデル）
+- **R の再起動・Pod の置き換え:** tmpfs では約束の記録が消えるので、再起動した R は起動から P + 余裕の間は昇格を受けない。置き換えで identity が変われば、新しい R は M が承認し直すまで successor ではない（古い identity の約束は M 側で q + P に切れる）
+
+**membership の世代:**
+
+- store は `{term, generation, master, successors（identity 付き）, mode, 進行中の intent}` を CAS で持つ。各 flared は見た中で最大の (term, generation) を永続化し、それより古い config・prepare・約束・grant を拒否する
+- replicated → solo（successor を外す）は、権威ある事実（Pod の削除・置き換え、明示の除外）でだけ行い、到達できない・一時的に不適格というだけでは行わない（不達 ≠ 後継なし）。CAS で commit してから M に通知し、M はより新しい世代の config でだけ solo に移る。遅れて届いた古い solo の config は世代で拒否する（反例あり）
+- 昇格は、intent の generation が store の現在と一致し、候補が現在の successors にいるときだけ CAS で commit できる。外された successor を古い候補情報で昇格させることはできない（反例あり）
+- 切り替えの intent（候補、段階、prepare の期限）は store に永続化し、operator の leader が替わったら、新しい leader が続行するか、unprepare で中断する
+
+**イベント列の反例（`leaseChecks`、`WriteLeaseModel` の event model。M・R・store・operator の 1 本の実時間軸、ドリフトなし。2 台の時計・ドリフト・任意の遅延の証明ではない）:**
+
+| 反例 | 規則なし | 規則あり |
+|---|---|---|
+| 非対称の分断（operator → M だけ不達） | M が更新し続け、60 s まで昇格できない（R2 不成立） | prepare で R が更新を拒否、M の約束は 20、昇格 25 |
+| operator 不在 | — | M の権限は更新され続け（70 まで）、昇格なし（R4） |
+| R が再起動して約束を忘れる（tmpfs） | 25 に昇格、M は 30 まで有効 → 重なる | 起動から P + 余裕（34）まで昇格を受けない |
+| 遅れて届いた古い solo の config | M が無期限に戻り、昇格と重なる | 世代で拒否 |
+| 外された successor の昇格 | — | store の CAS で拒否 |
+| 返事を先に送って記録が後 | 記録が消えて 16 に昇格、M は 20 まで → 重なる | 22 まで拒否 |
+
+**モデル化していないもの:** 2 台の時計のドリフト、メッセージの消失・重複の一般形、prepare の期限、leader 交代の途中での中断・再開、複数の successor、operator のリースとの組み合わせ。実装の前に、これらを同じ形のイベント列と不変条件で閉じる。

@@ -189,4 +189,133 @@ def handoverSafe (oldFrom : Nat) (oldEnd : Option Nat) (newStart : Option Nat) :
     | none => false          -- unbounded old authority and a promotion: overlap
     | some e => !({ start := oldFrom, stop := e } : Interval).overlaps { start := st, stop := st + 1000000 }
 
+
+/-! ## Event model of the successor promise (review of a6ba116)
+
+The functions above compare deadlines they are GIVEN; they say nothing about
+how promises are issued, renewed, stopped, forgotten, or bound to a
+membership. This part replays EVENT SEQUENCES (one master M, one successor
+R, the membership store, the operator) and checks the invariant
+
+  INV: if R becomes master at s, then M is not solo and every promise M
+       holds ended by s (M's authority from promises ⊆ [·, s)).
+
+It is still one real-time axis with no clock drift and no message loss
+other than what the sequence says: concrete counterexamples and their fixes,
+NOT a proof for two clocks, drift or arbitrary delays.
+
+Rules (each can be switched off to show its counterexample):
+* stopOnPrepare — R enters PREPARING atomically on the operator's prepare
+  (persisted before acknowledging it): it issues no new promise and rejects
+  renewals from then on. Without it, an M that still reaches R renews for
+  ever and R2 (finite switchover) fails.
+* waitAfterRestart — R may forget promises on a restart / replacement
+  (tmpfs, a new pod): it accepts promotion only P + margin after it started.
+* genCheck — every config / promise carries the membership generation; a
+  node keeps the highest it has seen (persisted) and ignores anything older.
+* recordBeforeReply — R records the promise end BEFORE it replies. -/
+
+structure Rules where
+  stopOnPrepare : Bool := true
+  waitAfterRestart : Bool := true
+  genCheck : Bool := true
+  recordBeforeReply : Bool := true
+  deriving Repr
+
+structure Params where
+  /-- promise duration -/
+  P : Nat := 10
+  margin : Nat := 1
+  deriving Repr
+
+inductive Ev where
+  /-- M asks R for a promise (nonce `n`) at `t`, bound to its generation -/
+  | mAsk (t n : Nat)
+  /-- R receives M's request `n` (sent at `q`, generation `g`) at `t` -/
+  | rRecv (t n q g : Nat)
+  /-- M receives R's promise for request `n` (generation `g`) at `t` -/
+  | mRecv (t n g : Nat)
+  /-- the operator's prepare reaches R at `t` (generation `g`) -/
+  | prepare (t g : Nat)
+  /-- R restarts at `t`; `durable` = its promise record survives -/
+  | rRestart (t : Nat) (durable : Bool)
+  /-- the membership store commits generation `g` at `t` (`solo` = no successor) -/
+  | commit (t g : Nat) (solo : Bool)
+  /-- a config of generation `g` reaches M at `t` -/
+  | mConfig (t g : Nat) (solo : Bool)
+  /-- the operator tries to promote R at `t` under generation `g` -/
+  | promote (t g : Nat)
+  deriving Repr
+
+structure St where
+  mGen : Nat := 1
+  mSolo : Bool := false
+  /-- outstanding requests: nonce, sent at -/
+  mAsked : List (Nat × Nat) := []
+  mPromiseEnd : Nat := 0
+  rGen : Nat := 1
+  rPreparing : Bool := false
+  rPromisedUntil : Nat := 0
+  rStartedAt : Nat := 0
+  /-- requests R actually answered (M can only receive those) -/
+  rReplied : List Nat := []
+  storeGen : Nat := 1
+  storeSolo : Bool := false
+  newStart : Option Nat := none
+  log : List String := []
+  deriving Repr
+
+def stepEv (ru : Rules) (pa : Params) (s : St) : Ev → St
+  | .mAsk t n => { s with mAsked := s.mAsked ++ [(n, t)] }
+  | .rRecv t n q g =>
+    if ru.stopOnPrepare && s.rPreparing then { s with log := s.log ++ [s!"R rejects the request sent at {q}: preparing"] }
+    else if ru.genCheck && g < s.rGen then { s with log := s.log ++ ["R rejects a request of an older generation"] }
+    else if ru.recordBeforeReply then { s with rPromisedUntil := max s.rPromisedUntil (t + pa.P + pa.margin), rReplied := s.rReplied ++ [n] }
+    else { s with rReplied := s.rReplied ++ [n] }
+  | .mRecv t n g =>
+    match s.mAsked.lookup n with
+    | none => s
+    | some _ => if !s.rReplied.contains n then { s with mAsked := s.mAsked.filter (·.1 != n) } else
+    match s.mAsked.lookup n with
+    | none => s
+    | some q =>
+      let asked := s.mAsked.filter (·.1 != n)
+      if t ≥ q + pa.P || (ru.genCheck && g != s.mGen) then { s with mAsked := asked }
+      else { s with mAsked := asked, mPromiseEnd := max s.mPromiseEnd (q + pa.P) }
+  | .prepare _ g =>
+    if ru.genCheck && g < s.rGen then s else { s with rPreparing := true, rGen := max s.rGen g }
+  | .rRestart t durable =>
+    { s with rStartedAt := t, rPromisedUntil := if durable then s.rPromisedUntil else 0 }
+  | .commit _ g solo => { s with storeGen := g, storeSolo := solo }
+  | .mConfig _ g solo =>
+    if ru.genCheck && g ≤ s.mGen then { s with log := s.log ++ [s!"M ignores the config of generation {g} (has {s.mGen})"] }
+    else { s with mGen := max s.mGen g, mSolo := solo }
+  | .promote t g =>
+    if s.newStart.isSome then s
+    else if s.storeSolo || g != s.storeGen then { s with log := s.log ++ [s!"promotion at {t} refused: the membership (generation {s.storeGen}) has no such successor"] }
+    else if ru.stopOnPrepare && !s.rPreparing then { s with log := s.log ++ [s!"promotion at {t} refused: R is not preparing"] }
+    else if t < s.rPromisedUntil then { s with log := s.log ++ [s!"promotion at {t} refused: R's promise runs to {s.rPromisedUntil}"] }
+    else if ru.waitAfterRestart && t < s.rStartedAt + pa.P + pa.margin then { s with log := s.log ++ [s!"promotion at {t} refused: R restarted at {s.rStartedAt}"] }
+    else { s with newStart := some t }
+
+def Ev.time : Ev → Nat
+  | .mAsk t _ | .rRecv t _ _ _ | .mRecv t _ _ | .prepare t _ | .rRestart t _ | .commit t _ _ | .mConfig t _ _ | .promote t _ => t
+
+/-- Replay in time order (stable: events at the same second keep their
+    listed order). -/
+def run (ru : Rules) (pa : Params) (init : St) (evs : List Ev) : St :=
+  (evs.mergeSort (fun a b => decide (a.time ≤ b.time))).foldl (stepEv ru pa) init
+
+/-- INV (see above). -/
+def inv (s : St) : Bool :=
+  match s.newStart with
+  | none => true
+  | some st => !s.mSolo && s.mPromiseEnd ≤ st
+
+/-- M renews every 5 s from `from` to `upto`; R receives 1 s later, M gets
+    the promise 1 s after that (both reachable). -/
+def renewals (fr upto : Nat) (g : Nat := 1) : List Ev :=
+  ((List.range ((upto - fr) / 5 + 1)).map fun i => fr + i * 5).flatMap fun q =>
+    [Ev.mAsk q q, Ev.rRecv (q + 1) q q g, Ev.mRecv (q + 2) q g]
+
 end FlareOperator.WriteLeaseModel

@@ -91,6 +91,8 @@ op_stats::stats_type op_stats::_parse_stats_type(const char* body) const {
 			}
 		} else if (strcmp(word, "nodes") == 0) {
 			type = stats_type_nodes;
+		} else if (strcmp(word, "tombstones") == 0) {
+			type = stats_type_tombstones;
 		} else {
 			type = stats_type_error;
 		}
@@ -386,7 +388,21 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 			_send_stat("repl_apply_lock_wait_us_max"        , rdb->get_repl_apply_lock_wait_us_max());
 			_send_stat("repl_forward_lock_wait_us_max"      , rdb->get_repl_forward_lock_wait_us_max());
 			_send_stat("repl_tombstones_dropped"            , rdb->get_repl_tombstones_dropped());
-			_send_stat("repl_tombstones"                    , rdb->get_repl_tombstones());
+			{
+				// the last OBSERVATION, never a scan (a plain stats used to
+				// scan the whole metadata family here: ~15 s, ~0.7 core on a
+				// replica with millions of identity records, pf-dev
+				// 2026-10-20). Unknown is reported as unknown, never as 0;
+				// `stats tombstones` counts exactly.
+				uint64_t tn = 0;
+				uint64_t tage = 0;
+				const bool tknown = rdb->get_repl_tombstones_observed(tn, tage);
+				_send_stat("repl_tombstones_known"          , tknown ? 1 : 0);
+				if (tknown) {
+					_send_stat("repl_tombstones"            , tn);
+					_send_stat("repl_tombstones_age_sec"    , tage);
+				}
+			}
 			_send_stat("rocksdb_repl_last_lsn"              , rdb->get_repl_last_lsn());
 			_send_stat("rocksdb_latest_sequence_number"     , rdb->get_latest_sequence_number());
 			_send_stat("rocksdb_wal_sync_success"           , rdb->get_wal_sync_success());
@@ -418,6 +434,31 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 #endif
 
 	return 0;
+}
+
+int op_stats::_send_stats_tombstones(storage* st) {
+#ifdef HAVE_LIBROCKSDB
+	storage_rocksdb* rdb = (st && st->get_type() == storage::type_rocksdb) ? dynamic_cast<storage_rocksdb*>(st) : NULL;
+	if (rdb == NULL) {
+		return this->_send_result(result_server_error, "not_supported");
+	}
+	struct timespec t0;
+	struct timespec t1;
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	uint64_t n = 0;
+	string why;
+	if (rdb->count_repl_tombstones(n, why) < 0) {
+		return this->_send_result(result_server_error, why.c_str());
+	}
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	const uint64_t ms = static_cast<uint64_t>((t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000);
+	_send_stat("repl_tombstones"            , n);
+	_send_stat("repl_tombstones_scan_msec"  , ms);
+	return this->_send_result(result_end);
+#else
+	(void)st;
+	return this->_send_result(result_server_error, "not_supported");
+#endif
 }
 
 int op_stats::_send_stats_items() {

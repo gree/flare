@@ -92,6 +92,9 @@ int op_stats_node::_run_server() {
 	case stats_type_nodes:
 		this->_send_stats_nodes(singleton<flared>::instance().get_cluster());
 		break;
+	case stats_type_tombstones:
+		// writes its own END / SERVER_ERROR
+		return this->_send_stats_tombstones(singleton<flared>::instance().get_storage());
 	case stats_type_threads_queue:
 		this->_send_stats_threads_queue();
 		break;

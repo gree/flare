@@ -57,6 +57,7 @@ protected:
 		stats_type_threads_slave,
 		stats_type_nodes,
 		stats_type_threads_queue,
+		stats_type_tombstones,
 	};
 
 	stats_type	_stats_type;
@@ -78,6 +79,8 @@ protected:
 	virtual int _send_stats_threads(thread_pool* req_tp, thread_pool* other_tp, int type);
 	virtual int _send_stats_nodes(cluster* cl);
 	virtual int _send_stats_threads_queue();
+	/** `stats tombstones`: the EXACT count (O(N) scan, storage_rocksdb.h) */
+	virtual int _send_stats_tombstones(storage* st);
 
 	virtual int _send_text_result(result r, const char* message = NULL);
 	virtual int _send_binary_result(result r, const char* message = NULL);

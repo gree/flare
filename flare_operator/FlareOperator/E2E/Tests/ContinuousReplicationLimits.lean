@@ -94,6 +94,17 @@ private def Ctx.statStr (c : Ctx) (ip key : String) : IO (Option String) := do
 
 private def Ctx.currItems (c : Ctx) (ip : String) : IO Nat := return (← c.statNat ip "curr_items").getD 0
 
+/-- The EXACT tombstone count (`stats tombstones`, an O(N) scan; a plain
+    `stats` only carries the last observation since the pf-dev 2026-10-20
+    fix). `none` = not counted (busy, cancelled, incomplete or unreadable):
+    never taken as 0. -/
+private def Ctx.tombstonesExact (c : Ctx) (ip : String) : IO (Option Nat) := do
+  match ← execInDebugPod c.cfg.debugPod c.cfg.«namespace» s!"printf 'stats tombstones\r\n' | nc -w 10 {ip} {c.cfg.flarePort}" with
+  | .ok o => return if (o.splitOn "END").length > 1 then (statVal o "repl_tombstones").bind (·.toNat?) else none
+  | .error _ => return none
+
+private def optTxt (o : Option Nat) : String := (o.map toString).getD "?"
+
 /-- Every key and value in the node's OWN storage (`dump`, whatever its role:
     a Prepare replica forwards GETs, so its copy is read this way). -/
 private def Ctx.localDump (c : Ctx) (ip : String) : IO (Option (List (String × String))) := do
@@ -417,6 +428,7 @@ def limitsSuite : TestSuite := {
           -- Sample while it drains: applied position, master RSS, live tombstones.
           let mut rssMax := rssCut
           let mut tombMax := 0
+          let mut tombUnknown := 0
           let mut incMax := 0
           let mut lastApplied := applied0
           let mut converged := false
@@ -426,18 +438,20 @@ def limitsSuite : TestSuite := {
             if a > lastApplied && a - lastApplied > incMax then incMax := a - lastApplied
             lastApplied := a
             rssMax := max rssMax ((← c.rssKb mPod).getD 0)
-            tombMax := max tombMax ((← c.statNat sIp "repl_tombstones").getD 0)
+            match ← c.tombstonesExact sIp with
+            | some t => tombMax := max tombMax t
+            | none => tombUnknown := tombUnknown + 1
             if (← c.statStr sIp "repl_follow_state") == some "following" && (← c.currItems sIp) == (← c.currItems mIp) && a ≥ mLatest then
               converged := true
               break
           let tombAfter ← waitForCondition "tombstones collected once the position passed the deletes" 120 do
-            return (← c.statNat sIp "repl_tombstones") == some 0
+            return (← c.tombstonesExact sIp) == some 0
           let growth := if rssMax > rss0 then rssMax - rss0 else 0
-          IO.eprintln s!"# drain: converged={converged}; applied {applied0}→{lastApplied} (master {mLatest}); largest 1 s advance {incMax} seq; master RSS max {rssMax} kB (growth {growth} kB); tombstones max {tombMax} → now {(← c.statNat sIp "repl_tombstones").getD 0} (collected={tombAfter}); wal_applied={← c.statNat sIp "repl_wal_applied"} tombstones_dropped={← c.statNat sIp "repl_tombstones_dropped"}; items master={← c.currItems mIp} replica={← c.currItems sIp}; reconstruction_started {recon0}→{(← c.statNat sIp "reconstruction_started").getD 0}"
+          IO.eprintln s!"# drain: converged={converged}; applied {applied0}→{lastApplied} (master {mLatest}); largest 1 s advance {incMax} seq; master RSS max {rssMax} kB (growth {growth} kB); tombstones max {tombMax} ({tombUnknown} counts unavailable) → now {optTxt (← c.tombstonesExact sIp)} (collected={tombAfter}); wal_applied={← c.statNat sIp "repl_wal_applied"} tombstones_dropped={← c.statNat sIp "repl_tombstones_dropped"}; items master={← c.currItems mIp} replica={← c.currItems sIp}; reconstruction_started {recon0}→{(← c.statNat sIp "reconstruction_started").getD 0}"
           if !converged then return .fail s!"the replica did not drain the backlog (applied {lastApplied} of {mLatest}, items master={← c.currItems mIp} replica={← c.currItems sIp})"
           if (← c.statNat sIp "reconstruction_started").getD 0 != recon0 then return .fail "a reconstruction ran instead of a catch-up"
           if growth > 131072 then return .fail s!"master RSS grew by {growth} kB while a replica caught up (bound 131072 kB)"
-          if !tombAfter then return .fail s!"tombstones were not collected after the position passed the deletes ({← c.statNat sIp "repl_tombstones"} live)"
+          if !tombAfter then return .fail s!"tombstones were not collected after the position passed the deletes ({optTxt (← c.tombstonesExact sIp)} live)"
           -- deleted keys must be absent locally on the replica (a miss proxies to the master where they are also gone)
           for k in ["bulk_0", "bulk_50", "bulk_99"] do
             match ← execInDebugPod limitsCfg.debugPod limitsCfg.«namespace» s!"printf 'get {k}\\r\\n' | nc -w 3 {sIp} {limitsCfg.flarePort}" with
@@ -4361,7 +4375,7 @@ private def Ctx.sustain (c : Ctx) (mPod mIp sPod sIp : String) (start rate minut
     let applied := (← c.statNat sIp "repl_applied_lsn").getD 0
     let lag := if head > applied then head - applied else 0
     lags := lags ++ [lag]
-    IO.eprintln s!"# sustain {rate}/s window {w}: state={(← c.statStr sIp "repl_follow_state").getD "?"} lag={lag} (head {head}, applied {applied}) items master={← c.currItems mIp} replica={← c.currItems sIp} master RSS={(← c.rssKb mPod).getD 0}kB WAL={(← c.walKb mPod).getD 0}kB data={(← c.dataKb mPod).getD 0}kB replica RSS={(← c.rssKb sPod).getD 0}kB tombstones={(← c.statNat sIp "repl_tombstones").getD 0} wal_skipped={(← c.statNat sIp "repl_wal_skipped").getD 0}"
+    IO.eprintln s!"# sustain {rate}/s window {w}: state={(← c.statStr sIp "repl_follow_state").getD "?"} lag={lag} (head {head}, applied {applied}) items master={← c.currItems mIp} replica={← c.currItems sIp} master RSS={(← c.rssKb mPod).getD 0}kB WAL={(← c.walKb mPod).getD 0}kB data={(← c.dataKb mPod).getD 0}kB replica RSS={(← c.rssKb sPod).getD 0}kB tombstones={optTxt (← c.tombstonesExact sIp)} wal_skipped={(← c.statNat sIp "repl_wal_skipped").getD 0}"
   return (lags, k)
 
 def sustainedSuite : TestSuite := {

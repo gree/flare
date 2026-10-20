@@ -189,8 +189,10 @@ storage_rocksdb::storage_rocksdb(
 	this->_wholelock_writers_waiting = 0;
 	pthread_mutex_init(&this->_tomb_count_mutex, NULL);
 	this->_tomb_scans = 0;
+	pthread_mutex_init(&this->_tomb_live_mutex, NULL);
 	this->_tomb_live = 0;
-	this->_tomb_live_valid = 0;
+	this->_tomb_live_valid = false;
+	this->_count_get_fail_for_test = 0;
 	this->_tomb_scan_hook = NULL;
 	this->_tomb_scan_fail_for_test = false;
 	this->_data_path = this->_data_dir + "/flare.rocksdb";
@@ -208,6 +210,7 @@ storage_rocksdb::~storage_rocksdb() {
 	pthread_rwlock_destroy(&this->_repl_apply_lock);
 	pthread_rwlock_destroy(&this->_mutex_generations);
 	pthread_mutex_destroy(&this->_tomb_count_mutex);
+	pthread_mutex_destroy(&this->_tomb_live_mutex);
 	pthread_mutex_destroy(&this->_resync_failure_mutex);
 	pthread_mutex_destroy(&this->_orphan_scan_mutex);
 	pthread_rwlock_destroy(&this->_mutex_master_id);
@@ -1078,6 +1081,7 @@ int storage_rocksdb::adopt_history(const string& master_id, const string& epoch,
 		// inherited replication metadata (a checkpoint carries the source's)
 		// is expressed in another sequence space: start from an empty family
 		if (this->_cf_meta != NULL) {
+			this->_tomb_set(0, false, "metadata family being dropped (history adopted)");
 			rocksdb::Status ds = this->_db->DropColumnFamily(this->_cf_meta);
 			this->_db->DestroyColumnFamilyHandle(this->_cf_meta);
 			this->_cf_meta = NULL;
@@ -1504,6 +1508,8 @@ rocksdb::Status storage_rocksdb::_open_db(const string& path) {
 
 void storage_rocksdb::_close_db() {
 	if (this->_db != NULL) {
+		// the live count describes this copy: unknown until the next seed
+		this->_tomb_set(0, false, "copy closed");
 		if (this->_cf_meta != NULL) {
 			this->_db->DestroyColumnFamilyHandle(this->_cf_meta);
 			this->_cf_meta = NULL;
@@ -3063,6 +3069,7 @@ int storage_rocksdb::swap_in_snapshot(const string& staging_dir, uint64_t checkp
 			// cursor is about to be set to the checkpoint sequence, and the
 			// positional rule refuses everything at or below it.
 			if (this->_cf_meta != NULL) {
+				this->_tomb_set(0, false, "metadata family being dropped (snapshot swap)");
 				rocksdb::Status ds = this->_db->DropColumnFamily(this->_cf_meta);
 				this->_db->DestroyColumnFamilyHandle(this->_cf_meta);
 				this->_cf_meta = NULL;
@@ -4202,26 +4209,35 @@ public:
 	std::map<std::string, bool> overlay;
 	int64_t delta;
 
-	curr_items_delta_handler(rocksdb::DB* db_, const rocksdb::ReadOptions* ro_):
-			db(db_), ro(ro_), delta(0) {}
+	bool inject_get_error;		// test seam: every DB read fails (IOError)
+
+	curr_items_delta_handler(rocksdb::DB* db_, const rocksdb::ReadOptions* ro_, bool inject_get_error_ = false):
+			db(db_), ro(ro_), delta(0), inject_get_error(inject_get_error_) {}
 
 	rocksdb::Status PutCF(uint32_t, const rocksdb::Slice& key, const rocksdb::Slice&) override {
-		this->_track(key.ToString(), true);
-		return rocksdb::Status::OK();
+		return this->_track(key.ToString(), true);
 	}
 	rocksdb::Status DeleteCF(uint32_t, const rocksdb::Slice& key) override {
-		this->_track(key.ToString(), false);
-		return rocksdb::Status::OK();
+		return this->_track(key.ToString(), false);
 	}
 	rocksdb::Status SingleDeleteCF(uint32_t, const rocksdb::Slice& key) override {
-		this->_track(key.ToString(), false);
-		return rocksdb::Status::OK();
+		return this->_track(key.ToString(), false);
+	}
+	// flare never writes these; counting them is not defined, so the batch
+	// is refused (the default handler would skip a default-family Merge)
+	rocksdb::Status MergeCF(uint32_t, const rocksdb::Slice&, const rocksdb::Slice&) override {
+		return rocksdb::Status::NotSupported("Merge in a replicated batch");
+	}
+	rocksdb::Status DeleteRangeCF(uint32_t, const rocksdb::Slice&, const rocksdb::Slice&) override {
+		return rocksdb::Status::NotSupported("DeleteRange in a replicated batch");
 	}
 
 private:
-	void _track(const std::string& k, bool present_after) {
+	// only NotFound means absent; any other read failure stops the walk
+	// (Iterate returns it) and the batch is refused before its Write
+	rocksdb::Status _track(const std::string& k, bool present_after) {
 		if (storage_rocksdb::is_reserved_key(k)) {
-			return;
+			return rocksdb::Status::OK();
 		}
 		bool present_before;
 		std::map<std::string, bool>::iterator it = this->overlay.find(k);
@@ -4229,7 +4245,14 @@ private:
 			present_before = it->second;
 		} else {
 			std::string v;
-			present_before = this->db->Get(*this->ro, k, &v).ok();
+			rocksdb::Status st = this->inject_get_error ? rocksdb::Status::IOError("injected (test)") : this->db->Get(*this->ro, k, &v);
+			if (st.ok()) {
+				present_before = true;
+			} else if (st.IsNotFound()) {
+				present_before = false;
+			} else {
+				return st;
+			}
 		}
 		if (!present_before && present_after) {
 			this->delta++;
@@ -4237,6 +4260,7 @@ private:
 			this->delta--;
 		}
 		this->overlay[k] = present_after;
+		return rocksdb::Status::OK();
 	}
 };
 
@@ -4251,39 +4275,53 @@ public:
 	std::map<std::string, bool> overlay;	// key -> is a tombstone after this op
 	int64_t delta;
 
-	tombstone_delta_handler(rocksdb::DB* db_, const rocksdb::ReadOptions* ro_, rocksdb::ColumnFamilyHandle* meta_):
-			db(db_), ro(ro_), meta(meta_), delta(0) {}
+	bool inject_get_error;		// test seam: every DB read fails (IOError)
+
+	tombstone_delta_handler(rocksdb::DB* db_, const rocksdb::ReadOptions* ro_, rocksdb::ColumnFamilyHandle* meta_, bool inject_get_error_ = false):
+			db(db_), ro(ro_), meta(meta_), delta(0), inject_get_error(inject_get_error_) {}
 
 	rocksdb::Status PutCF(uint32_t cf, const rocksdb::Slice& key, const rocksdb::Slice& value) override {
 		if (this->meta != NULL && cf == this->meta->GetID()) {
-			this->_track(key.ToString(), value.size() >= 2 && value[value.size() - 2] == '|' && value[value.size() - 1] == '1');
+			return this->_track(key.ToString(), value.size() >= 2 && value[value.size() - 2] == '|' && value[value.size() - 1] == '1');
 		}
 		return rocksdb::Status::OK();
 	}
 	rocksdb::Status DeleteCF(uint32_t cf, const rocksdb::Slice& key) override {
 		if (this->meta != NULL && cf == this->meta->GetID()) {
-			this->_track(key.ToString(), false);
+			return this->_track(key.ToString(), false);
 		}
 		return rocksdb::Status::OK();
 	}
 	rocksdb::Status SingleDeleteCF(uint32_t cf, const rocksdb::Slice& key) override {
 		return this->DeleteCF(cf, key);
 	}
+	// see curr_items_delta_handler: refused, never silently uncounted
+	rocksdb::Status MergeCF(uint32_t, const rocksdb::Slice&, const rocksdb::Slice&) override {
+		return rocksdb::Status::NotSupported("Merge in a replicated batch");
+	}
+	rocksdb::Status DeleteRangeCF(uint32_t, const rocksdb::Slice&, const rocksdb::Slice&) override {
+		return rocksdb::Status::NotSupported("DeleteRange in a replicated batch");
+	}
 
 private:
-	void _track(const std::string& k, bool tomb_after) {
+	// only NotFound means "no row"; any other read failure stops the walk
+	rocksdb::Status _track(const std::string& k, bool tomb_after) {
 		bool tomb_before = false;
 		std::map<std::string, bool>::iterator it = this->overlay.find(k);
 		if (it != this->overlay.end()) {
 			tomb_before = it->second;
 		} else {
 			std::string v;
-			if (this->db->Get(*this->ro, this->meta, k, &v).ok()) {
+			rocksdb::Status st = this->inject_get_error ? rocksdb::Status::IOError("injected (test)") : this->db->Get(*this->ro, this->meta, k, &v);
+			if (st.ok()) {
 				tomb_before = v.size() >= 2 && v[v.size() - 2] == '|' && v[v.size() - 1] == '1';
+			} else if (!st.IsNotFound()) {
+				return st;
 			}
 		}
 		this->delta += (tomb_after ? 1 : 0) - (tomb_before ? 1 : 0);
 		this->overlay[k] = tomb_after;
+		return rocksdb::Status::OK();
 	}
 };
 }	// anonymous namespace
@@ -4358,6 +4396,18 @@ void test_apply_pause() {
 }
 }	// anonymous namespace
 
+// Both counts of a replicated batch, or the first failure: a read error
+// (anything but NotFound), an operation that is not counted (Merge,
+// DeleteRange, ...) or a batch that cannot be walked. Any failure refuses the
+// batch BEFORE its Write, so a count is never advanced by a partial delta.
+rocksdb::Status storage_rocksdb::_count_batch(const rocksdb::WriteBatch& batch, rocksdb::WriteBatch::Handler& h, rocksdb::WriteBatch::Handler& th) {
+	rocksdb::Status st = const_cast<rocksdb::WriteBatch&>(batch).Iterate(&h);
+	if (st.ok()) {
+		st = const_cast<rocksdb::WriteBatch&>(batch).Iterate(&th);
+	}
+	return st;
+}
+
 int storage_rocksdb::apply_batch(const rocksdb::WriteBatch& batch) {
 	// the apply lock in read mode excludes the tombstone collection (which
 	// holds it exclusively) between the delta handlers' reads and the write;
@@ -4371,10 +4421,15 @@ int storage_rocksdb::apply_batch(const rocksdb::WriteBatch& batch) {
 	}
 	// O(1) curr_items bookkeeping for the replica path: replicated batches
 	// bypass set()/remove(), so walk the batch for its live-key delta first.
-	curr_items_delta_handler h(this->_db, &this->_read_options);
-	tombstone_delta_handler th(this->_db, &this->_read_options, this->_cf_meta);
-	const_cast<rocksdb::WriteBatch&>(batch).Iterate(&h);
-	const_cast<rocksdb::WriteBatch&>(batch).Iterate(&th);
+	curr_items_delta_handler h(this->_db, &this->_read_options, this->_count_get_fail_for_test == 1);
+	tombstone_delta_handler th(this->_db, &this->_read_options, this->_cf_meta, this->_count_get_fail_for_test == 2);
+	const rocksdb::Status hs = this->_count_batch(batch, h, th);
+	if (!hs.ok()) {
+		this->_unlock_batch_slots(slots);
+		pthread_rwlock_unlock(&this->_repl_apply_lock);
+		log_err("replicated batch refused before its write: its counts cannot be computed (%s)", hs.ToString().c_str());
+		return -1;
+	}
 	test_apply_pause();
 	// WriteBatch is passed as const reference, but Write() needs non-const pointer
 	rocksdb::WriteBatch* batch_ptr = const_cast<rocksdb::WriteBatch*>(&batch);
@@ -4875,27 +4930,43 @@ int storage_rocksdb::count_repl_tombstones(uint64_t& n, string& why) {
 }
 
 bool storage_rocksdb::get_repl_tombstones_live(uint64_t& n) {
-	const int64_t v = __sync_add_and_fetch(&this->_tomb_live, 0);
+	pthread_mutex_lock(&this->_tomb_live_mutex);
+	const int64_t v = this->_tomb_live;
+	const bool valid = this->_tomb_live_valid;
+	pthread_mutex_unlock(&this->_tomb_live_mutex);
 	n = v > 0 ? static_cast<uint64_t>(v) : 0;
-	return __sync_add_and_fetch(&this->_tomb_live_valid, 0) != 0 && v >= 0;
+	return valid && v >= 0;
 }
 
 void storage_rocksdb::_tomb_add(int64_t delta, const char* where) {
 	if (delta == 0) {
 		return;
 	}
-	const int64_t v = __sync_add_and_fetch(&this->_tomb_live, delta);
-	if (v < 0 && __sync_add_and_fetch(&this->_tomb_live_valid, 0) != 0) {
-		// cannot happen when every metadata write is accounted for: a missed
-		// path or a double count. Unknown from now on, never a wrapped value.
-		__sync_lock_test_and_set(&this->_tomb_live_valid, 0);
+	bool went_below = false;
+	int64_t v = 0;
+	pthread_mutex_lock(&this->_tomb_live_mutex);
+	if (this->_tomb_live_valid) {
+		v = this->_tomb_live + delta;
+		this->_tomb_live = v;
+		if (v < 0) {
+			// cannot happen when every metadata write is accounted for: a
+			// missed path or a double count. Unknown from now on, never a
+			// wrapped value.
+			this->_tomb_live_valid = false;
+			went_below = true;
+		}
+	}
+	pthread_mutex_unlock(&this->_tomb_live_mutex);
+	if (went_below) {
 		log_err("CRITICAL: the live tombstone count went below zero (%lld after %lld at %s): reported UNKNOWN until the next exact seed", (long long)v, (long long)delta, where);
 	}
 }
 
 void storage_rocksdb::_tomb_set(uint64_t n, bool valid, const char* why) {
-	__sync_lock_test_and_set(&this->_tomb_live, static_cast<int64_t>(n));
-	__sync_lock_test_and_set(&this->_tomb_live_valid, valid ? 1 : 0);
+	pthread_mutex_lock(&this->_tomb_live_mutex);
+	this->_tomb_live = static_cast<int64_t>(n);
+	this->_tomb_live_valid = valid;
+	pthread_mutex_unlock(&this->_tomb_live_mutex);
 	log_notice("repl_tombstones set to %llu (%s)%s", (unsigned long long)n, why, valid ? "" : " — INVALID, reported unknown");
 }
 
@@ -5163,10 +5234,14 @@ int storage_rocksdb::_apply_batch_with_lsn_locked(const rocksdb::WriteBatch& bat
 
 	// O(1) curr_items bookkeeping (the LSN marker is a reserved key and is
 	// excluded by the handler).
-	curr_items_delta_handler h(this->_db, &this->_read_options);
-	tombstone_delta_handler th(this->_db, &this->_read_options, this->_cf_meta);
-	merged.Iterate(&h);
-	merged.Iterate(&th);
+	curr_items_delta_handler h(this->_db, &this->_read_options, this->_count_get_fail_for_test == 1);
+	tombstone_delta_handler th(this->_db, &this->_read_options, this->_cf_meta, this->_count_get_fail_for_test == 2);
+	const rocksdb::Status hs = this->_count_batch(merged, h, th);
+	if (!hs.ok()) {
+		log_err("apply_batch_with_lsn refused before its write (lsn=%llu): its counts cannot be computed (%s)",
+			(unsigned long long)master_lsn, hs.ToString().c_str());
+		return -1;
+	}
 	test_apply_pause();
 
 	rocksdb::Status status = this->_db->Write(this->_write_options, &merged);

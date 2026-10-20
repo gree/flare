@@ -562,6 +562,23 @@ public:
 	 *	marks the count INVALID (reported unknown, never 0) until the next
 	 *	seed.
 	 *
+	 *	VALIDITY ACROSS COPY CHANGES AND CLOSE. The live count describes the
+	 *	metadata family of the copy that is open now. Every step that destroys
+	 *	that family marks the count INVALID first (_close_db — every copy
+	 *	switch, reset and reopen goes through it — and the drop of the family
+	 *	in adopt_history / swap_in_snapshot); it becomes valid again only by
+	 *	the exact seed at the end of _open_db or by a freshly created empty
+	 *	family (0). A failed reopen or recreate leaves it invalid. Value and
+	 *	validity are one pair under _tomb_live_mutex, a leaf mutex held for a
+	 *	few loads and stores, never across I/O or another lock: a reader sees
+	 *	the old copy's count (the change had not begun), unknown, or the new
+	 *	copy's count — never an old value with a new validity. Plain stats
+	 *	takes only this mutex, never the whole-DB lock.
+	 *
+	 *	A replicated raw batch whose counts cannot be computed (a read error
+	 *	other than NotFound, Merge / DeleteRange, a batch that cannot be
+	 *	walked) is REFUSED before its write: no partial delta is applied.
+	 *
 	 *	* get_repl_tombstones_live: O(1); false = invalid.
 	 *	* count_repl_tombstones: the EXACT count for verification, a full
 	 *	  scan under one RocksDB snapshot (O(N)), one at a time ("busy"),
@@ -579,6 +596,9 @@ public:
 	void set_tombstone_scan_fail_for_test(bool on) { this->_tomb_scan_fail_for_test = on; }
 	int debug_wholelock_writers_waiting() { return __sync_add_and_fetch(&this->_wholelock_writers_waiting, 0); }
 	void debug_tomb_add(int64_t d) { this->_tomb_add(d, "test"); }
+	/** test seam: the raw-batch count handlers' DB reads fail (IOError):
+	    1 = the curr_items handler, 2 = the tombstone handler, 0 = off */
+	void set_count_get_fail_for_test(int which) { this->_count_get_fail_for_test = which; }
 private:
 	/** the whole-DB lock in write mode for a COPY change: first marks a
 	    writer as waiting, so a running exact count stops */
@@ -588,9 +608,13 @@ private:
 	uint64_t					_tomb_scans;
 	void						(*_tomb_scan_hook)(storage_rocksdb*);
 	bool						_tomb_scan_fail_for_test;
-	/** the live delta counter (see above) */
-	volatile int64_t			_tomb_live;
-	volatile int				_tomb_live_valid;
+	/** the live delta counter (see above): value and validity, one pair
+	    under _tomb_live_mutex (a leaf) */
+	pthread_mutex_t				_tomb_live_mutex;
+	int64_t						_tomb_live;
+	bool						_tomb_live_valid;
+	int							_count_get_fail_for_test;
+	rocksdb::Status _count_batch(const rocksdb::WriteBatch& batch, rocksdb::WriteBatch::Handler& h, rocksdb::WriteBatch::Handler& th);
 	void _tomb_add(int64_t delta, const char* where);
 	void _tomb_set(uint64_t n, bool valid, const char* why);
 	/** exact scan of the metadata family into the live counter (DB handle

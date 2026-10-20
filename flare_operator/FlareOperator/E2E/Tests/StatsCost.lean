@@ -104,6 +104,21 @@ private def bulk (ip pfx : String) (n : Nat) (del : Bool := false) : IO Bool := 
   | .ok o => return (o.splitOn "OK").length > 1
   | .error _ => return false
 
+/-- Bulk writes of keys `pfx_lo..pfx_hi` (noreply, one connection). -/
+private def bulkRange (ip pfx : String) (lo hi : Nat) (del : Bool) : IO Bool := do
+  let line := if del then s!"delete {pfx}_%d noreply\\r\\n" else s!"set {pfx}_%d 0 0 1 noreply\\r\\nv\\r\\n"
+  match ← debug s!"seq {lo} {hi} | awk '\{printf \"{line}\", $1}' | nc -w 30 {ip} {cfg.flarePort} >/dev/null 2>&1; echo OK" with
+  | .ok o => return (o.splitOn "OK").length > 1
+  | .error _ => return false
+
+/-- Why the replica did not converge: both counts and the forwarding counters. -/
+private def notConverged (mIp sIp what : String) : IO String := do
+  let m ← statNat mIp "curr_items"
+  let r ← statNat sIp "curr_items"
+  let d ← statNat mIp "proxy_write_dropped"
+  let q ← statNat mIp "total_thread_queue"
+  return s!"PRECONDITION NOT MET (not a measurement): the replica did not converge after {what} within 300 s (items master {m} / replica {r}; master proxy_write_dropped {d}, total_thread_queue {q})"
+
 /-- Seconds until the replica's item count equals the master's (≤ 300). -/
 private def lag (mIp sIp : String) : IO (Option Nat) := do
   let t0 ← IO.monoMsNow
@@ -153,9 +168,14 @@ private def measure : IO TestResult := do
   -- forwarded with their identity; a tenth are deleted (tombstones)
   let n ← keysCount
   IO.eprintln s!"# stats-cost: loading {n} keys (+{n / 10} deletes) through the master {mPod}"
-  if !(← bulk mIp "sc" n) then return .fail "the bulk load failed"
-  if !(← bulk mIp "sc" (n / 10) (del := true)) then return .fail "the bulk deletes failed"
-  let some l0 ← lag mIp sIp | return .fail "the replica did not converge after the load"
+  -- in chunks of 20000, each followed by convergence (9c2d5ac: one 300k
+  -- noreply burst never converged and said nothing about why)
+  let chunk := 20000
+  for i in [0:(n + chunk - 1) / chunk] do
+    if !(← bulkRange mIp "sc" (i * chunk + 1) (min n ((i + 1) * chunk)) false) then return .fail s!"the bulk load failed at chunk {i}"
+    if (← lag mIp sIp).isNone then return .fail (← notConverged mIp sIp s!"load chunk {i}")
+  if !(← bulkRange mIp "sc" 1 (n / 10) true) then return .fail "the bulk deletes failed"
+  let some l0 ← lag mIp sIp | return .fail (← notConverged mIp sIp "the deletes")
   IO.eprintln s!"# stats-cost: replica converged {l0} s after the load"
   -- semantics: plain stats carries the LIVE count (a delta counter seeded at
   -- open), O(1); it must equal the exact scan once writes are quiet

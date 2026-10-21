@@ -4220,6 +4220,53 @@ void test_promotion_unreadable_cursor_failed_reseed_refuses_admission() {
 	cut_assert_equal_int(cluster::proxy_request_error_partition, admit_set(&cl));
 }
 
+// The readable-but-ahead side takes the same path: when the fresh master_id
+// or the re-seed fails, the promotion refusal that admission consults is
+// latched (a get and a set are refused).
+void test_promotion_cursor_ahead_failed_reconcile_refuses_admission() {
+	// control: a readable cursor ahead of the own sequence whose reconcile
+	// succeeds admits both
+	struct ahead_storage : public mock_storage {
+		ahead_storage() : mock_storage("tmp_unused", 32, 4) {}
+		virtual bool read_repl_cursor(uint64_t& cursor) { cursor = 10; return true; }
+		virtual uint64_t get_latest_sequence_number() { return 5; }
+	};
+	{
+		ahead_storage hs;
+		promoting_cluster cl(12121);
+		cl.set_storage(&hs);
+		cut_assert_equal_int(0, cl.promote());
+		cut_assert_false(cl.refused());
+		cut_assert_equal_int(cluster::proxy_request_continue, admit_get(&cl));
+		cut_assert_equal_int(cluster::proxy_request_continue, admit_set(&cl));
+	}
+	struct failing_regenerate_storage : public ahead_storage {
+		virtual int regenerate_master_id() { return -1; }
+	};
+	struct failing_reseed_ahead_storage : public ahead_storage {
+		virtual int set_repl_last_lsn(uint64_t lsn) { return -1; }
+	};
+	{
+		failing_regenerate_storage fs;
+		promoting_cluster cl(12121);
+		cl.set_storage(&fs);
+		cut_assert_equal_int(0, cl.promote());
+		cut_assert_true(cl.refused());
+		cut_assert_operator(cl.get_promotion_refused_why().find("ahead of own sequence"), !=, string::npos);
+		cut_assert_equal_int(cluster::proxy_request_error_partition, admit_get(&cl));
+		cut_assert_equal_int(cluster::proxy_request_error_partition, admit_set(&cl));
+	}
+	{
+		failing_reseed_ahead_storage fs;
+		promoting_cluster cl(12121);
+		cl.set_storage(&fs);
+		cut_assert_equal_int(0, cl.promote());
+		cut_assert_true(cl.refused());
+		cut_assert_equal_int(cluster::proxy_request_error_partition, admit_get(&cl));
+		cut_assert_equal_int(cluster::proxy_request_error_partition, admit_set(&cl));
+	}
+}
+
 // Once the applied position has passed the delete, the tombstone may be
 // collected — and an older put is then refused by the POSITION instead
 // (design §3.5). This is the case a wall-clock window could not decide.

@@ -2296,8 +2296,13 @@ int cluster::reconcile_cursor_on_promotion(storage* s, string& why) {
 	} else if (cursor > seq) {
 		log_warning("promotion to master with replication cursor ahead of own sequence (repl_last_lsn=%llu > latest_sequence_number=%llu): cursor belongs to a former master's sequence space. Minting fresh master_id so same-lineage slaves take a clean full dump instead of stranding on lsn_ahead / #14 truncate-skip.",
 			(unsigned long long)cursor, (unsigned long long)seq);
-		s->regenerate_master_id();
-		s->set_repl_last_lsn(seq);
+		const int r1 = s->regenerate_master_id();
+		const int r2 = s->set_repl_last_lsn(seq);
+		if (r1 < 0 || r2 < 0) {
+			why = "promotion with a replication cursor ahead of own sequence: could not mint a new master_id / re-seed the cursor";
+			s->mark_replication_unavailable(why.c_str());
+			result = -1;
+		}
 	}
 	return result;
 }

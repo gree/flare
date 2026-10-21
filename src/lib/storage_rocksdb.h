@@ -640,6 +640,7 @@ private:
 	int							_gen_get_fail_for_test;
 	bool						_switch_binding_fail_for_test;
 	volatile int				_repl_pos_read_fail_for_test;
+	volatile int				_repl_pos_fail_after_for_test;
 	rocksdb::Status _count_batch(const rocksdb::WriteBatch& batch, rocksdb::WriteBatch::Handler& h, rocksdb::WriteBatch::Handler& th);
 	void _tomb_add(int64_t delta, const char* where);
 	void _tomb_set(uint64_t n, bool valid, const char* why);
@@ -681,7 +682,15 @@ public:
 		uint64_t		value;			// 0 unless state == repl_pos_set
 	};
 	repl_position read_repl_last_lsn();
-	virtual bool is_repl_last_lsn_readable() { return this->read_repl_last_lsn().state != repl_pos_failed; }
+	virtual bool read_repl_cursor(uint64_t& cursor) {
+		const repl_position p = this->read_repl_last_lsn();
+		if (p.state == repl_pos_failed) {
+			return false;
+		}
+		cursor = p.value;
+		return true;
+	}
+	virtual void mark_replication_unavailable(const char* why);
 	// Plain value for stats / logs only: 0 for unset AND failed. Never use it
 	// to decide anything (see read_repl_last_lsn()).
 	uint64_t get_repl_last_lsn();
@@ -691,6 +700,9 @@ public:
 	/** test seams: 1 = the next position reads fail with IOError (until 0);
 	    the raw store writes the key's bytes verbatim (a malformed value) */
 	void set_repl_pos_read_fail_for_test(int on) { this->_repl_pos_read_fail_for_test = on; }
+	/** n >= 0: the next n position reads are real, every later one fails with
+	    IOError (the first read succeeds, the n-th fails); -1 = off */
+	void set_repl_pos_fail_after_for_test(int n) { this->_repl_pos_fail_after_for_test = n; }
 	int put_repl_last_lsn_raw_for_test(const std::string& raw);
 	// Durably overwrite the replication cursor (kReplLastLsnKey). Used to
 	// seed the cursor after a full-dump reconstruction so the next WAL

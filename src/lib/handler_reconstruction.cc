@@ -299,7 +299,12 @@ int handler_reconstruction::_run_once() {
 	uint64_t peer_latest_lsn = 0;
 	bool peer_reachable = false;
 	bool peer_snapshot_supported = false;
-	bool via_wal = this->_try_wal_reconstruction(c, peer_wal_supported, peer_master_id, peer_latest_lsn, peer_reachable, peer_snapshot_supported);
+	bool wal_position_unreadable = false;
+	bool via_wal = this->_try_wal_reconstruction(c, peer_wal_supported, peer_master_id, peer_latest_lsn, peer_reachable, peer_snapshot_supported, wal_position_unreadable);
+	if (wal_position_unreadable) {
+		log_err("reconstruction stopped: the applied replication position cannot be read (WAL catch-up decision); not treating it as 0", 0);
+		return -1;
+	}
 	this->_attempt_master_id = peer_master_id;
 
 	// the copy was replaced by a verified staging copy (design §3)
@@ -361,7 +366,11 @@ int handler_reconstruction::_run_once() {
 			//     deletion-propagation resync has the master AHEAD of us and
 			//     still truncates as before.
 			storage_rocksdb* rdb = dynamic_cast<storage_rocksdb*>(this->_storage);
-			uint64_t local_lsn = rdb ? rdb->get_repl_last_lsn() : 0;
+			uint64_t local_lsn = 0;
+			if (rdb && !position_for_replace_decision(rdb, local_lsn)) {
+				log_err("reconstruction stopped: the applied replication position cannot be read (replace-or-merge decision); not treating it as 0", 0);
+				return -1;
+			}
 			string local_master_id = rdb ? rdb->get_master_id() : "";
 			bool same_lineage = rdb && !peer_master_id.empty()
 				&& peer_master_id == local_master_id;
@@ -1112,12 +1121,14 @@ int handler_reconstruction::_staged_rebuild(bool snapshot_ok, const string& peer
 	}
 
 	// --- verify, then the protection rule right before the switch --------
+	uint64_t stg_position = 0;
+	const bool stg_reached = staging_position_reached(stg, l1, stg_position);	// ONE read: the check and the log
 	if (!stg->copy_identity_consistent() || stg->get_master_id() != peer_master_id
-			|| (epoch_bound && (stg->get_source_epoch() != epoch || stg->get_repl_last_lsn() < l1))) {
+			|| (epoch_bound && (stg->get_source_epoch() != epoch || !stg_reached))) {
 		return abandon::now(rdb, stg, attempt, "the staging copy failed its final check (identity, lineage, history or position)");
 	}
 	log_notice("staging copy %s verified: lineage %s, history %s, position %llu >= L1 %llu; %llu keys (source reported %llu%s; counts are not a criterion)",
-		stg->get_copy_id().c_str(), peer_master_id.c_str(), epoch_bound ? epoch.c_str() : "(legacy)", (unsigned long long)stg->get_repl_last_lsn(),
+		stg->get_copy_id().c_str(), peer_master_id.c_str(), epoch_bound ? epoch.c_str() : "(legacy)", (unsigned long long)stg_position,
 		(unsigned long long)l1, (unsigned long long)stg->count(), (unsigned long long)src.items, src.known ? "" : ", unknown");
 	{
 		string gwhy;
@@ -1337,9 +1348,33 @@ int handler_reconstruction::_activate_with_retry(bool skip_ready_state) {
  *	from a backup, resynced against a different cluster, or freshly created
  *	always full-dumps rather than risk applying an incompatible WAL stream.
  */
+bool handler_reconstruction::position_for_replace_decision(storage* st, uint64_t& local_lsn) {
+	local_lsn = 0;
+	return st->read_repl_cursor(local_lsn);
+}
+
+handler_reconstruction::wal_start handler_reconstruction::position_for_wal_start(storage* st, const string& local_master_id, uint64_t& last_lsn) {
+	last_lsn = 0;
+	if (!st->read_repl_cursor(last_lsn)) {
+		last_lsn = 0;
+		return wal_start_unreadable;
+	}
+	return (last_lsn == 0 || local_master_id.empty()) ? wal_start_skip : wal_start_try;
+}
+
+bool handler_reconstruction::staging_position_reached(storage* st, uint64_t l1, uint64_t& position) {
+	position = 0;
+	if (!st->read_repl_cursor(position)) {
+		position = 0;
+		return false;
+	}
+	return position >= l1;
+}
+
 bool handler_reconstruction::_try_wal_reconstruction(shared_connection c,
 		bool& peer_wal_supported, string& peer_master_id, uint64_t& peer_latest_lsn,
-		bool& peer_reachable, bool& peer_snapshot_supported) {
+		bool& peer_reachable, bool& peer_snapshot_supported, bool& position_unreadable) {
+	position_unreadable = false;
 	peer_wal_supported = false;
 	peer_snapshot_supported = false;
 	peer_master_id.clear();
@@ -1401,9 +1436,14 @@ bool handler_reconstruction::_try_wal_reconstruction(shared_connection c,
 	// is the chicken-and-egg case a fresh full-dump slave hits — it will
 	// now be seeded from peer_latest_lsn after the dump so the NEXT sync
 	// can go incremental.)
-	uint64_t last_lsn = rdb->get_repl_last_lsn();
+	uint64_t last_lsn = 0;
 	string local_master_id = rdb->get_master_id();
-	if (last_lsn == 0 || local_master_id.empty()) {
+	const wal_start ws = position_for_wal_start(rdb, local_master_id, last_lsn);
+	if (ws == wal_start_unreadable) {
+		position_unreadable = true;
+		return false;
+	}
+	if (ws == wal_start_skip) {
 		log_info("WAL reconstruction skipped (last_lsn=%llu, master_id=%s) -> full dump",
 			(unsigned long long)last_lsn, local_master_id.c_str());
 		return false;

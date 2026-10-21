@@ -245,6 +245,8 @@ protected:
 	vector<shared_proxy_event_listener>		_fixed_proxy_event_listeners;
 
 public:
+	/** promotion's cursor reconciliation, from one typed read (see cluster.cc) */
+	static void reconcile_cursor_on_promotion(storage* s);
 	cluster(thread_pool* req_tp, thread_pool* other_tp, string server_name, int server_port);
 	virtual ~cluster();
 

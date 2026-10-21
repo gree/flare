@@ -197,6 +197,7 @@ storage_rocksdb::storage_rocksdb(
 	this->_gen_get_fail_for_test = 0;
 	this->_switch_binding_fail_for_test = false;
 	this->_repl_pos_read_fail_for_test = 0;
+	this->_repl_pos_fail_after_for_test = -1;
 	this->_tomb_scan_hook = NULL;
 	this->_tomb_scan_fail_for_test = false;
 	this->_data_path = this->_data_dir + "/flare.rocksdb";
@@ -1500,6 +1501,13 @@ int storage_rocksdb::advance_incarnation() {
 		log_err("could not persist the new receiver incarnation: this node's copy was replaced but the identity did not change — replication is now UNAVAILABLE here (fail closed)", 0);
 	}
 	return r;
+}
+
+void storage_rocksdb::mark_replication_unavailable(const char* why) {
+	pthread_rwlock_wrlock(&this->_mutex_generations);
+	this->_generations_broken = true;
+	pthread_rwlock_unlock(&this->_mutex_generations);
+	log_err("replication is UNAVAILABLE on this node (fail closed): %s", why != NULL ? why : "");
 }
 
 int storage_rocksdb::regenerate_master_id() {
@@ -5395,11 +5403,22 @@ storage_rocksdb::repl_position storage_rocksdb::read_repl_last_lsn() {
 	r.state = repl_pos_unset;
 	r.value = 0;
 	if (this->_db == NULL) {
+		// a closed DB cannot say where it stands: unknown, not "never written"
+		log_err("repl_last_lsn read: the DB handle is closed -> the applied position is UNKNOWN, not 0", 0);
+		r.state = repl_pos_failed;
 		return r;
 	}
 
+	bool inject = this->_repl_pos_read_fail_for_test != 0;
+	if (!inject && this->_repl_pos_fail_after_for_test >= 0) {
+		if (this->_repl_pos_fail_after_for_test == 0) {
+			inject = true;
+		} else {
+			this->_repl_pos_fail_after_for_test = this->_repl_pos_fail_after_for_test - 1;
+		}
+	}
 	string value;
-	rocksdb::Status status = this->_repl_pos_read_fail_for_test != 0
+	rocksdb::Status status = inject
 		? rocksdb::Status::IOError("test")
 		: this->_db->Get(this->_read_options, kReplLastLsnKey, &value);
 	if (status.ok()) {

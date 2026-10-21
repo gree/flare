@@ -61,7 +61,16 @@ public:
 		attempt_disconnected,	// transport failed: retry, keep the data
 		attempt_needs_rebuild,	// this position can never be satisfied again
 		attempt_error,			// storage/protocol failure: retry
+		attempt_proceed,		// begin_attempt only: the slice may be asked for
 	};
+
+	// The checks before a slice, from ONE typed read of the applied position
+	// (the same value is the cursor sent). An unreadable position is a
+	// retryable error (follow_error), never a rebuild request and never
+	// position 0: the controller repairs on needs_rebuild, and a transient
+	// read failure must not cause one.
+	static attempt_outcome begin_attempt(storage* st, const string& epoch, const string& incarnation,
+		uint64_t& cursor, const char*& state_reason);
 
 	// The decision this handler makes for every client result. Pure, so the
 	// "a disconnect is not a rebuild" rule is testable directly.

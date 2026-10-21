@@ -28,6 +28,8 @@
 #include <app.h>
 #include <storage_rocksdb.h>
 #include <handler_wal_follower.h>
+#include <handler_reconstruction.h>
+#include <cluster.h>
 #include <op_repl_sync_wal.h>
 #include <op_repl_snapshot.h>
 #include <connection_tcp.h>
@@ -3940,7 +3942,7 @@ void test_repl_position_not_found_is_unset_zero() {
 	storage_rocksdb::repl_position p = s->read_repl_last_lsn();
 	cppcut_assert_equal(storage_rocksdb::repl_pos_unset, p.state);
 	cppcut_assert_equal(static_cast<uint64_t>(0), p.value);
-	cut_assert_true(s->is_repl_last_lsn_readable());
+	{ uint64_t c = 99; cut_assert_true(s->read_repl_cursor(c)); cppcut_assert_equal(static_cast<uint64_t>(0), c); }
 	drop_rocksdb(s, wal_master_dir);
 }
 
@@ -3959,7 +3961,7 @@ void test_repl_position_io_error_is_failed_not_zero() {
 	s->set_repl_pos_read_fail_for_test(1);
 	storage_rocksdb::repl_position p = s->read_repl_last_lsn();
 	cppcut_assert_equal(storage_rocksdb::repl_pos_failed, p.state);
-	cut_assert_false(s->is_repl_last_lsn_readable());
+	{ uint64_t c = 99; cut_assert_false(s->read_repl_cursor(c)); cppcut_assert_equal(static_cast<uint64_t>(99), c); }
 	s->set_repl_pos_read_fail_for_test(0);
 	cppcut_assert_equal(storage_rocksdb::repl_pos_set, s->read_repl_last_lsn().state);
 	drop_rocksdb(s, wal_master_dir);
@@ -4014,6 +4016,137 @@ void test_repl_position_failure_stops_apply_and_gc() {
 	cppcut_assert_equal(static_cast<uint64_t>(29), s->get_repl_last_lsn());    // cursor untouched
 	// readable again: the same GC now proceeds
 	cppcut_assert_equal(static_cast<uint64_t>(1), s->collect_tombstones(100));
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// A closed DB cannot say where it stands: failed, not "never written" (0).
+void test_repl_position_closed_db_is_failed_not_unset() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_int(0, s->set_repl_last_lsn(42));
+	cut_assert_equal_int(0, s->close());
+	cppcut_assert_equal(storage_rocksdb::repl_pos_failed, s->read_repl_last_lsn().state);
+	uint64_t c = 7;
+	cut_assert_false(s->read_repl_cursor(c));
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// The seam: the first read is real, the n-th fails (until switched off).
+void test_repl_position_nth_read_seam() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_int(0, s->set_repl_last_lsn(42));
+	s->set_repl_pos_fail_after_for_test(2);
+	cppcut_assert_equal(storage_rocksdb::repl_pos_set, s->read_repl_last_lsn().state);
+	cppcut_assert_equal(storage_rocksdb::repl_pos_set, s->read_repl_last_lsn().state);
+	cppcut_assert_equal(storage_rocksdb::repl_pos_failed, s->read_repl_last_lsn().state);
+	cppcut_assert_equal(storage_rocksdb::repl_pos_failed, s->read_repl_last_lsn().state);
+	s->set_repl_pos_fail_after_for_test(-1);
+	cppcut_assert_equal(storage_rocksdb::repl_pos_set, s->read_repl_last_lsn().state);
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// Replace-or-merge decision (handler_reconstruction): the first read (the
+// start gate) succeeds, the decision's own read fails -> refuse, not 0.
+void test_reconstruction_replace_decision_refuses_on_later_read_failure() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_int(0, s->set_repl_last_lsn(42));
+	uint64_t v = 0;
+	s->set_repl_pos_fail_after_for_test(1);
+	cut_assert_true(handler_reconstruction::position_for_replace_decision(s, v));
+	cppcut_assert_equal(static_cast<uint64_t>(42), v);
+	cut_assert_false(handler_reconstruction::position_for_replace_decision(s, v));
+	cppcut_assert_equal(static_cast<uint64_t>(0), v);
+	s->set_repl_pos_fail_after_for_test(-1);
+	cut_assert_true(handler_reconstruction::position_for_replace_decision(s, v));
+	cppcut_assert_equal(static_cast<uint64_t>(42), v);
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// WAL catch-up vs full dump: unreadable is its own answer — never "skip"
+// (which would fall through to a dump on a guessed 0).
+void test_reconstruction_wal_start_distinguishes_unreadable_from_skip() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	uint64_t v = 5;
+	cppcut_assert_equal(handler_reconstruction::wal_start_skip, handler_reconstruction::position_for_wal_start(s, "m", v));
+	cppcut_assert_equal(static_cast<uint64_t>(0), v);
+	cut_assert_equal_int(0, s->set_repl_last_lsn(42));
+	cppcut_assert_equal(handler_reconstruction::wal_start_skip, handler_reconstruction::position_for_wal_start(s, "", v));
+	cppcut_assert_equal(handler_reconstruction::wal_start_try, handler_reconstruction::position_for_wal_start(s, "m", v));
+	cppcut_assert_equal(static_cast<uint64_t>(42), v);
+	s->set_repl_pos_fail_after_for_test(1);
+	uint64_t first = 0;
+	cut_assert_true(s->read_repl_cursor(first));
+	cppcut_assert_equal(handler_reconstruction::wal_start_unreadable, handler_reconstruction::position_for_wal_start(s, "m", v));
+	cppcut_assert_equal(static_cast<uint64_t>(0), v);
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// Staging copy's final verification: an unreadable position is never "reached".
+void test_reconstruction_staging_verification_fails_on_later_read_failure() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_int(0, s->set_repl_last_lsn(50));
+	uint64_t pos = 0;
+	cut_assert_true(handler_reconstruction::staging_position_reached(s, 50, pos));
+	cppcut_assert_equal(static_cast<uint64_t>(50), pos);
+	cut_assert_false(handler_reconstruction::staging_position_reached(s, 51, pos));
+	s->set_repl_pos_fail_after_for_test(1);
+	uint64_t first = 0;
+	cut_assert_true(s->read_repl_cursor(first));
+	// would be "reached" for any l1 if the failure read as 0 >= 0
+	cut_assert_false(handler_reconstruction::staging_position_reached(s, 0, pos));
+	cppcut_assert_equal(static_cast<uint64_t>(0), pos);
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// Follower: an unreadable position is a retryable error (follow_error), not a
+// rebuild request; once a later read recovers it proceeds from the position.
+void test_follower_unreadable_position_retries_without_rebuild() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_int(0, s->set_repl_last_lsn(42));
+	uint64_t cursor = 9;
+	const char* why = "";
+	s->set_repl_pos_fail_after_for_test(1);
+	uint64_t first = 0;
+	cut_assert_true(s->read_repl_cursor(first));
+	cppcut_assert_equal(handler_wal_follower::attempt_error, handler_wal_follower::begin_attempt(s, "e", "i", cursor, why));
+	cppcut_assert_equal(string("position_unreadable"), string(why));
+	cppcut_assert_equal(static_cast<uint64_t>(0), cursor);
+	s->set_repl_pos_fail_after_for_test(-1);
+	cppcut_assert_equal(handler_wal_follower::attempt_proceed, handler_wal_follower::begin_attempt(s, "e", "i", cursor, why));
+	cppcut_assert_equal(static_cast<uint64_t>(42), cursor);
+	// the genuine rebuild cases are unchanged
+	cppcut_assert_equal(handler_wal_follower::attempt_needs_rebuild, handler_wal_follower::begin_attempt(s, "", "i", cursor, why));
+	cppcut_assert_equal(string("generations_unavailable"), string(why));
+	drop_rocksdb(s, wal_master_dir);
+	s = make_rocksdb(wal_master_dir);
+	cppcut_assert_equal(handler_wal_follower::attempt_needs_rebuild, handler_wal_follower::begin_attempt(s, "e", "i", cursor, why));
+	cppcut_assert_equal(string("no_position"), string(why));
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// Promotion with an unreadable cursor: a fresh master_id and a re-seeded
+// cursor (safe direction), through ONE read.
+void test_promotion_unreadable_cursor_reseeds() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_int(0, s->set_repl_last_lsn(1000000));
+	const string before = s->get_master_id();
+	const uint64_t seq_before = s->get_latest_sequence_number();
+	s->set_repl_pos_fail_after_for_test(0);
+	cluster::reconcile_cursor_on_promotion(s);
+	s->set_repl_pos_fail_after_for_test(-1);
+	cut_assert_true(s->get_master_id() != before);
+	cppcut_assert_equal(seq_before, s->get_repl_last_lsn());
+	cut_assert_false(s->get_source_epoch().empty());	// not latched: it worked
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// ... and when that cannot be carried out, the EXISTING refusal latch (the
+// generations go unavailable) is taken instead of treating it as success.
+void test_promotion_unreadable_cursor_failed_reseed_latches_refusal() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	cut_assert_false(s->get_source_epoch().empty());
+	cut_assert_equal_int(0, s->close());	// the position is unreadable AND the writes fail
+	cluster::reconcile_cursor_on_promotion(s);
+	cppcut_assert_equal(string(""), s->get_source_epoch());
 	drop_rocksdb(s, wal_master_dir);
 }
 

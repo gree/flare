@@ -280,10 +280,18 @@ public:
 	// backend-agnostic callers (e.g. cluster::_shift_node_role) query them via
 	// a storage* without pulling in backend-specific headers. Non-WAL backends
 	// report 0, so cursor-vs-sequence logic is a safe no-op there.
+	// DISPLAY ONLY (stats / logs): 0 for unset AND unreadable. Decisions use
+	// read_repl_cursor() below.
 	virtual uint64_t get_repl_last_lsn() { return 0; }
-	// false only when the applied position EXISTS but cannot be trusted (read
-	// error / malformed value); "never written" is readable (0).
-	virtual bool is_repl_last_lsn_readable() { return true; }
+	// ONE typed read for a decision: false only when the applied position
+	// cannot be trusted (closed DB, read error, malformed value) — cursor is
+	// then untouched; "never written" is readable (cursor 0). Decide on this,
+	// never on get_repl_last_lsn() (stats / log only).
+	virtual bool read_repl_cursor(uint64_t& cursor) { cursor = 0; return true; }
+	// The EXISTING refusal latch (generations unavailable): every replication
+	// path on this node refuses until it is cleared. No-op on backends
+	// without replication state.
+	virtual void mark_replication_unavailable(const char* why) {}
 	virtual int set_repl_last_lsn(uint64_t lsn) { return 0; }
 	virtual uint64_t get_latest_sequence_number() { return 0; }
 

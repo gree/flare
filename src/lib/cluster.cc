@@ -2272,6 +2272,32 @@ string cluster::_partition_binding_for(int partition) {
 	return b.str();
 }
 
+/**
+ *	Promotion: reconcile the replication cursor with this node's own sequence
+ *	from ONE typed read. An unreadable cursor is not 0: it may be ahead of our
+ *	own sequence, so it takes the same safe direction as an inverted one — and
+ *	if that cannot be carried out (new master_id / re-seed fail) the node
+ *	enters the existing refusal latch rather than serving on a guess.
+ */
+void cluster::reconcile_cursor_on_promotion(storage* s) {
+	uint64_t cursor = 0;
+	const bool readable = s->read_repl_cursor(cursor);
+	const uint64_t seq = s->get_latest_sequence_number();
+	if (!readable) {
+		log_err("promotion to master with an unreadable replication cursor: minting a fresh master_id and re-seeding the cursor to own sequence %llu", (unsigned long long)seq);
+		const int r1 = s->regenerate_master_id();
+		const int r2 = s->set_repl_last_lsn(seq);
+		if (r1 < 0 || r2 < 0) {
+			s->mark_replication_unavailable("promotion with an unreadable replication cursor: could not mint a new master_id / re-seed the cursor");
+		}
+	} else if (cursor > seq) {
+		log_warning("promotion to master with replication cursor ahead of own sequence (repl_last_lsn=%llu > latest_sequence_number=%llu): cursor belongs to a former master's sequence space. Minting fresh master_id so same-lineage slaves take a clean full dump instead of stranding on lsn_ahead / #14 truncate-skip.",
+			(unsigned long long)cursor, (unsigned long long)seq);
+		s->regenerate_master_id();
+		s->set_repl_last_lsn(seq);
+	}
+}
+
 int cluster::_shift_node_role(string node_key, role old_role, int old_partition, role new_role, int new_partition) {
 	log_notice("shifting node_role (node_key=%s, old_role=%s, old_partition=%d, new_role=%s, new_partition=%d)", node_key.c_str(), cluster::role_cast(old_role).c_str(), old_partition, cluster::role_cast(new_role).c_str(), new_partition);
 
@@ -2381,21 +2407,7 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 			// serving a new history under the previous identity.
 			log_err("promotion: could not advance the source epoch -> replication is UNAVAILABLE on this node until it can be persisted", 0);
 		}
-		const bool cursor_readable = this->_storage->is_repl_last_lsn_readable();
-		uint64_t cursor = this->_storage->get_repl_last_lsn();
-		uint64_t seq = this->_storage->get_latest_sequence_number();
-		if (!cursor_readable) {
-			// An unknown position is not 0: it may be ahead of our own
-			// sequence. Same safe direction as the branch below.
-			log_err("promotion to master with an unreadable replication cursor: minting a fresh master_id and re-seeding the cursor to own sequence %llu", (unsigned long long)seq);
-			this->_storage->regenerate_master_id();
-			this->_storage->set_repl_last_lsn(seq);
-		} else if (cursor > seq) {
-			log_warning("promotion to master with replication cursor ahead of own sequence (repl_last_lsn=%llu > latest_sequence_number=%llu): cursor belongs to a former master's sequence space. Minting fresh master_id so same-lineage slaves take a clean full dump instead of stranding on lsn_ahead / #14 truncate-skip.",
-				(unsigned long long)cursor, (unsigned long long)seq);
-			this->_storage->regenerate_master_id();
-			this->_storage->set_repl_last_lsn(seq);
-		}
+		cluster::reconcile_cursor_on_promotion(this->_storage);
 	}
 
 	// Active means the operator has declared this node's local data

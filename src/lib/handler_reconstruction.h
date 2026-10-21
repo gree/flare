@@ -91,6 +91,16 @@ public:
 	// R3-D / T24: the source's identity and size by name, a fresh lookup on
 	// each of up to probe_attempts tries (public for the cutter test)
 	static void probe_source_identity(const string& host, int port, copy_identity& out, shared_thread owner = shared_thread());
+	// The applied position as each reconstruction DECISION sees it: one typed
+	// read per decision, passed on — never a second untyped re-read, and an
+	// unreadable position (or a closed DB) refuses instead of reading as 0.
+	// Replace-or-merge: false = refuse the attempt.
+	static bool position_for_replace_decision(storage* st, uint64_t& local_lsn);
+	// WAL catch-up or full dump: skip = nothing to be incremental from.
+	enum wal_start { wal_start_skip = 0, wal_start_try, wal_start_unreadable };
+	static wal_start position_for_wal_start(storage* st, const string& local_master_id, uint64_t& last_lsn);
+	// Staging copy's final check: false = unreadable OR below l1 (never verified).
+	static bool staging_position_reached(storage* st, uint64_t l1, uint64_t& position);
 	static int probe_attempts;
 	static int probe_retry_wait_ms;
 	handler_reconstruction(shared_thread t, cluster* cl, storage* st, string node_server_name, int node_server_port, int partition, int partition_size, cluster::role r, int reconstruction_interval, int reconstruction_bwlimit);
@@ -152,7 +162,7 @@ protected:
 	// BEFORE the dump. peer_reachable reports whether the feature probe got
 	// ANY response (source alive) — the caller uses it to decide whether a
 	// truncate-before-dump is safe (never truncate against a dead source).
-	bool _try_wal_reconstruction(shared_connection c, bool& peer_wal_supported, string& peer_master_id, uint64_t& peer_latest_lsn, bool& peer_reachable, bool& peer_snapshot_supported);
+	bool _try_wal_reconstruction(shared_connection c, bool& peer_wal_supported, string& peer_master_id, uint64_t& peer_latest_lsn, bool& peer_reachable, bool& peer_snapshot_supported, bool& position_unreadable);
 
 	// After a full-dump reconstruction (and master_id adoption), durably
 	// seed repl_last_lsn from the master's pre-dump latest_lsn so the next

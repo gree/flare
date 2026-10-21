@@ -212,6 +212,24 @@ void handler_wal_follower::_park() {
 	}
 }
 
+handler_wal_follower::attempt_outcome handler_wal_follower::begin_attempt(storage* st,
+		const string& epoch, const string& incarnation, uint64_t& cursor, const char*& state_reason) {
+	cursor = 0;
+	state_reason = "";
+	if (!st->read_repl_cursor(cursor)) {
+		cursor = 0;
+		state_reason = "position_unreadable";
+		return attempt_error;
+	}
+	if (cursor == 0 || epoch.empty() || incarnation.empty()) {
+		// Nothing to be incremental from, or no identity to bind it to. The
+		// initial copy is the snapshot path's job (design §4, condition 5).
+		state_reason = cursor == 0 ? "no_position" : "generations_unavailable";
+		return attempt_needs_rebuild;
+	}
+	return attempt_proceed;
+}
+
 int handler_wal_follower::_follow_once(bool& more) {
 #ifdef HAVE_LIBROCKSDB
 	more = false;
@@ -220,22 +238,19 @@ int handler_wal_follower::_follow_once(bool& more) {
 		return attempt_error;
 	}
 
-	const storage_rocksdb::repl_position pos = rdb->read_repl_last_lsn();
-	if (pos.state == storage_rocksdb::repl_pos_failed) {
-		// Unknown is not "no position": do not follow and do not ask for a
-		// rebuild on a guess either — retry once the position can be read.
-		if (stats_object != NULL) stats_object->follow_set_state(stats::follow_needs_rebuild, "position_unreadable");
-		return attempt_error;
-	}
-	const uint64_t cursor = pos.value;
 	const string master_id = rdb->get_master_id();
 	const string epoch = rdb->get_source_epoch();
 	const string incarnation = rdb->get_incarnation();
-	if (cursor == 0 || epoch.empty() || incarnation.empty()) {
-		// Nothing to be incremental from, or no identity to bind it to. The
-		// initial copy is the snapshot path's job (design §4, condition 5).
-		if (stats_object != NULL) stats_object->follow_set_state(stats::follow_needs_rebuild,
-			cursor == 0 ? "no_position" : "generations_unavailable");
+	uint64_t cursor = 0;
+	const char* begin_reason = "";
+	const attempt_outcome begin = begin_attempt(rdb, epoch, incarnation, cursor, begin_reason);
+	if (begin == attempt_error) {
+		// Unknown is not "no position": retry (non-destructive) once it can be read.
+		if (stats_object != NULL) stats_object->follow_set_state(stats::follow_error, begin_reason);
+		return attempt_error;
+	}
+	if (begin == attempt_needs_rebuild) {
+		if (stats_object != NULL) stats_object->follow_set_state(stats::follow_needs_rebuild, begin_reason);
 		return attempt_needs_rebuild;
 	}
 
@@ -265,10 +280,17 @@ int handler_wal_follower::_follow_once(bool& more) {
 
 	const attempt_outcome outcome = classify(client_result, transport_ok);
 	switch (outcome) {
-		case attempt_progress:
-			if (stats_object != NULL) stats_object->follow_note_progress(rdb->get_repl_last_lsn());
+		case attempt_progress: {
+			uint64_t after = 0;
+			if (!rdb->read_repl_cursor(after)) {
+				// the slice may have moved the position, but where to is unknown
+				if (stats_object != NULL) stats_object->follow_set_state(stats::follow_error, "position_unreadable");
+				return attempt_error;
+			}
+			if (stats_object != NULL) stats_object->follow_note_progress(after);
 			if (stats_object != NULL) stats_object->follow_set_state(stats::follow_following, "");
-			return slice_outcome(cursor, rdb->get_repl_last_lsn());
+			return slice_outcome(cursor, after);
+		}
 		case attempt_needs_rebuild:
 			if (stats_object != NULL) stats_object->follow_set_state(stats::follow_needs_rebuild, reason_for(client_result));
 			return attempt_needs_rebuild;

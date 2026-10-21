@@ -246,7 +246,7 @@ protected:
 
 public:
 	/** promotion's cursor reconciliation, from one typed read (see cluster.cc) */
-	static void reconcile_cursor_on_promotion(storage* s);
+	static int reconcile_cursor_on_promotion(storage* s, string& why);
 	cluster(thread_pool* req_tp, thread_pool* other_tp, string server_name, int server_port);
 	virtual ~cluster();
 

@@ -2279,7 +2279,8 @@ string cluster::_partition_binding_for(int partition) {
  *	if that cannot be carried out (new master_id / re-seed fail) the node
  *	enters the existing refusal latch rather than serving on a guess.
  */
-void cluster::reconcile_cursor_on_promotion(storage* s) {
+int cluster::reconcile_cursor_on_promotion(storage* s, string& why) {
+	int result = 0;
 	uint64_t cursor = 0;
 	const bool readable = s->read_repl_cursor(cursor);
 	const uint64_t seq = s->get_latest_sequence_number();
@@ -2288,7 +2289,9 @@ void cluster::reconcile_cursor_on_promotion(storage* s) {
 		const int r1 = s->regenerate_master_id();
 		const int r2 = s->set_repl_last_lsn(seq);
 		if (r1 < 0 || r2 < 0) {
-			s->mark_replication_unavailable("promotion with an unreadable replication cursor: could not mint a new master_id / re-seed the cursor");
+			why = "promotion with an unreadable replication cursor: could not mint a new master_id / re-seed the cursor";
+			s->mark_replication_unavailable(why.c_str());
+			result = -1;
 		}
 	} else if (cursor > seq) {
 		log_warning("promotion to master with replication cursor ahead of own sequence (repl_last_lsn=%llu > latest_sequence_number=%llu): cursor belongs to a former master's sequence space. Minting fresh master_id so same-lineage slaves take a clean full dump instead of stranding on lsn_ahead / #14 truncate-skip.",
@@ -2296,6 +2299,7 @@ void cluster::reconcile_cursor_on_promotion(storage* s) {
 		s->regenerate_master_id();
 		s->set_repl_last_lsn(seq);
 	}
+	return result;
 }
 
 int cluster::_shift_node_role(string node_key, role old_role, int old_partition, role new_role, int new_partition) {
@@ -2407,7 +2411,15 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 			// serving a new history under the previous identity.
 			log_err("promotion: could not advance the source epoch -> replication is UNAVAILABLE on this node until it can be persisted", 0);
 		}
-		cluster::reconcile_cursor_on_promotion(this->_storage);
+		string why;
+		if (cluster::reconcile_cursor_on_promotion(this->_storage, why) < 0) {
+			// the same refusal latch as a forbidden copy: reads and writes
+			// for this master's partitions are refused (pre_proxy_read / _write)
+			this->_promotion_refused_why = why;
+			this->_promotion_refused = true;
+			log_err("CRITICAL: PROMOTION REFUSED by this node: %s — it serves no reads or writes as master until the map takes the role away", why.c_str());
+			return 0;
+		}
 	}
 
 	// Active means the operator has declared this node's local data

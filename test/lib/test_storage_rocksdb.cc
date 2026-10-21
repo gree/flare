@@ -39,6 +39,9 @@
 #include <fcntl.h>
 #include <time.h>
 #include "mock_storage.h"
+#include "mock_cluster.h"
+#include <op_get.h>
+#include <op_set.h>
 #include "connection_iostream.h"
 
 #include <limits>
@@ -4131,7 +4134,8 @@ void test_promotion_unreadable_cursor_reseeds() {
 	const string before = s->get_master_id();
 	const uint64_t seq_before = s->get_latest_sequence_number();
 	s->set_repl_pos_fail_after_for_test(0);
-	cluster::reconcile_cursor_on_promotion(s);
+	string why;
+	cppcut_assert_equal(0, cluster::reconcile_cursor_on_promotion(s, why));
 	s->set_repl_pos_fail_after_for_test(-1);
 	cut_assert_true(s->get_master_id() != before);
 	cppcut_assert_equal(seq_before, s->get_repl_last_lsn());
@@ -4145,9 +4149,75 @@ void test_promotion_unreadable_cursor_failed_reseed_latches_refusal() {
 	storage_rocksdb* s = make_rocksdb(wal_master_dir);
 	cut_assert_false(s->get_source_epoch().empty());
 	cut_assert_equal_int(0, s->close());	// the position is unreadable AND the writes fail
-	cluster::reconcile_cursor_on_promotion(s);
+	string why;
+	cut_assert_operator(cluster::reconcile_cursor_on_promotion(s, why), <, 0);
+	cut_assert_false(why.empty());
 	cppcut_assert_equal(string(""), s->get_source_epoch());
 	drop_rocksdb(s, wal_master_dir);
+}
+
+namespace {
+	// a cluster whose own node is the master of partition 0, with the role
+	// shift reachable from the test
+	struct promoting_cluster : public mock_cluster {
+		promoting_cluster(int port) : mock_cluster("localhost", port) {
+			node me = this->set_node("localhost", port, cluster::role_master, cluster::state_active, 0, 100);
+			this->set_partition(0, me);
+		}
+		int promote() {
+			return this->_shift_node_role(this->get_own_node_key(), cluster::role_proxy, -1, cluster::role_master, 0);
+		}
+		bool refused() { return this->is_promotion_refused(); }
+	};
+
+	cluster::proxy_request admit_get(cluster* cl) {
+		shared_connection c;
+		op_get op(c, cl, NULL);
+		storage::entry e;
+		e.parse(" key", storage::parse_type_get);
+		shared_queue_proxy_read q;
+		return cl->pre_proxy_read(&op, e, NULL, q);
+	}
+
+	cluster::proxy_request admit_set(cluster* cl) {
+		shared_connection c;
+		op_set op(c, cl, NULL);
+		op.get_entry().parse(" key 0 0 5 3", storage::parse_type_set);
+		shared_queue_proxy_write q;
+		return cl->pre_proxy_write(&op, q);
+	}
+}
+
+// The failure must reach the latch that ADMISSION looks at (review: only
+// the replication generations were marked, which pre_proxy_read/_write do not
+// consult): a get and a set for the master's partition are refused.
+void test_promotion_unreadable_cursor_failed_reseed_refuses_admission() {
+	// control: the same cluster over a healthy copy admits both
+	{
+		storage_rocksdb* s = make_rocksdb(wal_master_dir);
+		promoting_cluster cl(12121);
+		cl.set_storage(s);
+		cut_assert_equal_int(0, cl.promote());
+		cut_assert_false(cl.refused());
+		cut_assert_equal_int(cluster::proxy_request_continue, admit_get(&cl));
+		cut_assert_equal_int(cluster::proxy_request_continue, admit_set(&cl));
+		drop_rocksdb(s, wal_master_dir);
+	}
+	// every earlier promotion check passes on this storage; only the cursor
+	// step fails (unreadable cursor, re-seed cannot be written)
+	struct failing_reseed_storage : public mock_storage {
+		failing_reseed_storage() : mock_storage("tmp_unused", 32, 4) {}
+		virtual bool read_repl_cursor(uint64_t& cursor) { cursor = 0; return false; }
+		virtual int regenerate_master_id() { return -1; }
+	};
+	failing_reseed_storage fs;
+	promoting_cluster cl(12121);
+	cl.set_storage(&fs);
+	cut_assert_equal_int(0, cl.promote());
+	cut_assert_true(cl.refused());
+	cut_assert_operator(cl.get_promotion_refused_why().find("replication cursor"), !=, string::npos);
+	cut_assert_equal_int(cluster::proxy_request_error_partition, admit_get(&cl));
+	cut_assert_equal_int(cluster::proxy_request_error_partition, admit_set(&cl));
 }
 
 // Once the applied position has passed the delete, the tombstone may be

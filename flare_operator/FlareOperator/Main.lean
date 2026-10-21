@@ -3126,6 +3126,9 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
             metrics.replicaRepairCompleted.inc
             metrics.replicaRepairRequested.inc
             IO.eprintln s!"[flare-operator] REPLICA REPAIR COMPLETE (with late drops): {who} reconstructed, but {e.drops - e.dropsAtReseat} write(s) were dropped to it after the reconstruction began and may not be in the copy — REQUEUED as a new request"
+          | .rerequested =>
+            metrics.replicaRepairRequested.inc
+            IO.eprintln s!"[flare-operator] REPLICA REPAIR: the master of {who}'s partition changed after its reseat (was {e.masterKey}) and its copy is not from the current master — REQUESTED AGAIN against the current master, {e.drops} dropped write(s) kept"
           | .voided =>
             metrics.replicaRepairVoided.inc
             IO.eprintln s!"[flare-operator] CRITICAL: replica repair VOIDED for {who}: it became a MASTER while under repair; the {e.drops} write(s) it missed are now missing on a primary"

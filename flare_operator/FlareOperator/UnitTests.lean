@@ -317,6 +317,27 @@ def checkAdvanceComplete (ctx : Ctx) : IO Unit := do
     (reqDrops (feed lEmptyEntries 38 (some 7)) == some 1)
   check ctx "a node that became MASTER while reseated is voided"
     (stepsOf lRel (obs (some 12) (some 100) (some 2) (some "succeeded") (some 2) (some masterKey) (some masterKey) (some (.Master, .Active))) == [.voided])
+  -- breaker-migration test 13 (rc68 a2, 7641f76): reseated from master A, the
+  -- partition's master moved to B, and the node's copy (rebuilt from A) is
+  -- not B's. The entry must become a fresh request against B, drops kept.
+  let newMaster := "new-master:12121"
+  let afterMove := obs (some 12) (some 200) (some 1) (some "succeeded") (some 1) (some masterKey) (some newMaster) (some (.Slave, .Active))
+  let (lMoved, stMoved) := advance lRel [(slaveKey, afterMove)]
+  check ctx "master changed after the reseat, the copy is from the OLD master: the entry is requested again against the CURRENT master, drops kept, not completed, not dropped"
+    (stMoved.map (·.2) == [.rerequested] && lMoved.entries.length == 1 && firstPhase lMoved == some .requested
+      && firstDrops lMoved == some 3 && firstNodeKey lMoved == some slaveKey
+      && (lMoved.entries.head?.map (·.masterKey)) == some newMaster
+      && (lMoved.entries.head?.bind (·.currentIdAtReseat)) == none
+      && ((plan lMoved true "").2.map Prod.fst) == [slaveKey])
+  check ctx "master changed after the reseat: the re-requested entry does not loop while the master stays, and completes only on a newer success from the new master"
+    (let again := advance lMoved [(slaveKey, afterMove)]
+     let (lRes, _) := advance (markDemoted lMoved slaveKey 13) [(slaveKey, obs (some 13) (some 200) (some 1) (some "succeeded") (some 1) (some masterKey) (some newMaster) (some (.Proxy, .Active)))]
+     let notYet := advance lRes [(slaveKey, afterMove)]
+     let done := advance lRes [(slaveKey, obs (some 13) (some 200) (some 2) (some "succeeded") (some 2) (some newMaster) (some newMaster) (some (.Slave, .Active)))]
+     again.2.isEmpty && notYet.2.isEmpty
+       && done.2.map (·.2) == [.completed] && done.1.entries.isEmpty)
+  check ctx "master unchanged after the reseat: an old-source copy is still just a wait (no re-request)"
+    (stepsOf lRel (obs (some 12) (some 100) (some 2) (some "succeeded") (some 2) (some "old-master:12121") (some masterKey) (some (.Slave, .Active))) == [])
   let lNoBase : Ledger := { lRel with entries := lRel.entries.map fun e => { e with bootIdAtReseat := none, currentIdAtReseat := none } }
   let (lNB, stNB) := advance lNoBase [(slaveKey, doneObs)]
   check ctx "with no baseline the first readable record becomes the baseline; nothing completes yet"

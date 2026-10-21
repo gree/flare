@@ -400,6 +400,7 @@ inductive Step where
   | completed     -- Slave/Active with a reconstruction that began after the reseat and finished
   | completedRequeued -- as `completed`, but drops arrived after the reconstruction began: the increment is requeued
   | voided        -- node became a Master while under repair
+  | rerequested   -- the master changed after the reseat: back to a fresh request against the current one
   deriving Repr, BEq
 
 /-- Advance one entry by one observation. -/
@@ -440,6 +441,19 @@ def advanceEntry (e : Entry) (o : Observation) : Option Entry × Step :=
                              dropsAtReseat := 0, hold := Option.none },
                .completedRequeued)
             else (Option.none, .completed)
+          else if master != e.masterKey then
+            -- The partition's master CHANGED after the reseat (breaker-
+            -- migration test 13): the reseat reconstruction copied from the
+            -- old master, so this node cannot complete by it, and
+            -- `requestRebuild` adds nothing for a node that already has an
+            -- entry — the entry stayed `reseated` forever and the node was
+            -- never rebuilt from the new master. Turn it back into a fresh
+            -- request against the CURRENT master, keeping every drop; it is
+            -- never completed without a successful rebuild from that master.
+            (some { e with phase := .requested, masterKey := master,
+                           bootIdAtReseat := Option.none, currentIdAtReseat := Option.none,
+                           dropsAtReseat := 0, hold := Option.none },
+             .rerequested)
           else (some e, .none)
         -- No baseline readable at release: record the first readable one
         -- and wait for a later success.

@@ -1,9 +1,10 @@
 /-
   E2E/Tests/NodeOps.lean — node operations on a multi-node kind cluster
   (docs/design-node-operations-2026-10-19.md). Each test asserts the TARGET
-  guarantee of the design's acceptance table; on code without the planned
-  controls it FAILS, and that failure is the recorded reproduction of the
-  gap (current behaviour, measured). Precondition / unobservable outcomes
+  guarantee of the design's acceptance table. The planned-eviction guard is
+  implemented; the guarded suites pass with it. The `*-control` suites run the
+  same scenarios with the guard DISABLED as negative controls (see below).
+  Precondition / unobservable outcomes
   are reported as such, never as a verdict.
 
   Suites (each runs alone: `flare_e2e --filter node-ops-drain`):
@@ -361,10 +362,15 @@ def holdSuite : TestSuite :=
         run := holdTest { cfg, suite := "node-ops-hold", test := "d-behind" } }
     ] }
 
-/-- CONTROLS (design §4.5: compare old and new on the same SHA): the same A
-    and D scenarios with the eviction guard OFF — the behaviour without the
-    planned-eviction controls. Expected: A may lose acknowledged writes under
-    the 100 ms successor delay; D completes the drain (not held). -/
+/-- NEGATIVE CONTROLS (design §4.5: compare guard off and on, same SHA). The
+    planned-eviction guard IS implemented (design §7-8; the guarded A/D suites
+    pass). These suites DISABLE it on purpose and rerun the A and D scenarios.
+    A FAILURE here is the EXPECTED control outcome (A may lose acknowledged
+    writes under the 100 ms successor delay; D completes the drain, not held);
+    it is not a missing feature. A PASS here does not show safety without the
+    guard: A only "may" lose writes. The framework has no expected-failure
+    result (pass/fail/skip only), so the verdicts are unchanged and the
+    node-ops-control CI group is expected to be red. -/
 def drainControlSuite : TestSuite :=
   let cfg := cfgOf "node-drain-c" true false
   { name := "node-ops-drain-control"
@@ -375,7 +381,7 @@ def drainControlSuite : TestSuite :=
     onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
     afterEach := fun i => saveFullLogs cfg.«namespace» s!"after-test-{i}"
     tests := [
-      { name := "(A, CONTROL: no eviction guard) standard kubectl drain of the MASTER's worker under continuous writes with the successor delayed 100 ms: every acknowledged write on the new master and the rebuilt replica (expected to FAIL without the guard)"
+      { name := "(A, NEGATIVE CONTROL, guard DISABLED on purpose; a failure is the expected control outcome, a pass does not show safety) standard kubectl drain of the MASTER's worker under continuous writes with the successor delayed 100 ms: every acknowledged write on the new master and the rebuilt replica (guard disabled: expected control outcome = writes may be lost)"
         run := drainTest { cfg, suite := "node-ops-drain-control", test := "a-master-control" } true }
     ] }
 
@@ -389,7 +395,7 @@ def holdControlSuite : TestSuite :=
     onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
     afterEach := fun i => saveFullLogs cfg.«namespace» s!"after-test-{i}"
     tests := [
-      { name := "(D, CONTROL: no eviction guard) the replica is cut off and behind; a standard drain of the master's worker: held? (expected to FAIL without the guard)"
+      { name := "(D, NEGATIVE CONTROL, guard DISABLED on purpose; a failure is the expected control outcome) the replica is cut off and behind; a standard drain of the master's worker: held? (guard disabled: expected control outcome = drain not held)"
         run := holdTest { cfg, suite := "node-ops-hold-control", test := "d-behind-control" } }
     ] }
 

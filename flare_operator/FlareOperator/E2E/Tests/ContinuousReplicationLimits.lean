@@ -1641,7 +1641,12 @@ private def Ctx.releasePromotion (c : Ctx) : IO Unit := do
 /-- `threeInSync` is STRUCTURAL only (roles, item counts, bound source epoch).
     This is the value check: every copy's OWN storage (`dump`, read directly
     from each pod, not through a proxy) holds exactly the master's key/value
-    pairs, and there is at least one. An unreadable dump is not a match. -/
+    pairs, and there is at least one. An unreadable dump is not a match.
+    Scope of the claim: the copies agree WITH EACH OTHER, the master's dump
+    being the reference — not that every acknowledged write is kept (the test
+    does not track its written keys). `localDump` parses line by line and trims
+    whitespace/CR, so this is an equality check for this suite's single-line
+    ASCII values, not a byte-for-byte proof for arbitrary binary values. -/
 private def Ctx.copiesIdentical (c : Ctx) (m a b : String) : IO Bool := do
   let ns := c.cfg.«namespace»
   let dumpOf := fun (p : String) => do c.localDump ((← getPodIp p ns).getD "")

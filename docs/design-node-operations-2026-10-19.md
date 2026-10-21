@@ -330,6 +330,29 @@ master (旧)                 operator leader               新 master
 
 **判断点（数値は選んでいない。引数・record の欄）:** prepare の deadline T、旧権限の上界 oldUntil の算出、リース長 L / 約束の P、margin（ドリフト上限）、successor の自己 cancel を許すか（許さないと operator 不在時に R が戻らない）、Unknown で停止を維持する代償の承認（S1）、store の linearizable な実現（K8s の CAS / resourceVersion 等）と leader fencing の実現、commit の `now` をどの時計で測るか。**未実装:** runtime 配線、flared 側の write 拒否、永続化の IO・破損時の運用、membership の世代。
 
+### 12.7 terminal CAS アダプタの実装境界（f4。設計のみ。次のコードの前に書く。runtime 未配線・既定 OFF・未承認）
+
+**置き場所（既存の store を使う）。** operator が永続状態を持つ既存の仕組みは、K8s の ConfigMap を `kubectl get` / `create` / `replace -f`（metadata.resourceVersion 付き）で読み書きする方式（履歴 `{cr}-history`、`Main.lean` の `readHistory` / `persistHistory`。node-map `{cr}-node-map`）。intent も同じ種類の object に置く: ConfigMap `{cr}-promotion-intent-p{partition}`、`data.record` に `PromotionIntent.encode` の 1 行。partition に 1 つの intent record。新しい種類の store・CRD・時計は足さない。
+
+**CAS = resourceVersion。** 読みは (value, resourceVersion) | notFound | error。書きは `replace`（読んだ resourceVersion を載せる）で、他者が先に書いていれば conflict（API が拒否）。初回は `create`（存在すれば alreadyExists）。resourceVersion は不透明な token として等値の比較にだけ使い、大小や時間の意味は持たせない。
+
+**再読して決める場面。**
+- conflict: 書いた値は採用しない。再読し、**読み直した record に対して pure の決定をやり直す**（盲目の上書き・同じ値の再送はしない）。試行は有限（fuel）。尽きたら Unknown を返す（commit も cancel も確定したとは言わない）。
+- 返事の喪失（replace がエラー・timeout で、書けたか不明）: 結果は Unknown として扱い、再読する。再読した record が自分の書こうとした値と一致すれば「確定」、そうでなければ新しい record に対して決定をやり直す。再読もできなければ Unknown（R は S1 により約束を再開しない・昇格しない）。
+- get の error・notFound の区別: notFound（API が肯定した不在）だけが absent。error は absent ではない。
+
+**旧 leader の拒否。** record の `fence` が adopt 済みの最大 token。commit / cancel / prepared の記録は自分の token が record の fence と**一致するときだけ** pure 側で applied になる（stale は staleLeader）。resourceVersion だけでは「今の leader か」は分からない（別の leader が同じ resourceVersion を読んで書ける）ので、leader 権限は record 内の fence で、同時書込の排除は resourceVersion で、二重に見る。新 leader は先に adopt（token をより大きく CAS）する。
+
+**terminal が再起動をまたいで terminal のまま。** アダプタは状態を持たない（関数 + 外部 client）。決定はすべて「読んだ record」に対して行い、committed / cancelled の record に対しては pure の関数が applied を返さない（既証明の定理: terminal からの反転は applied にならない）。プロセスの再起動後は同じ ConfigMap を読み直すだけで terminal が見える。record が壊れている・未知 version のときは absent 扱いにせず refuse（S7）。terminal の record を新しい intent で置き換えることはこの単位では実装しない（intent の世代交代・GC は未設計。create は alreadyExists で拒否）。
+
+**時間（store の時計を使わない）。** K8s API から「store の CLOCK_BOOTTIME」を原子的に読むことはできない。この単位の CAS は時刻を一切読まない。CAS が与えるのは **commit と cancel の排他（terminal は 1 回だけ、どちらか）**だけ。時間に依存する部分は、その判断をする側が**自分の時計で**行い、`now` を引数で渡す:
+- 旧権限の終わりを待つのは後継 R が R 自身の時計（node + boot 付き `At`）で行う（S5。`oldUntil` は R の時計の値。他 node の値は `fromRequest` で期間から R の時計に直したものだけ）。
+- すべての時刻値は ClockId（node, boot）を持つ。`now` の ClockId が record の `deadline` と違えば pure 側が clockMismatch で refuse する（比較しない。安全側）。アダプタは時計を持たず、`now` を渡す呼び出し側が時計の持ち主を名乗る。
+- **残る設計判断（未解決。この単位では決めない）:** `deadline` は 1 つの時計の値なので、(a) leader の commit（operator の時計）と (b) successor の自己 cancel（R の時計）の両方を時間で制限することは、今の record では表せない。片方の時計に揃えた場合、もう片方は clockMismatch で拒否される（commit が拒否される = 昇格しない = 安全側で可用性が下がる）。どちらの時計に置くか、または deadline を 2 つ持つかは承認が要る。
+- 旧 master の権限の上界（oldUntil）の値の出し方、L / P / margin の数値は選ばない。
+
+**この単位でしないこと:** runtime への配線（Main・reconcile ループから呼ばない）、flared 側の write 拒否、kubectl を使う実 client（抽象 client と in-memory の fake だけ）、実 API のテスト、intent の世代交代・GC、停止方針の既定値。solo の master は止めず、operator 単独の故障で write は止まらない（アダプタは operator の中の部品で、flared の write 経路に載せない）。
+
 ### 8.7 partition の targeted run（a6ba116、E2E 39345347481）— writer の key を一意にした最初の測定
 
 - C: 合格（測定。failover の受入ではない）

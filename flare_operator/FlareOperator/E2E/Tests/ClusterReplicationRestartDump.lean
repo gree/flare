@@ -18,7 +18,11 @@
   resends it within a 120 s window.
 
   The destination's operator is held (scaled to 0) from before the delete
-  until 45 s after it, so the restarted flared listens without a role.
+  until 45 s after it. The restarted flared waits for its index server (that
+  operator) before it listens, so the roleless window (listening, no role
+  yet, SERVER_ERROR) opens only after the release and lasts ~6 s: the test
+  keeps writing through the source from the release until the resend counter
+  moves, so a forward lands inside it.
 
   Three verdicts, separate tests:
     1. arrived or counted (every acknowledged change on the destination, or
@@ -262,6 +266,26 @@ def suite : TestSuite := {
         match ← kubectl ["scale", "deployment", cfgDst.operatorName, "-n", cfgDst.«namespace», "--replicas=1"] with
         | .error e => return .fail s!"could not release the destination operator: {e}"
         | .ok _ => pure ()
+        -- The restarted flared does not listen until the destination's
+        -- operator (its index server) answers, so the roleless window opens
+        -- only AFTER the release and lasts until the operator's next pass
+        -- assigns the role (~6 s; rc68 attempt 2: listening 16:29:57.8, master
+        -- 16:30:04.0, and no write was in flight then, so only connection
+        -- refusals were seen). Keep writing through the source from the
+        -- release until a forward is answered SERVER_ERROR and resent (counter
+        -- moved), at most 90 s, so a forward lands inside the window. The keys
+        -- rotate over five names and are tracked like the others.
+        let winKeys := (List.range 5).map (s!"rst_win_{·}")
+        let mut winWrites := 0
+        let mut winRetried := r0
+        for n in [0:300] do
+          let k := s!"rst_win_{n % 5}"
+          if !(← setSrc sIp k s!"w{n}") then unacked := unacked ++ [k]
+          winWrites := n + 1
+          IO.sleep 300
+          winRetried ← statNat cfgSrc sIp "cluster_replication[forward_server_error_retried]"
+          if winRetried > r0 then break
+        IO.eprintln s!"# wrote {winWrites} key update(s) through the source after the release; forward_server_error_retried {r0} → {winRetried}"
         if !unacked.isEmpty then
           return .fail s!"the source did not acknowledge {unacked} — the premise does not hold"
         let back ← waitForCondition "the destination master answers again" 300 do
@@ -284,7 +308,7 @@ def suite : TestSuite := {
           postKeys := postKeys ++ [k]
           if !(← setSrc sIp k s!"q{j}") then
             return .fail s!"the source did not acknowledge {k} after the restart"
-        let tracked := preKeys ++ newKeys ++ postKeys
+        let tracked := preKeys ++ newKeys ++ winKeys ++ postKeys
         -- the resend window is 120 s; wait past it before judging
         let _ ← waitForCondition "every tracked key agrees on source and destination" 240 do
           return (← divergent sIp dIp tracked).isEmpty

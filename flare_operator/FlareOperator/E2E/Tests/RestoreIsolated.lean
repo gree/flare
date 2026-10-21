@@ -278,13 +278,16 @@ private def negativeObservation (c : ClusterConfig) (secs : Nat) : IO (Except St
   return .ok seen
 
 /-- What one `stats` answer from the copy at `ip` says about itself (not through
-    a proxy): the pod's UID, flared's pid, its copy id, the (lineage, epoch)
-    history it holds — rocksdb_master_id and its OWN rocksdb_source_epoch, never
-    the epoch of a past rebuild — and its role/state/partition by its own view. -/
-private structure NodeSnap where
+    a proxy): the pod's UID, flared's pid and its reconstruction boot id (a
+    container restart or PID reuse in the same pod changes the boot id, the pid
+    alone cannot tell), its copy id, the (lineage, epoch) history it holds —
+    rocksdb_master_id and its OWN rocksdb_source_epoch, never the epoch of a
+    past rebuild — and its role/state/partition by its own view. -/
+structure NodeSnap where
   pod : String
   uid : String
   pid : String
+  bootId : String
   copyId : String
   lineage : String
   epoch : String
@@ -293,27 +296,35 @@ private structure NodeSnap where
   partition : String
   deriving BEq, Repr
 
-/-- One consistent snapshot of `pod`; none when any identity/history field is
-    missing or empty. -/
+/-- Parse one `stats` reply. none when the reply is incomplete (no terminating
+    `END` line) or carries an ERROR line, or when any identity/history field
+    (including `reconstruction_boot_id`) is missing or empty. The reply is NOT
+    an atomic snapshot: flared reads its stats under several locks, so the
+    fields come from one reply but are read at slightly different moments. -/
+def parseNodeSnap (pod uid out : String) : Option NodeSnap :=
+  let lines := (out.splitOn "\n").map fun l => (l.replace "\r" "").trim
+  if !lines.any (· == "END") || lines.any (fun l => l.startsWith "ERROR" || l.startsWith "SERVER_ERROR" || l.startsWith "CLIENT_ERROR") then none
+  else
+    let get := fun (key : String) => lines.findSome? fun t =>
+      if t.startsWith s!"STAT {key} " then some (t.drop (s!"STAT {key} ").length).trim else none
+    match get "pid", get "reconstruction_boot_id", get "rocksdb_copy_id", get "rocksdb_master_id",
+          get "rocksdb_source_epoch", get "own_role", get "own_state", get "own_partition" with
+    | some pid, some boot, some cid, some mid, some ep, some role, some st, some part =>
+      if uid.isEmpty || pid.isEmpty || boot.isEmpty || cid.isEmpty || mid.isEmpty || ep.isEmpty then none
+      else some { pod, uid, pid, bootId := boot, copyId := cid, lineage := mid, epoch := ep, role, state := st, partition := part }
+    | _, _, _, _, _, _, _, _ => none
+
+/-- One reply from `pod` (see `parseNodeSnap`: not an atomic snapshot). -/
 private def nodeSnap (c : ClusterConfig) (pod : String) : IO (Option NodeSnap) := do
   let ns := c.«namespace»
   let uid ← podUidOf pod ns
   let some ip ← getPodIp pod ns | return none
   match ← execInDebugPod c.debugPod ns s!"printf 'stats\\r\\n' | nc -w 3 {ip} {c.flarePort}" with
   | .error _ => return none
-  | .ok out =>
-    let get := fun (key : String) => (out.splitOn "\n").findSome? fun l =>
-      let t := (l.replace "\r" "").trim
-      if t.startsWith s!"STAT {key} " then some (t.drop (s!"STAT {key} ").length).trim else none
-    match get "pid", get "rocksdb_copy_id", get "rocksdb_master_id", get "rocksdb_source_epoch",
-          get "own_role", get "own_state", get "own_partition" with
-    | some pid, some cid, some mid, some ep, some role, some st, some part =>
-      if uid.isEmpty || pid.isEmpty || cid.isEmpty || mid.isEmpty || ep.isEmpty then return none
-      return some { pod, uid, pid, copyId := cid, lineage := mid, epoch := ep, role, state := st, partition := part }
-    | _, _, _, _, _, _, _ => return none
+  | .ok out => return parseNodeSnap pod uid out
 
 /-- The node holds the P0 master role by its OWN view. -/
-private def NodeSnap.isP0Master (s : NodeSnap) : Bool :=
+def NodeSnap.isP0Master (s : NodeSnap) : Bool :=
   s.role == "master" && s.state == "active" && s.partition == "0"
 
 /-- The authority's record for partition 0 (ConfigMap `{name}-history`):
@@ -334,7 +345,7 @@ private def authorityHistory (c : ClusterConfig) : IO (Option (String × String 
 /-- Wait until partition 0's master, as the operator's map names it, holds the
     master role by its own view and reports on the node itself the (lineage,
     epoch) the authority recorded, no promotion intent is pending, and the same
-    (generation, pod, pod UID, pid, copy id, lineage, epoch) has been observed
+    (generation, pod, pod UID, pid, boot id, copy id, lineage, epoch) has been observed
     for `stableMs`. Returns the generation and the node snapshot that passed
     that check (nothing re-read afterwards), or the last observation. -/
 private def settledP0History (c : ClusterConfig) (secs stableMs : Nat)

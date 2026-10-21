@@ -35,6 +35,7 @@ import FlareOperator.E2E.TraceMatch
 import FlareOperator.E2E.Helpers
 import FlareOperator.E2E.PromotionTimeline
 import FlareOperator.E2E.Tests.NodeOps
+import FlareOperator.E2E.Tests.RestoreIsolated
 import FlareOperator.StateMachine.WriteLeaseModel
 import FlareOperator.StateMachine.SourceEligibility
 import FlareOperator.StateMachine.RebuildConcurrency
@@ -3145,6 +3146,21 @@ def checkMigrationForwardGate (ctx : Ctx) : IO Unit := do
 
 private def hasSub (s sub : String) : Bool := (s.splitOn sub).length > 1
 
+def checkNodeSnapParse (ctx : Ctx) : IO Unit := do
+  let body (boot : String) : String :=
+    "STAT pid 42\r\nSTAT reconstruction_boot_id " ++ boot ++ "\r\nSTAT rocksdb_copy_id c1\r\nSTAT rocksdb_master_id m1\r\nSTAT rocksdb_source_epoch 7\r\nSTAT own_role master\r\nSTAT own_state active\r\nSTAT own_partition 0\r\n"
+  let parse := FlareOperator.E2E.Tests.RestoreIsolated.parseNodeSnap "p" "u"
+  let a := parse (body "b1" ++ "END\r\n")
+  check ctx "nodeSnap parse: a complete reply gives the snapshot with its boot id"
+    (match a with | some s => s.bootId == "b1" && s.pid == "42" && s.epoch == "7" && s.isP0Master | none => false)
+  check ctx "nodeSnap parse: no terminating END is none (incomplete reply)" (parse (body "b1")).isNone
+  check ctx "nodeSnap parse: an ERROR line is none" (parse (body "b1" ++ "ERROR\r\nEND\r\n")).isNone
+  check ctx "nodeSnap parse: same pid, changed boot id is a different snapshot (restart / PID reuse)"
+    (a.isSome && parse (body "b2" ++ "END\r\n") != a && (parse (body "b2" ++ "END\r\n")).isSome)
+  check ctx "nodeSnap parse: an empty boot id is none" (parse (body "" ++ "END\r\n")).isNone
+  check ctx "nodeSnap parse: a missing boot id is none"
+    (parse ((body "b1").replace "STAT reconstruction_boot_id b1\r\n" "" ++ "END\r\n")).isNone
+
 open FlareOperator.K8s.Bridge in
 /-- Opt-in cross-cluster snapshot-push switch (default unchanged). -/
 def checkSnapshotPushSwitch (ctx : Ctx) : IO Unit := do
@@ -3245,6 +3261,7 @@ def run : IO UInt32 := do
   checkStaleR3Refill ctx
   checkMigrationForwardGate ctx
   checkSnapshotPushSwitch ctx
+  checkNodeSnapParse ctx
   let failures ← ctx.failures.get
   let n ← ctx.count.get
   IO.println s!"1..{n}"

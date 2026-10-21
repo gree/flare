@@ -194,6 +194,8 @@ storage_rocksdb::storage_rocksdb(
 	this->_tomb_live = 0;
 	this->_tomb_live_valid = false;
 	this->_count_get_fail_for_test = 0;
+	this->_gen_get_fail_for_test = 0;
+	this->_switch_binding_fail_for_test = false;
 	this->_tomb_scan_hook = NULL;
 	this->_tomb_scan_fail_for_test = false;
 	this->_data_path = this->_data_dir + "/flare.rocksdb";
@@ -524,11 +526,18 @@ int storage_rocksdb::_load_or_init_generations() {
 	pthread_rwlock_wrlock(&this->_mutex_generations);
 	int rc = 0;
 	bool minted_epoch_now = false;
+	// all-or-nothing: the slots are assigned only when BOTH were established,
+	// so a failure on the second never leaves a half-updated pair
+	string loaded[sizeof(gens) / sizeof(gens[0])];
 	for (size_t i = 0; i < sizeof(gens) / sizeof(gens[0]); i++) {
 		string value;
 		rocksdb::Status st = this->_db->Get(this->_read_options, gens[i].key, &value);
+		if (this->_gen_get_fail_for_test == (int)i + 1) {
+			this->_gen_get_fail_for_test = 0;
+			st = rocksdb::Status::IOError("injected generation read failure");
+		}
 		if (st.ok() && !value.empty()) {
-			*gens[i].slot = value;
+			loaded[i] = value;
 			continue;
 		}
 		if (!st.ok() && !st.IsNotFound()) {
@@ -541,9 +550,14 @@ int storage_rocksdb::_load_or_init_generations() {
 			rc = -1;
 			break;
 		}
-		*gens[i].slot = minted;
+		loaded[i] = minted;
 		if (gens[i].slot == &this->_source_epoch) {
 			minted_epoch_now = true;
+		}
+	}
+	if (rc == 0) {
+		for (size_t i = 0; i < sizeof(gens) / sizeof(gens[0]); i++) {
+			*gens[i].slot = loaded[i];
 		}
 	}
 	// The epoch's reason: read it back; a freshly minted epoch on a new DB is
@@ -865,15 +879,28 @@ int storage_rocksdb::switch_to_staging(const string& attempt, const string& expe
 			this->_copy_identity_consistent = copy_fs::read_small_file(this->_data_path + "/" + copy_fs::kCopyIdFile, f) == 0 && f == v;
 		}
 		this->_clear_header_cache();
+		// the initialisation below is part of the switch's SUCCESS: if any
+		// step fails the new copy is unverified, the switch is UNRESOLVED
+		// (intent and both copies kept, nothing activated; the next open
+		// resolves it from what is on disk)
 		if (this->_load_or_init_generations() < 0) {
-			log_err("copy switch: generations of the new live copy could not be loaded", 0);
+			this->_close_db();
+			this->_db = NULL;
+			this->_mark_switch_unresolved("generations of the new live copy could not be loaded (intent kept)");
+			break;
 		}
 		{
 			string mid;
-			if (this->_db->Get(this->_read_options, kReplMasterIdKey, &mid).ok() && !mid.empty()) {
+			rocksdb::Status ms = this->_db->Get(this->_read_options, kReplMasterIdKey, &mid);
+			if (ms.ok() && !mid.empty()) {
 				pthread_rwlock_wrlock(&this->_mutex_master_id);
 				this->_master_id = mid;
 				pthread_rwlock_unlock(&this->_mutex_master_id);
+			} else if (!ms.ok() && !ms.IsNotFound()) {
+				this->_close_db();
+				this->_db = NULL;
+				this->_mark_switch_unresolved("the master id of the new live copy could not be read: " + ms.ToString() + " (intent kept)");
+				break;
 			}
 		}
 		this->_tombstone_sweep_cursor.clear();
@@ -897,9 +924,13 @@ int storage_rocksdb::switch_to_staging(const string& attempt, const string& expe
 			rocksdb::WriteBatch bb;
 			bb.Delete(kRestoredUnverifiedKey);
 			bb.Delete(kPartitionBindingKey);
-			rocksdb::Status bs = this->_db->Write(bwo, &bb);
+			rocksdb::Status bs = this->_switch_binding_fail_for_test
+				? rocksdb::Status::IOError("injected binding clear failure") : this->_db->Write(bwo, &bb);
 			if (!bs.ok()) {
-				log_err("copy switch: the source's partition binding / restored flag could not be cleared: %s", bs.ToString().c_str());
+				this->_close_db();
+				this->_db = NULL;
+				this->_mark_switch_unresolved("the source's partition binding / restored flag could not be cleared: " + bs.ToString() + " (intent kept)");
+				break;
 			}
 		}
 		if (copy_fs::remove_intent(this->_data_dir) < 0) {

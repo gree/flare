@@ -1947,6 +1947,52 @@ void test_switch_to_staging_retains_the_old_copy() {
 	drop_rocksdb(s, wal_master_dir);
 }
 
+// CPP-01: the new copy's initialisation (generation load, master id read,
+// binding / restored-flag clear) is part of switch_to_staging's success. One
+// failure point per test: the switch is UNRESOLVED, the intent and BOTH
+// copies stay on disk, the in-memory generations are not half-updated, the
+// caller's failure branch (is_switch_unresolved) is taken.
+namespace {
+	void check_switch_init_failure(int gen_fail, bool binding_fail) {
+		storage_rocksdb* s = make_rocksdb(wal_master_dir);
+		storage_set_string(s, "k", "old");
+		const string old_id = s->get_copy_id();
+		const string before = s->debug_raw_generations();
+		const string new_id = make_staging_copy(wal_master_dir, "f1", "k", "new");
+		s->set_generation_get_fail_for_test(gen_fail);
+		s->set_switch_binding_fail_for_test(binding_fail);
+		cut_assert_equal_int(-1, s->switch_to_staging("f1", new_id));
+		cut_assert_true(s->is_switch_unresolved());
+		cut_assert_false(s->copy_identity_consistent());
+		string why;
+		cut_assert_true(s->promotion_forbidden(why));
+		if (gen_fail != 0) {
+			// the load failed: not even the first generation was taken over
+			cut_assert_equal_string(before.c_str(), s->debug_raw_generations().c_str());
+		}
+		// intent kept; the new live copy and the old (retained) copy are on disk
+		struct stat st;
+		const string dir = wal_master_dir;
+		cut_assert_equal_int(0, ::stat((dir + "/" + copy_fs::kIntentFile).c_str(), &st));
+		cut_assert_equal_string(new_id.c_str(), read_file_s(dir + "/flare.rocksdb/COPY_ID").c_str());
+		cut_assert_equal_string(old_id.c_str(), read_file_s(dir + "/retained-f1/COPY_ID").c_str());
+		// the same process neither retries nor resets
+		cut_assert_equal_int(-1, s->switch_to_staging("f1", new_id));
+		cut_assert_equal_int(-1, s->hard_reset());
+		delete s;
+		// the next start resolves the intent from what is on disk
+		storage_rocksdb* t = new storage_rocksdb(dir, 32, 4, 16, 4, 2, 86400, 1024);
+		cut_assert_equal_int(0, t->open());
+		cut_assert_false(t->is_switch_unresolved());
+		delete t;
+		cut_remove_path(wal_master_dir, NULL);
+	}
+}
+
+void test_switch_to_staging_generation_load_fails_stays_unresolved() { check_switch_init_failure(1, false); }
+void test_switch_to_staging_second_generation_fails_leaves_memory_unchanged() { check_switch_init_failure(2, false); }
+void test_switch_to_staging_binding_clear_fails_stays_unresolved() { check_switch_init_failure(0, true); }
+
 // IN-PLACE RESTORE (docs/plan-inplace-restore-retention.md): the hook left
 // staging-restore-<ts> (RESTORED marker) named in RESTORE.switch; the open
 // switches it in and RETAINS the live copy, with no record (never reaped)

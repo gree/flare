@@ -599,6 +599,18 @@ public:
 	/** test seam: the raw-batch count handlers' DB reads fail (IOError):
 	    1 = the curr_items handler, 2 = the tombstone handler, 0 = off */
 	void set_count_get_fail_for_test(int which) { this->_count_get_fail_for_test = which; }
+	/** test seams for switch_to_staging: the next generation load's Get of
+	    1 = the source epoch / 2 = the incarnation fails once (0 = off); the
+	    binding / restored-flag clear Write fails */
+	void set_generation_get_fail_for_test(int which) { this->_gen_get_fail_for_test = which; }
+	void set_switch_binding_fail_for_test(bool on) { this->_switch_binding_fail_for_test = on; }
+	/** the in-memory generations regardless of the broken flag (tests) */
+	std::string debug_raw_generations() {
+		pthread_rwlock_rdlock(&this->_mutex_generations);
+		std::string v = this->_source_epoch + "|" + this->_incarnation;
+		pthread_rwlock_unlock(&this->_mutex_generations);
+		return v;
+	}
 private:
 	/** the whole-DB lock in write mode for a COPY change: first marks a
 	    writer as waiting, so a running exact count stops */
@@ -614,6 +626,8 @@ private:
 	int64_t						_tomb_live;
 	bool						_tomb_live_valid;
 	int							_count_get_fail_for_test;
+	int							_gen_get_fail_for_test;
+	bool						_switch_binding_fail_for_test;
 	rocksdb::Status _count_batch(const rocksdb::WriteBatch& batch, rocksdb::WriteBatch::Handler& h, rocksdb::WriteBatch::Handler& th);
 	void _tomb_add(int64_t delta, const char* where);
 	void _tomb_set(uint64_t n, bool valid, const char* why);

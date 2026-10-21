@@ -51,12 +51,21 @@ structure Ctx where
   failures : IO.Ref (List String)
   count : IO.Ref Nat
 
-def check (ctx : Ctx) (name : String) (ok : Bool) : IO Unit := do
+def checkB (ctx : Ctx) (name : String) (ok : Bool) : IO Unit := do
   ctx.count.modify (· + 1)
   if ok then IO.println s!"ok - {name}"
   else
     IO.println s!"not ok - {name}"
     ctx.failures.modify (· ++ [name])
+
+/-- `check` takes its condition as a thunk so the `&&`/`==` case-splits stay inside a
+closure: the code generator would otherwise float them over the continuation of the whole
+test body and duplicate it (UnitTests.c grew to 3M lines, 48+ min in clang -O3). -/
+@[noinline] def checkT (ctx : Ctx) (name : String) (ok : Unit → Bool) : IO Unit :=
+  checkB ctx name (ok ())
+
+local macro "check " ctx:term:max name:term:max ok:term:max : term =>
+  `(checkT $ctx $name (fun _ => $ok))
 
 def node (role : FlareRole) (state : FlareState) (partition : Int) (name : String) : FlareNode :=
   { serverName := name, serverPort := 12121, role := role, state := state, partition := partition }

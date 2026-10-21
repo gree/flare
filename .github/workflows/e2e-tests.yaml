@@ -250,8 +250,41 @@ jobs:
           sudo mv kubectl /usr/local/bin/kubectl
 
       - name: Install helm
+        # Pinned release + checksum instead of piping get-helm-3 into bash:
+        # in 39688319796 that script exited "Failed to install helm" before kind
+        # was created (authority / cross-cluster legs), and curl's --retry does
+        # not cover a failure inside the piped script. Likely path (consistent
+        # with the log, not proven): get-helm-3's latest-version lookup
+        # (checkDesiredVersion) got a reply without a "v..." line, and under
+        # set -e its `grep "^v[0-9]"` exited 1 into the EXIT trap, so the
+        # detailed "Could not retrieve..." message never printed. The HTTP
+        # status / body of that lookup were not logged: the network/CDN cause
+        # is unknown. A pinned version removes the lookup altogether.
+        # v3.22.1 is the version get-helm-3 was installing. The whole
+        # download+verify is retried a bounded number of times, each attempt
+        # logged.
+        env:
+          HELM_VERSION: v3.22.1
+          HELM_SHA256: 896cf63684a42a723d61c980369d6e588330927deb13676ca0d85006dd6da0ea
         run: |
-          curl --retry 5 --retry-delay 3 --retry-all-errors -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          set -euo pipefail
+          tgz="helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          for attempt in 1 2 3 4 5; do
+            echo "helm install attempt ${attempt}: https://get.helm.sh/${tgz}"
+            rm -f "$tgz"
+            if curl --retry 3 --retry-delay 3 --retry-all-errors -fsSL -o "$tgz" "https://get.helm.sh/${tgz}" \
+               && echo "${HELM_SHA256}  ${tgz}" | sha256sum -c -; then
+              tar -xzf "$tgz" linux-amd64/helm
+              sudo install -m 0755 linux-amd64/helm /usr/local/bin/helm
+              rm -rf "$tgz" linux-amd64
+              helm version
+              exit 0
+            fi
+            echo "helm install attempt ${attempt} failed"
+            sleep $((attempt * 5))
+          done
+          echo "::error::could not install helm ${HELM_VERSION} after 5 attempts"
+          exit 1
 
       - name: Test Helm startup memory configuration
         # Helm is installed above; test startup ConfigMap seeding before builds.

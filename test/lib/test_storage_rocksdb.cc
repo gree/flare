@@ -1989,6 +1989,105 @@ namespace {
 	}
 }
 
+// CPP-01 follow-up: the switch-specific initialisation survives a restart.
+// The staging copy carries a REAL source binding and restored flag; the clear
+// fails at the switch; the next start (roll-forward) must clear them BEFORE
+// the intent goes, and refuse to serve (intent kept) when it fails again.
+namespace {
+	const char kSrcBinding[] = "v1 partition=0 partitions=1 size=1024 hash=jenkins resolver=modular hint=1 virtual=4096";
+
+	// a staging copy that has the source's partition binding AND restored flag
+	string make_flagged_staging_copy(const char* dir, const char* a, const string& key, const string& value) {
+		const char sdir[] = "tmp_rocksdb_copy_staging_build";
+		storage_rocksdb* t = make_rocksdb(sdir);
+		storage_set_string(t, key, value);
+		string why;
+		cut_assert_equal_int(0, t->check_partition_binding(kSrcBinding, true, why));
+		drop_rocksdb_noremove(t);
+		FILE* f = fopen((string(sdir) + "/flare.rocksdb/RESTORED").c_str(), "w");
+		cut_assert_not_null(f);
+		fclose(f);
+		t = make_rocksdb(sdir);		// the marker becomes the restored flag
+		cut_assert_true(t->is_restored_unverified());
+		cut_assert_equal_string(kSrcBinding, t->get_partition_binding().c_str());
+		const string id = t->get_copy_id();
+		drop_rocksdb_noremove(t);
+		cut_assert_equal_int(0, rename((string(sdir) + "/flare.rocksdb").c_str(), (string(dir) + "/staging-" + a).c_str()));
+		cut_remove_path(sdir, NULL);
+		return id;
+	}
+
+	// the failed switch of a flagged copy, then the process "dies"
+	void flagged_switch_fails(string& old_id, string& new_id) {
+		storage_rocksdb* s = make_rocksdb(wal_master_dir);
+		storage_set_string(s, "k", "old");
+		old_id = s->get_copy_id();
+		new_id = make_flagged_staging_copy(wal_master_dir, "f1", "k", "new");
+		s->set_switch_binding_fail_for_test(true);
+		cut_assert_equal_int(-1, s->switch_to_staging("f1", new_id));
+		cut_assert_true(s->is_switch_unresolved());
+		delete s;
+	}
+
+	storage_rocksdb* raw_open(bool binding_fail, int& rc) {
+		storage_rocksdb* t = new storage_rocksdb(wal_master_dir, 32, 4, 16, 4, 2, 86400, 1024);
+		t->set_switch_binding_fail_for_test(binding_fail);
+		rc = t->open();
+		return t;
+	}
+}
+
+void test_switch_roll_forward_at_start_clears_the_inherited_flags() {
+	string old_id, new_id;
+	flagged_switch_fails(old_id, new_id);
+	const string dir = wal_master_dir;
+	int rc = 0;
+	storage_rocksdb* t = raw_open(false, rc);
+	cut_assert_equal_int(0, rc);
+	cut_assert_false(t->is_switch_unresolved());
+	cut_assert_equal_string(new_id.c_str(), t->get_copy_id().c_str());
+	cut_assert_equal_string("new", get_value(t, "k").c_str());
+	cut_assert_equal_string("", t->get_partition_binding().c_str());
+	cut_assert_false(t->is_restored_unverified());
+	cut_assert_equal_string(old_id.c_str(), read_file_s(dir + "/retained-f1/COPY_ID").c_str());
+	cut_assert_equal_string("", read_file_s(dir + "/" + copy_fs::kIntentFile).c_str());
+	delete t;
+	cut_remove_path(wal_master_dir, NULL);
+}
+
+void test_switch_roll_forward_clear_failing_again_refuses_to_open_and_keeps_the_intent() {
+	string old_id, new_id;
+	flagged_switch_fails(old_id, new_id);
+	const string dir = wal_master_dir;
+	int rc = 0;
+	storage_rocksdb* t = raw_open(true, rc);
+	cut_assert_equal_int(-1, rc);
+	delete t;
+	struct stat st;
+	cut_assert_equal_int(0, ::stat((dir + "/" + copy_fs::kIntentFile).c_str(), &st));
+	cut_assert_equal_string(new_id.c_str(), read_file_s(dir + "/flare.rocksdb/COPY_ID").c_str());
+	cut_assert_equal_string(old_id.c_str(), read_file_s(dir + "/retained-f1/COPY_ID").c_str());
+	// and the start after that, when the clear works, serves the new copy cleanly
+	t = raw_open(false, rc);
+	cut_assert_equal_int(0, rc);
+	cut_assert_equal_string(new_id.c_str(), t->get_copy_id().c_str());
+	cut_assert_equal_string("", t->get_partition_binding().c_str());
+	cut_assert_false(t->is_restored_unverified());
+	cut_assert_equal_int(-1, ::stat((dir + "/" + copy_fs::kIntentFile).c_str(), &st));
+	delete t;
+	cut_remove_path(wal_master_dir, NULL);
+}
+
+void test_switch_to_staging_success_clears_the_inherited_flags() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	storage_set_string(s, "k", "old");
+	const string new_id = make_flagged_staging_copy(wal_master_dir, "f1", "k", "new");
+	cut_assert_equal_int(0, s->switch_to_staging("f1", new_id));
+	cut_assert_equal_string("", s->get_partition_binding().c_str());
+	cut_assert_false(s->is_restored_unverified());
+	drop_rocksdb(s, wal_master_dir);
+}
+
 void test_switch_to_staging_generation_load_fails_stays_unresolved() { check_switch_init_failure(1, false); }
 void test_switch_to_staging_second_generation_fails_leaves_memory_unchanged() { check_switch_init_failure(2, false); }
 void test_switch_to_staging_binding_clear_fails_stays_unresolved() { check_switch_init_failure(0, true); }

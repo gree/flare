@@ -803,6 +803,45 @@ bool storage_rocksdb::_refuse_if_switch_unresolved(const char* who) {
 	return true;
 }
 
+rocksdb::Status storage_rocksdb::_clear_inherited_binding() {
+	rocksdb::WriteOptions bwo;
+	bwo.sync = true;
+	rocksdb::WriteBatch bb;
+	bb.Delete(kRestoredUnverifiedKey);
+	bb.Delete(kPartitionBindingKey);
+	if (this->_switch_binding_fail_for_test) {
+		return rocksdb::Status::IOError("injected binding clear failure");
+	}
+	return this->_db->Write(bwo, &bb);
+}
+
+int storage_rocksdb::_finish_roll_forward(const switch_intent& in) {
+	rocksdb::Status st = this->_open_db(this->_data_path);
+	if (!st.ok()) {
+		log_err("copy switch roll-forward: the new live copy does not open (%s): refusing to serve it, intent kept", st.ToString().c_str());
+		this->_close_db();
+		return -1;
+	}
+	string v;
+	rocksdb::Status cs = this->_db->Get(this->_read_options, kCopyIdKey, &v);
+	if (!cs.ok() || v != in.new_id) {
+		log_err("copy switch roll-forward: the live copy is [%s], not the intent's new copy %s: refusing to serve it, intent kept", cs.ok() ? v.c_str() : cs.ToString().c_str(), in.new_id.c_str());
+		this->_close_db();
+		return -1;
+	}
+	rocksdb::Status bs = this->_clear_inherited_binding();
+	this->_close_db();
+	if (!bs.ok()) {
+		log_err("copy switch roll-forward: the source's partition binding / restored flag could not be cleared (%s): refusing to serve the copy, intent kept", bs.ToString().c_str());
+		return -1;
+	}
+	if (copy_fs::remove_intent(this->_data_dir) < 0) {
+		return -1;
+	}
+	log_notice("copy switch roll-forward DONE: live is copy %s (inherited binding / restored flag cleared)", in.new_id.c_str());
+	return 0;
+}
+
 int storage_rocksdb::switch_to_staging(const string& attempt, const string& expected_new_id) {
 	if (this->_refuse_if_switch_unresolved("switch_to_staging")) {
 		return -1;
@@ -889,19 +928,14 @@ int storage_rocksdb::switch_to_staging(const string& attempt, const string& expe
 			this->_mark_switch_unresolved("generations of the new live copy could not be loaded (intent kept)");
 			break;
 		}
-		{
-			string mid;
-			rocksdb::Status ms = this->_db->Get(this->_read_options, kReplMasterIdKey, &mid);
-			if (ms.ok() && !mid.empty()) {
-				pthread_rwlock_wrlock(&this->_mutex_master_id);
-				this->_master_id = mid;
-				pthread_rwlock_unlock(&this->_mutex_master_id);
-			} else if (!ms.ok() && !ms.IsNotFound()) {
-				this->_close_db();
-				this->_db = NULL;
-				this->_mark_switch_unresolved("the master id of the new live copy could not be read: " + ms.ToString() + " (intent kept)");
-				break;
-			}
+		// the master id is the NEW copy's: read it, or mint and persist one
+		// as open() does; the old copy's in-memory id is never kept (a
+		// NotFound / empty id is success only through that minting)
+		if (this->_load_or_generate_master_id() < 0) {
+			this->_close_db();
+			this->_db = NULL;
+			this->_mark_switch_unresolved("the master id of the new live copy could not be loaded or created (intent kept)");
+			break;
 		}
 		this->_tombstone_sweep_cursor.clear();
 		this->_seed_curr_items_by_scan("copy switch");
@@ -919,13 +953,7 @@ int storage_rocksdb::switch_to_staging(const string& attempt, const string& expe
 		{
 			// the staged copy was received from a source: not a RESTORED copy
 			// (a source's flag must not travel), re-bound when it is Active
-			rocksdb::WriteOptions bwo;
-			bwo.sync = true;
-			rocksdb::WriteBatch bb;
-			bb.Delete(kRestoredUnverifiedKey);
-			bb.Delete(kPartitionBindingKey);
-			rocksdb::Status bs = this->_switch_binding_fail_for_test
-				? rocksdb::Status::IOError("injected binding clear failure") : this->_db->Write(bwo, &bb);
+			rocksdb::Status bs = this->_clear_inherited_binding();
 			if (!bs.ok()) {
 				this->_close_db();
 				this->_db = NULL;
@@ -1566,8 +1594,16 @@ int storage_rocksdb::open() {
 	// unfinished staging copies.
 	if (!this->_staging && copy_fs::dir_exists(this->_data_dir)) {
 		string report;
-		if (copy_fs::recover(this->_data_dir, "flare.rocksdb", report) < 0) {
+		switch_intent forward;
+		if (copy_fs::recover(this->_data_dir, "flare.rocksdb", report, &forward) < 0) {
 			log_err("storage open refused: the copy switch could not be resolved (%s)", report.c_str());
+			return -1;
+		}
+		// a roll-forward keeps the intent until the new copy's switch-specific
+		// initialisation (clearing the inherited binding / restored flag) is
+		// done and synced; if that fails the copy is not served
+		if (!forward.attempt.empty() && this->_finish_roll_forward(forward) < 0) {
+			log_err("storage open refused: the rolled-forward copy could not be initialised (switch intent kept)", 0);
 			return -1;
 		}
 		// an in-place restore the hook prepared: switched in with the live

@@ -55,6 +55,8 @@ using namespace std;
 namespace gree {
 namespace flare {
 
+struct switch_intent;
+
 /**
  *  storage_rocksdb class - RocksDB storage backend
  */
@@ -383,6 +385,15 @@ protected:
 	// in-place restore (docs/plan-inplace-restore-retention.md): the switch
 	// the restore hook prepared (RESTORE.switch naming staging-<attempt>)
 	int _apply_restore_switch();
+	/** the source-specific initialisation of a switched-in copy (clear the
+	    inherited partition binding / restored flag, synced); shared by
+	    switch_to_staging and the start-time roll-forward. The DB is open. */
+	rocksdb::Status _clear_inherited_binding();
+	/** start-time roll-forward of an intent whose new copy is live: open it,
+	    verify its copy id is the intent's new id, clear the inherited
+	    binding / flag, close, and only then remove the intent. -1 = refuse
+	    to serve (intent kept). */
+	int _finish_roll_forward(const switch_intent& in);
 	void _release_snapshot_serve();
 	// marker present and the live copy is the post-quarantine empty copy (or
 	// the crash came before it was recorded)

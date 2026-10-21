@@ -71,7 +71,14 @@ int remove_tree_path(const string& path);
 // At open, BEFORE the live DB is opened: resolve a switch intent from what
 // exists on disk (design §4.2). 0 = nothing to do or resolved; -1 = stop
 // (inconsistent: nothing touched; the caller refuses to open).
-int recover(const string& data_dir, const string& live_name, string& report);
+//
+// `forward` (optional): when given, a ROLL-FORWARD decision does NOT remove
+// the intent: *forward receives the intent and 0 is returned with the intent
+// still on disk; the caller finishes the switch-specific initialisation of
+// the new copy and then calls remove_intent(). forward->attempt stays empty
+// for every other outcome (abort / rollback / nothing to do keep their
+// semantics: the intent is already gone).
+int recover(const string& data_dir, const string& live_name, string& report, switch_intent* forward = NULL);
 // After recover(): remove every staging copy (unfinished attempts). Refuses
 // while an intent is present. Returns the number removed, -1 on refusal.
 int cleanup_staging(const string& data_dir);

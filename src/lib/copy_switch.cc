@@ -264,7 +264,10 @@ int rename_durable(const string& data_dir, const string& from, const string& to)
 	return fsync_dir(data_dir);
 }
 
-int recover(const string& data_dir, const string& live_name, string& report) {
+int recover(const string& data_dir, const string& live_name, string& report, switch_intent* forward) {
+	if (forward != NULL) {
+		*forward = switch_intent();
+	}
 	report.clear();
 	string text;
 	string err;
@@ -307,6 +310,10 @@ int recover(const string& data_dir, const string& live_name, string& report) {
 	case recovery_roll_forward:
 		// the new copy is live; the caller opens it and checks its COPY_ID
 		log_warning("copy switch recovery: %s", report.c_str());
+		if (forward != NULL) {
+			*forward = in;		// the intent stays until the caller's initialisation of the new copy is done
+			return 0;
+		}
 		return remove_intent(data_dir);
 	default:
 		log_err("copy switch recovery: %s", report.c_str());

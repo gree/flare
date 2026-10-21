@@ -2817,6 +2817,38 @@ void check_unresolved_switch(bool after_rename) {
 void test_running_switch_rename_fails_and_intent_unreadable_stays_unresolved() { check_unresolved_switch(false); }
 void test_running_switch_fsync_fails_after_rename_and_intent_unreadable_stays_unresolved() { check_unresolved_switch(true); }
 
+// the staging->live rename DID happen, then the directory fsync failed, with a
+// readable intent: recovery rolls forward and the intent is KEPT; this process
+// stops serving; the next start finishes the switch by the start-time rule
+// (the source's flags cleared, old copy kept, then the intent goes)
+void test_running_switch_fsync_fails_after_rename_rolls_forward_at_next_start() {
+	storage_rocksdb* s = make_rocksdb(wal_slave_dir);
+	storage_set_string(s, "k", "old");
+	const string dir = wal_slave_dir;
+	const string old_id = s->get_copy_id();
+	const string new_id = make_flagged_staging_copy(dir, "f1", "k", "new");
+	copy_fs::set_rename_fault_for_test("/staging-f1", EIO, true);
+	cut_assert_equal_int(-1, s->switch_to_staging("f1", new_id));
+	copy_fs::clear_read_faults_for_test();
+	cut_assert_true(s->is_switch_unresolved());
+	struct stat st;
+	cut_assert_equal_int(0, ::stat((dir + "/" + copy_fs::kIntentFile).c_str(), &st));
+	cut_assert_equal_string(new_id.c_str(), read_file_s(dir + "/flare.rocksdb/COPY_ID").c_str());
+	cut_assert_equal_string(old_id.c_str(), read_file_s(dir + "/retained-f1/COPY_ID").c_str());
+	delete s;
+	storage_rocksdb* t = new storage_rocksdb(dir, 32, 4, 16, 4, 2, 86400, 1024);
+	cut_assert_equal_int(0, t->open());
+	cut_assert_false(t->is_switch_unresolved());
+	cut_assert_equal_string(new_id.c_str(), t->get_copy_id().c_str());
+	cut_assert_equal_string("new", get_value(t, "k").c_str());
+	cut_assert_equal_string("", t->get_partition_binding().c_str());
+	cut_assert_false(t->is_restored_unverified());
+	cut_assert_equal_string(old_id.c_str(), read_file_s(dir + "/retained-f1/COPY_ID").c_str());
+	cut_assert_equal_int(-1, ::stat((dir + "/" + copy_fs::kIntentFile).c_str(), &st));
+	delete t;
+	cut_remove_path(wal_slave_dir, NULL);
+}
+
 // recovery succeeds and the live directory IS the old copy again: reopened
 void test_running_switch_rename_fails_with_readable_intent_rolls_back_and_reopens() {
 	string nid;

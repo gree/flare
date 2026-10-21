@@ -306,14 +306,15 @@ int storage_rocksdb::_get_header(string key, entry& e) {
 int storage_rocksdb::_load_or_generate_master_id() {
 	string value;
 	rocksdb::Status status = this->_db->Get(this->_read_options, kReplMasterIdKey, &value);
-	if (status.ok()) {
+	// an empty stored value is no identity: it is replaced by a minted one below
+	if (status.ok() && !value.empty()) {
 		pthread_rwlock_wrlock(&this->_mutex_master_id);
 		this->_master_id = value;
 		pthread_rwlock_unlock(&this->_mutex_master_id);
 		log_debug("loaded existing master id (id=%s)", value.c_str());
 		return 0;
 	}
-	if (!status.IsNotFound()) {
+	if (!status.ok() && !status.IsNotFound()) {
 		log_err("failed to read master id: %s", status.ToString().c_str());
 		return -1;
 	}
@@ -882,10 +883,21 @@ int storage_rocksdb::switch_to_staging(const string& attempt, const string& expe
 			// directory on disk is the old copy again (a rollback / abort that
 			// really happened); an in-memory copy id proves nothing
 			string report;
-			const int rr = copy_fs::recover(this->_data_dir, "flare.rocksdb", report);
+			// forward: a roll-forward keeps the intent (the new copy's
+			// initialisation is not done yet; the start-time roll-forward does it)
+			switch_intent forward;
+			const int rr = copy_fs::recover(this->_data_dir, "flare.rocksdb", report, &forward);
 			const string live_now = copy_fs::read_copy_id(this->_data_path);
 			log_err("copy switch failed; recovery (%d): %s; live directory now [%s]", rr, report.c_str(), live_now.c_str());
-			if (rr == 0 && live_now == in.old_id) {
+			if (rr == 0 && !forward.attempt.empty()) {
+				// the staging->live rename happened, only what followed failed:
+				// the live copy is the NEW one, uninitialised here. Keep the
+				// intent and stop using the DB in this process; the next start
+				// finishes the switch (clears the inherited flags), then the intent.
+				this->_db = NULL;
+				this->_mark_switch_unresolved("the switch rolled forward: the live directory is the new copy " + live_now
+					+ " but its initialisation was not done in this process (intent kept: the next open finishes it)");
+			} else if (rr == 0 && live_now == in.old_id) {
 				rocksdb::Status ro = this->_open_db(this->_data_path);
 				if (!ro.ok()) {
 					this->_db = NULL;

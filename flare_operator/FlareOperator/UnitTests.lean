@@ -36,6 +36,7 @@ import FlareOperator.E2E.Helpers
 import FlareOperator.E2E.PromotionTimeline
 import FlareOperator.E2E.Tests.NodeOps
 import FlareOperator.StateMachine.WriteLeaseModel
+import FlareOperator.StateMachine.PromotionIntentChecks
 import FlareOperator.StateMachine.SourceEligibility
 import FlareOperator.StateMachine.RebuildConcurrency
 import FlareOperator.StateMachine.AuthoritativeHistory
@@ -3198,6 +3199,10 @@ def checkSnapshotPushSwitch (ctx : Ctx) : IO Unit := do
       (String.intercalate "\n    " ((renderFlaredExtraConf {} none false).splitOn "\n")) &&
      !hasSub (FlareOperator.Migration.Provision.configMapYaml pk) "cluster-replication-server-name")
 
+/-- C' dual writer: promotion intent CAS, persistence and refusal rules (not wired into the runtime). -/
+def checkPromotionIntent (ctx : Ctx) : IO Unit := do
+  for (n, ok) in FlareOperator.PromotionIntentChecks.checks do check ctx n ok
+
 def run : IO UInt32 := do
   let ctx : Ctx := { failures := ← IO.mkRef [], count := ← IO.mkRef 0 }
   checkObserve ctx
@@ -3245,6 +3250,7 @@ def run : IO UInt32 := do
   checkStaleR3Refill ctx
   checkMigrationForwardGate ctx
   checkSnapshotPushSwitch ctx
+  checkPromotionIntent ctx
   let failures ← ctx.failures.get
   let n ← ctx.count.get
   IO.println s!"1..{n}"

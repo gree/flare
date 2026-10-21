@@ -420,7 +420,7 @@ def mkSuite (suiteName : String) (snapshotPush : Bool) : TestSuite := {
           match ← getPodIp dPod cfgDst.«namespace» with
           | some ip => IO.eprintln s!"# destination stats: {← creplStats ip}; curr_items {← getCurrItems cfgDst.debugPod cfgDst.«namespace» ip cfgDst.flarePort}"
           | none => pure ()
-          match ← kubectl ["exec", dPod, "-n", cfgDst.«namespace», "--", "sh", "-c", "ls -la /tmp/flare /tmp/flare/* 2>&1 | head -60; df -h /tmp/flare"] with
+          match ← kubectl ["exec", dPod, "-n", cfgDst.«namespace», "--", "sh", "-c", s!"ls -la {flaredDataDir cfgDst} {flaredDataDir cfgDst}/* 2>&1 | head -60; df -h {flaredDataDir cfgDst}"] with
           | .ok o => IO.eprintln s!"# destination data dir: {o}"
           | .error e => IO.eprintln s!"# destination data dir unreadable: {e}"
           return .fail "the destination master did not come back within 300 s"

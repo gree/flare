@@ -363,6 +363,11 @@ spec:
       protocol: TCP
   type: ClusterIP"
 
+/-- The directory flared is started with (`--data-dir`): `/data/flare` on a
+    PVC or tmpfs volume, the pod-local `/tmp/flare` otherwise. -/
+def flaredDataDir (cfg : ClusterConfig) : String :=
+  if cfg.usePvc || cfg.useTmpfs then "/data/flare" else "/tmp/flare"
+
 /-- Generate StatefulSet + headless Service YAML. -/
 def statefulSetYaml (cfg : ClusterConfig) : String :=
   let cluster := cfg.name
@@ -378,7 +383,7 @@ def statefulSetYaml (cfg : ClusterConfig) : String :=
   let flaredEnvLines := String.join (cfg.flaredEnv.map fun (k, v) =>
     s!"\n            - name: {k}\n              value: \"{v}\"")
   let persistent := cfg.usePvc || cfg.useTmpfs
-  let dataDir := if persistent then "/data/flare" else "/tmp/flare"
+  let dataDir := flaredDataDir cfg
   -- RESTORE hook (PVC only): if the marker file exists it names a checkpoint
   -- directory (created by the flared `backup` op, a complete RocksDB dir);
   -- replace the live DB with it and consume the marker, then start flared.

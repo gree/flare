@@ -1645,7 +1645,16 @@ private def Ctx.threeInSync (c : Ctx) : IO (Option (String × String × String �
       let n ← c.currItems ((← getPodIp m c.cfg.«namespace»).getD "")
       let na ← c.currItems ((← getPodIp a c.cfg.«namespace»).getD "")
       let nb ← c.currItems ((← getPodIp b c.cfg.«namespace»).getD "")
-      if n > 0 && na == n && nb == n then return some (m, a, b, n)
+      -- Equal counts are not the same history: a node that was rebuilt from
+      -- an earlier master (or never was) can hold the same number of items
+      -- (rc68 a2, test 12 → 13). Each slave's bound source epoch must be the
+      -- master's own epoch whenever both can be read.
+      let mEpoch ← c.statStr ((← getPodIp m c.cfg.«namespace»).getD "") "rocksdb_source_epoch"
+      let sameHistory ← [a, b].allM fun s => do
+        match mEpoch, ← c.statStr ((← getPodIp s c.cfg.«namespace»).getD "") "repl_read_source_epoch" with
+        | some me, some se => return me.isEmpty || se.isEmpty || me == se
+        | _, _ => return true
+      if n > 0 && na == n && nb == n && sameHistory then return some (m, a, b, n)
     | _ => pure ()
     IO.sleep 4000
   return none

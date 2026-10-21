@@ -2826,7 +2826,7 @@ void test_running_switch_fsync_fails_after_rename_rolls_forward_at_next_start() 
 	storage_set_string(s, "k", "old");
 	const string dir = wal_slave_dir;
 	const string old_id = s->get_copy_id();
-	const string new_id = make_flagged_staging_copy(dir, "f1", "k", "new");
+	const string new_id = make_flagged_staging_copy(wal_slave_dir, "f1", "k", "new");
 	copy_fs::set_rename_fault_for_test("/staging-f1", EIO, true);
 	cut_assert_equal_int(-1, s->switch_to_staging("f1", new_id));
 	copy_fs::clear_read_faults_for_test();

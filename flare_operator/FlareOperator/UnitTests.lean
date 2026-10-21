@@ -352,6 +352,53 @@ def checkAdvanceComplete (ctx : Ctx) : IO Unit := do
   check ctx "with no baseline the first readable record becomes the baseline; nothing completes yet"
     (stNB.isEmpty && (lNB.entries.head?.bind (·.currentIdAtReseat)) == some 2)
 
+/-- The contract of `advanceEntry` on unknown or out-of-scope data: the entry
+    survives with its phase, drops, master and baseline untouched, and no step
+    is reported — a wait. -/
+def waitsUnchanged (l : Ledger) (o : Observation) : Bool :=
+  let (l', st) := advance l [(slaveKey, o)]
+  st.isEmpty && l'.entries.length == 1
+    && l'.entries.head?.map (fun e => (e.phase, e.drops, e.masterKey, e.bootIdAtReseat, e.currentIdAtReseat, e.dropsAtReseat))
+       == l.entries.head?.map (fun e => (e.phase, e.drops, e.masterKey, e.bootIdAtReseat, e.currentIdAtReseat, e.dropsAtReseat))
+
+def checkAdvanceUnknown (ctx : Ctx) : IO Unit := do
+  let newMaster := "new-master:12121"
+  let sa := some (FlareRole.Slave, FlareState.Active)
+  -- every field of a would-be completion / re-request, one at a time missing
+  check ctx "reseated, lastSuccessSource missing: a wait (unchanged), even with a success and the master changed — never completed, dropped or re-requested"
+    (waitsUnchanged lRel (obs (some 12) (some 100) (some 2) (some "succeeded") (some 2) none (some masterKey) sa)
+      && waitsUnchanged lRel (obs (some 12) (some 100) (some 2) (some "succeeded") (some 2) none (some newMaster) sa))
+  check ctx "reseated, currentMaster missing: a wait (unchanged), even with a success — never completed, dropped or re-requested"
+    (waitsUnchanged lRel (obs (some 12) (some 100) (some 2) (some "succeeded") (some 2) (some masterKey) none sa))
+  check ctx "reseated, bootId / currentId / currentState / lastSuccessId missing (the master changed): a wait (unchanged), never completed, dropped or re-requested"
+    (waitsUnchanged lRel (obs (some 12) none (some 2) (some "succeeded") (some 2) (some masterKey) (some newMaster) sa)
+      && waitsUnchanged lRel (obs (some 12) (some 100) none (some "succeeded") (some 2) (some masterKey) (some newMaster) sa)
+      && waitsUnchanged lRel (obs (some 12) (some 100) (some 2) none (some 2) (some masterKey) (some newMaster) sa)
+      && waitsUnchanged lRel (obs (some 12) (some 100) (some 2) (some "succeeded") none (some masterKey) (some newMaster) sa))
+  -- no baseline: the first readable record becomes it; never a completion,
+  -- never a re-request (the master change is judged once a baseline exists)
+  let lNoBase : Ledger := { lRel with entries := lRel.entries.map fun e => { e with bootIdAtReseat := none, currentIdAtReseat := none } }
+  let moved := obs (some 12) (some 100) (some 2) (some "succeeded") (some 2) (some masterKey) (some newMaster) sa
+  let (lNB, stNB) := advance lNoBase [(slaveKey, moved)]
+  check ctx "reseated, no reseat baseline, master changed: only the baseline is recorded; not completed, dropped or re-requested (the re-request waits one pass)"
+    (stNB.isEmpty && lNB.entries.length == 1 && firstPhase lNB == some .reseated
+      && firstDrops lNB == some 3 && (lNB.entries.head?.map (·.masterKey)) == some masterKey
+      && (lNB.entries.head?.bind (·.currentIdAtReseat)) == some 2)
+  check ctx "reseated, no reseat baseline, a success from the current master: not completed on the same pass (baseline only)"
+    (stepsOf lNoBase doneObs == [] && (advance lNoBase [(slaveKey, doneObs)]).1.entries.length == 1)
+  -- the node is not Slave/Active: nothing is decided
+  let gone := obs (some 12) (some 100) (some 2) (some "succeeded") (some 2) (some masterKey) (some newMaster)
+  check ctx "reseated, node not Slave/Active (Prepare / Proxy / Slave-Down / not in the map), master changed, success from the current master: a wait (unchanged), never completed, dropped or re-requested"
+    (waitsUnchanged lRel (gone (some (.Slave, .Prepare)))
+      && waitsUnchanged lRel (gone (some (.Proxy, .Active)))
+      && waitsUnchanged lRel (gone (some (.Slave, .Down)))
+      && waitsUnchanged lRel (gone none)
+      && waitsUnchanged lRel (obs (some 12) (some 100) (some 2) (some "succeeded") (some 2) (some newMaster) (some newMaster) (some (.Slave, .Prepare))))
+  -- the demoted and requested phases never reach the reseated branches
+  let noVersion := { doneObs with reportedVersion := none }
+  check ctx "demoted (version unread) / requested entries ignore completion data: a Slave/Active success does not close them"
+    (waitsUnchanged lDem noVersion && waitsUnchanged (request l1 masterKey slaveKey 3) doneObs)
+
 def lFull : Ledger :=
   let l := markDemoted (request l1 masterKey slaveKey 3) slaveKey 11
   { l with entries := l.entries.map fun e => { e with nodeKey := some slaveKey, hold := some "x" } }
@@ -3159,6 +3206,7 @@ def run : IO UInt32 := do
   checkFollowOwnership ctx
   checkAdvanceHold ctx
   checkAdvanceComplete ctx
+  checkAdvanceUnknown ctx
   checkJson ctx
   checkEpisodes ctx
   checkJudgeRefusals ctx

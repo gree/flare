@@ -1638,6 +1638,21 @@ private def Ctx.holdPromotion (c : Ctx) (act : IO Unit) : IO (Option (List Strin
 private def Ctx.releasePromotion (c : Ctx) : IO Unit := do
   discard <| c.opExec "touch /tmp/saf08/promote-release"
 
+/-- `threeInSync` is STRUCTURAL only (roles, item counts, bound source epoch).
+    This is the value check: every copy's OWN storage (`dump`, read directly
+    from each pod, not through a proxy) holds exactly the master's key/value
+    pairs, and there is at least one. An unreadable dump is not a match. -/
+private def Ctx.copiesIdentical (c : Ctx) (m a b : String) : IO Bool := do
+  let ns := c.cfg.«namespace»
+  let dumpOf := fun (p : String) => do c.localDump ((← getPodIp p ns).getD "")
+  let sorted := fun (d : List (String × String)) => d.toArray.qsort (fun x y => x.1 < y.1) |>.toList
+  match ← dumpOf m, ← dumpOf a, ← dumpOf b with
+  | some dm, some da, some db =>
+    return !dm.isEmpty && (missingFrom dm da).isEmpty && (missingFrom dm db).isEmpty
+      && da.length == dm.length && db.length == dm.length
+      && sorted dm == sorted da && sorted dm == sorted db
+  | _, _, _ => return false
+
 private def Ctx.threeInSync (c : Ctx) : IO (Option (String × String × String × Nat)) := do
   for _ in [0:90] do
     match ← c.p0Roles with
@@ -1648,12 +1663,14 @@ private def Ctx.threeInSync (c : Ctx) : IO (Option (String × String × String �
       -- Equal counts are not the same history: a node that was rebuilt from
       -- an earlier master (or never was) can hold the same number of items
       -- (rc68 a2, test 12 → 13). Each slave's bound source epoch must be the
-      -- master's own epoch whenever both can be read.
+      -- master's own epoch, and BOTH must have been read, non-empty: this
+      -- suite runs the RocksDB build, where every node reports an epoch, so a
+      -- missing, empty or unreadable value is Unknown, not a match.
       let mEpoch ← c.statStr ((← getPodIp m c.cfg.«namespace»).getD "") "rocksdb_source_epoch"
       let sameHistory ← [a, b].allM fun s => do
         match mEpoch, ← c.statStr ((← getPodIp s c.cfg.«namespace»).getD "") "repl_read_source_epoch" with
-        | some me, some se => return me.isEmpty || se.isEmpty || me == se
-        | _, _ => return true
+        | some me, some se => return !me.isEmpty && !se.isEmpty && me == se
+        | _, _ => return false
       if n > 0 && na == n && nb == n && sameHistory then return some (m, a, b, n)
     | _ => pure ()
     IO.sleep 4000
@@ -1872,7 +1889,9 @@ def identitySuite : TestSuite := {
             if !aborted then return .fail s!"the promotion of {target} was not aborted after its flared restarted"
             if newItems != items then return .fail s!"the new master {newMaster} holds {newItems} of {items} keys"
             let healed ← waitForCondition "the drained pod returns and the copies match" 480 do
-              return (← c.threeInSync).isSome
+              match ← c.threeInSync with
+              | some (m, a, b, _) => c.copiesIdentical m a b
+              | none => return false
             if !healed then return .fail "the cluster did not converge after the aborted promotion"
             return .pass },
 

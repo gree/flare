@@ -403,7 +403,27 @@ inductive Step where
   | rerequested   -- the master changed after the reseat: back to a fresh request against the current one
   deriving Repr, BEq
 
-/-- Advance one entry by one observation. -/
+/-- Advance one entry by one observation.
+
+    Contract on unknown data: an entry is never completed (`.completed`,
+    `.completedRequeued`) and never dropped except on a POSITIVE reading, and
+    anything unreadable is a wait, not a decision.
+    * `.requested`: always unchanged.
+    * `.demoted v`: released only when the node's own version is read and ≥ v;
+      an unread version waits (unchanged). A node read as Master is voided.
+    * `.reseated`, node read as Master: voided. Node not Slave/Active
+      (Prepare, Proxy, Down, or absent from the map): waits, unchanged.
+    * `.reseated`, Slave/Active but any of bootId, currentId, currentState,
+      lastSuccessId, lastSuccessSource, currentMaster unread: waits, unchanged
+      (in particular a missing source or master never completes and never
+      re-requests, even when the other fields show a success or a moved master).
+    * `.reseated`, all six read, no reseat baseline: the first readable record
+      is recorded as the baseline (the only change) and nothing else happens
+      that pass; completion and re-request need a baseline.
+    * `.reseated`, all six read and a baseline: completes only on a succeeded
+      latest reconstruction newer than the baseline from the current master;
+      else, if the current master is not the entry's `masterKey`, it is
+      re-requested against the current master (drops kept); else waits. -/
 def advanceEntry (e : Entry) (o : Observation) : Option Entry × Step :=
   match e.phase with
   | .requested => (some e, .none)

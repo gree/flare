@@ -281,6 +281,9 @@ public:
 	// a storage* without pulling in backend-specific headers. Non-WAL backends
 	// report 0, so cursor-vs-sequence logic is a safe no-op there.
 	virtual uint64_t get_repl_last_lsn() { return 0; }
+	// false only when the applied position EXISTS but cannot be trusted (read
+	// error / malformed value); "never written" is readable (0).
+	virtual bool is_repl_last_lsn_readable() { return true; }
 	virtual int set_repl_last_lsn(uint64_t lsn) { return 0; }
 	virtual uint64_t get_latest_sequence_number() { return 0; }
 

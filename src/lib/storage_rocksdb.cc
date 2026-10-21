@@ -196,6 +196,7 @@ storage_rocksdb::storage_rocksdb(
 	this->_count_get_fail_for_test = 0;
 	this->_gen_get_fail_for_test = 0;
 	this->_switch_binding_fail_for_test = false;
+	this->_repl_pos_read_fail_for_test = 0;
 	this->_tomb_scan_hook = NULL;
 	this->_tomb_scan_fail_for_test = false;
 	this->_data_path = this->_data_dir + "/flare.rocksdb";
@@ -501,9 +502,7 @@ string storage_rocksdb::_mint_generation(const string& previous) {
 	uint64_t n = 0;
 	string::size_type colon = previous.find(':');
 	if (colon != string::npos) {
-		try {
-			n = boost::lexical_cast<uint64_t>(previous.substr(0, colon));
-		} catch (boost::bad_lexical_cast&) {
+		if (!parse_stored_u64(previous.substr(0, colon), n)) {
 			n = 0;
 		}
 	}
@@ -752,9 +751,9 @@ int storage_rocksdb::bump_copy_generation(const char* why) {
 	pthread_rwlock_wrlock(&this->_mutex_generations);
 	string id = this->_copy_id;
 	const size_t c = id.rfind(':');
-	unsigned long long g = 0;
-	if (c != string::npos) {
-		g = strtoull(id.c_str() + c + 1, NULL, 10);
+	uint64_t g = 0;
+	if (c != string::npos && !parse_stored_u64(id.substr(c + 1), g)) {
+		g = 0;
 	}
 	const string next = (c == string::npos ? id : id.substr(0, c)) + ":" + boost::lexical_cast<string>(g + 1);
 	int r = id.empty() ? -1 : this->_persist_generation(kCopyIdKey, next);
@@ -4730,7 +4729,12 @@ storage_rocksdb::apply_outcome storage_rocksdb::apply_forwarded_change(const str
 		}
 		// Read INSIDE the critical section: the applier may have advanced it
 		// while this change was waiting for a connection, a retry or a lock.
-		const uint64_t cursor = this->get_repl_last_lsn();
+		const repl_position pos = this->read_repl_last_lsn();
+		if (pos.state == repl_pos_failed) {
+			outcome = apply_error;		// fail closed: unknown is not position 0
+			break;
+		}
+		const uint64_t cursor = pos.value;
 		outcome = this->_decide_change(source_epoch, label, mr == 0, current, cursor);
 		if (outcome != apply_applied) {
 			break;
@@ -4884,7 +4888,12 @@ uint64_t storage_rocksdb::_collect_tombstones_locked(uint64_t budget) {
 	if (this->_db == NULL || this->_cf_meta == NULL || budget == 0) {
 		return 0;
 	}
-	const uint64_t cursor = this->get_repl_last_lsn();
+	const repl_position pos = this->read_repl_last_lsn();
+	if (pos.state == repl_pos_failed) {
+		log_warning("tombstone collection skipped: the applied position is unreadable", 0);
+		return 0;		// fail closed: nothing is dropped on an unknown position
+	}
+	const uint64_t cursor = pos.value;
 	rocksdb::ReadOptions ro = this->_read_options;
 	ro.fill_cache = false;
 	rocksdb::Iterator* it = this->_db->NewIterator(ro, this->_cf_meta);
@@ -5151,7 +5160,12 @@ int storage_rocksdb::apply_wal_batch(const string& source_epoch, const string& i
 			refusal = apply_refused_stale_follower;
 			break;
 		}
-		const uint64_t cursor = this->get_repl_last_lsn();
+		const repl_position pos = this->read_repl_last_lsn();
+		if (pos.state == repl_pos_failed) {
+			refusal = apply_error;		// fail closed: unknown is not position 0
+			break;
+		}
+		const uint64_t cursor = pos.value;
 		// Contiguity: the stream must continue where this node stopped. The
 		// batch that CONTAINS the cursor is re-delivered by design (RocksDB
 		// starts at the batch holding the requested sequence), so a base at
@@ -5357,19 +5371,65 @@ int storage_rocksdb::_apply_batch_with_lsn_locked(const rocksdb::WriteBatch& bat
 	return 0;
 }
 
-uint64_t storage_rocksdb::get_repl_last_lsn() {
-	string value;
+bool storage_rocksdb::parse_stored_u64(const string& s, uint64_t& out) {
+	if (s.empty() || s.size() > 20) {
+		return false;
+	}
+	uint64_t n = 0;
+	for (string::size_type i = 0; i < s.size(); i++) {
+		if (s[i] < '0' || s[i] > '9') {
+			return false;
+		}
+		const uint64_t d = static_cast<uint64_t>(s[i] - '0');
+		if (n > (~static_cast<uint64_t>(0) - d) / 10) {
+			return false;
+		}
+		n = n * 10 + d;
+	}
+	out = n;
+	return true;
+}
 
+storage_rocksdb::repl_position storage_rocksdb::read_repl_last_lsn() {
+	repl_position r;
+	r.state = repl_pos_unset;
+	r.value = 0;
 	if (this->_db == NULL) {
-		return 0;
+		return r;
 	}
 
-	rocksdb::Status status = this->_db->Get(this->_read_options, kReplLastLsnKey, &value);
+	string value;
+	rocksdb::Status status = this->_repl_pos_read_fail_for_test != 0
+		? rocksdb::Status::IOError("test")
+		: this->_db->Get(this->_read_options, kReplLastLsnKey, &value);
 	if (status.ok()) {
-		return boost::lexical_cast<uint64_t>(value);
+		uint64_t n = 0;
+		if (!parse_stored_u64(value, n)) {
+			log_err("repl_last_lsn holds a malformed value (%zu bytes) -> the applied position is UNKNOWN, not 0", value.size());
+			r.state = repl_pos_failed;
+			return r;
+		}
+		r.state = repl_pos_set;
+		r.value = n;
+		return r;
 	}
+	if (status.IsNotFound()) {
+		return r;		// No previous sync
+	}
+	log_err("repl_last_lsn read failed: %s -> the applied position is UNKNOWN, not 0", status.ToString().c_str());
+	r.state = repl_pos_failed;
+	return r;
+}
 
-	return 0;  // No previous sync
+uint64_t storage_rocksdb::get_repl_last_lsn() {
+	return this->read_repl_last_lsn().value;
+}
+
+int storage_rocksdb::put_repl_last_lsn_raw_for_test(const string& raw) {
+	if (this->_db == NULL) {
+		return -1;
+	}
+	return this->_db->Put(rocksdb::WriteOptions(), kReplLastLsnKey, raw).ok() ? 0 : -1;
 }
 
 int storage_rocksdb::set_repl_last_lsn(uint64_t lsn) {
@@ -5381,7 +5441,7 @@ int storage_rocksdb::set_repl_last_lsn(uint64_t lsn) {
 	// is how a slave reconstructed by full dump acquires a nonzero
 	// replication cursor (seeded from the master's latest_lsn) so that a
 	// *subsequent* WAL sync can be incremental. See handler_reconstruction.
-	uint64_t old_lsn = this->get_repl_last_lsn();
+	const uint64_t old_lsn = this->get_repl_last_lsn();		// log only; this overwrites the key
 	string lsn_value = boost::lexical_cast<string>(lsn);
 
 	rocksdb::WriteOptions wo;

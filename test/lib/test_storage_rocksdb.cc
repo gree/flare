@@ -3933,6 +3933,90 @@ void test_apply_rule_delete_then_older_put_does_not_resurrect() {
 	drop_rocksdb(s, wal_master_dir);
 }
 
+// CPP-02: the applied position is typed. Never written is a state (0); a read
+// error or a malformed stored value is "failed", never 0.
+void test_repl_position_not_found_is_unset_zero() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	storage_rocksdb::repl_position p = s->read_repl_last_lsn();
+	cppcut_assert_equal(storage_rocksdb::repl_pos_unset, p.state);
+	cppcut_assert_equal(static_cast<uint64_t>(0), p.value);
+	cut_assert_true(s->is_repl_last_lsn_readable());
+	drop_rocksdb(s, wal_master_dir);
+}
+
+void test_repl_position_valid_value_is_set() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_int(0, s->set_repl_last_lsn(42));
+	storage_rocksdb::repl_position p = s->read_repl_last_lsn();
+	cppcut_assert_equal(storage_rocksdb::repl_pos_set, p.state);
+	cppcut_assert_equal(static_cast<uint64_t>(42), p.value);
+	drop_rocksdb(s, wal_master_dir);
+}
+
+void test_repl_position_io_error_is_failed_not_zero() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_int(0, s->set_repl_last_lsn(42));
+	s->set_repl_pos_read_fail_for_test(1);
+	storage_rocksdb::repl_position p = s->read_repl_last_lsn();
+	cppcut_assert_equal(storage_rocksdb::repl_pos_failed, p.state);
+	cut_assert_false(s->is_repl_last_lsn_readable());
+	s->set_repl_pos_read_fail_for_test(0);
+	cppcut_assert_equal(storage_rocksdb::repl_pos_set, s->read_repl_last_lsn().state);
+	drop_rocksdb(s, wal_master_dir);
+}
+
+void test_repl_position_malformed_value_is_failed_without_exception() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	const char* bad[] = { "", "abc", "12x", "-1", "+5", " 7", "99999999999999999999999" };
+	for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+		cut_assert_equal_int(0, s->put_repl_last_lsn_raw_for_test(bad[i]));
+		cppcut_assert_equal(storage_rocksdb::repl_pos_failed, s->read_repl_last_lsn().state);
+		cppcut_assert_equal(static_cast<uint64_t>(0), s->get_repl_last_lsn());   // no throw
+	}
+	cut_assert_equal_int(0, s->put_repl_last_lsn_raw_for_test("18446744073709551615"));
+	cppcut_assert_equal(storage_rocksdb::repl_pos_set, s->read_repl_last_lsn().state);
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// On an unreadable position the apply paths refuse (nothing written) and the
+// tombstone collection drops nothing, instead of using 0.
+void test_repl_position_failure_stops_apply_and_gc() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	const string epoch = s->get_source_epoch();
+	const string inc = s->get_incarnation();
+
+	storage::entry del;
+	del.key = "k";
+	cppcut_assert_equal(storage_rocksdb::apply_applied, s->apply_forwarded_change(epoch, inc, 20, del, true));
+	cppcut_assert_equal(static_cast<uint64_t>(1), s->get_repl_tombstones());
+	cut_assert_equal_int(0, s->set_repl_last_lsn(29));
+
+	s->set_repl_pos_read_fail_for_test(1);
+
+	storage::entry e;
+	fill_entry(e, "other", "v");
+	cppcut_assert_equal(storage_rocksdb::apply_error, s->apply_forwarded_change(epoch, inc, 100, e, false));
+
+	rocksdb::WriteBatch b;
+	b.Put(rocksdb::Slice("wb"), rocksdb::Slice("v"));
+	uint64_t applied = 0, skipped = 0;
+	storage_rocksdb::apply_outcome refusal = storage_rocksdb::apply_applied;
+	cut_assert_equal_int(-1, s->apply_wal_batch(epoch, inc, 30, b, applied, skipped, refusal));
+	cppcut_assert_equal(storage_rocksdb::apply_error, refusal);
+
+	cppcut_assert_equal(static_cast<uint64_t>(0), s->collect_tombstones(100));
+
+	s->set_repl_pos_read_fail_for_test(0);
+	cppcut_assert_equal(static_cast<uint64_t>(1), s->get_repl_tombstones());   // kept
+	string out;
+	cut_assert_operator(storage_get_string(s, "other", out), !=, 0);           // nothing written
+	cut_assert_operator(storage_get_string(s, "wb", out), !=, 0);
+	cppcut_assert_equal(static_cast<uint64_t>(29), s->get_repl_last_lsn());    // cursor untouched
+	// readable again: the same GC now proceeds
+	cppcut_assert_equal(static_cast<uint64_t>(1), s->collect_tombstones(100));
+	drop_rocksdb(s, wal_master_dir);
+}
+
 // Once the applied position has passed the delete, the tombstone may be
 // collected — and an older put is then refused by the POSITION instead
 // (design §3.5). This is the case a wall-clock window could not decide.

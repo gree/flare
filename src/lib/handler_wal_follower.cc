@@ -220,7 +220,14 @@ int handler_wal_follower::_follow_once(bool& more) {
 		return attempt_error;
 	}
 
-	const uint64_t cursor = rdb->get_repl_last_lsn();
+	const storage_rocksdb::repl_position pos = rdb->read_repl_last_lsn();
+	if (pos.state == storage_rocksdb::repl_pos_failed) {
+		// Unknown is not "no position": do not follow and do not ask for a
+		// rebuild on a guess either — retry once the position can be read.
+		if (stats_object != NULL) stats_object->follow_set_state(stats::follow_needs_rebuild, "position_unreadable");
+		return attempt_error;
+	}
+	const uint64_t cursor = pos.value;
 	const string master_id = rdb->get_master_id();
 	const string epoch = rdb->get_source_epoch();
 	const string incarnation = rdb->get_incarnation();

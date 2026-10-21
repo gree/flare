@@ -260,6 +260,17 @@ int handler_reconstruction::_run_once() {
 			}
 		}
 	}
+	// FAIL CLOSED on an unknown applied position: "never written" is a state
+	// (0), but a read error or a malformed stored value is not — choosing
+	// between the WAL catch-up, a merge and a truncate on a guessed 0 could
+	// replace data on a position that was never established.
+	if (this->_storage->get_type() == storage::type_rocksdb) {
+		storage_rocksdb* rdb = dynamic_cast<storage_rocksdb*>(this->_storage);
+		if (rdb && rdb->read_repl_last_lsn().state == storage_rocksdb::repl_pos_failed) {
+			log_err("reconstruction NOT started: the applied replication position cannot be read (read error or malformed value); not treating it as 0", 0);
+			return -1;
+		}
+	}
 #endif
 
 	shared_connection c(bounded_connection(this->_node_server_name, this->_node_server_port));
@@ -849,7 +860,12 @@ namespace {
 	bool catch_up_to(const string& host, int port, storage_rocksdb* target, storage_rocksdb* settings,
 			const string& master_id, const string& epoch, uint64_t l1, int bwlimit, int interval, string& why) {
 		for (int round = 0; round < 1000; round++) {
-			const uint64_t from = target->get_repl_last_lsn();
+			const storage_rocksdb::repl_position fpos = target->read_repl_last_lsn();
+			if (fpos.state == storage_rocksdb::repl_pos_failed) {
+				why = "the target's applied position cannot be read";
+				return false;
+			}
+			const uint64_t from = fpos.value;
 			if (from >= l1) {
 				return true;
 			}
@@ -873,7 +889,12 @@ namespace {
 				why = o.str();
 				return false;
 			}
-			if (target->get_repl_last_lsn() <= from) {
+			const storage_rocksdb::repl_position after = target->read_repl_last_lsn();
+			if (after.state == storage_rocksdb::repl_pos_failed) {
+				why = "the target's applied position cannot be read after the catch-up";
+				return false;
+			}
+			if (after.value <= from) {
 				ostringstream o;
 				o << "the catch-up made no progress at " << from << " (target " << l1 << ")";
 				why = o.str();

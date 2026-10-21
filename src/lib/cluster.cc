@@ -2381,9 +2381,16 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 			// serving a new history under the previous identity.
 			log_err("promotion: could not advance the source epoch -> replication is UNAVAILABLE on this node until it can be persisted", 0);
 		}
+		const bool cursor_readable = this->_storage->is_repl_last_lsn_readable();
 		uint64_t cursor = this->_storage->get_repl_last_lsn();
 		uint64_t seq = this->_storage->get_latest_sequence_number();
-		if (cursor > seq) {
+		if (!cursor_readable) {
+			// An unknown position is not 0: it may be ahead of our own
+			// sequence. Same safe direction as the branch below.
+			log_err("promotion to master with an unreadable replication cursor: minting a fresh master_id and re-seeding the cursor to own sequence %llu", (unsigned long long)seq);
+			this->_storage->regenerate_master_id();
+			this->_storage->set_repl_last_lsn(seq);
+		} else if (cursor > seq) {
 			log_warning("promotion to master with replication cursor ahead of own sequence (repl_last_lsn=%llu > latest_sequence_number=%llu): cursor belongs to a former master's sequence space. Minting fresh master_id so same-lineage slaves take a clean full dump instead of stranding on lsn_ahead / #14 truncate-skip.",
 				(unsigned long long)cursor, (unsigned long long)seq);
 			this->_storage->regenerate_master_id();

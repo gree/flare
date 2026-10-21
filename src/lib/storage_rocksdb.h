@@ -639,6 +639,7 @@ private:
 	int							_count_get_fail_for_test;
 	int							_gen_get_fail_for_test;
 	bool						_switch_binding_fail_for_test;
+	volatile int				_repl_pos_read_fail_for_test;
 	rocksdb::Status _count_batch(const rocksdb::WriteBatch& batch, rocksdb::WriteBatch::Handler& h, rocksdb::WriteBatch::Handler& th);
 	void _tomb_add(int64_t delta, const char* where);
 	void _tomb_set(uint64_t n, bool valid, const char* why);
@@ -670,7 +671,27 @@ public:
 	void _unlock_batch_slots(const std::vector<int>& idx);
 	int _apply_batch_with_lsn_locked(const rocksdb::WriteBatch& batch, uint64_t master_lsn);
 	static bool validate_batch_rep(const rocksdb::WriteBatch& batch);
+	// The applied position, typed. "unset" (never written: NotFound) is a
+	// legitimate state meaning position 0; "failed" (read error, or a stored
+	// value that is not a plain decimal number) is NOT position 0 — callers
+	// that apply, collect or choose a recovery path must stop on it.
+	enum repl_pos_state { repl_pos_unset = 0, repl_pos_set, repl_pos_failed };
+	struct repl_position {
+		repl_pos_state	state;
+		uint64_t		value;			// 0 unless state == repl_pos_set
+	};
+	repl_position read_repl_last_lsn();
+	virtual bool is_repl_last_lsn_readable() { return this->read_repl_last_lsn().state != repl_pos_failed; }
+	// Plain value for stats / logs only: 0 for unset AND failed. Never use it
+	// to decide anything (see read_repl_last_lsn()).
 	uint64_t get_repl_last_lsn();
+	// One strict parser for stored decimal counters: digits only, no sign, no
+	// whitespace, no overflow. Returns false (out untouched) otherwise.
+	static bool parse_stored_u64(const std::string& s, uint64_t& out);
+	/** test seams: 1 = the next position reads fail with IOError (until 0);
+	    the raw store writes the key's bytes verbatim (a malformed value) */
+	void set_repl_pos_read_fail_for_test(int on) { this->_repl_pos_read_fail_for_test = on; }
+	int put_repl_last_lsn_raw_for_test(const std::string& raw);
 	// Durably overwrite the replication cursor (kReplLastLsnKey). Used to
 	// seed the cursor after a full-dump reconstruction so the next WAL
 	// sync can be incremental. Returns 0 on success, -1 on write failure.

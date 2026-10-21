@@ -277,19 +277,44 @@ private def negativeObservation (c : ClusterConfig) (secs : Nat) : IO (Except St
     return .error s!"the operator's map was read in only {observed}/{samples} samples: no evidence either way (not a pass)"
   return .ok seen
 
-/-- (lineage, epoch) the copy at `ip` itself reports in flared's stats (not
-    through a proxy): rocksdb_master_id and the epoch it rebuilt from, else
-    its own source epoch — the same pair the operator's classifier compares. -/
-private def nodeHistory (c : ClusterConfig) (ip : String) : IO (Option (String × String)) := do
-  let some mid ← statOf c ip "rocksdb_master_id" | return none
-  let own ← statOf c ip "rocksdb_source_epoch"
-  let rebuilt ← statOf c ip "rocksdb_rebuilt_from_epoch"
-  let ep := match rebuilt with
-    | some e => if e.trim.isEmpty then own else some e
-    | none => own
-  match ep with
-  | some e => if mid.trim.isEmpty || e.trim.isEmpty then return none else return some (mid.trim, e.trim)
-  | none => return none
+/-- What one `stats` answer from the copy at `ip` says about itself (not through
+    a proxy): the pod's UID, flared's pid, its copy id, the (lineage, epoch)
+    history it holds — rocksdb_master_id and its OWN rocksdb_source_epoch, never
+    the epoch of a past rebuild — and its role/state/partition by its own view. -/
+private structure NodeSnap where
+  pod : String
+  uid : String
+  pid : String
+  copyId : String
+  lineage : String
+  epoch : String
+  role : String
+  state : String
+  partition : String
+  deriving BEq, Repr
+
+/-- One consistent snapshot of `pod`; none when any identity/history field is
+    missing or empty. -/
+private def nodeSnap (c : ClusterConfig) (pod : String) : IO (Option NodeSnap) := do
+  let ns := c.«namespace»
+  let uid ← podUidOf pod ns
+  let some ip ← getPodIp pod ns | return none
+  match ← execInDebugPod c.debugPod ns s!"printf 'stats\\r\\n' | nc -w 3 {ip} {c.flarePort}" with
+  | .error _ => return none
+  | .ok out =>
+    let get := fun (key : String) => (out.splitOn "\n").findSome? fun l =>
+      let t := (l.replace "\r" "").trim
+      if t.startsWith s!"STAT {key} " then some (t.drop (s!"STAT {key} ").length).trim else none
+    match get "pid", get "rocksdb_copy_id", get "rocksdb_master_id", get "rocksdb_source_epoch",
+          get "own_role", get "own_state", get "own_partition" with
+    | some pid, some cid, some mid, some ep, some role, some st, some part =>
+      if uid.isEmpty || pid.isEmpty || cid.isEmpty || mid.isEmpty || ep.isEmpty then return none
+      return some { pod, uid, pid, copyId := cid, lineage := mid, epoch := ep, role, state := st, partition := part }
+    | _, _, _, _, _, _, _ => return none
+
+/-- The node holds the P0 master role by its OWN view. -/
+private def NodeSnap.isP0Master (s : NodeSnap) : Bool :=
+  s.role == "master" && s.state == "active" && s.partition == "0"
 
 /-- The authority's record for partition 0 (ConfigMap `{name}-history`):
     (generation, lineage, epoch, a promotion intent is pending). -/
@@ -306,37 +331,40 @@ private def authorityHistory (c : ClusterConfig) : IO (Option (String × String 
       | _ => return none
     | none => return none
 
-/-- Wait until partition 0's master, as the operator's map names it, reports
-    on the node itself the (lineage, epoch) the authority recorded, no
-    promotion intent is pending, and the same (pod, generation, lineage,
-    epoch) has been observed for `stableMs`. Returns that history, or the last
-    observation for the log. -/
+/-- Wait until partition 0's master, as the operator's map names it, holds the
+    master role by its own view and reports on the node itself the (lineage,
+    epoch) the authority recorded, no promotion intent is pending, and the same
+    (generation, pod, pod UID, pid, copy id, lineage, epoch) has been observed
+    for `stableMs`. Returns the generation and the node snapshot that passed
+    that check (nothing re-read afterwards), or the last observation. -/
 private def settledP0History (c : ClusterConfig) (secs stableMs : Nat)
-    : IO (Except String (String × String × String)) := do
+    : IO (Except String (String × NodeSnap)) := do
   let last ← IO.mkRef "(nothing observed)"
-  let since ← IO.mkRef (none : Option (String × Nat))
+  let since ← IO.mkRef (none : Option ((String × NodeSnap) × Nat))
+  let verified ← IO.mkRef (none : Option (String × NodeSnap))
   let ok ← waitForCondition "P0's authoritative history equals what its master reports itself, stable" secs do
     let now ← IO.monoMsNow
     let some p := findMasterPod (← nodeView c) 0
       | last.set "no P0 master in the operator's map"; since.set none; return false
-    let ip := (← getPodIp p c.«namespace»).getD ""
-    let node ← nodeHistory c ip
+    let node ← nodeSnap c p
     let auth ← authorityHistory c
-    last.set s!"master {p}; node {node}; authority {auth}"
+    last.set s!"master {p}; node {repr node}; authority {auth}"
     match node, auth with
-    | some (nm, ne), some (g, am, ae, false) =>
-      if nm != am || ne != ae then since.set none; return false
-      let key := s!"{p}/{g}/{nm}/{ne}"
+    | some n, some (g, am, ae, false) =>
+      if !n.isP0Master || n.lineage != am || n.epoch != ae then since.set none; return false
+      let cur := (g, n)
       match ← since.get with
       | some (k, t0) =>
-        if k == key then return now - t0 >= stableMs
-        else since.set (some (key, now)); return false
-      | none => since.set (some (key, now)); return false
+        if k == cur then
+          if now - t0 >= stableMs then verified.set (some cur); return true
+          return false
+        else since.set (some (cur, now)); return false
+      | none => since.set (some (cur, now)); return false
     | _, _ => since.set none; return false
   if ok then
-    match ← authorityHistory c with
-    | some (g, m, e, _) => return .ok (g, m, e)
-    | none => return .error "the authority's record vanished"
+    match ← verified.get with
+    | some v => return .ok v
+    | none => return .error "internal: settled without a verified observation"
   else return .error (← last.get)
 
 def suite : TestSuite := {
@@ -585,28 +613,35 @@ def suite : TestSuite := {
         if !mastered then return .fail "precondition: no P0 master in the two-partition source within 300 s"
         -- the master in the map and a stats answer do not make a history: the
         -- backup is only a same-history restore if the authority's record for P0
-        -- equals what the node itself reports, stably, before AND after the backup
-        -- (CI c0f776ac attempt 1: the backup was taken as a promotion committed;
-        -- the restored copy held an older lineage/epoch than the authority adopted
-        -- a moment later and was FORBIDDEN as a master)
-        let notMet := fun (what : String) => TestResult.fail s!"PRECONDITION NOT MET (not a restore verdict, not a product defect): {what}"
-        let (gen0, mid0, ep0) ← match ← settledP0History src2Cfg 180 15000 with
+        -- equals what the node itself reports (its own source epoch, its own
+        -- master role), stably, and the node is the same copy/pod/process around
+        -- the backup (CI c0f776ac attempt 1: the backup was taken as a promotion
+        -- committed; the restored copy held an older lineage/epoch than the
+        -- authority adopted a moment later and was FORBIDDEN as a master)
+        let notMet := fun (what : String) => TestResult.fail s!"PRECONDITION NOT MET (scenario not executed; cause unclassified): {what}"
+        let (gen0, snap0) ← match ← settledP0History src2Cfg 180 15000 with
           | .ok h => pure h
           | .error last => return notMet s!"P0's authoritative history did not settle to what its master reports within 180 s: {last}"
-        let entries ← nodeView src2Cfg
-        let some p0 := findMasterPod entries 0 | return .fail "precondition: no P0 master in the two-partition source"
-        let p0Ip := (← getPodIp p0 ns2).getD ""
-        let beforeBackup ← nodeHistory src2Cfg p0Ip
-        match ← execInDebugPod src2Cfg.debugPod ns2 s!"printf 'backup inplace-p0\\r\\n' | nc -w 10 {p0Ip} {src2Cfg.flarePort}" with
-        | .ok o => IO.eprintln s!"# backup on {p0}: {o.trim}"
-        | .error e => return .fail s!"precondition: backup on {p0}: {e}"
-        let afterBackup ← nodeHistory src2Cfg p0Ip
+        let p0 := snap0.pod
+        let some p0Ip ← getPodIp p0 ns2 | return notMet s!"{p0} has no IP"
+        let mid0 := snap0.lineage
+        let ep0 := snap0.epoch
+        -- the protocol reply decides whether the backup was taken, not the shell's exit status
+        let backupReply ← execInDebugPod src2Cfg.debugPod ns2 s!"printf 'backup inplace-p0\\r\\n' | nc -w 10 {p0Ip} {src2Cfg.flarePort}"
+        let reply := match backupReply with | .ok o => o.trim | .error e => s!"(shell error) {e}"
+        IO.eprintln s!"# backup on {p0}: {reply}"
+        let replyLines := (reply.splitOn "\n").map (·.replace "\r" "" |>.trim)
+        if !(replyLines.any (·.startsWith "STAT backup_path ") && replyLines.getLast? == some "END"
+             && !replyLines.any (fun l => containsSubstr l "SERVER_ERROR" || containsSubstr l "CLIENT_ERROR" || containsSubstr l "ERROR")) then
+          return notMet s!"flared's reply to the backup is not a protocol success (STAT backup_path ... END): {reply}"
+        let afterSnap ← nodeSnap src2Cfg p0
         let authAfter ← authorityHistory src2Cfg
-        IO.eprintln s!"# history around the backup on {p0}: authority gen {gen0} {mid0}/{ep0}; node before {beforeBackup}, after {afterBackup}; authority after {authAfter}"
-        -- the backup's own history is the node's at the instant it was taken: equal
-        -- on both sides of it, and equal to the authority's
-        if beforeBackup != some (mid0, ep0) || afterBackup != some (mid0, ep0) then
-          return notMet s!"the node's history moved around the backup (before {beforeBackup}, after {afterBackup}; authority {mid0}/{ep0}): the backup's lineage/epoch is not established"
+        IO.eprintln s!"# history around the backup on {p0}: authority gen {gen0} {mid0}/{ep0}; node before {repr snap0}, after {repr afterSnap}; authority after {authAfter}"
+        -- the backup's inside is not read directly (its history is a reserved key of the
+        -- checkpointed DB): the claim is only that it is bracketed by the node's own
+        -- history, unchanged from the verified observation to after the backup
+        if afterSnap != some snap0 then
+          return notMet s!"the node changed around the backup (before {repr snap0}, after {repr afterSnap}): the backup's lineage/epoch is only bracketed, not established"
         match authAfter with
         | some (g, m, e, false) =>
           if g != gen0 || m != mid0 || e != ep0 then

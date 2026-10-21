@@ -277,6 +277,68 @@ private def negativeObservation (c : ClusterConfig) (secs : Nat) : IO (Except St
     return .error s!"the operator's map was read in only {observed}/{samples} samples: no evidence either way (not a pass)"
   return .ok seen
 
+/-- (lineage, epoch) the copy at `ip` itself reports in flared's stats (not
+    through a proxy): rocksdb_master_id and the epoch it rebuilt from, else
+    its own source epoch — the same pair the operator's classifier compares. -/
+private def nodeHistory (c : ClusterConfig) (ip : String) : IO (Option (String × String)) := do
+  let some mid ← statOf c ip "rocksdb_master_id" | return none
+  let own ← statOf c ip "rocksdb_source_epoch"
+  let rebuilt ← statOf c ip "rocksdb_rebuilt_from_epoch"
+  let ep := match rebuilt with
+    | some e => if e.trim.isEmpty then own else some e
+    | none => own
+  match ep with
+  | some e => if mid.trim.isEmpty || e.trim.isEmpty then return none else return some (mid.trim, e.trim)
+  | none => return none
+
+/-- The authority's record for partition 0 (ConfigMap `{name}-history`):
+    (generation, lineage, epoch, a promotion intent is pending). -/
+private def authorityHistory (c : ClusterConfig) : IO (Option (String × String × String × Bool)) := do
+  match ← kubectl ["get", "configmap", s!"{c.name}-history", "-n", c.«namespace», "-o", "jsonpath={.data.record}"] with
+  | .error _ => return none
+  | .ok r =>
+    let lines := (r.splitOn "\n").map (·.trim)
+    let intent := lines.any (·.startsWith "intent ")
+    match lines.find? (·.startsWith "part 0 known ") with
+    | some l =>
+      match l.splitOn " " with
+      | _ :: _ :: _ :: g :: mid :: ep :: _ => return some (g, mid, ep, intent)
+      | _ => return none
+    | none => return none
+
+/-- Wait until partition 0's master, as the operator's map names it, reports
+    on the node itself the (lineage, epoch) the authority recorded, no
+    promotion intent is pending, and the same (pod, generation, lineage,
+    epoch) has been observed for `stableMs`. Returns that history, or the last
+    observation for the log. -/
+private def settledP0History (c : ClusterConfig) (secs stableMs : Nat)
+    : IO (Except String (String × String × String)) := do
+  let last ← IO.mkRef "(nothing observed)"
+  let since ← IO.mkRef (none : Option (String × Nat))
+  let ok ← waitForCondition "P0's authoritative history equals what its master reports itself, stable" secs do
+    let now ← IO.monoMsNow
+    let some p := findMasterPod (← nodeView c) 0
+      | last.set "no P0 master in the operator's map"; since.set none; return false
+    let ip := (← getPodIp p c.«namespace»).getD ""
+    let node ← nodeHistory c ip
+    let auth ← authorityHistory c
+    last.set s!"master {p}; node {node}; authority {auth}"
+    match node, auth with
+    | some (nm, ne), some (g, am, ae, false) =>
+      if nm != am || ne != ae then since.set none; return false
+      let key := s!"{p}/{g}/{nm}/{ne}"
+      match ← since.get with
+      | some (k, t0) =>
+        if k == key then return now - t0 >= stableMs
+        else since.set (some (key, now)); return false
+      | none => since.set (some (key, now)); return false
+    | _, _ => since.set none; return false
+  if ok then
+    match ← authorityHistory c with
+    | some (g, m, e, _) => return .ok (g, m, e)
+    | none => return .error "the authority's record vanished"
+  else return .error (← last.get)
+
 def suite : TestSuite := {
   name := "restore-isolated"
   setup := do
@@ -521,12 +583,35 @@ def suite : TestSuite := {
           | some p => return (← statOf src2Cfg ((← getPodIp p ns2).getD "") "curr_items").isSome
           | none => return false
         if !mastered then return .fail "precondition: no P0 master in the two-partition source within 300 s"
+        -- the master in the map and a stats answer do not make a history: the
+        -- backup is only a same-history restore if the authority's record for P0
+        -- equals what the node itself reports, stably, before AND after the backup
+        -- (CI c0f776ac attempt 1: the backup was taken as a promotion committed;
+        -- the restored copy held an older lineage/epoch than the authority adopted
+        -- a moment later and was FORBIDDEN as a master)
+        let notMet := fun (what : String) => TestResult.fail s!"PRECONDITION NOT MET (not a restore verdict, not a product defect): {what}"
+        let (gen0, mid0, ep0) ← match ← settledP0History src2Cfg 180 15000 with
+          | .ok h => pure h
+          | .error last => return notMet s!"P0's authoritative history did not settle to what its master reports within 180 s: {last}"
         let entries ← nodeView src2Cfg
         let some p0 := findMasterPod entries 0 | return .fail "precondition: no P0 master in the two-partition source"
         let p0Ip := (← getPodIp p0 ns2).getD ""
+        let beforeBackup ← nodeHistory src2Cfg p0Ip
         match ← execInDebugPod src2Cfg.debugPod ns2 s!"printf 'backup inplace-p0\\r\\n' | nc -w 10 {p0Ip} {src2Cfg.flarePort}" with
         | .ok o => IO.eprintln s!"# backup on {p0}: {o.trim}"
         | .error e => return .fail s!"precondition: backup on {p0}: {e}"
+        let afterBackup ← nodeHistory src2Cfg p0Ip
+        let authAfter ← authorityHistory src2Cfg
+        IO.eprintln s!"# history around the backup on {p0}: authority gen {gen0} {mid0}/{ep0}; node before {beforeBackup}, after {afterBackup}; authority after {authAfter}"
+        -- the backup's own history is the node's at the instant it was taken: equal
+        -- on both sides of it, and equal to the authority's
+        if beforeBackup != some (mid0, ep0) || afterBackup != some (mid0, ep0) then
+          return notMet s!"the node's history moved around the backup (before {beforeBackup}, after {afterBackup}; authority {mid0}/{ep0}): the backup's lineage/epoch is not established"
+        match authAfter with
+        | some (g, m, e, false) =>
+          if g != gen0 || m != mid0 || e != ep0 then
+            return notMet s!"the authority moved around the backup (gen {gen0} {mid0}/{ep0} -> gen {g} {m}/{e}): the backup may hold an older history"
+        | _ => return notMet s!"the authority's record is unreadable or has a pending promotion after the backup ({authAfter})"
         let some atBackup := (← statOf src2Cfg p0Ip "curr_items").bind String.toNat? | return .fail "precondition: P0's items could not be read"
         let oldId := ((← statOf src2Cfg p0Ip "rocksdb_copy_id").getD "").trim
         -- the live copy moves past the backup

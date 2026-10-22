@@ -128,6 +128,9 @@ private:
 	bool			_flush_all_enabled;
 	bool			_repl_identity_forward;
 	bool			_wal_follow_enabled;
+	bool			_write_authority_enabled;
+	uint64_t		_write_authority_margin_ms;
+	uint64_t		_write_authority_max_ttl_ms;
 	int				_wal_follow_max_batches;
 	int				_wal_follow_max_bytes;
 	int				_wal_follow_poll_interval_usec;
@@ -290,6 +293,10 @@ public:
 	bool is_flush_all_enabled() { return this->_flush_all_enabled; }
 	bool is_repl_identity_forward() { return this->_repl_identity_forward; }
 	bool is_wal_follow_enabled() { return this->_wal_follow_enabled; }
+	// C' (design §13): startup-only, OFF by default, no numeric default
+	bool is_write_authority_enabled() { return this->_write_authority_enabled; }
+	uint64_t get_write_authority_margin_ms() { return this->_write_authority_margin_ms; }
+	uint64_t get_write_authority_max_ttl_ms() { return this->_write_authority_max_ttl_ms; }
 	int get_wal_follow_max_batches() { return this->_wal_follow_max_batches; }
 	int get_wal_follow_max_bytes() { return this->_wal_follow_max_bytes; }
 	int get_wal_follow_poll_interval_usec() { return this->_wal_follow_poll_interval_usec; }

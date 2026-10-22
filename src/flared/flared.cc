@@ -34,6 +34,8 @@
 #include "handler_alarm.h"
 #include "handler_metrics.h"
 #include "handler_reaper.h"
+#include "handler_authority.h"
+#include "write_promise.h"
 #include "handler_storage_check.h"
 #include "handler_request.h"
 #include "op_repl_snapshot_push.h"
@@ -176,6 +178,15 @@ flared::~flared() {
 /**
  *	flared application startup procs
  */
+// C': is this node a slave of `partition` in its own map
+static bool flared_is_slave_of(int partition) {
+	cluster* cl = singleton<flared>::instance().get_cluster();
+	cluster::role r = cluster::role_proxy;
+	cluster::state st = cluster::state_down;
+	int p = -1;
+	return cl != NULL && cl->get_own_assignment(r, st, p) && r == cluster::role_slave && p == partition;
+}
+
 int flared::startup(int argc, char **argv) {
 	ini_option_object().set_args(argc, argv);
 	if (ini_option_object().load() < 0) {
@@ -195,6 +206,23 @@ int flared::startup(int argc, char **argv) {
 	vector<string> lines = show_node::lines();
 	for (vector<string>::iterator line = lines.begin(); line != lines.end(); line++) {
 		log_notice("  %s", line->c_str());
+	}
+
+	// C' (design §13): off unless explicitly configured; before this node can
+	// register or take any write, so no write is admitted without authority
+	{
+		string why;
+		if (!write_promise::configure(ini_option_object().is_write_authority_enabled(),
+				ini_option_object().get_write_authority_margin_ms(),
+				ini_option_object().get_write_authority_max_ttl_ms(), why)) {
+			log_err("write-authority: %s", why.c_str());
+			return -1;
+		}
+		if (ini_option_object().is_write_authority_enabled()) {
+			log_notice("write authority ENABLED (margin=%llu ms, max ttl=%llu ms): writes need the operator-given membership and the successors' promises",
+				(unsigned long long)ini_option_object().get_write_authority_margin_ms(),
+				(unsigned long long)ini_option_object().get_write_authority_max_ttl_ms());
+		}
 	}
 
 	// startup procs
@@ -371,6 +399,14 @@ int flared::startup(int argc, char **argv) {
 	// deferred until the storage exists — run it now or the node sits in
 	// prepare forever.
 	this->_cluster->run_boot_shift();
+
+	// C': the master's promise rounds (idle until the operator gives a membership)
+	if (write_promise::enabled()) {
+		write_promise::set_role_probe(&flared_is_slave_of);
+		shared_thread th_authority = this->_other_thread_pool->get(thread_pool::thread_type_authority);
+		handler_authority* h_authority = new handler_authority(th_authority, this->_cluster);
+		th_authority->trigger(h_authority);
+	}
 
 	// creating alarm thread in advance
 	shared_thread th_alarm = this->_other_thread_pool->get(thread_pool::thread_type_alarm);

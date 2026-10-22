@@ -233,6 +233,16 @@ public:
 	static uint64_t authority_refused();
 	/** how many times a change of authority (revoke / new term / floor raise) had to wait for a write in its apply section */
 	static uint64_t authority_drain_waits();
+	/** register `partition` with this node's identity WITHOUT clearing a grant already held
+	    when the identity is unchanged (authority_set_identity clears it). */
+	static void authority_ensure_identity(uint32_t partition, const std::string& pod_uid,
+		const std::string& boot_id, const std::string& copy_id);
+	/** the node's own authority clock now (authority_clock_failed when unreadable) */
+	static uint64_t authority_now_ns();
+	/** what this node holds for a partition: false when no grant. `remaining_ns` is 0 for solo */
+	static bool authority_info(uint32_t partition, uint64_t& term, uint64_t& generation, bool& solo, uint64_t& remaining_ns);
+	/** this node's identity strings (for the grant a request is answered with) */
+	static void authority_identity(std::string& pod_uid, std::string& boot_id, std::string& copy_id);
 	/** test seam: boottime clock in nanoseconds (default CLOCK_BOOTTIME).
 	    A clock that cannot be read returns authority_clock_failed, and
 	    everything fails closed (no grant request, no admission, no ack). */

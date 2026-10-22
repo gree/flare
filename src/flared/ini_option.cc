@@ -106,6 +106,9 @@ ini_option::ini_option():
 		_flush_all_enabled(default_flush_all_enabled),
 		_repl_identity_forward(default_repl_identity_forward),
 		_wal_follow_enabled(default_wal_follow_enabled),
+		_write_authority_enabled(false),
+		_write_authority_margin_ms(0),
+		_write_authority_max_ttl_ms(0),
 		_wal_follow_max_batches(default_wal_follow_max_batches),
 		_wal_follow_max_bytes(default_wal_follow_max_bytes),
 		_wal_follow_poll_interval_usec(default_wal_follow_poll_interval_usec),
@@ -481,6 +484,15 @@ int ini_option::load() {
 		}
 		if (opt_var_map.count("repl-follow-enabled")) {
 			this->_wal_follow_enabled = opt_var_map["repl-follow-enabled"].as<bool>();
+		}
+		if (opt_var_map.count("write-authority-enabled")) {
+			this->_write_authority_enabled = opt_var_map["write-authority-enabled"].as<bool>();
+		}
+		if (opt_var_map.count("write-authority-margin-ms")) {
+			this->_write_authority_margin_ms = opt_var_map["write-authority-margin-ms"].as<uint64_t>();
+		}
+		if (opt_var_map.count("write-authority-max-ttl-ms")) {
+			this->_write_authority_max_ttl_ms = opt_var_map["write-authority-max-ttl-ms"].as<uint64_t>();
 		}
 		if (opt_var_map.count("repl-follow-max-batches")) {
 			this->_wal_follow_max_batches = opt_var_map["repl-follow-max-batches"].as<int>();
@@ -954,6 +966,9 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("rocksdb-snapshot-bwlimit",			program_options::value<int>(),		"bandwidth cap in KB/s for serving a snapshot-bootstrap stream (repl_snapshot); 0 = unlimited (default 32768 = ~256 Mbps, dynamic, rocksdb only)")
 		("flush-all-enabled",					program_options::value<bool>(),		"administrative gate for the flush_all op; false refuses it with SERVER_ERROR (default true, dynamic)")
 		("repl-identity-forward",			program_options::value<bool>(),		"carry the source's replication identity on forwarded writes so the destination orders them against the WAL stream (SAF-10b); enable only when every node understands it (default false, dynamic)")
+		("write-authority-enabled",			program_options::value<bool>(),		"C' no dual writer (design §13): a master writes only while its successors promise not to be promoted; the operator drives promotion through an intent. Startup-only, default false; every node of the cluster must switch together")
+		("write-authority-margin-ms",		program_options::value<uint64_t>(),	"clock drift margin added to every promise a replica gives (required, > 0, when write-authority-enabled; no default)")
+		("write-authority-max-ttl-ms",		program_options::value<uint64_t>(),	"upper bound of a promise's ttl a replica accepts; also its quiet time after a restart (required, > 0, when write-authority-enabled; no default)")
 		("repl-follow-enabled",				program_options::value<bool>(),		"run a continuous WAL follower on an active RocksDB slave so a blip is recovered from the applied position without a rebuild (SAF-10c); requires repl-identity-forward cluster-wide (default false, dynamic)")
 		("repl-follow-max-batches",			program_options::value<int>(),		"bound on WAL batches per follow response (default 256, dynamic)")
 		("repl-follow-max-bytes",			program_options::value<int>(),		"bound on WAL bytes per follow response (default 4194304, dynamic)")

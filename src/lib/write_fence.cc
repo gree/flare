@@ -308,11 +308,14 @@ bool write_fence::entry::_admit_replica(int partition, const std::string& tag) {
 				_refuse_admission_locked(*this);
 				return false;
 			}
-			if (ps.floor_set && (tt < ps.floor_term || (tt == ps.floor_term && tg < ps.floor_gen))) {
+			// no floor yet: the first token is NOT accepted (an old master's forward
+			// could be it). The operator gives the floor before the engine matters
+			// (authority_set_floor / `authority floor`), design §13.
+			if (!ps.floor_set || tt < ps.floor_term || (tt == ps.floor_term && tg < ps.floor_gen)) {
 				_refuse_admission_locked(*this);
 				return false;
 			}
-			const bool higher = !ps.floor_set || tt > ps.floor_term || (tt == ps.floor_term && tg > ps.floor_gen);
+			const bool higher = tt > ps.floor_term || (tt == ps.floor_term && tg > ps.floor_gen);
 			if (higher && !raise) {
 				raise = true;
 				continue;
@@ -484,6 +487,58 @@ void write_fence::authority_set_identity(uint32_t partition, const std::string& 
 		}
 	}
 	_clear_grant_locked(_auth_parts[partition]);
+}
+
+void write_fence::authority_ensure_identity(uint32_t partition, const std::string& pod_uid,
+		const std::string& boot_id, const std::string& copy_id) {
+	{
+		scoped l(&_mutex);
+		if (_auth_identity_set && pod_uid == _auth_pod_uid && boot_id == _auth_boot_id && copy_id == _auth_copy_id
+				&& _auth_registered.count(partition) != 0) {
+			return;
+		}
+	}
+	exclusive x(&_apply_rw, true);
+	scoped l(&_mutex);
+	const bool other = !_auth_identity_set || pod_uid != _auth_pod_uid || boot_id != _auth_boot_id || copy_id != _auth_copy_id;
+	_auth_identity_set = true;
+	_auth_pod_uid = pod_uid;
+	_auth_boot_id = boot_id;
+	_auth_copy_id = copy_id;
+	if (other) {
+		for (std::map<uint32_t, part_state>::iterator it = _auth_parts.begin(); it != _auth_parts.end(); it++) {
+			_clear_grant_locked(it->second);
+		}
+		_auth_registered.clear();
+	}
+	_auth_registered.insert(partition);
+	_auth_parts[partition];
+}
+
+uint64_t write_fence::authority_now_ns() {
+	scoped l(&_mutex);
+	return _auth_clock();
+}
+
+bool write_fence::authority_info(uint32_t partition, uint64_t& term, uint64_t& generation, bool& solo, uint64_t& remaining_ns) {
+	scoped l(&_mutex);
+	std::map<uint32_t, part_state>::const_iterator it = _auth_parts.find(partition);
+	const uint64_t now = _auth_clock();
+	if (!_auth_enabled || it == _auth_parts.end() || !_authority_valid_locked(it->second, now)) {
+		return false;
+	}
+	term = it->second.term;
+	generation = it->second.gen;
+	solo = it->second.solo;
+	remaining_ns = solo ? 0 : it->second.deadline - now;
+	return true;
+}
+
+void write_fence::authority_identity(std::string& pod_uid, std::string& boot_id, std::string& copy_id) {
+	scoped l(&_mutex);
+	pod_uid = _auth_pod_uid;
+	boot_id = _auth_boot_id;
+	copy_id = _auth_copy_id;
 }
 
 uint64_t write_fence::authority_begin_request() {

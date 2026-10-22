@@ -40,6 +40,7 @@
 #include "op_copy_discard.h"
 #include "op_rebuild_resume.h"
 #include "op_fence.h"
+#include "op_authority.h"
 
 namespace gree {
 namespace flare {
@@ -152,6 +153,8 @@ op* op_parser_text_node::_determine_op(const char* first, const char* buf, int& 
 			singleton<flared>::instance().get_storage());
 	} else if (strcmp(first, "fence") == 0) {
 		r = new op_fence(this->_connection);
+	} else if (strcmp(first, "authority") == 0) {
+		r = new op_authority(this->_connection);
 	} else if (strcmp(first, "rebuild_resume") == 0) {
 		r = new op_rebuild_resume(this->_connection,
 			singleton<flared>::instance().get_storage());

@@ -50,6 +50,7 @@ noinst_LTLIBRARIES =	\
 	test_copy_protection.la	\
 	test_write_fence.la	\
 	test_write_authority.la	\
+	test_write_promise.la	\
 	test_copy_switch.la	\
 	test_signal_interrupt.la	\
 	test_op_touch.la	\
@@ -144,6 +145,7 @@ test_source_eligibility_la_SOURCES	= test_source_eligibility.cc
 test_copy_protection_la_SOURCES	= test_copy_protection.cc
 test_write_fence_la_SOURCES	= test_write_fence.cc connection_iostream.cc
 test_write_authority_la_SOURCES	= test_write_authority.cc connection_iostream.cc mock_storage.cc mock_cluster.cc
+test_write_promise_la_SOURCES	= test_write_promise.cc connection_iostream.cc mock_cluster.cc mock_storage.cc
 test_copy_switch_la_SOURCES	= test_copy_switch.cc
 test_signal_interrupt_la_SOURCES	= test_signal_interrupt.cc
 test_op_touch_la_SOURCES	= test_op_touch.cc connection_iostream.cc

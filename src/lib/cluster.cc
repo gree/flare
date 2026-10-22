@@ -27,6 +27,7 @@
  *	$Id$
  */
 #include "cluster.h"
+#include "write_promise.h"
 #include "connection_tcp.h"
 #include "handler_monitor.h"
 #include "handler_proxy.h"
@@ -2328,6 +2329,23 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 	// data outside the replication history).
 	this->_storage->set_lazy_expiry_delete(new_role == role_master);
 	this->_storage->set_write_partition(new_role == role_master ? new_partition : -1);
+	// C' (design §13): a slave becomes a master only when its promise to the
+	// old master is over on its own clock and the operator committed the
+	// promotion intent (write_promise::may_promote). A first master from
+	// proxy has no old master to wait for. A refusal uses the same latch as a
+	// forbidden copy (no reads / writes until the map takes the role away).
+	if (new_role != role_master && old_role == role_master && old_partition >= 0) {
+		write_promise::note_role(static_cast<uint32_t>(old_partition), false);
+	}
+	if (new_role == role_master && old_role == role_slave && new_partition >= 0 && write_promise::enabled()) {
+		string why;
+		if (!write_promise::may_promote(static_cast<uint32_t>(new_partition), why)) {
+			this->_promotion_refused_why = "write authority: " + why;
+			this->_promotion_refused = true;
+			log_err("CRITICAL: PROMOTION REFUSED by this node: %s — it serves no reads or writes as master until the map takes the role away", this->_promotion_refused_why.c_str());
+			return 0;
+		}
+	}
 	if (new_role != role_master && this->_promotion_refused) {
 		log_notice("promotion refusal lifted: no longer a master (new_role=%s)", cluster::role_cast(new_role).c_str());
 		this->_promotion_refused = false;

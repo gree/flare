@@ -68,6 +68,7 @@ libflare_la_SOURCES = \
 	op_orphan_purge.h op_orphan_purge.cc \
 	op_backup.h op_copy_discard.h op_rebuild_resume.h op_backup.cc op_copy_discard.cc op_rebuild_resume.cc \
 	op_fence.h op_fence.cc write_fence.h write_fence.cc \
+	write_promise.h write_promise.cc op_authority.h op_authority.cc handler_authority.h handler_authority.cc \
 	op_node_add.h op_node_add.cc \
 	op_node_remove.h op_node_remove.cc \
 	op_node_role.h op_node_role.cc \

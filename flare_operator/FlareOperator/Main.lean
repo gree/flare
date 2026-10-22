@@ -2111,7 +2111,7 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
             return
           | some (uid, rc) =>
             let ctx := WriteAuthorityDriver.Ctx.live cfg (← historyCrRef.get) ns (← leaderEpochRef.get) "operator"
-            match ← WriteAuthorityDriver.gate ctx part.toNat k uid (toString (rc.getD 0)) 6 with
+            match ← WriteAuthorityDriver.gate ctx part.toNat k uid (toString (rc.getD 0)) 4 with
             | .proceed => IO.eprintln s!"[flare-operator] write authority: promotion of {k} (P{part}) passed the intent gate"
             | .hold why =>
               IO.eprintln s!"[flare-operator] write authority: PROMOTION HELD for {k} (P{part}): {why}"

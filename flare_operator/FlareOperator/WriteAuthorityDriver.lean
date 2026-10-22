@@ -149,9 +149,12 @@ def ensurePartition (ctx : Ctx) (p : Nat) (v : View) : IO (Option Members) := do
   | .ok cur =>
     let old := cur.map (·.1)
     let termNext := (old.map (·.term)).getD 0 + 1
-    let atts ← match old with
-      | some _ => scanAttempts ctx p termNext
-      | none => pure (.ok [])
+    -- the intents are read only when the record would change (a pass at rest costs no extra reads)
+    let masterNow := v.master.getD ""
+    let wantsChange := match old with
+      | some o => o.master != masterNow || o.successors != sortedKeys (v.successors.filter (· != masterNow))
+      | none => false
+    let atts ← if wantsChange then scanAttempts ctx p termNext else pure (.ok [])
     match atts with
     | .error e =>
       IO.eprintln s!"[flare-operator] write authority P{p}: {e}; the record is held"

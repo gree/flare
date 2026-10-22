@@ -40,6 +40,7 @@ import FlareOperator.StateMachine.WriteLeaseModel
 import FlareOperator.StateMachine.PromotionIntentChecks
 import FlareOperator.StateMachine.PromotionIntentStoreChecks
 import FlareOperator.StateMachine.PromotionIntentKubeChecks
+import FlareOperator.StateMachine.WriteAuthorityChecks
 import FlareOperator.StateMachine.SourceEligibility
 import FlareOperator.StateMachine.RebuildConcurrency
 import FlareOperator.StateMachine.AuthoritativeHistory
@@ -1541,7 +1542,29 @@ def partChecks : List (String × Bool) :=
         && (writerKey "wo" b 7).all (fun ch => ch.isAlphanum || ch == '_' || ch == '-')),
     ("writer records: the send time is kept (span [t0, t]); an older line without it is widened conservatively",
       (parseWrites "7 1005 10.0.0.1 k7 v7 STORED 1003").head?.map (·.span) == some (1003, 1005)
-        && (parseWrites "7 1005 10.0.0.1 k7 v7 STORED").head?.map (·.span) == some (1001, 1005))
+        && (parseWrites "7 1005 10.0.0.1 k7 v7 STORED").head?.map (·.span) == some (1001, 1005)),
+    ("C' with the write authority ON: the verdict is on the acknowledgements — the old master's last ack must END before the new master can have acked; equal / later = PRODUCT GAP, whatever the roles said",
+      let wa := fun (o : PartObs) => partVerdictWa o
+      let c : PartObs := { base with samples := withFail }
+      -- old acks end at 151, the new master acks from 300: no overlap
+      wa { c with oldAcks := [(ack 1 150 151 "o", "local")], peerAcks := [(ack 2 300 301 "p", "local")] } == none
+        -- the old master acks until 305 (> 300): a dual acknowledgement, even though only ONE side was classified
+        && startsWith (wa { c with oldAcks := [(ack 1 150 151 "o", "local"), (ack 3 304 305 "o", "local")], peerAcks := [(ack 2 300 301 "p", "local")] }) "PRODUCT GAP"
+        -- an old ack whose path is Unknown still counts as the old master's
+        && startsWith (wa { c with oldAcks := [(ack 3 304 305 "o", "unknown")], peerAcks := [(ack 2 300 301 "p", "local")] }) "PRODUCT GAP"
+        -- ack ending at the very instant the new one starts is not before it
+        && startsWith (wa { c with oldAcks := [(ack 3 299 300 "o", "local")], peerAcks := [(ack 2 300 301 "p", "local")] }) "PRODUCT GAP"),
+    ("C' with the write authority ON: an unclassified new-master ack counts no earlier than the replica's last non-master reading (stricter, never hides an overlap); no new-master ack / no old ack = NOT VERIFIED, never green",
+      let c : PartObs := { base with samples := withFail }
+      -- the replica read master from 200; its last slave reading starts at 196
+      waFirstNewPossible { c with peerAcks := [(ack 2 150 151 "p", "unknown")] } == some 196
+        && waFirstNewPossible { c with peerAcks := [(ack 2 250 251 "p", "unknown")] } == some 250
+        && waFirstNewPossible { c with peerAcks := [(ack 2 250 251 "p", "forwarded")] } == none
+        && partVerdictWa { c with oldAcks := [(ack 1 150 151 "o", "local")], peerAcks := [(ack 2 250 251 "p", "unknown")] } == none
+        && startsWith (partVerdictWa { c with oldAcks := [(ack 1 150 151 "o", "local")], peerAcks := [(ack 2 250 251 "p", "forwarded")] }) "NOT VERIFIED"
+        && startsWith (partVerdictWa { c with oldAcks := [], peerAcks := [(ack 2 250 251 "p", "local")] }) "NOT VERIFIED"
+        && startsWith (partVerdictWa { c with oldAcks := [(ack 1 150 151 "o", "local")], peerAcks := [(ack 2 250 251 "p", "local")], logsComplete := false }) "UNOBSERVABLE"
+        && startsWith (partVerdictWa { c with inj := { inj with apiAfter := some true } }) "PRECONDITION NOT MET")
   ]
 
 -- §11 write-authority DESIGN MODEL (not product code): the review's
@@ -3226,6 +3249,10 @@ def checkPromotionIntentStore (ctx : Ctx) : IO Unit := do
   for (n, ok) in ← FlareOperator.PromotionIntentStoreChecks.checks do check ctx n ok
   for (n, ok) in ← FlareOperator.PromotionIntentKubeChecks.checks do check ctx n ok
 
+/-- C' wiring (docs §13): the pure part of the operator side. -/
+def checkWriteAuthority (ctx : Ctx) : IO Unit := do
+  for (n, ok) in FlareOperator.WriteAuthorityChecks.checks do check ctx n ok
+
 def run : IO UInt32 := do
   let ctx : Ctx := { failures := ← IO.mkRef [], count := ← IO.mkRef 0 }
   checkObserve ctx
@@ -3276,6 +3303,7 @@ def run : IO UInt32 := do
   checkNodeSnapParse ctx
   checkPromotionIntent ctx
   checkPromotionIntentStore ctx
+  checkWriteAuthority ctx
   let failures ← ctx.failures.get
   let n ← ctx.count.get
   IO.println s!"1..{n}"

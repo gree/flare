@@ -43,6 +43,7 @@ import FlareOperator.StateMachine.CopyDiscardApproval
 import FlareOperator.StateMachine.PromotionEvidence
 import FlareOperator.StateMachine.AuthoritativeHistory
 import FlareOperator.EvictionGuard
+import FlareOperator.WriteAuthorityDriver
 import FlareOperator.Server.WebhookServer
 
 namespace FlareOperator
@@ -316,6 +317,9 @@ initialize disruptionRef : IO.Ref (Option Disruption.State) ← IO.mkRef none
 initialize disruptionLoadOkRef : IO.Ref Bool ← IO.mkRef false
 initialize plannedDrainRef : IO.Ref (List (String × String)) ← IO.mkRef []
 initialize leaderEpochRef : IO.Ref Nat ← IO.mkRef 0
+/-- C' (docs §13): `some` only when the operator was given an explicit, consistent
+    set of numbers (FLARE_WRITE_AUTHORITY_*); `none` = everything C' is OFF. -/
+initialize writeAuthorityRef : IO.Ref (Option WriteAuthority.Config) ← IO.mkRef none
 initialize disruptionLock : Std.BaseMutex ← Std.BaseMutex.new
 /-- The masterless CRITICAL's last line per partition (summary, ms): logged
     on change or every 60 s, not every pass (decision 2026-10-16). -/
@@ -2092,6 +2096,28 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
         IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: its pod changed after it was observed (observed {obs}, now {now}) — a restarted or replaced copy is not promoted on the old one's standing; nothing from this pass is committed, the next pass re-decides"
         promotionAbortedRef.set true
         return
+    -- C' (docs §13): a slave that becomes the master is promoted only through the
+    -- promotion intent (prepare -> successor's promise over -> terminal CAS commit).
+    -- Each pass takes the steps the stores and the successor allow; a step that
+    -- cannot finish holds the promotion (nothing from this pass is committed).
+    if let some cfg ← writeAuthorityRef.get then
+      for k in promoted do
+        if ((cur.lookupNode k).map (·.role)) == some FlareRole.Slave then
+          let part := ((ucs.lookupNode k).map (·.partition)).getD (-1)
+          match ← podIdentityNow (extractPodName k) ns with
+          | none =>
+            IO.eprintln s!"[flare-operator] write authority: PROMOTION HELD for {k}: its pod identity is unreadable"
+            promotionAbortedRef.set true
+            return
+          | some (uid, rc) =>
+            let ctx : WriteAuthorityDriver.Ctx :=
+              { cfg, cr := (← historyCrRef.get), ns, token := (← leaderEpochRef.get), node := "operator" }
+            match ← WriteAuthorityDriver.gate ctx part.toNat k uid (toString (rc.getD 0)) 6 with
+            | .proceed => IO.eprintln s!"[flare-operator] write authority: promotion of {k} (P{part}) passed the intent gate"
+            | .hold why =>
+              IO.eprintln s!"[flare-operator] write authority: PROMOTION HELD for {k} (P{part}): {why}"
+              promotionAbortedRef.set true
+              return
   -- Copy retention §10: one rebuild per partition and one in the cluster.
   -- A NEW Proxy -> Slave(Prepare) assignment beyond that is held (the node
   -- stays a Proxy this pass). Rejoins over TCP and master reconstructions
@@ -2395,6 +2421,33 @@ private def runReconcileDriver (stateRef : IO.Ref FlareClusterState)
 -- FSM-Driven Reconcile (Complete with safety checks and metrics)
 -- ===========================================================================
 
+/-- C' (docs §13): the membership record of every partition is kept at the map and
+    pushed to the nodes. Partition-count changes (a prepare map) are not supported
+    with the engine on: nothing is pushed then, and flared refuses the prepare
+    master's forwards. -/
+private def authorityPass (crName ns leaseName identity : String) (st : FlareClusterState) : IO Unit := do
+  match ← writeAuthorityRef.get with
+  | none => pure ()
+  | some cfg =>
+    let holder ← match ← getLease leaseName ns with
+      | .ok l => pure (l.holderIdentity == identity && !l.expired)
+      | .error _ => pure false
+    if !holder then return
+    let parts := (st.nodeMap.map (·.2.partition)).filter (· ≥ 0) |>.eraseDups
+    if parts.length != (← desiredPartitionsRef.get) then
+      IO.eprintln s!"[flare-operator] write authority: the map has {parts.length} partitions, the CR {← desiredPartitionsRef.get}: partition-count change is not supported with write authority on; nothing is pushed this pass"
+      return
+    let pods ← match ← Bridge.listFlaredPodsE crName ns with
+      | .ok ps => pure ps
+      | .error _ => pure []
+    let usable := fun (k : String) => pods.any fun pd => pd.toNodeKey == k && pd.ready && !pd.terminating
+    let ctx : WriteAuthorityDriver.Ctx := { cfg, cr := crName, ns, token := (← leaderEpochRef.get), node := "operator" }
+    for p in parts do
+      let master := (st.nodeMap.find? fun kv => kv.2.role == FlareRole.Master && kv.2.partition == p).map (·.1)
+      let succ := (st.nodeMap.filter fun kv =>
+        kv.2.role == FlareRole.Slave && kv.2.partition == p && kv.2.state == FlareState.Active && usable kv.1).map (·.1)
+      discard <| WriteAuthorityDriver.ensurePartition ctx p.toNat { master, successors := succ }
+
 /-- Prepare-stuck watchdog threshold in reconcile cycles (5s each): 720 ≈ 1h.
     Deliberately high by default (a 100GB+ dataset legitimately rebuilds for
     hours); override with --prepare-stuck-cycles on small clusters where
@@ -2404,6 +2457,7 @@ private def prepareStuckThresholdCycles : Nat := 720
 
 /-- FSM-driven reconcile loop with partition reduction safety check and metrics.
     This is the production-ready version that wraps runReconcileDriver.
+
 
     LEASE FENCE / dual-leader window: the lease is renewed at the top of each
     outer loop iteration, but a reconcile that outlives the 15s lease (slow
@@ -2856,6 +2910,9 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
               IO.eprintln s!"[flare-operator] topology delivery unconfirmed (v{finalVersion}); retained for retry through the lease fence"
         finally
           endPublication gate
+
+  -- 3b. C' (docs §13): the membership record and the nodes' authority (OFF unless configured)
+  authorityPass crName ns leaseName identity (← stateRef.get)
 
   -- 4. Update node counts
   updateNodeCounts metrics finalState
@@ -3817,6 +3874,19 @@ def main (args : List String) : IO Unit := do
   -- the admission endpoint (plain HTTP on 127.0.0.1, TLS terminated by the
   -- sidecar the chart adds; unused when no webhook is configured).
   leaderEpochRef.set gen
+  do
+    let envNat : String → IO (Option Nat) := fun n => do pure ((← IO.getEnv n).bind (·.toNat?))
+    let ttl ← envNat "FLARE_WRITE_AUTHORITY_TTL_MS"
+    let renew ← envNat "FLARE_WRITE_AUTHORITY_RENEW_MS"
+    let margin ← envNat "FLARE_WRITE_AUTHORITY_MARGIN_MS"
+    let timeout ← envNat "FLARE_WRITE_AUTHORITY_PREPARE_TIMEOUT_MS"
+    match WriteAuthority.Config.ofValues ttl renew margin timeout with
+    | some cfg =>
+      writeAuthorityRef.set (some cfg)
+      IO.eprintln s!"[flare-operator] write authority ON: ttl {cfg.ttlMs} ms, renew {cfg.renewMs} ms, margin {cfg.marginMs} ms, prepare timeout {cfg.prepareTimeoutMs} ms (every flared must run with write-authority-enabled)"
+    | none =>
+      if [ttl, renew, margin, timeout].any Option.isSome then
+        IO.eprintln "[flare-operator] ERROR: FLARE_WRITE_AUTHORITY_* is incomplete or inconsistent (need TTL, RENEW < TTL, MARGIN, PREPARE_TIMEOUT > TTL + MARGIN): write authority stays OFF"
   match ← EvictionGuard.load crName ns with
   | .ok d =>
     disruptionRef.set d

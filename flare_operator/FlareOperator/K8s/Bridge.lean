@@ -463,7 +463,7 @@ def queryPodStats (podName ns : String) (statsCmd : String) : IO (Except String 
   -- open (memcached protocol), so a plain `cat` always ran into its 3 s
   -- timeout and every stats probe cost ≥3 s of reconcile time. The overall
   -- deadline stays (timeout 3), so a hung or silent flared still bounds it.
-  execInPod podName ns ["bash", "-c", s!"exec 3<>/dev/tcp/localhost/12121; printf '{statsCmd}\\r\\n' >&3; timeout 3 bash -c 'while IFS= read -r line; do printf \"%s\\n\" \"$line\"; case \"$line\" in END*) break;; esac; done' <&3; exec 3>&-"]
+  execInPod podName ns ["bash", "-c", s!"exec 3<>/dev/tcp/localhost/12121; printf '{statsCmd}\\r\\n' >&3; timeout 3 bash -c 'while IFS= read -r line; do printf \"%s\\n\" \"$line\"; case \"$line\" in END*|SERVER_ERROR*) break;; esac; done' <&3; exec 3>&-"]
 
 /-- What a bounded stats probe (`timeout 3` inside the exec) says about a
     pod's data: `(hasData, knownEmpty)`. A pod lands in `knownEmpty` ONLY when

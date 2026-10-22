@@ -295,6 +295,7 @@ protected:
 	// own clock — that would change its data outside the replication
 	// history. Off until the cluster says this node is a master.
 	volatile bool _lazy_expiry_delete;
+	volatile int _write_partition;
 	uint64_t _follow_generation;
 	// Expired entries hidden from a read but NOT deleted (replica side).
 	AtomicCounter _expire_filtered;
@@ -878,6 +879,7 @@ public:
 	uint64_t get_wal_fallback_to_dump()       { return this->_wal_fallback_to_dump.fetch(); }
 	uint64_t get_expire_reaped()              { return this->_expire_reaped.fetch(); }
 	virtual void set_lazy_expiry_delete(bool on) { this->_lazy_expiry_delete = on; }
+	virtual void set_write_partition(int partition) { this->_write_partition = partition; }
 	bool get_lazy_expiry_delete() const       { return this->_lazy_expiry_delete; }
 	uint64_t get_expire_filtered()            { return this->_expire_filtered.fetch(); }
 	uint64_t get_snapshot_bootstrap()         { return this->_snapshot_bootstrap.fetch(); }

@@ -109,6 +109,8 @@ int op_repl_snapshot_push::_parse_text_server_parameters() {
 		}
 		if (strcmp(q, "relay=1") == 0) {
 			this->_relay = true;
+		} else if (strncmp(q, "wa=", 3) == 0) {
+			this->_auth_tag = q + 3;
 		}
 	}
 	delete[] p;
@@ -184,6 +186,14 @@ int op_repl_snapshot_push::_run_server() {
 				return this->_connection->write(line, strlen(line)) < 0 ? -1 : 0;
 			}
 		}
+	}
+
+	// write authority (write_fence.h): a push that landed on the partition
+	// master is a MASTER-WRITE of that partition; a relay hop to an Active
+	// slave is a REPLICA-APPLY and must carry the master's current authority
+	if (!(this->_relay ? fence_entry.admit_replica(this->_partition, this->_auth_tag)
+			: fence_entry.admit_master(this->_partition))) {
+		return this->_send_result(result_server_error, fence_entry.refusal());
 	}
 
 	// Same partition layout on both sides or the per-partition key spaces do
@@ -540,7 +550,9 @@ int op_repl_snapshot_push::_relay_staging_to_slaves(const string& staging, uint6
 			continue;
 		}
 		char line[BUFSIZ];
-		snprintf(line, sizeof(line), "repl_snapshot_push %d %d 0 relay=1", this->_partition, this->_partition_size);
+		const string wa = write_fence::authority_current_tag(this->_partition);
+		snprintf(line, sizeof(line), "repl_snapshot_push %d %d 0 relay=1%s%s", this->_partition, this->_partition_size,
+			wa.empty() ? "" : " wa=", wa.c_str());
 		if (sc->writeline(line) < 0) {
 			continue;
 		}

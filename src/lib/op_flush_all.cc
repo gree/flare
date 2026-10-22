@@ -150,12 +150,35 @@ int op_flush_all::_run_server() {
 			return this->_send_result(result_server_error, "flush_all refused on a replica: flush the master");
 		}
 	}
-	if (this->_storage->truncate() < 0) {
+	// flush_all is a MASTER-WRITE of this node's own partition (a replica
+	// was refused above): it needs that partition's write authority, and a
+	// node that cannot tell its partition has none (write_fence.h)
+	{
+		cluster::role r;
+		cluster::state st;
+		int partition = -1;
+		const bool known = this->_cluster != NULL && this->_cluster->get_own_assignment(r, st, partition);
+		if (!fence_entry.admit_master(known ? partition : -1)) {
+			return this->_send_result(result_server_error, fence_entry.refusal());
+		}
+	}
+	if (!fence_entry.apply_begin()) {
+		return this->_send_result(result_server_error, "write authority lost before apply");
+	}
+	const int truncated = this->_storage->truncate();
+	fence_entry.apply_end();
+	if (truncated < 0) {
 		if (this->_option & storage::option_noreply) {
 			return 0;
 		} else {
 			return this->_send_result(result_server_error, "unknown error");
 		}
+	}
+	if (!fence_entry.ack_ok()) {
+		if (this->_option & storage::option_noreply) {
+			return 0;
+		}
+		return this->_send_result(result_server_error, "write authority lost before ack");
 	}
 
 	if (this->_option & storage::option_noreply) {

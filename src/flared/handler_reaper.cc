@@ -110,6 +110,18 @@ int handler_reaper::run() {
 				aborted = true;
 				break;
 			}
+			// the reaper deletes as the MASTER of this node's partition: it
+			// needs that partition's write authority (write_fence.h)
+			{
+				cluster::role own_role;
+				cluster::state own_state;
+				int own_partition = -1;
+				if (!this->_cluster->get_own_assignment(own_role, own_state, own_partition)
+						|| own_role != cluster::role_master || !fence_entry.admit_master(own_partition)) {
+					aborted = true;
+					break;
+				}
+			}
 
 			uint32_t scanned = 0;
 			uint32_t reaped = 0;

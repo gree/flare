@@ -160,6 +160,7 @@ storage_rocksdb::storage_rocksdb(
 	_wal_fallback_to_dump(0),
 	_expire_reaped(0),
 	_lazy_expiry_delete(false),
+	_write_partition(-1),
 	_follow_generation(0),
 	_expire_filtered(0),
 	_snapshot_bootstrap(0),
@@ -2115,7 +2116,8 @@ int storage_rocksdb::get(entry& e, result& r, int b) {
 			// check let an arm land between the check and the remove, so an
 			// uncounted delete could follow the barrier (review 2026-10-19 #5).
 			write_fence::entry fence_entry;
-			if (fence_entry.fenced()) {
+			// a lazy expiry delete is a MASTER-WRITE of this node's partition
+			if (fence_entry.fenced() || !fence_entry.admit_master(this->_write_partition)) {
 				this->_expire_filtered.incr();
 			} else {
 				result r_remove;

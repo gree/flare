@@ -52,6 +52,10 @@ public:
 	 * set node to node_map
 	 */
 	cluster::node set_node(string server_name, int server_port, role r, state s, int partition = 0, int balance = 0);
+	/*
+	 * make a node a member (replica) of a partition: the "index" a proxied change is matched against
+	 */
+	void set_partition_member(int partition, string server_name, int server_port);
 	void clear_node_map();
 	void clear_node_partition_map();
 	void dump_node_map();

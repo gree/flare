@@ -114,6 +114,7 @@ protected:
 	int					_partition;
 	int					_partition_size;
 	uint64_t			_bwlimit;			// KB/s the SOURCE throttles the file stream at
+	string				_auth_tag;			// server side: write authority a relay hop carries (write_fence.h)
 	bool				_relay;				// server side: intra-destination hop (master -> its slave)
 	client_result		_client_result;
 	string				_redirect_host;

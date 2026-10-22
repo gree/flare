@@ -67,6 +67,19 @@ int op_orphan_purge::_run_server() {
 	if (!rdb || !this->_cluster) {
 		return this->_send_result(result_server_error, "internal_error");
 	}
+	// INTERNAL (local, unreplicated, no client ACK): the keys it deletes lie
+	// outside this node's own partition. On the MASTER of a partition it
+	// still needs that partition's write authority (a silent old master
+	// purges nothing); on any other role it is subject to the fence only.
+	{
+		cluster::role own_role;
+		cluster::state own_state;
+		int own_partition = -1;
+		if (this->_cluster->get_own_assignment(own_role, own_state, own_partition) && own_role == cluster::role_master
+				&& !fence_entry.admit_master(own_partition)) {
+			return this->_send_result(result_server_error, fence_entry.refusal());
+		}
+	}
 
 	// Validate the token against the outstanding scan.
 	log_info("orphan_purge starting (token=%s)", this->_token.c_str());

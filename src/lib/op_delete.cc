@@ -104,7 +104,8 @@ int op_delete::_run_server() {
 	}
 	// pre-proxy (proxy if node is not master in request-partition)
 	shared_queue_proxy_write q;
-	cluster::proxy_request r_proxy = this->_cluster->pre_proxy_write(this, q);
+	cluster::write_role role;
+	cluster::proxy_request r_proxy = this->_cluster->pre_proxy_write(this, q, 0, &role);
 	if (r_proxy == cluster::proxy_request_complete) {
 		if (this->_entry.option & storage::option_noreply) {
 			// we should not access variable "q"
@@ -123,6 +124,16 @@ int op_delete::_run_server() {
 	// storage i/o
 	storage::result r_storage;
 	int retcode;
+	// write authority, role-aware and per partition (write_fence.h): a
+	// master write takes the grant of this partition; a change applied because
+	// this node is a replica takes none but must carry the current authority
+	if (!(role.replica ? fence_entry.admit_replica(role.partition, this->_entry.auth_tag)
+			: fence_entry.admit_master(role.partition))) {
+		if (this->_entry.option & storage::option_noreply) {
+			return 0;
+		}
+		return this->_send_result(result_server_error, fence_entry.refusal());
+	}
 	// write authority at the APPLY point: an entry whose authority ended
 	// (revoke / term / generation / identity / its own deadline) must not
 	// write; the section stays open only across the storage call
@@ -143,8 +154,14 @@ int op_delete::_run_server() {
 		switch (applied) {
 			case storage::identified_applied:
 				stats_object->increment_delete_hits();
+				if (!fence_entry.ack_ok()) {
+					return this->_send_result(result_server_error, "write authority lost before ack");
+				}
 				return this->_send_result(result_deleted);
 			case storage::identified_skipped:
+				if (!fence_entry.ack_ok()) {
+					return this->_send_result(result_server_error, "write authority lost before ack");
+				}
 				return this->_send_result(result_deleted);
 			case storage::identified_refused:
 				return this->_send_result(result_server_error, "replication identity refused");
@@ -174,6 +191,7 @@ int op_delete::_run_server() {
 		stats_object->increment_delete_hits();
 		// post-proxy (notify updates to slaves if we need)
 		if (fence_entry.still_authorized()) {	// else no forward; the ACK is refused below
+			this->_entry.auth_tag = fence_entry.authority_tag();	// what the replicas check
 			r_proxy = this->_cluster->post_proxy_write(this,
 																								 this->_is_sync(this->_entry.option,
 																																this->_cluster->get_replication_type()
@@ -215,6 +233,11 @@ int op_delete::_run_client(storage::entry& e) {
 	}
 	if (e.option & storage::option_async) {
 		offset += snprintf(request+offset, request_len-offset, " %s", storage::option_cast(storage::option_async).c_str());
+	}
+	// write authority the change was made under (write_fence.h): only set
+	// when the engine is on and the master was admitted under a grant
+	if (!e.auth_tag.empty()) {
+		offset += snprintf(request+offset, request_len-offset, " wa=%s", e.auth_tag.c_str());
 	}
 	// SAF-10b: replication identity of this change (see op_set::_run_client).
 	if (!e.repl_tag.empty()) {

@@ -189,6 +189,12 @@ int storage::entry::parse(const char*p, parse_type t) {
 					n += util::next_word(p+n, q, sizeof(q));
 					continue;
 				}
+				// write authority the forwarded change was made under (write_fence.h)
+				if (strncmp(q, "wa=", 3) == 0) {
+					this->auth_tag = q + 3;
+					n += util::next_word(p+n, q, sizeof(q));
+					continue;
+				}
 				storage::option r = storage::option_none;
 				if (storage::option_cast(q, r) < 0) {
 					log_debug("unknown option [%s] (cast failed)", q);

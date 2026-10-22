@@ -5,6 +5,8 @@
  */
 #include "write_fence.h"
 
+#include <stdio.h>
+
 namespace gree {
 namespace flare {
 
@@ -25,6 +27,7 @@ static uint64_t default_boottime_ns() {
 }
 
 static const size_t authority_max_pending = 64;
+static volatile uint64_t drain_waits = 0;
 
 pthread_mutex_t	write_fence::_mutex = PTHREAD_MUTEX_INITIALIZER;
 #ifdef PTHREAD_RWLOCK_WRITER_NONRECURSIVE_INITIALIZER_NP
@@ -41,6 +44,7 @@ uint64_t		write_fence::_refused = 0;
 uint64_t		write_fence::_generation = 0;
 time_t			(*write_fence::_clock)() = default_clock;
 void			(*write_fence::_entry_hook)() = NULL;
+void			(*write_fence::_admit_hook)() = NULL;
 bool			write_fence::_auth_enabled = false;
 bool			write_fence::_auth_identity_set = false;
 uint32_t		write_fence::_auth_partition = 0;
@@ -48,24 +52,21 @@ std::string		write_fence::_auth_pod_uid;
 std::string		write_fence::_auth_boot_id;
 std::string		write_fence::_auth_copy_id;
 uint64_t		write_fence::_auth_next_nonce = 1;
-uint64_t		write_fence::_auth_last_nonce = 0;
-std::map<uint64_t, uint64_t>	write_fence::_auth_pending;
-bool			write_fence::_auth_have = false;
-uint64_t		write_fence::_auth_term = 0;
-uint64_t		write_fence::_auth_gen = 0;
-uint64_t		write_fence::_auth_deadline = 0;
-bool			write_fence::_auth_solo = false;
-uint64_t		write_fence::_auth_serial = 0;
-bool			write_fence::_auth_revoked = false;
-uint64_t		write_fence::_auth_revoked_term = 0;
-uint64_t		write_fence::_auth_revoked_gen = 0;
+std::map<uint32_t, write_fence::part_state>	write_fence::_auth_parts;
+std::set<uint32_t>	write_fence::_auth_registered;
 uint64_t		write_fence::_auth_refused = 0;
 uint64_t		(*write_fence::_auth_clock)() = default_boottime_ns;
 
 namespace {
 class exclusive {
 public:
-	explicit exclusive(pthread_rwlock_t* l, bool take): _l(take ? l : NULL) { if (_l) pthread_rwlock_wrlock(_l); }
+	explicit exclusive(pthread_rwlock_t* l, bool take): _l(take ? l : NULL) {
+		if (_l && pthread_rwlock_trywrlock(_l) != 0) {
+			// a write is in its apply section: this change of authority waits for it
+			__sync_fetch_and_add(&drain_waits, 1);
+			pthread_rwlock_wrlock(_l);
+		}
+	}
 	~exclusive() { if (_l) pthread_rwlock_unlock(_l); }
 private:
 	pthread_rwlock_t* _l;
@@ -182,26 +183,20 @@ write_fence::entry::entry() {
 		scoped l(&_mutex);
 		this->_no_authority = false;
 		this->_bound = false;
+		this->_bound_replica = false;
 		this->_applying = false;
 		this->_bound_solo = false;
+		this->_bound_partition = 0;
 		this->_bound_serial = 0;
 		this->_bound_deadline = 0;
+		this->_bound_term = 0;
+		this->_bound_gen = 0;
 		this->_fenced = _active_locked(_clock());
 		if (this->_fenced) {
 			_refused++;
-		} else if (_auth_enabled && !_authority_valid_locked(_auth_clock())) {
-			// the same check path: a master without a valid grant refuses
-			this->_fenced = true;
-			this->_no_authority = true;
-			_refused++;
-			_auth_refused++;
 		} else {
-			if (_auth_enabled) {
-				this->_bound = true;
-				this->_bound_serial = _auth_serial;
-				this->_bound_solo = _auth_solo;
-				this->_bound_deadline = _auth_deadline;
-			}
+			// the fence only; the write authority is taken where the entry
+			// says what it is (admit_master / admit_replica)
 			_in_flight++;
 			hook = _entry_hook;
 		}
@@ -220,16 +215,168 @@ write_fence::entry::~entry() {
 	_in_flight--;
 }
 
-// the authority this entry was admitted under is still the current one
-// (no revoke / new term / generation / identity / engine switch since: the
-// serial) and its OWN deadline has not passed. A renewal of the same
-// authority does not change the serial, and the entry never gets the new TTL.
-bool write_fence::_bound_ok_locked(const entry& e, uint64_t now) {
-	if (now == authority_clock_failed) {
+// an admitted entry that the authority engine refuses leaves the in-flight
+// count and reads as fenced from now on
+void write_fence::_refuse_admission_locked(entry& e) {
+	e._fenced = true;
+	e._no_authority = true;
+	e._bound = false;
+	_in_flight--;
+	_refused++;
+	_auth_refused++;
+}
+
+bool write_fence::entry::admit_master(int partition) {
+	const bool ok = this->_admit_master(partition);
+	if (ok && this->_bound) {
+		void (*hook)() = NULL;
+		{
+			scoped l(&_mutex);
+			hook = _admit_hook;
+		}
+		if (hook != NULL) {
+			hook();
+		}
+	}
+	return ok;
+}
+
+bool write_fence::entry::admit_replica(int partition, const std::string& tag) {
+	const bool ok = this->_admit_replica(partition, tag);
+	if (ok && this->_bound) {
+		void (*hook)() = NULL;
+		{
+			scoped l(&_mutex);
+			hook = _admit_hook;
+		}
+		if (hook != NULL) {
+			hook();
+		}
+	}
+	return ok;
+}
+
+bool write_fence::entry::_admit_master(int partition) {
+	if (this->_fenced) {
 		return false;
 	}
-	return e._bound && _auth_enabled && _auth_have && _auth_serial == e._bound_serial
-		&& (e._bound_solo || now < e._bound_deadline) && _authority_valid_locked(now);
+	scoped l(&_mutex);
+	if (!_auth_enabled) {
+		return true;
+	}
+	if (partition >= 0) {
+		std::map<uint32_t, part_state>::iterator it = _auth_parts.find(static_cast<uint32_t>(partition));
+		if (it != _auth_parts.end() && _authority_valid_locked(it->second, _auth_clock())) {
+			const part_state& ps = it->second;
+			this->_bound = true;
+			this->_bound_replica = false;
+			this->_bound_partition = static_cast<uint32_t>(partition);
+			this->_bound_serial = ps.serial;
+			this->_bound_solo = ps.solo;
+			this->_bound_deadline = ps.deadline;
+			this->_bound_term = ps.term;
+			this->_bound_gen = ps.gen;
+			return true;
+		}
+	}
+	_refuse_admission_locked(*this);
+	return false;
+}
+
+bool write_fence::entry::_admit_replica(int partition, const std::string& tag) {
+	if (this->_fenced) {
+		return false;
+	}
+	uint32_t tp = 0;
+	uint64_t tt = 0, tg = 0;
+	bool raise = false;
+	for (;;) {
+		{
+			// a raise of the floor drains the apply sections first
+			exclusive x(&_apply_rw, raise);
+			scoped l(&_mutex);
+			if (!_auth_enabled) {
+				return true;
+			}
+			if (partition < 0 || !authority_parse_tag(tag, tp, tt, tg) || tp != static_cast<uint32_t>(partition)) {
+				_refuse_admission_locked(*this);
+				return false;
+			}
+			part_state& ps = _auth_parts[tp];
+			// a node that is the master of the partition takes no replica change
+			if (_authority_valid_locked(ps, _auth_clock())) {
+				_refuse_admission_locked(*this);
+				return false;
+			}
+			if (ps.floor_set && (tt < ps.floor_term || (tt == ps.floor_term && tg < ps.floor_gen))) {
+				_refuse_admission_locked(*this);
+				return false;
+			}
+			const bool higher = !ps.floor_set || tt > ps.floor_term || (tt == ps.floor_term && tg > ps.floor_gen);
+			if (higher && !raise) {
+				raise = true;
+				continue;
+			}
+			if (higher) {
+				ps.floor_set = true;
+				ps.floor_term = tt;
+				ps.floor_gen = tg;
+				ps.floor_serial++;
+			}
+			this->_bound = true;
+			this->_bound_replica = true;
+			this->_bound_partition = tp;
+			this->_bound_serial = ps.floor_serial;
+			this->_bound_term = tt;
+			this->_bound_gen = tg;
+			return true;
+		}
+	}
+}
+
+std::string write_fence::entry::authority_tag() const {
+	if (!this->_bound || this->_bound_replica) {
+		return std::string();
+	}
+	char buf[96];
+	snprintf(buf, sizeof(buf), "%u:%llu:%llu", this->_bound_partition,
+		static_cast<unsigned long long>(this->_bound_term), static_cast<unsigned long long>(this->_bound_gen));
+	return buf;
+}
+
+bool write_fence::authority_parse_tag(const std::string& tag, uint32_t& partition, uint64_t& term, uint64_t& generation) {
+	unsigned long long p = 0, t = 0, g = 0;
+	int n = 0;
+	if (tag.empty() || tag.size() > 64 || sscanf(tag.c_str(), "%llu:%llu:%llu%n", &p, &t, &g, &n) != 3
+			|| static_cast<size_t>(n) != tag.size() || p > 0xffffffffULL || tag.find_first_of("+- ") != std::string::npos) {
+		return false;
+	}
+	partition = static_cast<uint32_t>(p);
+	term = t;
+	generation = g;
+	return true;
+}
+
+// the authority this entry was admitted under is still the current one
+// (no revoke / new term / generation / identity / engine switch since: the
+// serial) and, for a master, its OWN deadline has not passed. A renewal of
+// the same authority does not change the serial, and the entry never gets the
+// new TTL. A replica entry is current while the partition's floor has not
+// moved (floor_serial) and no master grant appeared.
+bool write_fence::_bound_ok_locked(const entry& e, uint64_t now) {
+	if (now == authority_clock_failed || !e._bound || !_auth_enabled) {
+		return false;
+	}
+	std::map<uint32_t, part_state>::const_iterator it = _auth_parts.find(e._bound_partition);
+	if (it == _auth_parts.end()) {
+		return false;
+	}
+	const part_state& ps = it->second;
+	if (e._bound_replica) {
+		return ps.floor_serial == e._bound_serial && !_authority_valid_locked(ps, now);
+	}
+	return ps.have && ps.serial == e._bound_serial
+		&& (e._bound_solo || now < e._bound_deadline) && _authority_valid_locked(ps, now);
 }
 
 bool write_fence::entry::ack_ok() {
@@ -286,29 +433,32 @@ void write_fence::entry::apply_end() {
 	}
 }
 
-bool write_fence::_authority_valid_locked(uint64_t now) {
-	if (!_auth_have) {
+bool write_fence::_authority_valid_locked(const part_state& ps, uint64_t now) {
+	if (!ps.have) {
 		return false;
 	}
 	if (now == authority_clock_failed) {
 		return false;
 	}
-	return _auth_solo || now < _auth_deadline;
+	return ps.solo || now < ps.deadline;
 }
 
-static void authority_clear_grant_locked(bool& have, uint64_t& deadline, bool& solo, std::map<uint64_t, uint64_t>& pending) {
-	have = false;
-	deadline = 0;
-	solo = false;
-	pending.clear();
+void write_fence::_clear_grant_locked(part_state& ps) {
+	ps.have = false;
+	ps.deadline = 0;
+	ps.solo = false;
+	ps.pending.clear();
+	ps.serial++;
+	ps.floor_serial++;
 }
 
 void write_fence::authority_set_enabled(bool on) {
 	exclusive x(&_apply_rw, true);
 	scoped l(&_mutex);
 	_auth_enabled = on;
-	authority_clear_grant_locked(_auth_have, _auth_deadline, _auth_solo, _auth_pending);
-	_auth_serial++;
+	for (std::map<uint32_t, part_state>::iterator it = _auth_parts.begin(); it != _auth_parts.end(); it++) {
+		_clear_grant_locked(it->second);
+	}
 }
 
 bool write_fence::authority_enabled() {
@@ -320,27 +470,43 @@ void write_fence::authority_set_identity(uint32_t partition, const std::string& 
 		const std::string& boot_id, const std::string& copy_id) {
 	exclusive x(&_apply_rw, true);
 	scoped l(&_mutex);
+	const bool other = !_auth_identity_set || pod_uid != _auth_pod_uid || boot_id != _auth_boot_id || copy_id != _auth_copy_id;
 	_auth_identity_set = true;
 	_auth_partition = partition;
 	_auth_pod_uid = pod_uid;
 	_auth_boot_id = boot_id;
 	_auth_copy_id = copy_id;
+	_auth_registered.insert(partition);
 	// a different identity never inherits a grant bound to the old one
-	authority_clear_grant_locked(_auth_have, _auth_deadline, _auth_solo, _auth_pending);
-	_auth_serial++;
+	if (other) {
+		for (std::map<uint32_t, part_state>::iterator it = _auth_parts.begin(); it != _auth_parts.end(); it++) {
+			_clear_grant_locked(it->second);
+		}
+	}
+	_clear_grant_locked(_auth_parts[partition]);
 }
 
 uint64_t write_fence::authority_begin_request() {
+	uint32_t p;
+	{
+		scoped l(&_mutex);
+		p = _auth_partition;
+	}
+	return authority_begin_request(p);
+}
+
+uint64_t write_fence::authority_begin_request(uint32_t partition) {
 	scoped l(&_mutex);
 	const uint64_t now = _auth_clock();		// the SEND point, on our own clock
-	if (now == authority_clock_failed) {
+	if (now == authority_clock_failed || _auth_registered.count(partition) == 0) {
 		return 0;		// nonce 0 is never pending: no request can be granted
 	}
+	part_state& ps = _auth_parts[partition];
 	const uint64_t nonce = _auth_next_nonce++;
-	if (_auth_pending.size() >= authority_max_pending) {
-		_auth_pending.erase(_auth_pending.begin());
+	if (ps.pending.size() >= authority_max_pending) {
+		ps.pending.erase(ps.pending.begin());
 	}
-	_auth_pending[nonce] = now;
+	ps.pending[nonce] = now;
 	return nonce;
 }
 
@@ -353,7 +519,9 @@ bool write_fence::authority_apply_grant(const authority_grant& g, std::string& w
 		{
 			exclusive x(&_apply_rw, drain);
 			scoped l(&_mutex);
-			const bool change = _auth_have && !(g.term == _auth_term && g.generation == _auth_gen);
+			std::map<uint32_t, part_state>::iterator it = _auth_parts.find(g.partition);
+			const bool change = it == _auth_parts.end() || !it->second.have
+				|| !(g.term == it->second.term && g.generation == it->second.gen);
 			if (!change || drain) {
 				return _apply_grant_locked(g, why);
 			}
@@ -367,27 +535,29 @@ bool write_fence::_apply_grant_locked(const authority_grant& g, std::string& why
 		why = "authority engine off";
 		return false;
 	}
-	if (!_auth_identity_set || g.partition != _auth_partition || g.pod_uid != _auth_pod_uid
+	if (!_auth_identity_set || _auth_registered.count(g.partition) == 0 || g.pod_uid != _auth_pod_uid
 			|| g.boot_id != _auth_boot_id || g.copy_id != _auth_copy_id) {
 		why = "grant is bound to another identity";
 		return false;
 	}
-	std::map<uint64_t, uint64_t>::iterator it = _auth_pending.find(g.nonce);
-	if (it == _auth_pending.end() || g.nonce <= _auth_last_nonce) {
+	part_state& ps = _auth_parts[g.partition];
+	std::map<uint64_t, uint64_t>::iterator it = ps.pending.find(g.nonce);
+	if (it == ps.pending.end() || g.nonce <= ps.last_nonce) {
 		why = "unknown, old or duplicate request nonce";
 		return false;
 	}
-	if (_auth_revoked && (g.term < _auth_revoked_term
-			|| (g.term == _auth_revoked_term && g.generation <= _auth_revoked_gen))) {
+	if (ps.revoked && (g.term < ps.revoked_term
+			|| (g.term == ps.revoked_term && g.generation <= ps.revoked_gen))) {
 		why = "revoked";
 		return false;
 	}
-	if (_auth_have && (g.term < _auth_term || (g.term == _auth_term && g.generation < _auth_gen))) {
+	if ((ps.have && (g.term < ps.term || (g.term == ps.term && g.generation < ps.gen)))
+			|| (ps.floor_set && (g.term < ps.floor_term || (g.term == ps.floor_term && g.generation < ps.floor_gen)))) {
 		why = "older term or generation";
 		return false;
 	}
-	const bool same = _auth_have && g.term == _auth_term && g.generation == _auth_gen;
-	if (same && g.solo != _auth_solo) {
+	const bool same = ps.have && g.term == ps.term && g.generation == ps.gen;
+	if (same && g.solo != ps.solo) {
 		why = "membership mode differs within one generation";
 		return false;
 	}
@@ -403,19 +573,26 @@ bool write_fence::_apply_grant_locked(const authority_grant& g, std::string& why
 			why = "expired before it arrived";
 			return false;
 		}
-		if (same && deadline < _auth_deadline) {
-			deadline = _auth_deadline;		// a renewal never shortens
+		if (same && deadline < ps.deadline) {
+			deadline = ps.deadline;		// a renewal never shortens
 		}
 	}
-	_auth_pending.erase(_auth_pending.begin(), _auth_pending.upper_bound(g.nonce));
-	_auth_last_nonce = g.nonce;
-	_auth_have = true;
-	_auth_term = g.term;
-	_auth_gen = g.generation;
-	_auth_solo = g.solo;
-	_auth_deadline = deadline;
+	ps.pending.erase(ps.pending.begin(), ps.pending.upper_bound(g.nonce));
+	ps.last_nonce = g.nonce;
+	ps.have = true;
+	ps.term = g.term;
+	ps.gen = g.generation;
+	ps.solo = g.solo;
+	ps.deadline = deadline;
 	if (!same) {
-		_auth_serial++;		// a renewal of the same authority keeps it
+		ps.serial++;		// a renewal of the same authority keeps it
+		// this node is the master now: replica entries admitted before are void
+		ps.floor_serial++;
+	}
+	if (!ps.floor_set || g.term > ps.floor_term || (g.term == ps.floor_term && g.generation > ps.floor_gen)) {
+		ps.floor_set = true;
+		ps.floor_term = g.term;
+		ps.floor_gen = g.generation;
 	}
 	return true;
 }
@@ -423,30 +600,84 @@ bool write_fence::_apply_grant_locked(const authority_grant& g, std::string& why
 bool write_fence::authority_revoke(uint32_t partition, uint64_t term, uint64_t generation, std::string& why) {
 	exclusive x(&_apply_rw, true);
 	scoped l(&_mutex);
-	if (!_auth_identity_set || partition != _auth_partition) {
+	if (!_auth_identity_set || _auth_registered.count(partition) == 0) {
 		why = "another partition";
 		return false;
 	}
-	if (!_auth_revoked || term > _auth_revoked_term
-			|| (term == _auth_revoked_term && generation > _auth_revoked_gen)) {
-		_auth_revoked = true;
-		_auth_revoked_term = term;
-		_auth_revoked_gen = generation;
+	part_state& ps = _auth_parts[partition];
+	if (!ps.revoked || term > ps.revoked_term
+			|| (term == ps.revoked_term && generation > ps.revoked_gen)) {
+		ps.revoked = true;
+		ps.revoked_term = term;
+		ps.revoked_gen = generation;
 	}
-	if (_auth_have && (_auth_term < _auth_revoked_term
-			|| (_auth_term == _auth_revoked_term && _auth_gen <= _auth_revoked_gen))) {
-		authority_clear_grant_locked(_auth_have, _auth_deadline, _auth_solo, _auth_pending);
-		_auth_serial++;
+	if (ps.have && (ps.term < ps.revoked_term
+			|| (ps.term == ps.revoked_term && ps.gen <= ps.revoked_gen))) {
+		_clear_grant_locked(ps);
 	} else {
 		// requests sent before the revoke are void either way
-		_auth_pending.clear();
+		ps.pending.clear();
 	}
 	return true;
 }
 
-bool write_fence::authority_valid() {
+void write_fence::authority_set_floor(uint32_t partition, uint64_t term, uint64_t generation) {
+	exclusive x(&_apply_rw, true);
 	scoped l(&_mutex);
-	return _auth_enabled && _authority_valid_locked(_auth_clock());
+	part_state& ps = _auth_parts[partition];
+	if (ps.floor_set && (term < ps.floor_term || (term == ps.floor_term && generation <= ps.floor_gen))) {
+		return;		// never lowers
+	}
+	ps.floor_set = true;
+	ps.floor_term = term;
+	ps.floor_gen = generation;
+	ps.floor_serial++;
+	// a newer authority exists: a held grant of an older one is void
+	if (ps.have && (ps.term < term || (ps.term == term && ps.gen < generation))) {
+		_clear_grant_locked(ps);
+	}
+}
+
+bool write_fence::authority_floor(uint32_t partition, uint64_t& term, uint64_t& generation) {
+	scoped l(&_mutex);
+	std::map<uint32_t, part_state>::const_iterator it = _auth_parts.find(partition);
+	if (it == _auth_parts.end() || !it->second.floor_set) {
+		return false;
+	}
+	term = it->second.floor_term;
+	generation = it->second.floor_gen;
+	return true;
+}
+
+bool write_fence::authority_valid() {
+	uint32_t p;
+	{
+		scoped l(&_mutex);
+		p = _auth_partition;
+	}
+	return authority_valid(p);
+}
+
+std::string write_fence::authority_current_tag(uint32_t partition) {
+	scoped l(&_mutex);
+	std::map<uint32_t, part_state>::const_iterator it = _auth_parts.find(partition);
+	if (!_auth_enabled || it == _auth_parts.end() || !_authority_valid_locked(it->second, _auth_clock())) {
+		return std::string();
+	}
+	char buf[96];
+	snprintf(buf, sizeof(buf), "%u:%llu:%llu", partition,
+		static_cast<unsigned long long>(it->second.term), static_cast<unsigned long long>(it->second.gen));
+	return buf;
+}
+
+bool write_fence::authority_valid(uint32_t partition) {
+	scoped l(&_mutex);
+	std::map<uint32_t, part_state>::const_iterator it = _auth_parts.find(partition);
+	return _auth_enabled && it != _auth_parts.end() && _authority_valid_locked(it->second, _auth_clock());
+}
+
+uint64_t write_fence::authority_drain_waits() {
+	return __sync_fetch_and_add(&drain_waits, 0);
 }
 
 uint64_t write_fence::authority_refused() {
@@ -469,6 +700,11 @@ void write_fence::set_clock(time_t (*clock)()) {
 	_clock = clock ? clock : default_clock;
 }
 
+void write_fence::set_admit_hook(void (*hook)()) {
+	scoped l(&_mutex);
+	_admit_hook = hook;
+}
+
 void write_fence::set_entry_hook(void (*hook)()) {
 	scoped l(&_mutex);
 	_entry_hook = hook;
@@ -484,6 +720,7 @@ void write_fence::reset_for_test() {
 	_generation = 0;
 	_clock = default_clock;
 	_entry_hook = NULL;
+	_admit_hook = NULL;
 	_auth_enabled = false;
 	_auth_identity_set = false;
 	_auth_partition = 0;
@@ -491,14 +728,8 @@ void write_fence::reset_for_test() {
 	_auth_boot_id.clear();
 	_auth_copy_id.clear();
 	_auth_next_nonce = 1;
-	_auth_last_nonce = 0;
-	_auth_pending.clear();
-	_auth_have = false;
-	_auth_term = _auth_gen = _auth_deadline = 0;
-	_auth_solo = false;
-	_auth_serial = 0;
-	_auth_revoked = false;
-	_auth_revoked_term = _auth_revoked_gen = 0;
+	_auth_parts.clear();
+	_auth_registered.clear();
 	_auth_refused = 0;
 	_auth_clock = default_boottime_ns;
 	gettime_fn = clock_gettime;

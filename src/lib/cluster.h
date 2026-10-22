@@ -276,7 +276,17 @@ public:
 	int request_up_node(string node_server_name, int node_server_port);
 	int add_proxy_event_listener(shared_proxy_event_listener listener);
 	proxy_request pre_proxy_read(op_proxy_read* op, storage::entry& e, void* parameter, shared_queue_proxy_read& q);
-	proxy_request pre_proxy_write(op_proxy_write* op, shared_queue_proxy_write& q, uint64_t generic_value = 0);
+	// What this node is, for a write that pre_proxy_write let through
+	// (proxy_request_continue), and for which partition: the write authority
+	// (write_fence.h) is taken per partition and per role. replica: applied
+	// because this node is a replica of `partition` (a proxied / forwarded
+	// change); otherwise the master of `partition`. partition < 0: not set.
+	struct write_role {
+		write_role(): replica(false), partition(-1) { }
+		bool	replica;
+		int		partition;
+	};
+	proxy_request pre_proxy_write(op_proxy_write* op, shared_queue_proxy_write& q, uint64_t generic_value = 0, write_role* role = NULL);
 	proxy_request post_proxy_write(op_proxy_write* op, bool sync = false);
 	// TEST SEAM (FLARE_TEST_READ_TRACE_PREFIX): is `key` traced, and log the
 	// ANSWER a traced read got (hit / miss / unavailable + why), on the same

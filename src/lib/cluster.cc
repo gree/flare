@@ -1735,7 +1735,7 @@ cluster::proxy_request cluster::pre_proxy_read(op_proxy_read* op, storage::entry
  *
  *	@todo fix performance issue
  */
-cluster::proxy_request cluster::pre_proxy_write(op_proxy_write* op, shared_queue_proxy_write& q_result, uint64_t generic_value) {
+cluster::proxy_request cluster::pre_proxy_write(op_proxy_write* op, shared_queue_proxy_write& q_result, uint64_t generic_value, write_role* role) {
 	storage::entry& e = op->get_entry();
 	for (vector<shared_proxy_event_listener>::iterator it = this->_fixed_proxy_event_listeners.begin();
 			it != this->_fixed_proxy_event_listeners.end(); it++) {
@@ -1758,7 +1758,7 @@ cluster::proxy_request cluster::pre_proxy_write(op_proxy_write* op, shared_queue
 		// perhaps no partition available
 		return proxy_request_error_partition;
 	}
-	this->_determine_partition(e, p_prepare, true, is_prepare);
+	const int n_prepare = this->_determine_partition(e, p_prepare, true, is_prepare);
 
 	// Proxy marks mean "final delivery from within OUR cluster, apply
 	// locally" — honor them only when the marking node actually shares our
@@ -1776,12 +1776,21 @@ cluster::proxy_request cluster::pre_proxy_write(op_proxy_write* op, shared_queue
 		return proxy_request_error_partition;
 	}
 	if (p.master.node_key == this->_node_key || (local_proxy_request && is_prepare && p_prepare.master.node_key == this->_node_key)) {
-		// should be write at this node
+		// should be write at this node: as the master of the partition
+		if (role != NULL) {
+			role->replica = false;
+			role->partition = p.master.node_key == this->_node_key ? n : n_prepare;
+		}
 		return proxy_request_continue;
 	}
 
 	if (local_proxy_request) {
 		if (p.index.count(this->_node_key) > 0 || (is_prepare && p_prepare.index.count(this->_node_key) > 0)) {
+			// a change applied because this node is a replica of the partition
+			if (role != NULL) {
+				role->replica = true;
+				role->partition = p.index.count(this->_node_key) > 0 ? n : n_prepare;
+			}
 			return proxy_request_continue;
 		}
 	}
@@ -2318,6 +2327,7 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 	// finds it; a replica only hides it (its own clock must not change its
 	// data outside the replication history).
 	this->_storage->set_lazy_expiry_delete(new_role == role_master);
+	this->_storage->set_write_partition(new_role == role_master ? new_partition : -1);
 	if (new_role != role_master && this->_promotion_refused) {
 		log_notice("promotion refusal lifted: no longer a master (new_role=%s)", cluster::role_cast(new_role).c_str());
 		this->_promotion_refused = false;

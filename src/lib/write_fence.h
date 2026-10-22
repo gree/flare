@@ -62,8 +62,25 @@
  *	write, a forward, a sleep or a callback, and never while taking another
  *	lock. Nothing under a slot lock takes _apply_rw. A renewal takes no
  *	exclusive lock.
- *	Not yet role-aware: while on, the node-level check also gates a
- *	replica's apply paths, so the seam must not be enabled in production.
+ *	ROLE-AWARE, PER PARTITION. Every mutation entry declares what it is
+ *	before it writes (entry::admit_master / entry::admit_replica):
+ *	- MASTER-WRITE (a client write this node applies as the master of the
+ *	  partition, the reaper, a lazy expiry delete, flush_all, a snapshot
+ *	  push that lands on the master): needs the valid grant OF THAT
+ *	  PARTITION; a grant of another partition, or none, refuses it;
+ *	- REPLICA-APPLY (a change applied because this node is a replica of the
+ *	  partition: a forwarded / proxied / identified change, a snapshot relay
+ *	  hop): needs NO master grant. It must carry the authority it was made
+ *	  under (partition, term, generation: the "wa=" token) and is refused
+ *	  when that is older than the partition's FLOOR (the newest authority
+ *	  this node knows: raised by a change that carries a newer one, by a
+ *	  grant, or by authority_set_floor), when it carries none, or when this
+ *	  node holds a valid master grant for the partition itself;
+ *	- INTERNAL: see docs §12.6 for the decision per entry.
+ *	Raising the floor, like a revoke or a new term, drains the apply sections
+ *	(exclusive _apply_rw, node-wide), so a replica change admitted under an
+ *	older term cannot apply after the newer one was admitted.
+ *	An entry that never declared a role is refused when the engine is on.
  */
 #ifndef	WRITE_FENCE_H
 #define	WRITE_FENCE_H
@@ -72,6 +89,7 @@
 #include <stdint.h>
 #include <time.h>
 #include <map>
+#include <set>
 #include <string>
 
 namespace gree {
@@ -117,6 +135,22 @@ public:
 		bool fenced() const { return this->_fenced; }
 		/** the SERVER_ERROR text of a refusal ("fenced" or "no write authority") */
 		const char* refusal() const { return this->_no_authority ? "no write authority" : "fenced"; }
+		/** MASTER-WRITE: this mutation is applied as the master of
+		    `partition` (< 0: unknown, refused when the engine is on). Takes the
+		    grant of THAT partition. Returns false (and fenced() becomes true,
+		    refusal() "no write authority") when the engine is on and that
+		    partition has no valid grant. Engine off: true, nothing bound. */
+		bool admit_master(int partition);
+		/** REPLICA-APPLY: this mutation is a change applied because this node
+		    is a replica of `partition`; `tag` is the authority token the
+		    change carries (see authority_tag). No master grant is needed; the
+		    change is refused when the tag is missing / malformed / for another
+		    partition / older than the partition's floor, or when this node is
+		    the master of the partition. Engine off: true, tag ignored. */
+		bool admit_replica(int partition, const std::string& tag);
+		/** the token a MASTER-WRITE carries to its replicas ("p:term:gen"),
+		    empty when the entry was not admitted as a master under the engine */
+		std::string authority_tag() const;
 		/** call right before the ACK of the mutation: true when the grant
 		    admitted with this entry is still the current, unexpired one (a
 		    renewed or replaced grant counts as different: refuse). Always
@@ -141,10 +175,16 @@ public:
 		bool _fenced;
 		bool _no_authority;
 		bool _bound;
+		bool _bound_replica;
 		bool _applying;
 		bool _bound_solo;
+		bool _admit_master(int partition);
+		bool _admit_replica(int partition, const std::string& tag);
+		uint32_t _bound_partition;
 		uint64_t _bound_serial;
 		uint64_t _bound_deadline;
+		uint64_t _bound_term;
+		uint64_t _bound_gen;
 		entry(const entry&);
 		entry& operator=(const entry&);
 	};
@@ -175,10 +215,24 @@ public:
 	static bool authority_apply_grant(const authority_grant& g, std::string& why);
 	/** revoke every grant of (term, generation) and below for the partition */
 	static bool authority_revoke(uint32_t partition, uint64_t term, uint64_t generation, std::string& why);
-	/** a valid grant is held now */
+	/** a valid grant is held now (for the default partition: the last one given to authority_set_identity) */
 	static bool authority_valid();
+	static bool authority_valid(uint32_t partition);
+	/** the token to hand to a replica for what this node does as the master of
+	    `partition` right now ("p:term:gen"); empty when engine off / no valid grant */
+	static std::string authority_current_tag(uint32_t partition);
+	/** per partition request / revoke (the no-argument forms use the default partition) */
+	static uint64_t authority_begin_request(uint32_t partition);
+	/** the newest authority this node knows for a partition (a replica's
+	    reference); raising it above a held grant voids that grant. Never lowers. */
+	static void authority_set_floor(uint32_t partition, uint64_t term, uint64_t generation);
+	static bool authority_floor(uint32_t partition, uint64_t& term, uint64_t& generation);
+	/** "p:term:gen" parse / format of the token a replica change carries */
+	static bool authority_parse_tag(const std::string& tag, uint32_t& partition, uint64_t& term, uint64_t& generation);
 	/** how many mutations were refused for lack of authority (admission or ack) */
 	static uint64_t authority_refused();
+	/** how many times a change of authority (revoke / new term / floor raise) had to wait for a write in its apply section */
+	static uint64_t authority_drain_waits();
 	/** test seam: boottime clock in nanoseconds (default CLOCK_BOOTTIME).
 	    A clock that cannot be read returns authority_clock_failed, and
 	    everything fails closed (no grant request, no admission, no ack). */
@@ -193,13 +247,34 @@ public:
 	    and counted, i.e. between the fence check and the mutation it guards
 	    — a test arms the fence there to prove the mutation is counted */
 	static void set_entry_hook(void (*hook)());
+	/** test seam: called (outside the lock) right after admit_master / admit_replica
+	    ADMITTED an entry, i.e. between the admission and the apply section */
+	static void set_admit_hook(void (*hook)());
 	static void reset_for_test();
 
 private:
 	static bool _active_locked(time_t now);
-	static bool _authority_valid_locked(uint64_t now);
+	struct part_state {
+		part_state(): have(false), term(0), gen(0), deadline(0), solo(false), serial(0),
+			revoked(false), revoked_term(0), revoked_gen(0), last_nonce(0),
+			floor_set(false), floor_term(0), floor_gen(0), floor_serial(0) { }
+		bool have;
+		uint64_t term, gen, deadline;
+		bool solo;
+		uint64_t serial;
+		bool revoked;
+		uint64_t revoked_term, revoked_gen;
+		uint64_t last_nonce;
+		std::map<uint64_t, uint64_t> pending;	// nonce -> send point (ns)
+		bool floor_set;
+		uint64_t floor_term, floor_gen;
+		uint64_t floor_serial;
+	};
+	static bool _authority_valid_locked(const part_state& ps, uint64_t now);
 	static bool _bound_ok_locked(const entry& e, uint64_t now);
 	static bool _apply_grant_locked(const authority_grant& g, std::string& why);
+	static void _clear_grant_locked(part_state& ps);
+	static void _refuse_admission_locked(entry& e);
 
 	static pthread_mutex_t	_mutex;
 	static pthread_rwlock_t	_apply_rw;
@@ -211,20 +286,15 @@ private:
 	static uint64_t			_generation;
 	static time_t			(*_clock)();
 	static void				(*_entry_hook)();
+	static void				(*_admit_hook)();
 
 	static bool				_auth_enabled;
 	static bool				_auth_identity_set;
-	static uint32_t			_auth_partition;
+	static uint32_t			_auth_partition;	// the default partition of the no-argument forms
 	static std::string		_auth_pod_uid, _auth_boot_id, _auth_copy_id;
 	static uint64_t			_auth_next_nonce;
-	static uint64_t			_auth_last_nonce;
-	static std::map<uint64_t, uint64_t>	_auth_pending;	// nonce -> send point (ns)
-	static bool				_auth_have;
-	static uint64_t			_auth_term, _auth_gen, _auth_deadline;
-	static bool				_auth_solo;
-	static uint64_t			_auth_serial;
-	static bool				_auth_revoked;
-	static uint64_t			_auth_revoked_term, _auth_revoked_gen;
+	static std::map<uint32_t, part_state>	_auth_parts;
+	static std::set<uint32_t>	_auth_registered;
 	static uint64_t			_auth_refused;
 	static uint64_t			(*_auth_clock)();
 };

@@ -152,6 +152,8 @@ public:
 		// receiver then applies it the way it always has. Never serialized
 		// into the value header either.
 		string							repl_tag;
+		// write authority a forwarded change carries ("partition:term:gen", write_fence.h); empty when none
+		string							auth_tag;
 
 		static const int				header_size = sizeof(uint32_t) + sizeof(time_t) + sizeof(uint64_t) + sizeof(uint64_t);
 		static const uint64_t		max_data_size = 2147483647;
@@ -358,6 +360,8 @@ public:
 	// partition master; see storage_rocksdb). Backends without replication
 	// ordering ignore it.
 	virtual void set_lazy_expiry_delete(bool on) { (void)on; }
+	/** the partition this node is master of (-1: none), for the write authority of a lazy expiry delete */
+	virtual void set_write_partition(int partition) { (void)partition; }
 	// D7: a new follow generation (stop/start of the WAL follower); 0 = the
 	// backend has no continuous follower.
 	virtual uint64_t bump_follow_generation() { return 0; }

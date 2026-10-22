@@ -67,6 +67,10 @@ cluster::partition mock_cluster::set_partition(int partition, node master, node 
 	return p;
 }
 
+void mock_cluster::set_partition_member(int partition, string server_name, int server_port) {
+	this->_node_partition_map[partition].index[this->to_node_key(server_name, server_port)] = true;
+}
+
 cluster::node mock_cluster::set_node(string server_name, int server_port, role r, state s, int partition, int balance) {
 	string node_key = this->to_node_key(server_name, server_port);
 	node n;

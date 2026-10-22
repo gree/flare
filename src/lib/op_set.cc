@@ -126,7 +126,8 @@ int op_set::_run_server() {
 
 	// pre-proxy (proxy if node is not master in request-partition)
 	shared_queue_proxy_write q;
-	cluster::proxy_request r_proxy = this->_cluster->pre_proxy_write(this, q);
+	cluster::write_role role;
+	cluster::proxy_request r_proxy = this->_cluster->pre_proxy_write(this, q, 0, &role);
 	if (stats_object->diag_enabled() && this->is_proxy_request()) {
 		stats_object->diag_incr("recv_proxied_set:pre=" + boost::lexical_cast<string>(static_cast<int>(r_proxy)));
 	}
@@ -152,6 +153,16 @@ int op_set::_run_server() {
 	// storage i/o
 	storage::result r_storage;
 	int retcode;
+	// write authority, role-aware and per partition (write_fence.h): a
+	// master write takes the grant of this partition; a change applied because
+	// this node is a replica takes none but must carry the current authority
+	if (!(role.replica ? fence_entry.admit_replica(role.partition, this->_entry.auth_tag)
+			: fence_entry.admit_master(role.partition))) {
+		if (this->_entry.option & storage::option_noreply) {
+			return 0;
+		}
+		return this->_send_result(result_server_error, fence_entry.refusal());
+	}
 	// write authority at the APPLY point: an entry whose authority ended
 	// (revoke / term / generation / identity / its own deadline) must not
 	// write; the section stays open only across the storage call
@@ -174,10 +185,16 @@ int op_set::_run_server() {
 		switch (applied) {
 			case storage::identified_applied:
 				stats_object->increment_total_items();
+				if (!fence_entry.ack_ok()) {
+					return this->_send_result(result_server_error, "write authority lost before ack");
+				}
 				return this->_send_result(result_stored);
 			case storage::identified_skipped:
 				// This copy already holds this change or a newer one: the
 				// source is not ahead of us, so this is a success for it.
+				if (!fence_entry.ack_ok()) {
+					return this->_send_result(result_server_error, "write authority lost before ack");
+				}
 				return this->_send_result(result_stored);
 			case storage::identified_refused:
 				return this->_send_result(result_server_error, "replication identity refused");
@@ -217,6 +234,7 @@ int op_set::_run_server() {
 			stats_object->increment_touch_hits();
 		}
 		if (fence_entry.still_authorized()) {	// else no forward; the ACK is refused below
+			this->_entry.auth_tag = fence_entry.authority_tag();	// what the replicas check
 			r_proxy = this->_cluster->post_proxy_write(this,
 																								 this->_is_sync(this->_entry.option,
 																																this->_cluster->get_replication_type()));
@@ -267,6 +285,11 @@ int op_set::_run_client(storage::entry& e) {
 	}
 	if (e.option & storage::option_async) {
 		offset += snprintf(request+offset, request_len-offset, " %s", storage::option_cast(storage::option_async).c_str());
+	}
+	// write authority the change was made under (write_fence.h): only set
+	// when the engine is on and the master was admitted under a grant
+	if (!e.auth_tag.empty()) {
+		offset += snprintf(request+offset, request_len-offset, " wa=%s", e.auth_tag.c_str());
 	}
 	// SAF-10b: the source's replication identity, last on the line so an
 	// unknown trailing token is the only thing an older parser would see —

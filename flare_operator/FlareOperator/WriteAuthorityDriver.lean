@@ -138,54 +138,6 @@ def pushMaster (ctx : Ctx) (p : Nat) (m : Members) : IO Bool := do
       | some s2 => pure (s2.holds m)
       | none => pure false
 
-/-- One pass for one partition: decide the record, persist it, push it. Returns the
-    record in force (or none when the store could not be read: nothing is pushed). -/
-def ensurePartition (ctx : Ctx) (p : Nat) (v : View) : IO (Option Members) := do
-  let c ← recClient ctx p
-  match ← readRec c with
-  | .error e =>
-    IO.eprintln s!"[flare-operator] write authority P{p}: {e}; nothing changed this pass"
-    pure none
-  | .ok cur =>
-    let old := cur.map (·.1)
-    let termNext := (old.map (·.term)).getD 0 + 1
-    -- the intents are read only when the record would change (a pass at rest costs no extra reads)
-    let masterNow := v.master.getD ""
-    let wantsChange := match old with
-      | some o => o.master != masterNow || o.successors != sortedKeys (v.successors.filter (· != masterNow))
-      | none => false
-    let atts ← if wantsChange then scanAttempts ctx p termNext else pure (.ok [])
-    match atts with
-    | .error e =>
-      IO.eprintln s!"[flare-operator] write authority P{p}: {e}; the record is held"
-      pure old
-    | .ok as =>
-      let master := v.master.getD ""
-      let frozen := frozenBy as && (old.map (·.master)) == v.master
-      let want := Members.next old v frozen (committedFor as master)
-      let m ← match want with
-        | none => pure none
-        | some w =>
-          if some w == old then pure (some w)
-          else if ← writeRec c (cur.map (·.2)) w then pure (some w)
-          else pure old
-      match m with
-      | none => pure none
-      | some rec =>
-        pushFloors ctx p rec
-        let okM ← pushMaster ctx p rec
-        if okM && !rec.acked then
-          -- confirm: the master applied exactly this record (CAS'd)
-          let c2 ← recClient ctx p
-          match ← readRec c2 with
-          | .ok (some (r2, rv2)) =>
-            if r2 == rec then
-              let ok2 ← writeRec c2 (some rv2) { rec with acked := true }
-              pure (some (if ok2 then { rec with acked := true } else rec))
-            else pure (some r2)
-          | _ => pure (some rec)
-        else pure (some rec)
-
 /-! ## The promotion gate -/
 
 inductive GateResult where
@@ -195,6 +147,10 @@ inductive GateResult where
 
 def nowAt (ctx : Ctx) : IO At := do
   pure { clock := ctx.clock, t := ← ctx.nowMs }
+
+/-- The id the successor knows an attempt by: unique across terms (an intent message that was
+    delayed from an older term can never match a newer one). -/
+def wid (m : Members) (n : Nat) : Nat := (m.term + 1) * 100 + n
 
 def refOf (ctx : Ctx) (p : Nat) (m : Members) (n : Nat) (key uid boot : String) : Ref :=
   { scope := { cluster := ctx.cr, partition := p, generation := m.gen }, id := n, successor := key,
@@ -241,10 +197,10 @@ def doCreate (ctx : Ctx) (p : Nat) (m : Members) (as : List Attempt) (key uid bo
   | _ => pure false
 
 def doPrepare (ctx : Ctx) (p : Nat) (m : Members) (a : Attempt) (key uid boot : String) : IO Bool := do
-  match (← ask ctx key (cmdPrepare p a.n (m.term + 1))).bind Status.parse with
+  match (← ask ctx key (cmdPrepare p (wid m a.n) (m.term + 1))).bind Status.parse with
   | none => pure false
   | some s =>
-    if s.state != "preparing" || s.intent != a.n then pure false
+    if s.state != "preparing" || s.intent != wid m a.n then pure false
     else
       let c ← ctx.clientFor (intentName ctx.cr p (m.term + 1) a.n)
       if !(← ensureFence c ctx.token a.intent) then pure false
@@ -256,13 +212,22 @@ def doPrepare (ctx : Ctx) (p : Nat) (m : Members) (a : Attempt) (key uid boot : 
         | .refused _ _ => pure true
         | _ => pure false
 
-def doCancel (ctx : Ctx) (p : Nat) (m : Members) (a : Attempt) (key uid boot : String) : IO Unit := do
+/-- Cancel one attempt (the terminal CAS first, then the successor). `true` when the store says cancelled. -/
+def doCancelAttempt (ctx : Ctx) (p : Nat) (m : Members) (a : Attempt) : IO Bool := do
   let c ← ctx.clientFor (intentName ctx.cr p (m.term + 1) a.n)
   if (← ensureFence c ctx.token a.intent) then
-    match ← cancelIntent c (refOf ctx p m a.n key uid boot) (.leader ctx.token) (← nowAt ctx) with
-    | .done _ => discard <| ask ctx key (cmdCancel p a.n)
-    | .settled _ => discard <| ask ctx key (cmdCancel p a.n)
-    | _ => pure ()
+    match ← cancelIntent c a.intent.ref (.leader ctx.token) (← nowAt ctx) with
+    | .done _ =>
+      discard <| ask ctx a.intent.successor (cmdCancel p (wid m a.n))
+      pure true
+    | .settled _ =>
+      discard <| ask ctx a.intent.successor (cmdCancel p (wid m a.n))
+      pure true
+    | _ => pure false
+  else pure false
+
+def doCancel (ctx : Ctx) (p : Nat) (m : Members) (a : Attempt) (_key _uid _boot : String) : IO Unit :=
+  discard <| doCancelAttempt ctx p m a
 
 def doCommit (ctx : Ctx) (p : Nat) (m : Members) (a : Attempt) (key uid boot : String) : IO Bool := do
   let c ← ctx.clientFor (intentName ctx.cr p (m.term + 1) a.n)
@@ -288,7 +253,7 @@ partial def gate (ctx : Ctx) (p : Nat) (key uid boot : String) (fuel : Nat) : IO
       let now ← nowAt ctx
       let a := newestFor as key uid boot
       let rv := (← statusOf ctx key p).map replicaOf
-      let id := (a.map (·.n)).getD 0
+      let id := (a.map fun x => wid m x.n).getD 0
       match gateDecide (m.successors.contains key) m.acked (viewOf a now) rv id with
       | .proceed => return .proceed
       | .abort why => return .hold s!"abort: {why}"
@@ -313,7 +278,7 @@ partial def gate (ctx : Ctx) (p : Nat) (key uid boot : String) (fuel : Nat) : IO
         | none => return .hold "no intent"
         | some x =>
           if ← doCommit ctx p m x key uid boot then
-            discard <| ask ctx key (cmdCommit p x.n)
+            discard <| ask ctx key (cmdCommit p (wid m x.n))
             gate ctx p key uid boot (fuel - 1)
           else return .hold "the commit CAS did not apply"
       | .sendCommit =>
@@ -322,5 +287,74 @@ partial def gate (ctx : Ctx) (p : Nat) (key uid boot : String) (fuel : Nat) : IO
       | .sendCancel =>
         discard <| ask ctx key (cmdCancel p id)
         return .hold "the cancel of the abandoned prepare was sent again; the next pass starts a new attempt"
+
+/-- One pass for one partition: decide the record, persist it, push it. `wanted` = the node keys the
+    promotion commit point asked the gate about in this pass: a PENDING intent of any other
+    successor is abandoned (the promotion is no longer wanted, or another check held it) and
+    cancelled — the terminal CAS first, then the successor, so its promises and the master's grant
+    resume. A COMMITTED intent cannot be undone: it is reported (the master cannot write until that
+    successor is promoted). Returns the record in force (none when the store could not be read:
+    nothing is pushed). -/
+def abandonUnwanted (ctx : Ctx) (p : Nat) (m : Members) (as : List Attempt) (wanted : List String) :
+    IO (List Attempt) := do
+  let mut out : List Attempt := []
+  for a in as do
+    if a.intent.decision == .pending && !wanted.contains a.intent.successor then
+      if ← doCancelAttempt ctx p m a then
+        IO.eprintln s!"[flare-operator] write authority P{p}: the pending promotion intent {a.n} of {a.intent.successor} was not asked for in this pass: cancelled (its promises resume)"
+        out := out ++ [{ a with intent := { a.intent with decision := .cancelled, decidedBy := some ctx.token } }]
+      else out := out ++ [a]
+    else out := out ++ [a]
+  pure out
+
+def ensurePartition (ctx : Ctx) (p : Nat) (v : View) (wanted : List String := []) : IO (Option Members) := do
+  let c ← recClient ctx p
+  match ← readRec c with
+  | .error e =>
+    IO.eprintln s!"[flare-operator] write authority P{p}: {e}; nothing changed this pass"
+    pure none
+  | .ok cur =>
+    let old := cur.map (·.1)
+    let termNext := (old.map (·.term)).getD 0 + 1
+    let atts ← match old with
+      | some _ => scanAttempts ctx p termNext
+      | none => pure (.ok [])
+    match atts with
+    | .error e =>
+      IO.eprintln s!"[flare-operator] write authority P{p}: {e}; the record is held"
+      pure old
+    | .ok as0 =>
+      let as ← match old with
+        | some o => abandonUnwanted ctx p o as0 wanted
+        | none => pure as0
+      let master := v.master.getD ""
+      if (old.map (·.master)) == v.master then
+        for a in as do
+          if a.intent.decision == .committed && !wanted.contains a.intent.successor then
+            IO.eprintln s!"[flare-operator] CRITICAL: write authority P{p}: the promotion intent {a.n} of {a.intent.successor} is COMMITTED but the master did not change: that successor no longer promises, so the master cannot write until it is promoted (manual)"
+      let frozen := frozenBy as && (old.map (·.master)) == v.master
+      let want := Members.next old v frozen (committedFor as master)
+      let m ← match want with
+        | none => pure none
+        | some w =>
+          if some w == old then pure (some w)
+          else if ← writeRec c (cur.map (·.2)) w then pure (some w)
+          else pure old
+      match m with
+      | none => pure none
+      | some rec =>
+        pushFloors ctx p rec
+        let okM ← pushMaster ctx p rec
+        if okM && !rec.acked then
+          -- confirm: the master applied exactly this record (CAS'd)
+          let c2 ← recClient ctx p
+          match ← readRec c2 with
+          | .ok (some (r2, rv2)) =>
+            if r2 == rec then
+              let ok2 ← writeRec c2 (some rv2) { rec with acked := true }
+              pure (some (if ok2 then { rec with acked := true } else rec))
+            else pure (some r2)
+          | _ => pure (some rec)
+        else pure (some rec)
 
 end FlareOperator.WriteAuthorityDriver

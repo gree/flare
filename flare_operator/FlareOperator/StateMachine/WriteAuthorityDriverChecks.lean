@@ -181,7 +181,7 @@ def tFailover : IO Bool := do
   -- after the map made B the master
   let r ← ensurePartition (w.ctx 7) 0 (view1 B [])
   let nB5 ← w.node B
-  return isHold g1 && nB1.state == "preparing" && nB1.intent == 1 && d1 == some .pending
+  return isHold g1 && nB1.state == "preparing" && nB1.intent == 201 && d1 == some .pending
     && isHold g2 && d2 == some .pending && isHold g3 && d3 == some .pending
     && g4 == .proceed && d4 == some .committed && nB4.state == "committed"
     -- no commit message before the promise end (12000), which is after the old master's deadline (7000)
@@ -213,9 +213,9 @@ def tUnknownAndRecancel : IO Bool := do
   let nB4 ← w.node B
   let d4 ← w.decision (iname 0 2 2)
   return isHold g1 && d1 == some .pending && c1 == none
-    && isHold g2 && d2 == some .cancelled && nB2.state == "preparing" && nB2.intent == 1
+    && isHold g2 && d2 == some .cancelled && nB2.state == "preparing" && nB2.intent == 201
     && isHold g3 && nB3.state == "following"
-    && g4 == .proceed && nB4.state == "committed" && nB4.intent == 2 && d4 == some .committed
+    && g4 == .proceed && nB4.state == "committed" && nB4.intent == 202 && d4 == some .committed
     && (← w.decision (iname 0 2 1)) == some .cancelled
 
 /-- The operator restarts (a new leader token, a new clock): the old pending intent is not
@@ -232,7 +232,7 @@ def tOperatorRestart : IO Bool := do
   let nB1 ← w.node B
   let g2 ← gate (w.ctx 8 50000) 0 B "uid" "0" 6   -- attempt 2 under the new token (its promise is long over: committed)
   let d2 ← w.decision (iname 0 2 2)
-  let oldCommit := (← w.sent.get).any fun (_, k, c) => k == B && c == "authority commit 0 1"
+  let oldCommit := (← w.sent.get).any fun (_, k, c) => k == B && c == "authority commit 0 201"
   return isHold g1 && d1 == some .cancelled && nB1.state == "following"
     && g2 == .proceed && d2 == some .committed && !oldCommit
 
@@ -244,8 +244,8 @@ def tFrozen : IO Bool := do
   w.setClock 1000
   w.round A [B]
   let _ ← gate (w.ctx 7) 0 B "uid" "0" 6          -- an open (pending) intent
-  let r1 ← ensurePartition (w.ctx 7) 0 (view1 A [])        -- the successor vanishes from the map: NOT solo yet
-  let r2 ← ensurePartition (w.ctx 7) 0 (view1 B [A])       -- another master without a committed intent: refused
+  let r1 ← ensurePartition (w.ctx 7) 0 (view1 A []) [B]       -- the successor vanishes from the map: NOT solo yet (the gate asked about B)
+  let r2 ← ensurePartition (w.ctx 7) 0 (view1 B [A]) [B]      -- another master without a committed intent: refused
   return r1 == rec0 && r2 == rec0
 
 /-- the gate needs the master's confirmation, a candidate in the membership, and a record -/
@@ -279,6 +279,39 @@ def tTerminal : IO Bool := do
   return g == .proceed && (match res with | .refused _ _ => true | _ => false) && nB.state == "committed"
     && (← w.decision (iname 0 2 1)) == some .committed
 
+
+/-- An intent nobody asked about in this pass is abandoned: cancelled in the store, the successor
+    told (its promises and the master's grant resume), the membership no longer frozen; a COMMITTED
+    one is left alone (it cannot be undone) -/
+def tAbandon : IO Bool := do
+  let w ← World.new [A, B]
+  let rec0 ← ensurePartition (w.ctx 7) 0 (view1 A [B])
+  w.setClock 1000
+  w.round A [B]
+  let _ ← gate (w.ctx 7) 0 B "uid" "0" 6               -- pending and prepared: B no longer promises
+  let nB1 ← w.node B
+  -- the next pass does not ask the gate about B (the master is healthy again): the intent is abandoned
+  let r1 ← ensurePartition (w.ctx 7) 0 (view1 A [B]) []
+  let nB2 ← w.node B
+  let d1 ← w.decision (iname 0 2 1)
+  w.round A [B]                                         -- B promises again: the master's grant is renewed
+  let nA ← w.node A
+  -- and the membership can move again (B leaves the map)
+  let r2 ← ensurePartition (w.ctx 7) 0 (view1 A []) []
+  -- a committed intent cannot be abandoned
+  let w2 ← World.new [A, B]
+  let _ ← ensurePartition (w2.ctx 7) 0 (view1 A [B])
+  w2.setClock 1000
+  w2.round A [B]
+  let _ ← gate (w2.ctx 7) 0 B "uid" "0" 6
+  w2.setClock 12000
+  let g ← gate (w2.ctx 7) 0 B "uid" "0" 6
+  let _ ← ensurePartition (w2.ctx 7) 0 (view1 A [B]) []
+  let nB3 ← w2.node B
+  return rec0.isSome && nB1.state == "preparing" && r1 == rec0 && nB2.state == "following" && d1 == some .cancelled
+    && nA.grant && (match r2 with | some m => m.gen == 2 && m.successors.isEmpty | none => false)
+    && g == .proceed && (← w2.decision (iname 0 2 1)) == some .committed && nB3.state == "committed"
+
 def checks : IO (List (String × Bool)) := do
   return [
     ("driver: steady state — record, floor on the successor, membership confirmed by the master, idempotent", ← tSteady),
@@ -287,6 +320,7 @@ def checks : IO (List (String × Bool)) := do
     ("driver: operator restart — the old pending intent is cancelled by the new leader (clocks are not compared) and re-made", ← tOperatorRestart),
     ("driver: the membership is frozen while an intent is open; a master change without a committed intent is refused", ← tFrozen),
     ("driver: no promotion without the master's confirmation, a candidate in the membership, and a record", ← tGatePreconditions),
+    ("driver: an intent nobody asked about in this pass is abandoned (store, successor, membership unfrozen); a committed one is left alone", ← tAbandon),
     ("driver: a committed intent is terminal — the leader's cancel is refused, the successor stays committed", ← tTerminal) ]
 
 end FlareOperator.WriteAuthorityDriverChecks

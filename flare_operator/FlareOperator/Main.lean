@@ -320,6 +320,8 @@ initialize leaderEpochRef : IO.Ref Nat ← IO.mkRef 0
 /-- C' (docs §13): `some` only when the operator was given an explicit, consistent
     set of numbers (FLARE_WRITE_AUTHORITY_*); `none` = everything C' is OFF. -/
 initialize writeAuthorityRef : IO.Ref (Option WriteAuthority.Config) ← IO.mkRef none
+/-- the node keys the promotion commit point asked the C' gate about since the last authorityPass -/
+initialize gateTouchedRef : IO.Ref (List String) ← IO.mkRef []
 initialize disruptionLock : Std.BaseMutex ← Std.BaseMutex.new
 /-- The masterless CRITICAL's last line per partition (summary, ms): logged
     on change or every 60 s, not every pass (decision 2026-10-16). -/
@@ -2103,6 +2105,7 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
     if let some cfg ← writeAuthorityRef.get then
       for k in promoted do
         if ((cur.lookupNode k).map (·.role)) == some FlareRole.Slave then
+          gateTouchedRef.modify (· ++ [k])
           let part := ((ucs.lookupNode k).map (·.partition)).getD (-1)
           match ← podIdentityNow (extractPodName k) ns with
           | none =>
@@ -2445,7 +2448,8 @@ private def authorityPass (crName ns leaseName identity : String) (st : FlareClu
       let master := (st.nodeMap.find? fun kv => kv.2.role == FlareRole.Master && kv.2.partition == p).map (·.1)
       let succ := (st.nodeMap.filter fun kv =>
         kv.2.role == FlareRole.Slave && kv.2.partition == p && kv.2.state == FlareState.Active && usable kv.1).map (·.1)
-      discard <| WriteAuthorityDriver.ensurePartition ctx p.toNat { master, successors := succ }
+      discard <| WriteAuthorityDriver.ensurePartition ctx p.toNat { master, successors := succ } (← gateTouchedRef.get)
+    gateTouchedRef.set []
 
 /-- Prepare-stuck watchdog threshold in reconcile cycles (5s each): 720 ≈ 1h.
     Deliberately high by default (a 100GB+ dataset legitimately rebuilds for

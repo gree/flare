@@ -324,31 +324,44 @@ master (旧)                 operator leader               新 master
 - **solo:** grant が `solo`（権威ある membership に successor なし）と明示する時だけ期限なし。operator に届かないだけでは solo にならず、期限切れ = 拒否
 - **既定は OFF**（既存の動作のまま）。`write_fence::authority_set_enabled(true)` は test / admin seam で、本番の既定でも設定項目でもない。ttl は試験のパラメータ（既定値なし）
 - **apply 点への束縛（P1）:** ACK の拒否だけでは古い request が storage を書き戻す（term 1 の `K=v1` が admission 後に止まり、term 2 の `K=v2` が ACK された後に再開すると K が v1 に戻る）。entry は storage 書き込みの直前に `apply_begin()` で admission 時の権威がなお現在のものか（revoke / term / generation / identity / engine 切替が無く、**admission 時の自分の期限**が過ぎていないか）を検査し、書き込みが戻るまで apply 区間を開く。偽なら storage を書かず forward もせず `SERVER_ERROR write authority lost before apply`。forward の直前は `still_authorized()`（偽なら forward せず、後段の `ack_ok()` も偽）
-- **lock 順序（監査済み）:** `_apply_rw`（entry は共有で storage 書き込みの間だけ保持。権威の変更 = revoke / 新 term / generation / identity / engine 切替は排他で取り、書き込み中の entry を drain してから有効になる）→ storage の wholelock → key の slot lock。`_mutex` は最内で、数個の load/store の間だけ・他の lock を取らず・storage 書き込み、forward、sleep、callback をまたがない。slot lock 配下から `_apply_rw` は取らない（storage_rocksdb の lazy expiry の `entry` は `_mutex` のみ）。**同 term / generation の更新は排他 lock を取らない**。排他 lock は writer 優先（更新が書き込みの連続に飢えない）。全 mutation をまたぐ巨大 mutex も sleep をまたぐ保持もない
+- **lock 順序（監査済み）と、apply 区間が保証すること:** `_apply_rw`（entry は共有で storage 書き込みの間だけ保持。権威の変更 = revoke / 新 term / generation / identity / engine 切替 / floor 引き上げは排他で取る）→ storage の wholelock → key の slot lock。`_mutex` は最内で、数個の load/store の間だけ・他の lock を取らず・storage 書き込み、forward、sleep、callback をまたがない。slot lock 配下から `_apply_rw` は取らない（storage_rocksdb の lazy expiry の `entry` は `_mutex` のみ）。**同 term / generation の更新は排他 lock を取らない**。排他 lock は writer 優先。
+  - **保証（これだけ）:** 権威の変更（term 変更・revoke・floor 引き上げ）は、開いている apply 区間が閉じる（drain される）まで有効にならない。したがって、変更の**前**に admission された書き込みは、その変更が有効になった**後**には apply できない（apply_begin が偽になる）。同一 key の反例（term 1 の `K=v1` が admission 後に止まり、term 2 の `K=v2` が ACK された後に再開）はこれで閉じる
+  - **保証しないこと:** 「deadline が key slot の内側で再確認される」とは言わない。apply 区間は storage 自身の slot 待ち（wholelock / slot lock の待ち）を**含む**ため、deadline の検査は apply_begin の時点であり、slot を取った時点ではない。apply_begin の後に deadline が過ぎても、区間が開いている書き込みはその書き込みを終える（旧 deadline 内で admission・開始した書き込み）。`_apply_rw` は node 全体で 1 つ（partition 別ではない）ので、ある partition の権威変更は他 partition の書き込みの drain も待つ（正しさには影響せず、待ちが増えるだけ）
 - **通常の更新（P2）:** 同 term・同 generation の grant は権威を変えない（serial を進めない）。admission 済みの entry は**自分の期限**まで完了できる（新しい TTL に付け替えない）。期限後・revoke・新 term / generation・identity 変更は拒否。ACK 直前の `ack_ok()` も同じ判定
 - **clock 失敗:** CLOCK_BOOTTIME が読めない時は `authority_clock_failed` を返し、有効判定・admission・apply・ACK・request 送信（nonce 0、受理されない）すべて fail closed（solo も）。未初期化の timespec は使わない
-- **残る窓:** forward の「検査 → `post_proxy_write`」は同じ区間ではない。検査後に権威が失効しても、その時点で正当に適用済みの変更が replica へ送られることはある（ACK は `ack_ok()` で拒否される）。pre-proxy（他の master への転送）には検査を足していない（このノードの権威を使わない経路）
+- **残る窓:** 下の「forward の TOCTOU」を参照（閉じていない）
 - 試験（注入 clock）: 期限切れ・revoke・新 term が古い in-flight request を拒否・古い nonce の返事・再起動（新 boot）は権限なし・solo は明示の no-successor の時だけ・operator 不在は期限切れ。実 op（client の set / delete が op handler から storage へ）で、期限後の旧 master が拒否し storage に届かないこと
+
+**role と partition（今回）:** 各入口は書く前に自分が何かを宣言する（`entry::admit_master(partition)` / `entry::admit_replica(partition, tag)`）。宣言しない entry は engine ON で拒否（fail closed）。grant・期限・serial・floor は partition ごと（`_apply_rw` と `_mutex` だけが node で 1 つ）。
+- **MASTER-WRITE**（この partition の master として書く）: その partition の有効な grant が要る。他 partition の grant・grant なし・partition 不明（-1）は拒否。`pre_proxy_write` が `proxy_request_continue` を返した理由（自分が master か、prepare map の master か）から partition を決める（`cluster::write_role`）
+- **REPLICA-APPLY**（replica としての適用: proxy / forward / identified change、snapshot relay）: master grant は要らない。変更が持つ権威（`wa=partition:term:gen`。master が forward 時に admission した term / generation を載せる）を検査する。拒否: token なし・不正・別 partition・その partition の floor（この node が知る最新の権威。operator が `authority_set_floor` で渡す、grant の適用、より新しい token の変更の受理で上がる）より古い・この node 自身がその partition の有効な master grant を持つ。floor の引き上げは apply 区間を drain する（admission 後に止まった旧 term の変更は、新 term の変更の後に apply できない）。floor より上の grant は旧 grant を無効にする（降格した master の master-write は拒否）
+- **INTERNAL**: reaper / lazy expiry delete / flush_all / snapshot push（master に着いたもの）は**この node の partition の MASTER-WRITE**（表の前の決定のまま。以前は node 単位だった）。orphan purge: partition の master ならその partition の grant が要る。それ以外の role では fence のみ（purge 対象は自 partition の外の key で、複製もされず client ACK もない、という分類。**以前は node 単位の grant を要求していた入口の role 別の緩和であり、レビューで判断を要する**）
 
 **mutation 入口の表（review-safe-eviction §4.3 の列挙）:**
 
-| 入口 | admission（grant 必須） | ACK 直前の再確認 |
-|---|---|---|
-| client set / add / replace / append / prepend / cas / touch / gat（`op_set` 系） | 配線済み | 配線済み（apply 点・forward 直前・ACK 直前の 3 か所） |
-| client incr / decr（`op_incr`） | 配線済み | 配線済み（同 3 か所） |
-| client delete（`op_delete`） | 配線済み | 配線済み（同 3 か所） |
-| 他ノードからの proxy write（同じ op） | 配線済み（node 単位。下記の制約） | identity 付きの forwarded change も apply 点は配線済み（`apply_identified_change` の前後）。その経路の ACK 直前検査は未（早期 return） |
-| cross-cluster の受信 write | 配線済み（同じ op 経由） | 未 |
-| flush_all | 配線済み | 未（ACK 検査なし） |
-| snapshot push 受信 | 配線済み | 未 |
-| orphan purge | 配線済み | 未 |
-| expire reaper | 配線済み（chunk 単位） | 対象外（ACK なし） |
-| lazy expiry delete（storage_rocksdb） | 配線済み | 対象外（ACK なし） |
-| restore / dump 受信 | 未確認（fence の列挙にも無い） | 未 |
+| 入口 | 分類 | admission | apply 点 | forward 直前 | ACK 直前 |
+|---|---|---|---|---|---|
+| client set / add / replace / append / prepend / cas / touch / gat（`op_set` 系） | MASTER-WRITE | 配線済み（partition 別） | 配線済み | 配線済み | 配線済み |
+| client incr / decr（`op_incr`） | MASTER-WRITE | 配線済み | 配線済み | 配線済み | 配線済み |
+| client delete（`op_delete`） | MASTER-WRITE | 配線済み | 配線済み | 配線済み | 配線済み |
+| 他ノードから master への proxy write（pre-proxy 転送） | MASTER-WRITE | 配線済み | 配線済み | 配線済み | 配線済み |
+| master から replica への forward（proxied / identified change） | REPLICA-APPLY | 配線済み（token の検査。incr / set / delete が `wa=` を運ぶ） | 配線済み（identified の apply 前後も） | 配線済み | 配線済み（identified の早期 return の ACK も `ack_ok()`） |
+| cross-cluster の受信 write | MASTER-WRITE（foreign mark は client write と同じに routing される） | 配線済み（同じ op） | 配線済み | 配線済み | 配線済み |
+| flush_all | MASTER-WRITE（replica は従来どおり拒否） | 配線済み | 配線済み（truncate の前後） | なし（forward しない） | 配線済み |
+| snapshot push 受信（master に着いたもの） | MASTER-WRITE | 配線済み | 未（files / WAL の受け入れに apply 区間なし） | なし | 未 |
+| snapshot push の relay hop（slave） | REPLICA-APPLY（`wa=` を relay 送信側が載せる） | 配線済み | 未 | なし | 未 |
+| orphan purge | INTERNAL（master のみ grant 要、他 role は fence のみ） | 配線済み | 未 | なし | 未（ACK は管理 op の結果のみ） |
+| expire reaper | MASTER-WRITE（chunk 単位） | 配線済み（chunk ごと、partition 別） | 未（chunk の delete は apply 区間の外） | 未 | 対象外（ACK なし） |
+| lazy expiry delete（storage_rocksdb） | MASTER-WRITE（partition は `set_write_partition`、master 昇格時に cluster が設定） | 配線済み | 未 | 対象外 | 対象外（ACK なし） |
+| restore / dump 受信 | 未確認（fence の列挙にも無い） | 未 | 未 | 未 | 未 |
+
+**forward の TOCTOU（閉じていない。残る窓）:** `still_authorized()` の検査と `cluster::post_proxy_write`（キューへの積み込み）は同じ区間ではなく、既存の lock では 1 区間にできない（`post_proxy_write` は cluster の map lock・thread queue・sync 待ちを取る。それらを `_apply_rw` の中で取ると lock 順序が増え、sync の待ちが apply 区間と権威変更をブロックする）。検査の後・積み込みの前に権威が失効・revoke・term 変更されると、**その時点では正当に適用済みの変更が、失効後に replica へ届きうる**。結果: replica 側には token の検査（旧 term は floor で拒否）があり、floor が上がっていれば replica は拒否する。floor がまだ上がっていない replica には届く。client への ACK は `ack_ok()` で拒否される。これは「ACK した値が replica で失われない」ことを守るが、ACK していない値が replica に出ることは防がない。pre-proxy（他の master への転送）には検査を足していない（このノードの権威を使わない経路）。**この窓は閉じたと主張しない。**
+
+**prepare map（partition 数変更中）:** prepare master への forward は master-write として扱われ（grant が要る）、preparing master は grant を持たないため engine ON では拒否される。token の partition 番号（旧 map）と prepare 側の番号も一致しない。partition 数の変更中は engine を ON にできない（未対応として残す）。
 
 **未配線・未実施（C' 完了とは言わない）:**
-1. 上表の「未」の全て
-2. **role 非対応:** 検査は node 単位で、有効な間は replica の apply（proxy / 複製の受信）にも grant を要求する。本番では有効にできない。partition ごと・master だけに要求する形にしてから有効化する
+1. 上表の「未」の全て（snapshot push・orphan purge・reaper・lazy expiry の apply 区間 / ACK、restore / dump）
+2. **role / partition 対応は flared 内のみ（今回）:** operator が floor（`authority_set_floor`）を replica に渡す経路、token を持たない旧 build の master との混在、prepare map 中の扱い（上記）は未
 3. operator 側: grant の発行・更新・revoke・membership の永続化（`kjob/flare-cprime` の terminal CAS との接続）、request の送信、flared の stats / 管理 op による観測
 4. 実行時 E2E（C' の二重 write 0）
 5. 単一 node 内の複数 partition（grant は 1 partition のみ）、壁時計・ドリフト・VM 停止の影響

@@ -2,14 +2,23 @@
  *	test_write_authority.cc
  *
  *	The write AUTHORITY of write_fence (src/lib/write_fence.h, docs/design-
- *	node-operations-2026-10-19.md §13): deterministic tests on an injected
+ *	node-operations-2026-10-19.md §12.6): deterministic tests on an injected
  *	boottime clock. Default (engine off) behaviour is covered by
  *	test_write_fence.cc.
  */
 
 #include <cppcutter.h>
 
+#include "test_op.h"
+#include "connection_iostream.h"
+#include "mock_cluster.h"
+#include "mock_storage.h"
+
+#include <app.h>
 #include <write_fence.h>
+#include <op_set.h>
+#include <op_delete.h>
+#include <time_watcher.h>
 
 using namespace gree::flare;
 
@@ -44,8 +53,146 @@ namespace test_write_authority
 		write_fence::authority_set_enabled(true);
 	}
 
-	void setup() { start_node(); }
-	void teardown() { write_fence::reset_for_test(); }
+	TEST_OP_CLASS_BEGIN(op_set, NULL, NULL)
+		test_op_set(shared_connection c, cluster* cl, storage* st) : op_set(c, cl, st) { }
+	TEST_OP_CLASS_END;
+	TEST_OP_CLASS_BEGIN(op_delete, NULL, NULL)
+		test_op_delete(shared_connection c, cluster* cl, storage* st) : op_delete(c, cl, st) { }
+	TEST_OP_CLASS_END;
+
+	static mock_cluster*	cl = NULL;
+	static mock_storage*	st = NULL;
+
+	void setup()
+	{
+		stats_object = new stats();
+		stats_object->update_timestamp();
+		time_watcher_object = new time_watcher();	// storage access is observed (not polling)
+		start_node();
+		// this node is the master of the (only) partition, over a real op
+		// handler and a storage object
+		cl = new mock_cluster("localhost", 12121);
+		cluster::node master = cl->set_node("localhost", 12121, cluster::role_master, cluster::state_active, 0, 100);
+		cl->set_partition(0, master);
+		st = new mock_storage("", 0, 0);
+		st->open();
+	}
+
+	void teardown()
+	{
+		write_fence::reset_for_test();
+		delete st;
+		delete cl;
+		delete time_watcher_object;
+		time_watcher_object = NULL;
+		delete stats_object;
+		st = NULL;
+		cl = NULL;
+	}
+
+	static std::string run_set(const char* key)
+	{
+		shared_connection c(new connection_sstream(std::string(" ") + key + " 0 0 5\r\nVALUE\r\n"));
+		test_op_set op(c, cl, st);
+		cut_assert_equal_int(0, op._parse_text_server_parameters());
+		op._run_server();
+		return dynamic_cast<connection_sstream&>(*c).get_output();
+	}
+
+	static std::string run_delete(const char* key)
+	{
+		shared_connection c(new connection_sstream(std::string(" ") + key + "\r\n"));
+		test_op_delete op(c, cl, st);
+		cut_assert_equal_int(0, op._parse_text_server_parameters());
+		op._run_server();
+		return dynamic_cast<connection_sstream&>(*c).get_output();
+	}
+
+	static bool stored(const char* key)
+	{
+		storage::entry e;
+		e.key = key;
+		storage::result r;
+		st->get(e, r);
+		return r == storage::result_found;
+	}
+
+	static void grant_now(uint64_t term = 1, uint64_t gen = 1)
+	{
+		std::string why;
+		cut_assert_true(write_fence::authority_apply_grant(grant(write_fence::authority_begin_request(), term, gen), why));
+	}
+
+	// The first real mutation path: a client set / delete through the op
+	// handler into storage, with the engine on (via the seam).
+	void test_op_path_default_off_stores()
+	{
+		write_fence::reset_for_test();
+		cut_assert_equal_string("STORED\r\n", run_set("k0").c_str());
+		cut_assert_true(stored("k0"));
+	}
+
+	void test_op_path_stores_under_a_grant()
+	{
+		grant_now();
+		cut_assert_equal_string("STORED\r\n", run_set("k1").c_str());
+		cut_assert_true(stored("k1"));
+		cppcut_assert_equal(static_cast<uint64_t>(0), write_fence::authority_refused());
+	}
+
+	// a silent old master: the operator never answers again, clients still
+	// reach it — after expiry it refuses and does not touch storage
+	void test_silent_old_master_refuses_set_and_delete_after_expiry()
+	{
+		grant_now();
+		cut_assert_equal_string("STORED\r\n", run_set("k2").c_str());
+		fake_ns += TTL;
+		cut_assert_equal_string("SERVER_ERROR no write authority\r\n", run_set("k3").c_str());
+		cut_assert_false(stored("k3"));
+		cut_assert_equal_string("SERVER_ERROR no write authority\r\n", run_delete("k2").c_str());
+		cut_assert_true(stored("k2"));			// the delete did not reach storage
+		cppcut_assert_equal(static_cast<uint64_t>(2), write_fence::authority_refused());
+		cppcut_assert_equal(static_cast<uint64_t>(0), write_fence::in_flight());
+	}
+
+	void test_op_path_refuses_after_revoke()
+	{
+		std::string why;
+		grant_now();
+		cut_assert_true(write_fence::authority_revoke(0, 1, 1, why));
+		cut_assert_equal_string("SERVER_ERROR no write authority\r\n", run_set("k4").c_str());
+		cut_assert_false(stored("k4"));
+	}
+
+	// The grant was valid at admission but ended while the mutation ran
+	// (e.g. it waited for a lock): the ACK is withheld. Storage was written
+	// (the unknown-outcome case a client already handles); it is NOT
+	// acknowledged under a different grant.
+	static void expire_in_between() { fake_ns += TTL; }
+	static void renew_in_between()
+	{
+		std::string why;
+		write_fence::authority_apply_grant(grant(write_fence::authority_begin_request()), why);
+	}
+
+	void test_ack_is_refused_when_the_grant_ends_after_admission()
+	{
+		grant_now();
+		write_fence::set_entry_hook(expire_in_between);
+		cut_assert_equal_string("SERVER_ERROR write authority lost before ack\r\n", run_set("k5").c_str());
+		write_fence::set_entry_hook(NULL);
+		cut_assert_true(stored("k5"));
+	}
+
+	void test_ack_is_refused_when_the_grant_is_renewed_after_admission()
+	{
+		grant_now();
+		write_fence::set_entry_hook(renew_in_between);
+		cut_assert_equal_string("SERVER_ERROR write authority lost before ack\r\n", run_set("k6").c_str());
+		write_fence::set_entry_hook(NULL);
+		// the next request is admitted under the renewed grant and is acknowledged
+		cut_assert_equal_string("STORED\r\n", run_set("k7").c_str());
+	}
 
 	void test_default_is_off_and_changes_nothing()
 	{

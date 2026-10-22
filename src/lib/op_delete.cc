@@ -100,7 +100,7 @@ int op_delete::_run_server() {
 		if (this->_entry.option & storage::option_noreply) {
 			return 0;
 		}
-		return this->_send_result(result_server_error, "fenced");
+		return this->_send_result(result_server_error, fence_entry.refusal());
 	}
 	// pre-proxy (proxy if node is not master in request-partition)
 	shared_queue_proxy_write q;
@@ -164,6 +164,15 @@ int op_delete::_run_server() {
 		stats_object->increment_delete_misses();
 	}
 	
+	// write authority: the grant seen at admission must still be the current
+	// one now; else the ACK is withheld (the local apply already happened, so
+	// the client sees an error, not a success)
+	if (!fence_entry.ack_ok()) {
+		if (this->_entry.option & storage::option_noreply) {
+			return 0;
+		}
+		return this->_send_result(result_server_error, "write authority lost before ack");
+	}
 	if ((this->_entry.option & storage::option_noreply) == 0) {
 		return this->_send_result(static_cast<result>(r_storage));
 	}

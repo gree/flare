@@ -28,7 +28,7 @@
  *	fence is still at g: after a lapse, writes may have been acknowledged
  *	after the barrier (review 2026-10-19 #1).
  *
- *	WRITE AUTHORITY (C', docs/design-node-operations-2026-10-19.md §12, §13):
+ *	WRITE AUTHORITY (C', docs/design-node-operations-2026-10-19.md §12, §12.6):
  *	the same check path also carries a time-bounded, term-ordered authority
  *	to MASTER writes, so a silent old master (cut from the control plane,
  *	still reachable by clients) stops acknowledging after its authority

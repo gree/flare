@@ -314,3 +314,37 @@ master (旧)                 operator leader               新 master
 
 - C: 合格（測定。failover の受入ではない）
 - C': PRODUCT GAP。注入成立、切断中に failover あり。二重 write（推定、own view）旧 master 19080 / 新 master 18424 件。**ACK 喪失（直接）67239 件**（key が試験ごとに一意なので、前の試験の残りで「届いた」ように見える分はない）。判定のカバレッジ 84145 / 88869 件、writer の記録は完全
+
+### 12.6 flared 側の write authority（実装済みの部分と、未配線の入口。C' は完了していない）
+
+実装: `src/lib/write_fence.{h,cc}`（既存の fence と**同じ mutex・同じ `entry` の検査路**。第二の gate は作っていない）、試験 `test/lib/test_write_authority.cc`。
+
+- **grant** は partition・term・membership generation・自ノードの pod UID / boot id / copy id・自分が送った request の nonce に束縛される
+- **時間:** 自ノードの CLOCK_BOOTTIME。期限は**要求を送った時点** + ttl。受信時刻は入らない。期限後に届いた返事、pending でない nonce（古い・重複・再起動前）、古い term / generation、revoke 済みの (term, generation) 以下は拒否。revoke は後から着く古い grant に勝つ。更新で期限は短くならない
+- **solo:** grant が `solo`（権威ある membership に successor なし）と明示する時だけ期限なし。operator に届かないだけでは solo にならず、期限切れ = 拒否
+- **既定は OFF**（既存の動作のまま）。`write_fence::authority_set_enabled(true)` は test / admin seam で、本番の既定でも設定項目でもない。ttl は試験のパラメータ（既定値なし）
+- **ACK への束縛:** admission で見た grant の serial を entry が持ち、ACK の直前に `ack_ok()` が同じ grant が現在も有効かを見る。期限切れ・revoke・**更新または置換**（別の grant）のいずれでも ACK せず `SERVER_ERROR write authority lost before ack` を返す（storage への適用は済んでいる: client には結果不明のエラー）
+- 試験（注入 clock）: 期限切れ・revoke・新 term が古い in-flight request を拒否・古い nonce の返事・再起動（新 boot）は権限なし・solo は明示の no-successor の時だけ・operator 不在は期限切れ。実 op（client の set / delete が op handler から storage へ）で、期限後の旧 master が拒否し storage に届かないこと
+
+**mutation 入口の表（review-safe-eviction §4.3 の列挙）:**
+
+| 入口 | admission（grant 必須） | ACK 直前の再確認 |
+|---|---|---|
+| client set / add / replace / append / prepend / cas / touch / gat（`op_set` 系） | 配線済み | 配線済み（共通の最終 ACK 経路のみ） |
+| client incr / decr（`op_incr`） | 配線済み | 配線済み |
+| client delete（`op_delete`） | 配線済み | 配線済み |
+| 他ノードからの proxy write（同じ op） | 配線済み（node 単位。下記の制約） | 未（identity 付きの forwarded change の早期 return 経路は ACK 検査なし） |
+| cross-cluster の受信 write | 配線済み（同じ op 経由） | 未 |
+| flush_all | 配線済み | 未（ACK 検査なし） |
+| snapshot push 受信 | 配線済み | 未 |
+| orphan purge | 配線済み | 未 |
+| expire reaper | 配線済み（chunk 単位） | 対象外（ACK なし） |
+| lazy expiry delete（storage_rocksdb） | 配線済み | 対象外（ACK なし） |
+| restore / dump 受信 | 未確認（fence の列挙にも無い） | 未 |
+
+**未配線・未実施（C' 完了とは言わない）:**
+1. 上表の「未」の全て
+2. **role 非対応:** 検査は node 単位で、有効な間は replica の apply（proxy / 複製の受信）にも grant を要求する。本番では有効にできない。partition ごと・master だけに要求する形にしてから有効化する
+3. operator 側: grant の発行・更新・revoke・membership の永続化（`kjob/flare-cprime` の terminal CAS との接続）、request の送信、flared の stats / 管理 op による観測
+4. 実行時 E2E（C' の二重 write 0）
+5. 単一 node 内の複数 partition（grant は 1 partition のみ）、壁時計・ドリフト・VM 停止の影響

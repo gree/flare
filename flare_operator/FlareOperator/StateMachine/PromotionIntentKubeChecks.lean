@@ -120,22 +120,41 @@ def tReplaceMap : IO Bool := do
 
 def tCreateMap : IO Bool := do
   let rec' := encode prepared
-  let (run, _, files) ← script [.ok (obj "1111" "1" rec'), .error existsErr, .error timeoutErr,
-    .ok (obj "2222" "1" rec')]
-  let c ← mkClient run "flare-dev" "cas-t"
-  let a ← c.create rec'
-  let b ← c.create rec'
-  let d ← c.create rec'
-  let e ← c.create rec'       -- the pinned uid differs: refused
+  let (run, _, files) ← script [.ok (obj "1111" "1" rec'), .error existsErr, .error timeoutErr]
+  -- fresh (unpinned) client per call: the create is sent
+  let a ← (← mkClient run "flare-dev" "cas-t").create rec'
+  let b ← (← mkClient run "flare-dev" "cas-t").create rec'
+  let d ← (← mkClient run "flare-dev" "cas-t").create rec'
   let aOk := match a with | .ok rv => rv == "1" | _ => false
   let bEx := match b with | .alreadyExists => true | _ => false
   let dEr := match d with | .error _ => true | _ => false
-  let eEr := match e with | .error _ => true | _ => false
   -- a create manifest has no resourceVersion / uid
   let some mf := (← files.get)[0]? | return false
   let meta := ((Json.parse mf).toOption.getD Json.null).getObjValD "metadata"
-  return aOk && bEx && dEr && eEr && meta.getObjValD "resourceVersion" == Json.null &&
+  return aOk && bEx && dEr && meta.getObjValD "resourceVersion" == Json.null &&
     meta.getObjValD "uid" == Json.null
+
+/-- a pinned client never sends create: the runner sees only gets, and no write
+    follows a uid mismatch (the object was deleted and recreated under the name) -/
+def tCreatePinned : IO Bool := do
+  let rec' := encode prepared
+  let (run, seen, files) ← script [.ok (obj "1111" "1" rec'),   -- pins 1111
+    .ok (obj "1111" "2" rec'),                                  -- create -> alreadyExists
+    .ok (obj "2222" "1" rec'),                                  -- recreated: error
+    .error notFoundErr,                                         -- gone: error, not re-created
+    .error timeoutErr, .ok "not json"]
+  let c ← mkClient run "flare-dev" "cas-t"
+  let _ ← c.get
+  let r1 ← c.create rec'
+  let r2 ← c.create rec'
+  let r3 ← c.create rec'
+  let r4 ← c.create rec'
+  let r5 ← c.create rec'
+  let e1 := match r1 with | .alreadyExists => true | _ => false
+  let isE := fun (r : CreateResult) => match r with | .error _ => true | _ => false
+  let calls ← seen.get
+  return e1 && isE r2 && isE r3 && isE r4 && isE r5 && calls.length == 6 &&
+    calls.all (·.head? == some "get") && (← files.get).isEmpty
 
 /-- the record text survives the manifest (newlines, quotes, backslashes, unicode) -/
 def tManifest : IO Bool := do
@@ -167,7 +186,8 @@ def checks : IO (List (String × Bool)) := do
     ("kube: get with unparsable JSON, no data.record, empty uid, no uid -> error", ← tGetBad),
     ("kube: a different metadata.uid under the same name is refused, the pinned uid stays", ← tUid),
     ("kube: replace 409 (modified, uid precondition) -> conflict; NotFound / timeout / other uid -> error; manifest carries rv + uid + ns", ← tReplaceMap),
-    ("kube: create AlreadyExists -> alreadyExists; timeout -> error; other uid -> error; manifest has no rv / uid", ← tCreateMap),
+    ("kube: create AlreadyExists -> alreadyExists; timeout -> error; manifest has no rv / uid", ← tCreateMap),
+    ("kube: pinned client never sends create (6 calls, all get, no manifest): same uid -> alreadyExists; other uid / gone / timeout / junk -> error", ← tCreatePinned),
     ("kube: the record text survives the manifest unchanged", ← tManifest),
     ("kube: adapter over the kubectl client: 409 -> re-read -> refused against the terminal record, nothing else sent", ← tAdapter)
   ]

@@ -7,7 +7,7 @@
 
   Mapping (kubectl wraps stderr as "kubectl failed (exit N): <stderr>"):
     get      NotFound            -> notFound   (any other failure -> error)
-    create   AlreadyExists       -> alreadyExists
+    create   AlreadyExists       -> alreadyExists  (pinned uid: no create is sent, a get decides)
     replace  Conflict (409)      -> conflict   (NotFound / anything else -> error)
   Every reply that names an object is checked against the metadata.uid pinned by
   the first read or create of this client: a different uid under the same name
@@ -53,9 +53,12 @@ def parseObj (out : String) : Except String Obj := do
   return { uid, rv, record }
 
 /-- The ConfigMap manifest (JSON is YAML). `rv` / `uid` pin the write. -/
-def manifest (ns name record : String) (rv uid : Option String) : String :=
+def manifest (ns name record : String) (rv uid : Option String)
+    (labels : List (String × String) := []) : String :=
   let meta : List (String × Json) :=
     [("name", Json.str name), ("namespace", Json.str ns)] ++
+    (if labels.isEmpty then [] else
+      [("labels", Json.mkObj (labels.map fun (k, v) => (k, Json.str v)))]) ++
     (rv.map fun r => [("resourceVersion", Json.str r)]).getD [] ++
     (uid.map fun u => [("uid", Json.str u)]).getD []
   (Json.mkObj [("apiVersion", Json.str "v1"), ("kind", Json.str "ConfigMap"),
@@ -118,16 +121,33 @@ def withManifest (run : Runner) (verb : String) (ns text : String) :
 
 /-- A client for ConfigMap `ns/name` only: every call names that object and
     that namespace. A fresh client has no pinned uid (a restarted process pins
-    on its first read). -/
-def mkClient (run : Runner) (ns name : String) : IO Client := do
+    on its first read). `labels` are written on create and kept on replace.
+    With a pinned uid `create` never sends a create: it reads, and an object of
+    the pinned uid is `alreadyExists`; a gone object or another uid is an error
+    (a deleted object is never re-created, so no write can reach a newcomer). -/
+def mkClient (run : Runner) (ns name : String) (labels : List (String × String) := []) :
+    IO Client := do
   let pin ← IO.mkRef (none : Option String)
   return {
     get := do mapGet pin (← run ["get", "configmap", name, "-n", ns, "-o", "json"])
-    create := fun v => do mapCreate pin (← withManifest run "create" ns (manifest ns name v none none))
+    create := fun v => do
+      match ← pin.get with
+      | none =>
+        mapCreate pin (← withManifest run "create" ns (manifest ns name v none none labels))
+      | some u =>
+        match ← run ["get", "configmap", name, "-n", ns, "-o", "json"] with
+        | .error e =>
+          return .error (if isNotFound e then "pinned object is gone: not re-creating" else e)
+        | .ok out =>
+          match parseObj out with
+          | .error e => return .error s!"unreadable object: {e}"
+          | .ok o =>
+            if o.uid == u then return .alreadyExists
+            else return .error s!"object uid changed ({u} -> {o.uid}): not the same object, nothing written"
     replace := fun rv v => do
       let uid ← pin.get
       -- without a pinned uid (no read yet) the write is still resourceVersion-guarded
-      mapReplace pin (← withManifest run "replace" ns (manifest ns name v (some rv) uid)) }
+      mapReplace pin (← withManifest run "replace" ns (manifest ns name v (some rv) uid labels)) }
 
 def kubectlRunner : Runner := FlareOperator.Kubectl.kubectl
 

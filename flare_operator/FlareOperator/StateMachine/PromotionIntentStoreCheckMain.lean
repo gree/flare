@@ -1,14 +1,20 @@
 /-
-  PromotionIntentStoreCheckMain.lean — `promotion_intent_store_check NAMESPACE NAME`:
+  PromotionIntentStoreCheckMain.lean — `promotion_intent_store_check NAMESPACE PREFIX`:
   a real-API check of the CAS adapter on ONE test ConfigMap. Not run by CI, not
   part of flare_unit, not linked into the operator.
 
-  Scope guard: every kubectl call goes through `guarded`, which allows only
-  get / create / replace / delete of configmap NAME in namespace NAMESPACE (the
-  manifest file is parsed and must be that ConfigMap), nothing cluster-scoped.
-  An existing ConfigMap of that name is never touched (the run aborts, nothing
-  deleted). The ConfigMap is deleted at the end, also on failure.
-  Output is TAP-like; exit 0 only if every check passed.
+  Ownership: the name is PREFIX-<random hex> (run-unique), the object carries the
+  label flare-cprime-cas-test/run=<run id>. Ownership is established by CREATE
+  first (no initial delete / reset); on AlreadyExists nothing is touched and the
+  run exits. The uid of every object this run created is recorded from the
+  create reply; EVERY delete (also the final cleanup) is conditional on that uid:
+  a GET must show it, then `kubectl delete --raw` carries a DeleteOptions
+  precondition uid. There is no name-only delete anywhere.
+
+  Scope guard: every kubectl call goes through `guarded` (get / create / replace
+  of configmap NAME in NAMESPACE, and the uid-preconditioned raw delete of that
+  one path), nothing cluster-scoped. Output is TAP-like; exit 0 only if every
+  check passed and the cleanup succeeded.
 -/
 import FlareOperator.StateMachine.PromotionIntentKube
 import FlareOperator.StateMachine.PromotionIntentChecks
@@ -22,9 +28,13 @@ open FlareOperator.PromotionIntentChecks
 open Lean
 
 def namePrefix : String := "flare-cprime-cas-test"
+def labelKey : String := "flare-cprime-cas-test/run"
 
 def validNs (s : String) : Bool :=
   !s.isEmpty && s.all fun c => c.isLower || c.isDigit || c == '-'
+
+def hex (bs : ByteArray) : String :=
+  bs.foldl (fun acc b => acc ++ (Nat.toDigits 16 (b.toNat + 256)).asString.drop 1) ""
 
 /-- The manifest at `path` is a ConfigMap `ns/name` and nothing else. -/
 def manifestIsOurs (ns name path : String) : IO Bool := do
@@ -36,38 +46,105 @@ def manifestIsOurs (ns name path : String) : IO Bool := do
       (meta.getObjValD "namespace").getStr?.toOption == some ns
   catch _ => return false
 
-def guarded (ns name : String) : Runner := fun args => do
+def rawPath (ns name : String) : String := s!"/api/v1/namespaces/{ns}/configmaps/{name}"
+
+def deleteBody (uid : String) : String :=
+  (Json.mkObj [("apiVersion", Json.str "v1"), ("kind", Json.str "DeleteOptions"),
+    ("preconditions", Json.mkObj [("uid", Json.str uid)])]).compress
+
+/-- The only delete: raw DELETE of the one path whose body file holds a uid precondition. -/
+def deleteIsPreconditioned (path : String) : IO Bool := do
+  try
+    let j ← IO.ofExcept (Json.parse (← IO.FS.readFile path))
+    let u := ((j.getObjValD "preconditions").getObjValD "uid").getStr?.toOption.getD ""
+    return (j.getObjValD "kind").getStr?.toOption == some "DeleteOptions" && !u.isEmpty
+  catch _ => return false
+
+/-- `owned` records the uid of each object this run's create returned. -/
+def guarded (ns name : String) (owned : IO.Ref (Option String)) : Runner := fun args => do
   let refuse : IO (Except String String) :=
     return .error s!"guard: refused kubectl {args.take 3} (only configmap {ns}/{name})"
   match args with
   | ["get", "configmap", n, "-n", s, "-o", "json"] =>
     if n == name && s == ns then kubectlRunner args else refuse
-  | ["delete", "configmap", n, "-n", s, "--ignore-not-found"] =>
-    if n == name && s == ns then kubectlRunner args else refuse
+  | ["delete", "--raw", p, "-f", path] =>
+    if p == rawPath ns name && (← deleteIsPreconditioned path) then kubectlRunner args else refuse
   | [verb, "-f", path, "-n", s, "-o", "json"] =>
-    if (verb == "create" || verb == "replace") && s == ns && (← manifestIsOurs ns name path)
-    then kubectlRunner args else refuse
+    if (verb == "create" || verb == "replace") && s == ns && (← manifestIsOurs ns name path) then
+      let r ← kubectlRunner args
+      if verb == "create" then
+        if let .ok out := r then
+          if let .ok o := parseObj out then owned.set (some o.uid)
+      return r
+    else refuse
   | _ => refuse
 
 structure Env where
   run : Runner
   ns : String
   name : String
+  runId : String
+  owned : IO.Ref (Option String)
 
-def Env.client (e : Env) : IO Client := mkClient e.run e.ns e.name
+def Env.client (e : Env) : IO Client :=
+  mkClient e.run e.ns e.name [(labelKey, e.runId)]
 
-def Env.delete (e : Env) : IO (Except String String) :=
-  e.run ["delete", "configmap", e.name, "-n", e.ns, "--ignore-not-found"]
+/-- Delete the object this run created, only if it still has that uid.
+    Nothing owned -> nothing to delete. A GET showing another uid, or any doubt, deletes nothing. -/
+def Env.delete (e : Env) : IO (Except String String) := do
+  let some uid ← e.owned.get | return .ok "nothing owned"
+  match ← e.run ["get", "configmap", e.name, "-n", e.ns, "-o", "json"] with
+  | .error m =>
+    if isNotFound m then
+      e.owned.set none
+      return .ok "already gone"
+    else return .error m
+  | .ok out =>
+    match parseObj out with
+    | .error m => return .error s!"unreadable: {m}"
+    | .ok o =>
+      if o.uid != uid then
+        return .error s!"uid is {o.uid}, not ours ({uid}): not deleting"
+      else
+        let pid ← IO.Process.getPID
+        let path := s!"/tmp/flare-intent-del-{pid}-{← IO.monoNanosNow}.json"
+        try IO.FS.writeFile path (deleteBody uid) catch m => return .error s!"cannot write body: {m}"
+        let r ← e.run ["delete", "--raw", rawPath e.ns e.name, "-f", path]
+        try IO.FS.removeFile path catch _ => pure ()
+        if r.toOption.isSome then e.owned.set none
+        return r
 
-/-- Delete and recreate the ConfigMap holding `i`; returns a fresh client. -/
+/-- Establish ownership by create. `none` = ours; `some why` = abort, nothing deleted.
+    A create whose reply was lost (error): adopt the object only if the unique name
+    carries this run's label, else leave it alone. -/
+def claim (e : Env) (c : Client) (i : Intent) : IO (Option String) := do
+  match ← c.create (encode i) with
+  | .ok _ => return none
+  | .alreadyExists => return some s!"configmap {e.ns}/{e.name} already exists: not touching it"
+  | .error _ =>
+    match ← e.run ["get", "configmap", e.name, "-n", e.ns, "-o", "json"] with
+    | .ok out =>
+      let lab := ((Json.parse out).toOption.getD Json.null |>.getObjValD "metadata"
+        |>.getObjValD "labels" |>.getObjValD labelKey).getStr?.toOption
+      match parseObj out, lab with
+      | .ok o, some l =>
+        if l == e.runId then
+          e.owned.set (some o.uid)
+          return none
+        else return some s!"configmap {e.ns}/{e.name} exists with another run label: not touching it"
+      | _, _ => return some s!"configmap {e.ns}/{e.name} exists, not recognised: not touching it"
+    | .error m => return some s!"create outcome unknown ({m.take 200}); check configmap {e.ns}/{e.name} by hand"
+
+/-- Delete our object (uid-conditional) and create a fresh one holding `i`
+    (new uid, recorded); returns a fresh client. AlreadyExists -> none, nothing touched. -/
 def Env.reset (e : Env) (i : Intent) : IO (Option Client) := do
   match ← e.delete with
   | .error _ => return none
   | .ok _ =>
     let c ← e.client
-    match ← createIntent c i with
-    | .done _ => return some c
-    | _ => return none
+    match ← claim e c i with
+    | none => return some c
+    | some _ => return none
 
 def Env.stored (e : Env) : IO (Option Intent) := do
   match ← readIntent (← e.client) with
@@ -129,7 +206,8 @@ def tRecreated (e : Env) : IO Bool := do
   return refused && notOk && (← e.stored) == some prepared
 
 def tNotFound (e : Env) : IO Bool := do
-  let _ ← e.delete
+  let some _ ← e.reset prepared | return false
+  let .ok _ ← e.delete | return false
   let c ← e.client
   let g ← match ← c.get with | .notFound => pure true | _ => pure false
   let r ← commit1 c
@@ -154,32 +232,30 @@ def runAll (e : Env) : IO Bool := do
     if !ok then all := false
   return all
 
-/-- Create the ConfigMap only if absent; `none` = abort without touching anything. -/
-def preflight (e : Env) : IO (Option String) := do
-  match ← (← e.client).get with
-  | .notFound => return none
-  | .found _ _ => return some s!"configmap {e.ns}/{e.name} already exists: not touching it"
-  | .error m => return some s!"cannot read configmap {e.ns}/{e.name}: {m.take 200}"
-
 def main (args : List String) : IO UInt32 := do
-  let [ns, name] := args
-    | IO.eprintln "usage: promotion_intent_store_check NAMESPACE NAME"; return 2
-  unless validNs ns && name.startsWith namePrefix && validNs name do
-    IO.eprintln s!"refused: namespace must be [a-z0-9-]+, name must start with {namePrefix}"
+  let [ns, pfx] := args
+    | IO.eprintln "usage: promotion_intent_store_check NAMESPACE NAME_PREFIX"; return 2
+  unless validNs ns && pfx.startsWith namePrefix && validNs pfx do
+    IO.eprintln s!"refused: namespace must be [a-z0-9-]+, name prefix must start with {namePrefix}"
     return 2
-  let e : Env := { run := guarded ns name, ns, name }
-  if let some why ← preflight e then
+  let runId := hex (← IO.getRandomBytes 8)
+  let name := (pfx.dropRightWhile (· == '-')) ++ "-" ++ runId
+  let owned ← IO.mkRef (none : Option String)
+  let e : Env := { run := guarded ns name owned, ns, name, runId, owned }
+  IO.println s!"# name {ns}/{name} run {runId}"
+  if let some why ← claim e (← e.client) prepared then
     IO.println s!"Bail out! {why}"
     return 2
+  IO.println s!"# owned uid {(← owned.get).getD "?"}"
   let result ← try
       let ok ← runAll e
       pure (some ok)
     catch ex => do IO.eprintln s!"# aborted: {ex}"; pure none
-  -- cleanup: runs on pass, fail and abort; only the ConfigMap this run created
+  -- cleanup: runs on pass, fail and abort; deletes only the uid this run created
   let d ← e.delete
   match d with
-  | .ok _ => IO.println s!"# deleted configmap {ns}/{name}"
-  | .error m => IO.println s!"# CLEANUP FAILED, delete configmap {ns}/{name} by hand: {m.take 200}"
+  | .ok m => IO.println s!"# cleanup: {m}; configmap {ns}/{name} (uid-conditional delete)"
+  | .error m => IO.println s!"# CLEANUP FAILED: configmap {ns}/{name} not deleted (it may be ours or not; check its uid/label {labelKey}={runId} before deleting by hand): {m.take 200}"
   return if result == some true && d.toOption.isSome then 0 else 1
 
 end FlareOperator.PromotionIntentStoreCheckMain

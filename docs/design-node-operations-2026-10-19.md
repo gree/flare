@@ -310,6 +310,49 @@ master (旧)                 operator leader               新 master
 
 **モデル化していないもの:** 2 台の時計のドリフト、メッセージの消失・重複の一般形、prepare の期限、leader 交代の途中での中断・再開、複数の successor、operator のリースとの組み合わせ。実装の前に、これらを同じ形のイベント列と不変条件で閉じる。
 
+### 12.6 promotion intent の terminal CAS（レビュー 0a3fff2 を受けた独立実装。設計と未配線のコードのみ。runtime 未変更・未承認）
+
+**0a3fff2 のレビュー。** 反例（commit が T より前に store で確定し、結果の到達が T より後。R が timer だけで FOLLOWING に戻り約束を 40 まで再開し、22 に昇格 → 重なる）は正しい。「commit < T − 余裕」を確認しても、結果配送の任意の遅延とは競合を解決しない。モデルが必要とする安全条件と、その可用性の代償:
+
+| # | 安全条件 | 代償（止まる条件・期間） |
+|---|---|---|
+| S1 | **Unknown（返事を受け取っていない・store が読めない・record が壊れている）では、期限だけで R は約束を再開しない。** 再開は「この intent が cancelled」と store が肯定した時だけ | prepare 後に R から store への経路が切れると R は PREPARING のまま。約束を出さないので M は P の後に write を止める。**store の復旧まで有限時間の保証はない**（operator 不在の R4 は、prepare が来る前までしか成り立たない） |
+| S2 | cancel と commit は永続化した intent 上の**同一の terminal CAS**（pending → committed / cancelled）。terminal は反転しない。同じ決定の再送は noop | CAS の往復分の遅延。store の linearizable を前提（未証明） |
+| S3 | commit は leader の fencing token が store の現在値と一致する時だけ。新 leader は先に adopt（token をより大きくする）。旧 leader の遅延 commit/cancel は拒否 | leader 交代の間は commit も cancel も保留（intent は残る） |
+| S4 | commit は deadline の**前**（排他）、cancel は R の自己 cancel なら deadline から（包含） | deadline を過ぎた commit は拒否されるので、その intent は昇格できず新しい intent が要る（切り替えが 1 回遅れる） |
+| S5 | R は昇格の前に、自分の時計で max(store の oldUntil, R 自身が最後に出した約束の終わり) + margin を過ぎていること | 旧権限が長いほど昇格が遅れる（長さは oldUntil の計算次第） |
+| S6 | 旧 master は、リース/約束が切れたら（authorityEnd − margin から）ACK しない。solo（権威ある membership で successor なし）は止まらない。solo への戻りは successor 除外の commit の確認後だけ | C' と同じ状況（master が operator と全 successor から切れ、client だけが届く）では L の後に write が止まる（§12.4 の 1）。止まるのはその master にしか届かない client のみ |
+| S7 | record が壊れている・未知の version は「無い」と扱わず、refuse | 破損した record は人が直すまで進まない（保守側） |
+
+**モデルの不完全な点（0a3fff2）:** (1) 誰が timer で cancel を打つかが未定義（operator が不在だと cancel する者がいない）→ 本実装では successor の自己 cancel（deadline から、store 経由）を許す。これは 1 つの判断点。(2) store が `oldUntil` を commit の時点で比較しているが、store は M/R の時計と約束を原子的に読めない → 本実装では oldUntil を prepare ack 時に record し（`none` なら commit 不可）、昇格の待ちは R 側の自分の時計で行う。(3) `role` と `oldUntil` を同一の構造体に置いており、分散状態を原子的に読めるように見える。(4) `safe` は活性化の瞬間しか見ない。M が実際に write を止める時刻（M の時計、ドリフト）は入っていない。(5) R の再起動・record の破損・複数候補・membership の世代・2 つの時計は範囲外。(6) 既存の `WriteLeaseModel` の RQ（要求起点のリース）との接続は純関数 `acceptGrant` の例のみ。
+
+**実装（未配線、`flare_operator/FlareOperator/StateMachine/`）:** `PromotionIntent`（Intent、`prepare`/`recordPrepared`/`adoptLeader`/`commit`/`cancel`、versioned の `encode`/`decode`/`readOf`）、`PromotionRefusal`（`mayResume`、`mayPromote`、`onTimer`（role を変えず `tryCancel` のみ）、`onRead`、`renew`、`masterRefusesWrite`、`acceptGrant`、`approveSuccessor`、`membershipRemoved`）、`PromotionIntentChecks`（`flare_unit` に接続）。terminal の 5 つの命題は任意の record/token/時刻で Lean が証明（writer 排他全体の帰納証明ではない）。
+
+**判断点（数値は選んでいない。引数・record の欄）:** prepare の deadline T、旧権限の上界 oldUntil の算出、リース長 L / 約束の P、margin（ドリフト上限）、successor の自己 cancel を許すか（許さないと operator 不在時に R が戻らない）、Unknown で停止を維持する代償の承認（S1）、store の linearizable な実現（K8s の CAS / resourceVersion 等）と leader fencing の実現、commit の `now` をどの時計で測るか。**未実装:** runtime 配線、flared 側の write 拒否、永続化の IO・破損時の運用、membership の世代。
+
+### 12.7 terminal CAS アダプタの実装境界（f4。設計のみ。次のコードの前に書く。runtime 未配線・既定 OFF・未承認）
+
+**置き場所（既存の store を使う）。** operator が永続状態を持つ既存の仕組みは、K8s の ConfigMap を `kubectl get` / `create` / `replace -f`（metadata.resourceVersion 付き）で読み書きする方式（履歴 `{cr}-history`、`Main.lean` の `readHistory` / `persistHistory`。node-map `{cr}-node-map`）。intent も同じ種類の object に置く: ConfigMap `{cr}-promotion-intent-p{partition}`、`data.record` に `PromotionIntent.encode` の 1 行。partition に 1 つの intent record。新しい種類の store・CRD・時計は足さない。
+
+**CAS = resourceVersion。** 読みは (value, resourceVersion) | notFound | error。書きは `replace`（読んだ resourceVersion を載せる）で、他者が先に書いていれば conflict（API が拒否）。初回は `create`（存在すれば alreadyExists）。resourceVersion は不透明な token として等値の比較にだけ使い、大小や時間の意味は持たせない。
+
+**再読して決める場面。**
+- conflict: 書いた値は採用しない。再読し、**読み直した record に対して pure の決定をやり直す**（盲目の上書き・同じ値の再送はしない）。試行は有限（fuel）。尽きたら Unknown を返す（commit も cancel も確定したとは言わない）。
+- 返事の喪失（replace がエラー・timeout で、書けたか不明）: 結果は Unknown として扱い、再読する。再読した record が自分の書こうとした値と一致すれば「確定」、そうでなければ新しい record に対して決定をやり直す。再読もできなければ Unknown（R は S1 により約束を再開しない・昇格しない）。
+- get の error・notFound の区別: notFound（API が肯定した不在）だけが absent。error は absent ではない。
+
+**旧 leader の拒否。** record の `fence` が adopt 済みの最大 token。commit / cancel / prepared の記録は自分の token が record の fence と**一致するときだけ** pure 側で applied になる（stale は staleLeader）。resourceVersion だけでは「今の leader か」は分からない（別の leader が同じ resourceVersion を読んで書ける）ので、leader 権限は record 内の fence で、同時書込の排除は resourceVersion で、二重に見る。新 leader は先に adopt（token をより大きく CAS）する。
+
+**terminal が再起動をまたいで terminal のまま。** アダプタは状態を持たない（関数 + 外部 client）。決定はすべて「読んだ record」に対して行い、committed / cancelled の record に対しては pure の関数が applied を返さない（既証明の定理: terminal からの反転は applied にならない）。プロセスの再起動後は同じ ConfigMap を読み直すだけで terminal が見える。record が壊れている・未知 version のときは absent 扱いにせず refuse（S7）。terminal の record を新しい intent で置き換えることはこの単位では実装しない（intent の世代交代・GC は未設計。create は alreadyExists で拒否）。
+
+**時間（store の時計を使わない）。** K8s API から「store の CLOCK_BOOTTIME」を原子的に読むことはできない。この単位の CAS は時刻を一切読まない。CAS が与えるのは **commit と cancel の排他（terminal は 1 回だけ、どちらか）**だけ。時間に依存する部分は、その判断をする側が**自分の時計で**行い、`now` を引数で渡す:
+- 旧権限の終わりを待つのは後継 R が R 自身の時計（node + boot 付き `At`）で行う（S5。`oldUntil` は R の時計の値。他 node の値は `fromRequest` で期間から R の時計に直したものだけ）。
+- すべての時刻値は ClockId（node, boot）を持つ。`now` の ClockId が record の `deadline` と違えば pure 側が clockMismatch で refuse する（比較しない。安全側）。アダプタは時計を持たず、`now` を渡す呼び出し側が時計の持ち主を名乗る。
+- **残る設計判断（未解決。この単位では決めない）:** `deadline` は 1 つの時計の値なので、(a) leader の commit（operator の時計）と (b) successor の自己 cancel（R の時計）の両方を時間で制限することは、今の record では表せない。片方の時計に揃えた場合、もう片方は clockMismatch で拒否される（commit が拒否される = 昇格しない = 安全側で可用性が下がる）。どちらの時計に置くか、または deadline を 2 つ持つかは承認が要る。
+- 旧 master の権限の上界（oldUntil）の値の出し方、L / P / margin の数値は選ばない。
+
+**この単位でしないこと:** runtime への配線（Main・reconcile ループから呼ばない）、flared 側の write 拒否、kubectl を使う実 client（抽象 client と in-memory の fake だけ）、実 API のテスト、intent の世代交代・GC、停止方針の既定値。solo の master は止めず、operator 単独の故障で write は止まらない（アダプタは operator の中の部品で、flared の write 経路に載せない）。
+
 ### 8.7 partition の targeted run（a6ba116、E2E 39345347481）— writer の key を一意にした最初の測定
 
 - C: 合格（測定。failover の受入ではない）

@@ -28,7 +28,7 @@ structure Binding where
   podUid : String
   bootId : String
   copyId : String
-  deriving Repr, BEq, Inhabited
+  deriving Repr, BEq, Inhabited, DecidableEq
 
 structure Hist where
   masterId : String

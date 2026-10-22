@@ -40,6 +40,7 @@ import FlareOperator.E2E.Tests.ReplicaRepair
 import FlareOperator.E2E.Tests.ContinuousReplication
 import FlareOperator.E2E.Tests.ContinuousReplicationLimits
 import FlareOperator.E2E.Tests.NodeOps
+import FlareOperator.E2E.Tests.WriteAuthority
 import FlareOperator.E2E.Tests.StatsCost
 import FlareOperator.E2E.Tests.PrepareEvidence
 import FlareOperator.E2E.Tests.NativeMetrics
@@ -117,6 +118,12 @@ def main (args : List String) : IO UInt32 :=
     Tests.NodeOps.holdSuite,
     Tests.NodeOps.stopSuite,
     Tests.NodeOps.partitionSuite,
+    Tests.WriteAuthority.drainWaSuite,
+    Tests.WriteAuthority.holdWaSuite,
+    Tests.WriteAuthority.stopWaSuite,
+    Tests.WriteAuthority.partitionWaSuite,
+    Tests.WriteAuthority.operatorAbsentSuite,
+    Tests.WriteAuthority.soloSuite,
     Tests.NodeOps.drainControlSuite,
     Tests.StatsCost.suite,
     Tests.NodeOps.holdControlSuite,

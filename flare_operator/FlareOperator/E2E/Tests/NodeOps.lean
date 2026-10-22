@@ -31,12 +31,12 @@ open FlareOperator.E2E.Setup
 open FlareOperator.E2E.NodeOps
 open FlareOperator.Kubectl
 
-private def followFlags : String :=
+def followFlags : String :=
   "repl-identity-forward = true\nrepl-follow-enabled = true\nrepl-follow-poll-interval-usec = 200000"
 
 /-- 1 partition x 2 replicas, rocksdb, prod-like drain window and PDB, one
     flared pod per data worker. -/
-private def cfgOf (name : String) (tmpfs pvc : Bool) : ClusterConfig :=
+def cfgOf (name : String) (tmpfs pvc : Bool) : ClusterConfig :=
   { name := name, «namespace» := s!"flare-{name}", partitions := 1, replicas := 2,
     debugPod := s!"debug-{name}", storageBackend := "rocksdb", useTmpfs := tmpfs, usePvc := pvc,
     drainSeconds := 60, pdbMaxUnavailable := some 1, multiNode := true, extraFlaredConf := followFlags }
@@ -70,7 +70,7 @@ private def redundant (c : Ctx) (avoid : Option String) : IO Bool := do
   | _, _ => return false
 
 /-- Seed keys through the master and wait until the replica holds them. -/
-private def seed (c : Ctx) (p : Placement) (pfx : String) : IO (Except String Unit) := do
+def seed (c : Ctx) (p : Placement) (pfx : String) : IO (Except String Unit) := do
   let n ← writeKeys c.cfg.debugPod c.cfg.«namespace» p.master.ip c.cfg.flarePort pfx 50
   if n != 50 then return .error (notSetUp s!"seed: {n}/50 acknowledged")
   let ok ← waitForCondition "the replica holds the seed" 120 do
@@ -187,7 +187,7 @@ private def drainRun (c : Ctx) (drainMaster : Bool) : IO (Except String DrainObs
                  recoverySec := rec_, writes := ws, missingMaster := mm, missingReplica := mr, summary,
                  logsComplete := wl1.complete && wl2.complete }
 
-private def drainTest (c : Ctx) (drainMaster : Bool) : IO TestResult := do
+def drainTest (c : Ctx) (drainMaster : Bool) : IO TestResult := do
   match ← drainRun c drainMaster with
   | .error e => return .fail e
   | .ok o =>
@@ -199,7 +199,7 @@ private def drainTest (c : Ctx) (drainMaster : Bool) : IO TestResult := do
 /-- EV-01 / EV-05 (dry run): a bare policy/v1 Eviction (no labels) for the
     master reaches the webhook and is refused; a dry run records nothing; an
     Eviction whose UID precondition does not match is refused. -/
-private def rawEvictionTest (c : Ctx) : IO TestResult := do
+def rawEvictionTest (c : Ctx) : IO TestResult := do
   match ← c.placement with
   | .error e => return .fail e
   | .ok p =>
@@ -252,7 +252,7 @@ def holdVerdict (drainDone : Bool) (masterDeleting : Bool) (reasonSeen : Bool) :
   else if !reasonSeen then some "the eviction was held, but no reason naming the data condition was returned to the requester"
   else none
 
-private def holdTest (c : Ctx) : IO TestResult := do
+def holdTest (c : Ctx) : IO TestResult := do
   match ← c.placement with
   | .error e => return .fail e
   | .ok p =>
@@ -311,7 +311,7 @@ private def disruptionPhase (c : Ctx) : IO (Option String × Option String) := d
     | .error _ => return (none, none)
   | .error _ => return (none, none)
 
-private def concurrentTest (c : Ctx) : IO TestResult := do
+def concurrentTest (c : Ctx) : IO TestResult := do
   match ← c.placement with
   | .error e => return .fail e
   | .ok p =>
@@ -489,7 +489,7 @@ private def stopRun (c : Ctx) (returns : Bool) : IO (Except String StopObs) := d
                  missingMaster := mm, lateMissing := late, acksAfterPromotion := resumed, summary,
                  logsComplete := wl.complete }
 
-private def stopTest (c : Ctx) (returns : Bool) : IO TestResult := do
+def stopTest (c : Ctx) (returns : Bool) : IO TestResult := do
   match ← stopRun c returns with
   | .error e => return .fail e
   | .ok o =>
@@ -785,7 +785,7 @@ def ApiPaths.usable (a : ApiPaths) : List String :=
 
 /-- `nodeLevel` = also cut the master's worker from the API server on every
     path its kubelet can use, so the node goes NotReady. -/
-private def partitionRun (c : Ctx) (nodeLevel : Bool) : IO (Except String PartObs) := do
+def partitionRun (c : Ctx) (nodeLevel : Bool) : IO (Except String PartObs) := do
   match ← c.placement with
   | .error e => return .error e
   | .ok p =>
@@ -903,7 +903,7 @@ private def partitionRun (c : Ctx) (nodeLevel : Bool) : IO (Except String PartOb
                  oldAcks := acks wsOld, peerAcks := acks wsPeer, lostAcks := lost, summary,
                  logsComplete := wlOld.complete && wlPeer.complete }
 
-private def partitionTest (c : Ctx) (nodeLevel : Bool) : IO TestResult := do
+def partitionTest (c : Ctx) (nodeLevel : Bool) : IO TestResult := do
   match ← partitionRun c nodeLevel with
   | .error e => return .fail e
   | .ok o =>
@@ -914,6 +914,73 @@ private def partitionTest (c : Ctx) (nodeLevel : Bool) : IO TestResult := do
     let paths := fun (xs : List (WriteRec × String)) (k : String) => (xs.filter (·.2 == k)).length
     IO.eprintln s!"# [{c.test}] injection {repr o.inj}; node NotReady +{firstNotReady} s, pod NotReady +{firstPodNotReady} s, replica master (own view) +{firstNewMaster} s; old acks local/forwarded/unknown {paths o.oldAcks "local"}/{paths o.oldAcks "forwarded"}/{paths o.oldAcks "unknown"}, peer {paths o.peerAcks "local"}/{paths o.peerAcks "forwarded"}/{paths o.peerAcks "unknown"}; lost {o.lostAcks}; {o.summary}"
     match partVerdict o with
+    | some why => return .fail why
+    | none => return .pass
+
+
+/-! ## C / C' with the write authority ON (docs §13)
+
+    The role-based "dual write" inference above cannot judge the engine: the
+    isolated old master keeps its ROLE (master by its own view) for the whole cut
+    whether or not it still acknowledges. With the engine the criterion is on the
+    acknowledgements themselves: NO interval in which both the old and the new
+    master acknowledge. Never Unknown for the old side: EVERY acknowledgement
+    that came from the old master's address inside the cut counts as the old
+    master's (it is cut from its replica, so nothing it acknowledges was
+    forwarded). For the new side a classified local ack counts at its start; an
+    ack whose path cannot be told counts no earlier than the start of the last
+    reading in which the replica was still NOT master (it cannot have been
+    master before that), so an unclassified ack can only make the check
+    stricter, never hide an overlap. -/
+
+/-- The earliest instant the replica can have acknowledged as the master. -/
+def waFirstNewPossible (o : PartObs) : Option Nat :=
+  let reads := (o.samples.flatMap (·.reads)).filter fun r => r.pod == o.replica
+  let firstMaster := ((reads.filter fun r => (r.view.map (·.role)) == some "master").map (·.ts)).min?
+  let slaveTs := reads.filter fun r =>
+    match r.view, firstMaster with
+    | some v, some fm => v.role != "master" && r.ts < fm
+    | some v, none => v.role != "master"
+    | none, _ => false
+  let low := ((slaveTs.map (·.ts)).max?).getD o.tCut
+  let inCut := fun (w : WriteRec) => w.span.1 ≥ o.tCut && w.span.2 ≤ o.tHeal
+  let cands := (o.peerAcks.filter fun (w, _) => inCut w).filterMap fun (w, p) =>
+    if p == "local" then some w.span.1 else if p == "unknown" then some (max w.span.1 low) else none
+  cands.min?
+
+/-- The old master's last acknowledgement inside the cut (any path). -/
+def waLastOld (o : PartObs) : Option Nat :=
+  let inCut := fun (w : WriteRec) => w.span.1 ≥ o.tCut && w.span.2 ≤ o.tHeal
+  ((o.oldAcks.filter fun (w, _) => inCut w).map (·.1.span.2)).max?
+
+def partVerdictWa (o : PartObs) : Option String :=
+  let r := partReport o
+  let cov := s!" [{r.render}]"
+  match r.injection with
+  | some why => some (notSetUp s!"injection not established: {why}")
+  | none =>
+  if !r.logsComplete then
+    some (unobservable "a writer log was not confirmed complete" ++ cov)
+  else if o.nodeLevel then
+    match waLastOld o, waFirstNewPossible o with
+    | some lo, some fn =>
+      if lo ≥ fn then
+        some (s!"PRODUCT GAP (dual acknowledgement with the write authority ON): the old master's last acknowledgement in the cut ended at {lo}, the new master can have acknowledged from {fn} (cut {o.tCut}..{o.tHeal})" ++ cov)
+      else if !r.failedOver then
+        some ("NOT VERIFIED: the replica was not master by its own view during the cut" ++ cov)
+      else none
+    | _, none =>
+      some ("NOT VERIFIED: the new master acknowledged no write during the cut (availability after the switch not shown; no overlap can be judged)" ++ cov)
+    | none, _ =>
+      some ("NOT VERIFIED: the old master acknowledged no write inside the cut" ++ cov)
+  else partVerdict o
+
+def partitionTestWa (c : Ctx) (nodeLevel : Bool) : IO TestResult := do
+  match ← partitionRun c nodeLevel with
+  | .error e => return .fail e
+  | .ok o =>
+    IO.eprintln s!"# [{c.test}] write authority ON: old master last ack in the cut {waLastOld o}, new master earliest possible ack {waFirstNewPossible o}; {o.summary}"
+    match partVerdictWa o with
     | some why => return .fail why
     | none => return .pass
 

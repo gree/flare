@@ -71,13 +71,16 @@ int op_orphan_purge::_run_server() {
 	// outside this node's own partition. On the MASTER of a partition it
 	// still needs that partition's write authority (a silent old master
 	// purges nothing); on any other role it is subject to the fence only.
+	bool bound_master = false;
 	{
 		cluster::role own_role;
 		cluster::state own_state;
 		int own_partition = -1;
-		if (this->_cluster->get_own_assignment(own_role, own_state, own_partition) && own_role == cluster::role_master
-				&& !fence_entry.admit_master(own_partition)) {
-			return this->_send_result(result_server_error, fence_entry.refusal());
+		if (this->_cluster->get_own_assignment(own_role, own_state, own_partition) && own_role == cluster::role_master) {
+			if (!fence_entry.admit_master(own_partition)) {
+				return this->_send_result(result_server_error, fence_entry.refusal());
+			}
+			bound_master = true;
 		}
 	}
 
@@ -138,7 +141,17 @@ int op_orphan_purge::_run_server() {
 		storage::entry del;
 		del.key = e.key;
 		del.version = 0;
-		if (this->_storage->remove(del, r, storage::behavior_skip_version) == 0) {
+		// a delete is applied under the authority the purge was admitted with
+		// (one apply section per key: a revoke / new term waits for one delete)
+		if (bound_master && !fence_entry.apply_begin()) {
+			this->_storage->iter_end();
+			return this->_send_result(result_server_error, "write authority lost before apply");
+		}
+		const int remove_rc = this->_storage->remove(del, r, storage::behavior_skip_version);
+		if (bound_master) {
+			fence_entry.apply_end();
+		}
+		if (remove_rc == 0) {
 			if (r == storage::result_deleted) {
 				deleted++;
 				log_debug("orphan_purge: deleted key=%s (resolved_partition=%d, my_partition=%d)",
@@ -150,6 +163,9 @@ int op_orphan_purge::_run_server() {
 
 	// Consume the token: a successful purge must not be replayable.
 	rdb->clear_orphan_scan();
+	if (bound_master && !fence_entry.ack_ok()) {
+		return this->_send_result(result_server_error, "write authority lost before the result");
+	}
 
 	char line[BUFSIZ];
 	snprintf(line, sizeof(line), "STAT orphan_purge_deleted %llu\r\n",

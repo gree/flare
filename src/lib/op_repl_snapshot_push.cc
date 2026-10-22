@@ -367,7 +367,16 @@ int op_repl_snapshot_push::_run_server() {
 	}
 
 	// verification (CRC above + read-only structural probe inside) and swap
-	if (rdb->swap_in_snapshot(staging, cp_seq) < 0) {
+	// the swap is applied under the authority the push was admitted with (an
+	// apply section: a revoke / new term waits for it; an ended authority does
+	// not swap)
+	if (!fence_entry.apply_begin()) {
+		log_warning("snapshot push: write authority lost before the swap -> declining", 0);
+		return -1;
+	}
+	const int swap_rc = rdb->swap_in_snapshot(staging, cp_seq);
+	fence_entry.apply_end();
+	if (swap_rc < 0) {
 		return -1;
 	}
 	if (this->_connection->write("SWAPPED\r\n", 9) < 0) {
@@ -440,7 +449,14 @@ int op_repl_snapshot_push::_run_server() {
 			}
 		}
 		rocksdb::WriteBatch batch(string(data, size));
-		if (rdb->apply_batch_with_lsn(batch, lsn) < 0) {
+		if (!fence_entry.apply_begin()) {
+			log_warning("snapshot push: write authority lost before a WAL batch (lsn=%llu) -> stopping", (unsigned long long)lsn);
+			delete[] data;
+			return -1;
+		}
+		const int batch_rc = rdb->apply_batch_with_lsn(batch, lsn);
+		fence_entry.apply_end();
+		if (batch_rc < 0) {
 			log_err("snapshot push: failed to apply WAL batch (lsn=%llu)", (unsigned long long)lsn);
 			delete[] data;
 			return -1;
@@ -482,6 +498,11 @@ int op_repl_snapshot_push::_run_server() {
 		}
 	}
 
+	// the push is acknowledged only under the authority it was admitted with
+	if (!fence_entry.ack_ok()) {
+		log_warning("snapshot push: write authority ended before the acknowledgement -> no STORED", 0);
+		return -1;
+	}
 	char line[64];
 	snprintf(line, sizeof(line), "STORED %llu\r\n", (unsigned long long)applied);
 	if (this->_connection->write(line, strlen(line)) < 0) {

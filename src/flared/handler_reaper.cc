@@ -127,7 +127,16 @@ int handler_reaper::run() {
 			uint32_t reaped = 0;
 			string last;
 			vector<storage::entry> reaped_entries;
-			if (this->_storage->reap_expired(now, max_scan, after, last, more, scanned, reaped, &reaped_entries) < 0) {
+			// the chunk's deletes are applied under the authority the chunk was
+			// admitted with (apply section: a revoke / new term waits for them,
+			// and an expired authority does not delete)
+			if (!fence_entry.apply_begin()) {
+				aborted = true;
+				break;
+			}
+			const int reap_rc = this->_storage->reap_expired(now, max_scan, after, last, more, scanned, reaped, &reaped_entries);
+			fence_entry.apply_end();
+			if (reap_rc < 0) {
 				log_warning("reap_expired failed (after=%s) -> aborting this sweep", after.c_str());
 				aborted = true;
 				break;
@@ -140,6 +149,12 @@ int handler_reaper::run() {
 			// destination) as a VERSION-CARRYING delete — the same wire op a
 			// client delete produces. Without this the reap stayed master-local
 			// (observed live: the slave carried ~10k more keys than its master).
+			// the forward goes out only while the chunk's authority still holds
+			// (the replicas get the deletes through the WAL otherwise)
+			if (!fence_entry.still_authorized()) {
+				aborted = true;
+				break;
+			}
 			for (vector<storage::entry>::const_iterator it = reaped_entries.begin(); it != reaped_entries.end(); it++) {
 				if (this->_replicate_delete(*it) == 0) {
 					total_replicated++;

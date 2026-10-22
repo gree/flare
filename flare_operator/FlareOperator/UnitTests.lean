@@ -41,6 +41,7 @@ import FlareOperator.StateMachine.PromotionIntentChecks
 import FlareOperator.StateMachine.PromotionIntentStoreChecks
 import FlareOperator.StateMachine.PromotionIntentKubeChecks
 import FlareOperator.StateMachine.WriteAuthorityChecks
+import FlareOperator.StateMachine.WriteAuthorityDriverChecks
 import FlareOperator.StateMachine.SourceEligibility
 import FlareOperator.StateMachine.RebuildConcurrency
 import FlareOperator.StateMachine.AuthoritativeHistory
@@ -3252,6 +3253,7 @@ def checkPromotionIntentStore (ctx : Ctx) : IO Unit := do
 /-- C' wiring (docs §13): the pure part of the operator side. -/
 def checkWriteAuthority (ctx : Ctx) : IO Unit := do
   for (n, ok) in FlareOperator.WriteAuthorityChecks.checks do check ctx n ok
+  for (n, ok) in ← FlareOperator.WriteAuthorityDriverChecks.checks do check ctx n ok
 
 def run : IO UInt32 := do
   let ctx : Ctx := { failures := ← IO.mkRef [], count := ← IO.mkRef 0 }

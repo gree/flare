@@ -215,6 +215,9 @@ inductive Action where
   | createIntent
   | sendPrepare
   | cancelCas (why : String)
+  /-- the intent is cancelled in the store but the successor still holds that prepare
+      (the cancel message did not reach it): say it again before anything new -/
+  | sendCancel
   | commitCas
   | sendCommit
   | proceed
@@ -227,7 +230,10 @@ def gateDecide (isSuccessor acked : Bool) (iv : IntentView) (rv : Option Replica
   else if !acked then .wait "the master has not confirmed this membership"
   else match iv with
   | .none => .createIntent
-  | .cancelled => .createIntent
+  | .cancelled =>
+    match rv with
+    | some r => if r.state == "preparing" && r.intent == id then .sendCancel else .createIntent
+    | none => .createIntent
   | .pending false _ => .sendPrepare
   | .pending true reached =>
     if reached then .cancelCas "the prepare window passed without a commit"

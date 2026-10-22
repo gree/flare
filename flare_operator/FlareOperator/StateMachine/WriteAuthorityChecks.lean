@@ -108,6 +108,10 @@ def tDecide : Bool :=
     && gateDecide true false .none none 1 == .wait "the master has not confirmed this membership"
     && gateDecide true true .none none 0 == .createIntent
     && gateDecide true true .cancelled none 3 == .createIntent
+    -- the cancel is in the store but the successor still holds that prepare: say it again, do not start a new attempt over it
+    && gateDecide true true .cancelled (rep "preparing" 3 0 false) 3 == .sendCancel
+    && gateDecide true true .cancelled (rep "following" 0 0 false) 3 == .createIntent
+    && gateDecide true true .cancelled (rep "preparing" 2 0 false) 3 == .createIntent
     && gateDecide true true (.pending false false) none 1 == .sendPrepare
     && gateDecide true true (.pending true true) (rep "preparing" 1 0 false) 1 == .cancelCas "the prepare window passed without a commit"
     -- unknown never decides
@@ -150,6 +154,7 @@ def tDecideSafety : Bool :=
         | _ => true)
     -- a committed intent is never cancelled; an unreadable successor never commits or proceeds
     && (match a with | .cancelCas _ => iv != .committed | _ => true)
+    && (match a with | .sendCancel => iv == .cancelled | _ => true)
     && (if rv.isNone then (match a with | .commitCas | .proceed | .sendCommit => false | _ => true) else true)
 
 def checks : List (String × Bool) :=

@@ -785,7 +785,7 @@ def ApiPaths.usable (a : ApiPaths) : List String :=
 
 /-- `nodeLevel` = also cut the master's worker from the API server on every
     path its kubelet can use, so the node goes NotReady. -/
-def partitionRun (c : Ctx) (nodeLevel : Bool) : IO (Except String PartObs) := do
+def partitionRun (c : Ctx) (nodeLevel : Bool) (wa : Bool := false) : IO (Except String PartObs) := do
   match ← c.placement with
   | .error e => return .error e
   | .ok p =>
@@ -892,7 +892,11 @@ def partitionRun (c : Ctx) (nodeLevel : Bool) : IO (Except String PartObs) := do
       | none => pure none
     let ipToPod := pods.map fun r => (r.ip, r.name)
     let acks := fun (ws : List WriteRec) => (ws.filter fun w => classify w.reply == .ack).map fun w => (w, ownPathOf ss ipToPod w)
-    inj := { inj with clientAcksAfterCut := (wsOld.filter fun w => classify w.reply == .ack && w.t ≥ tCut + 5 && w.t ≤ tHeal).length }
+    -- the client path to the old master is open when it ANSWERS: an acknowledgement, or (with the
+    -- write authority ON, where the isolated master stops acknowledging once its grant ran out)
+    -- its own refusal; a request that got no reply proves nothing
+    inj := { inj with clientAcksAfterCut := (wsOld.filter fun w =>
+      (if wa then classify w.reply != .unobserved else classify w.reply == .ack) && w.t ≥ tCut + 5 && w.t ≤ tHeal).length }
     -- path counts from the nodes' OWN views (writerSummary's map-based
     -- path is not used here: it was printed with no samples, i.e. all
     -- 'unknown', in the 1b74644 run)
@@ -976,7 +980,7 @@ def partVerdictWa (o : PartObs) : Option String :=
   else partVerdict o
 
 def partitionTestWa (c : Ctx) (nodeLevel : Bool) : IO TestResult := do
-  match ← partitionRun c nodeLevel with
+  match ← partitionRun c nodeLevel true with
   | .error e => return .fail e
   | .ok o =>
     IO.eprintln s!"# [{c.test}] write authority ON: old master last ack in the cut {waLastOld o}, new master earliest possible ack {waFirstNewPossible o}; {o.summary}"

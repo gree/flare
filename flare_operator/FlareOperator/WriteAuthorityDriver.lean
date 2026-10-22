@@ -31,6 +31,12 @@ structure Ctx where
   token : Nat
   /-- the clock owner's name for intent deadlines (operator identity) -/
   node : String
+  /-- one `authority ...` line to the flared of the node key; `none` = no (complete) reply -/
+  askNode : String → String → IO (Option String)
+  /-- the ConfigMap `name` as a CAS client -/
+  clientFor : String → IO Client
+  /-- this operator's monotonic clock, ms -/
+  nowMs : IO Nat
 
 def Ctx.clock (c : Ctx) : ClockId := { node := c.node, boot := toString c.token }
 
@@ -39,16 +45,23 @@ def podOf (key : String) : String :=
   | p :: _ => p
   | [] => key
 
+/-- The live wiring: kubectl exec into the pod, ConfigMaps through the kubectl client. -/
+def Ctx.live (cfg : Config) (cr ns : String) (token : Nat) (node : String) : Ctx :=
+  { cfg, cr, ns, token, node,
+    askNode := fun key cmd => do
+      match ← FlareOperator.K8s.Bridge.queryPodStats (podOf key) ns cmd with
+      | .ok out => pure (some out)
+      | .error _ => pure none,
+    clientFor := fun name => mkClient kubectlRunner ns name [("app.kubernetes.io/managed-by", "flare-operator")],
+    nowMs := IO.monoMsNow }
+
 def membersName (cr : String) (p : Nat) : String := s!"{cr}-authority-p{p}"
 def intentName (cr : String) (p termNext attempt : Nat) : String :=
   s!"{cr}-promotion-intent-p{p}-t{termNext}-i{attempt}"
 
 /-! ## Nodes -/
 
-def ask (ctx : Ctx) (key cmd : String) : IO (Option String) := do
-  match ← FlareOperator.K8s.Bridge.queryPodStats (podOf key) ctx.ns cmd with
-  | .ok out => pure (some out)
-  | .error _ => pure none
+def ask (ctx : Ctx) (key cmd : String) : IO (Option String) := ctx.askNode key cmd
 
 def statusOf (ctx : Ctx) (key : String) (p : Nat) : IO (Option Status) := do
   pure ((← ask ctx key (cmdStatus p)).bind Status.parse)
@@ -78,7 +91,7 @@ def writeRec (c : Client) (rv : Option String) (m : Members) : IO Bool := do
     | _ => pure false
 
 def recClient (ctx : Ctx) (p : Nat) : IO Client :=
-  mkClient kubectlRunner ctx.ns (membersName ctx.cr p) [("app.kubernetes.io/managed-by", "flare-operator")]
+  ctx.clientFor (membersName ctx.cr p)
 
 /-! ## The intents of one partition and term -/
 
@@ -88,7 +101,7 @@ structure Attempt where
 
 partial def scanFrom (ctx : Ctx) (p termNext n : Nat) (acc : List Attempt) : IO (Except String (List Attempt)) := do
   if n > 16 then return .error "too many promotion attempts for one term (manual)"
-  let c ← mkClient kubectlRunner ctx.ns (intentName ctx.cr p termNext n) [("app.kubernetes.io/managed-by", "flare-operator")]
+  let c ← ctx.clientFor (intentName ctx.cr p termNext n)
   match ← readIntent c with
   | .settled i => scanFrom ctx p termNext (n + 1) (acc ++ [{ n, intent := i }])
   | .absent => pure (.ok acc)
@@ -178,7 +191,7 @@ inductive GateResult where
   deriving Repr, BEq
 
 def nowAt (ctx : Ctx) : IO At := do
-  pure { clock := ctx.clock, t := ← IO.monoMsNow }
+  pure { clock := ctx.clock, t := ← ctx.nowMs }
 
 def refOf (ctx : Ctx) (p : Nat) (m : Members) (n : Nat) (key uid boot : String) : Ref :=
   { scope := { cluster := ctx.cr, partition := p, generation := m.gen }, id := n, successor := key,
@@ -218,7 +231,7 @@ def doCreate (ctx : Ctx) (p : Nat) (m : Members) (as : List Attempt) (key uid bo
   let n := (as.map (·.n)).foldl max 0 + 1
   let now ← nowAt ctx
   let deadline : At := { now with t := now.t + ctx.cfg.prepareTimeoutMs }
-  let c ← mkClient kubectlRunner ctx.ns (intentName ctx.cr p (m.term + 1) n) [("app.kubernetes.io/managed-by", "flare-operator")]
+  let c ← ctx.clientFor (intentName ctx.cr p (m.term + 1) n)
   match ← createIntent c (Intent.prepare (refOf ctx p m n key uid boot) ctx.token deadline) with
   | .done _ => pure true
   | .settled _ => pure true
@@ -230,7 +243,7 @@ def doPrepare (ctx : Ctx) (p : Nat) (m : Members) (a : Attempt) (key uid boot : 
   | some s =>
     if s.state != "preparing" || s.intent != a.n then pure false
     else
-      let c ← mkClient kubectlRunner ctx.ns (intentName ctx.cr p (m.term + 1) a.n) []
+      let c ← ctx.clientFor (intentName ctx.cr p (m.term + 1) a.n)
       if !(← ensureFence c ctx.token a.intent) then pure false
       else
         let oldUntil : At := { clock := { node := key, boot }, t := s.remainingMs }
@@ -241,7 +254,7 @@ def doPrepare (ctx : Ctx) (p : Nat) (m : Members) (a : Attempt) (key uid boot : 
         | _ => pure false
 
 def doCancel (ctx : Ctx) (p : Nat) (m : Members) (a : Attempt) (key uid boot : String) : IO Unit := do
-  let c ← mkClient kubectlRunner ctx.ns (intentName ctx.cr p (m.term + 1) a.n) []
+  let c ← ctx.clientFor (intentName ctx.cr p (m.term + 1) a.n)
   if (← ensureFence c ctx.token a.intent) then
     match ← cancelIntent c (refOf ctx p m a.n key uid boot) (.leader ctx.token) (← nowAt ctx) with
     | .done _ => discard <| ask ctx key (cmdCancel p a.n)
@@ -249,7 +262,7 @@ def doCancel (ctx : Ctx) (p : Nat) (m : Members) (a : Attempt) (key uid boot : S
     | _ => pure ()
 
 def doCommit (ctx : Ctx) (p : Nat) (m : Members) (a : Attempt) (key uid boot : String) : IO Bool := do
-  let c ← mkClient kubectlRunner ctx.ns (intentName ctx.cr p (m.term + 1) a.n) []
+  let c ← ctx.clientFor (intentName ctx.cr p (m.term + 1) a.n)
   if !(← ensureFence c ctx.token a.intent) then pure false
   else
     match ← commitIntent c (refOf ctx p m a.n key uid boot) (.leader ctx.token) (membershipOf ctx p m) (← nowAt ctx) with
@@ -303,5 +316,8 @@ partial def gate (ctx : Ctx) (p : Nat) (key uid boot : String) (fuel : Nat) : IO
       | .sendCommit =>
         discard <| ask ctx key (cmdCommit p id)
         gate ctx p key uid boot (fuel - 1)
+      | .sendCancel =>
+        discard <| ask ctx key (cmdCancel p id)
+        return .hold "the cancel of the abandoned prepare was sent again; the next pass starts a new attempt"
 
 end FlareOperator.WriteAuthorityDriver

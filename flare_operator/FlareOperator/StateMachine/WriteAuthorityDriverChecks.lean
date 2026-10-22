@@ -1,0 +1,292 @@
+/-
+  WriteAuthorityDriverChecks.lean — the operator's C' driver (WriteAuthorityDriver) run
+  end to end against a FAKE cluster: in-memory ConfigMaps (the CAS fake of the intent
+  checks) and fake flared nodes that follow the semantics of write_promise.cc / op_authority.cc
+  (floor never lowers, prepare / commit / cancel, a promise end on the node's own clock,
+  members / solo). One world clock, ms. Finite schedules; NOT the real API and NOT the real
+  flared (the E2E suites are the real runs).
+-/
+import FlareOperator.WriteAuthorityDriver
+import FlareOperator.StateMachine.PromotionIntentStoreChecks
+
+namespace FlareOperator.WriteAuthorityDriverChecks
+
+open FlareOperator.WriteAuthority
+open FlareOperator.WriteAuthorityDriver
+open FlareOperator.PromotionIntentStoreChecks
+open FlareOperator.PromotionIntentStore
+open FlareOperator.PromotionIntent
+open FlareOperator.PromotionBinding
+
+structure Node where
+  reachable : Bool := true
+  floorTerm : Option Nat := none
+  state : String := "following"
+  intent : Nat := 0
+  promiseEnd : Nat := 0
+  mode : String := "none"
+  memTerm : Nat := 0
+  memGen : Nat := 0
+  grant : Bool := false
+  solo : Bool := false
+  deriving Inhabited
+
+def statusText (n : Node) (now : Nat) : String :=
+  let rem := if n.promiseEnd > now then n.promiseEnd - now else 0
+  let prom := (n.state == "committed" || n.state == "promoted") && rem == 0
+  let b : Bool → String := fun x => if x then "1" else "0"
+  s!"STAT authority_enabled 1\r\nSTAT authority_refused 0\r\nSTAT promise_state {n.state}\r\nSTAT promise_intent {n.intent}\r\nSTAT promise_have {b (n.promiseEnd > 0)}\r\nSTAT promise_remaining_ms {rem}\r\nSTAT promise_promotable {b prom}\r\nSTAT floor_term {n.floorTerm.getD 0}\r\nSTAT floor_gen 0\r\nSTAT floor_set {b n.floorTerm.isSome}\r\nSTAT members_mode {n.mode}\r\nSTAT members_term {n.memTerm}\r\nSTAT members_gen {n.memGen}\r\nSTAT members_successors -\r\nSTAT grant_valid {b n.grant}\r\nSTAT grant_term {n.memTerm}\r\nSTAT grant_gen {n.memGen}\r\nSTAT grant_solo {b n.solo}\r\nSTAT grant_remaining_ms 0\r\nEND\r\n"
+
+def nat (s : String) : Nat := s.toNat?.getD 0
+
+def newer (n : Node) (t g : Nat) : Bool := t > n.memTerm || (t == n.memTerm && g ≥ n.memGen)
+
+/-- what flared does with one `authority ...` line (op_authority.cc + write_promise.cc) -/
+def flaredApply (n : Node) (ws : List String) : Node × Option String :=
+  match ws with
+  | ["authority", "status", _] => (n, none)
+  | ["authority", "floor", _, t, _] =>
+    match n.floorTerm with
+    | some f => (if nat t > f then { n with floorTerm := some (nat t) } else n, none)
+    | none => ({ n with floorTerm := some (nat t) }, none)
+  | "authority" :: "members" :: _ :: t :: g :: _ :: _ :: _ :: _ =>
+    if newer n (nat t) (nat g) then
+      ({ n with mode := "replicated", memTerm := nat t, memGen := nat g, grant := if n.solo then false else n.grant, solo := false }, none)
+    else (n, some "older term / generation than the membership held")
+  | ["authority", "solo", _, t, g] =>
+    if newer n (nat t) (nat g) then ({ n with mode := "solo", memTerm := nat t, memGen := nat g, grant := true, solo := true }, none)
+    else (n, some "older term / generation than the membership held")
+  | ["authority", "prepare", _, id, _] =>
+    if n.state == "following" then ({ n with state := "preparing", intent := nat id }, none)
+    else if n.state == "preparing" && n.intent == nat id then (n, none)
+    else (n, some "another intent is in progress or the node is already committed / promoted")
+  | ["authority", "commit", _, id] =>
+    if (n.state == "preparing" || n.state == "committed") && n.intent == nat id then ({ n with state := "committed" }, none)
+    else (n, some "not preparing this intent")
+  | ["authority", "cancel", _, id] =>
+    if n.state == "preparing" && n.intent == nat id then ({ n with state := "following", intent := 0 }, none)
+    else if n.state == "following" then (n, none)
+    else (n, some "committed, promoted, or another intent: a terminal decision does not reverse")
+  | _ => (n, some "bad request")
+
+structure World where
+  clock : IO.Ref Nat
+  nodes : IO.Ref (List (String × Node))
+  stores : IO.Ref (List (String × Fake))
+  /-- (clock, node, line) of every line sent -/
+  sent : IO.Ref (List (Nat × String × String))
+
+def World.new (keys : List String) : IO World := do
+  return { clock := ← IO.mkRef 1000, nodes := ← IO.mkRef (keys.map fun k => (k, ({} : Node))),
+           stores := ← IO.mkRef [], sent := ← IO.mkRef [] }
+
+def World.node (w : World) (k : String) : IO Node := do
+  return ((← w.nodes.get).lookup k).getD {}
+
+def World.setNode (w : World) (k : String) (f : Node → Node) : IO Unit :=
+  w.nodes.modify fun l => l.map fun (k', x) => if k' == k then (k', f x) else (k', x)
+
+def World.ask (w : World) (key cmd : String) : IO (Option String) := do
+  let now ← w.clock.get
+  w.sent.modify (· ++ [(now, key, cmd)])
+  let n ← w.node key
+  if !n.reachable then return none
+  let (n', err) := flaredApply n ((cmd.splitOn " ").filter (· != ""))
+  w.setNode key fun _ => n'
+  return some (match err with | some e => s!"SERVER_ERROR {e}\r\n" | none => statusText n' now)
+
+def World.clientFor (w : World) (name : String) : IO Client := do
+  match (← w.stores.get).lookup name with
+  | some f => return f.client
+  | none =>
+    let f ← Fake.new none
+    w.stores.modify (· ++ [(name, f)])
+    return f.client
+
+def World.ctx (w : World) (token : Nat) (clockOffset : Nat := 0) : Ctx :=
+  { cfg := { ttlMs := 6000, renewMs := 2000, marginMs := 5000, prepareTimeoutMs := 120000 },
+    cr := "c", ns := "n", token, node := "operator",
+    askNode := w.ask, clientFor := w.clientFor, nowMs := do return (← w.clock.get) + clockOffset }
+
+def World.setClock (w : World) (t : Nat) : IO Unit := w.clock.set t
+
+/-- One request round of the master `m` to its successors at the world's clock (ttl 6 s, margin 5 s):
+    each following successor with the master's term as its floor records its promise end; the
+    master gets a grant when every one promised. -/
+def World.round (w : World) (m : String) (succs : List String) : IO Unit := do
+  let now ← w.clock.get
+  let mn ← w.node m
+  let mut all := true
+  for s in succs do
+    let sn ← w.node s
+    if sn.reachable && sn.state == "following" && sn.floorTerm == some mn.memTerm then
+      w.setNode s fun x => { x with promiseEnd := max x.promiseEnd (now + 6000 + 5000) }
+    else all := false
+  if all && mn.mode == "replicated" then w.setNode m fun x => { x with grant := true }
+
+def World.decision (w : World) (name : String) : IO (Option Decision) := do
+  match (← w.stores.get).lookup name with
+  | none => return none
+  | some f =>
+    match ← f.text with
+    | none => return none
+    | some t => match decode t with
+      | .ok i => return some i.decision
+      | .error _ => return none
+
+def World.firstSent (w : World) (key : String) (verb : String) : IO (Option Nat) := do
+  return ((← w.sent.get).find? fun (_, k, c) => k == key && (c.startsWith s!"authority {verb} ")).map (·.1)
+
+def A : String := "a-0.s.n.svc:12121"
+def B : String := "a-1.s.n.svc:12121"
+def C : String := "a-2.s.n.svc:12121"
+def view1 (m : String) (ss : List String) : View := { master := some m, successors := ss }
+def iname (p t n : Nat) : String := intentName "c" p t n
+def isHold (r : GateResult) : Bool := match r with | .hold _ => true | _ => false
+
+/-- steady state: the record, the floors, the master holds it and it is confirmed -/
+def tSteady : IO Bool := do
+  let w ← World.new [A, B]
+  let r ← ensurePartition (w.ctx 7) 0 (view1 A [B])
+  let nA ← w.node A
+  let nB ← w.node B
+  return r == some { term := 1, gen := 1, master := A, successors := [B], acked := true }
+    && nB.floorTerm == some 1 && nA.mode == "replicated" && nA.memTerm == 1 && nA.memGen == 1
+    -- idempotent: a second pass changes nothing and sends nothing but reads
+    && (← ensurePartition (w.ctx 7) 0 (view1 A [B])) == r
+
+/-- C' failover with the master cut off: nothing is committed or promoted before the
+    successor's promise to the master is over on ITS clock, which is after the master's
+    last possible deadline; afterwards the term moves and the new master is solo -/
+def tFailover : IO Bool := do
+  let w ← World.new [A, B]
+  let _ ← ensurePartition (w.ctx 7) 0 (view1 A [B])
+  w.setClock 1000
+  w.round A [B]                                  -- the master's last round: send point 1000, grant until 7000
+  w.setNode A fun x => { x with reachable := false }
+  let g1 ← gate (w.ctx 7) 0 B "uid" "0" 6        -- intent created, successor prepared (promise runs to 12000)
+  let nB1 ← w.node B
+  let d1 ← w.decision (iname 0 2 1)
+  w.setClock 5000
+  let g2 ← gate (w.ctx 7) 0 B "uid" "0" 6
+  let d2 ← w.decision (iname 0 2 1)
+  w.setClock 11999
+  let g3 ← gate (w.ctx 7) 0 B "uid" "0" 6
+  let d3 ← w.decision (iname 0 2 1)
+  w.setClock 12000
+  let g4 ← gate (w.ctx 7) 0 B "uid" "0" 6
+  let d4 ← w.decision (iname 0 2 1)
+  let nB4 ← w.node B
+  let firstCommit ← w.firstSent B "commit"
+  -- after the map made B the master
+  let r ← ensurePartition (w.ctx 7) 0 (view1 B [])
+  let nB5 ← w.node B
+  return isHold g1 && nB1.state == "preparing" && nB1.intent == 1 && d1 == some .pending
+    && isHold g2 && d2 == some .pending && isHold g3 && d3 == some .pending
+    && g4 == .proceed && d4 == some .committed && nB4.state == "committed"
+    -- no commit message before the promise end (12000), which is after the old master's deadline (7000)
+    && firstCommit == some 12000
+    && r == some { term := 2, gen := 2, master := B, successors := [], acked := true }
+    && nB5.mode == "solo" && nB5.grant && nB5.solo && nB5.memTerm == 2
+
+/-- Unknown never commits; a cancelled prepare the successor still holds is cancelled again
+    before a new attempt; the new attempt then goes through -/
+def tUnknownAndRecancel : IO Bool := do
+  let w ← World.new [A, B]
+  let _ ← ensurePartition (w.ctx 7) 0 (view1 A [B])
+  w.setClock 1000
+  w.round A [B]
+  let _ ← gate (w.ctx 7) 0 B "uid" "0" 6          -- prepared, promise to 12000
+  w.setNode B fun x => { x with reachable := false }
+  w.setClock 20000                                 -- the promise is over, but the successor cannot be read
+  let g1 ← gate (w.ctx 7) 0 B "uid" "0" 6
+  let d1 ← w.decision (iname 0 2 1)
+  let c1 ← w.firstSent B "commit"
+  w.setClock 200000                                -- past the prepare window (1000 + 120000)
+  let g2 ← gate (w.ctx 7) 0 B "uid" "0" 6
+  let d2 ← w.decision (iname 0 2 1)
+  w.setNode B fun x => { x with reachable := true }
+  let nB2 ← w.node B                               -- still preparing intent 1: the cancel never reached it
+  let g3 ← gate (w.ctx 7) 0 B "uid" "0" 6          -- says the cancel again
+  let nB3 ← w.node B
+  let g4 ← gate (w.ctx 7) 0 B "uid" "0" 6          -- a new attempt (2): prepared, its old promise long over, committed, promotable
+  let nB4 ← w.node B
+  let d4 ← w.decision (iname 0 2 2)
+  return isHold g1 && d1 == some .pending && c1 == none
+    && isHold g2 && d2 == some .cancelled && nB2.state == "preparing" && nB2.intent == 1
+    && isHold g3 && nB3.state == "following"
+    && g4 == .proceed && nB4.state == "committed" && nB4.intent == 2 && d4 == some .committed
+    && (← w.decision (iname 0 2 1)) == some .cancelled
+
+/-- The operator restarts (a new leader token, a new clock): the old pending intent is not
+    committed on a clock it cannot compare; it is cancelled by the new leader, then re-made -/
+def tOperatorRestart : IO Bool := do
+  let w ← World.new [A, B]
+  let _ ← ensurePartition (w.ctx 7) 0 (view1 A [B])
+  w.setClock 1000
+  w.round A [B]
+  let _ ← gate (w.ctx 7) 0 B "uid" "0" 6
+  w.setClock 12000
+  let g1 ← gate (w.ctx 8 50000) 0 B "uid" "0" 6   -- the new leader: deadlines are on the dead leader's clock
+  let d1 ← w.decision (iname 0 2 1)
+  let nB1 ← w.node B
+  let g2 ← gate (w.ctx 8 50000) 0 B "uid" "0" 6   -- attempt 2 under the new token (its promise is long over: committed)
+  let d2 ← w.decision (iname 0 2 2)
+  let oldCommit := (← w.sent.get).any fun (_, k, c) => k == B && c == "authority commit 0 1"
+  return isHold g1 && d1 == some .cancelled && nB1.state == "following"
+    && g2 == .proceed && d2 == some .committed && !oldCommit
+
+/-- the membership does not move while an intent is open, and a master change without a committed
+    intent is not accepted -/
+def tFrozen : IO Bool := do
+  let w ← World.new [A, B]
+  let rec0 ← ensurePartition (w.ctx 7) 0 (view1 A [B])
+  w.setClock 1000
+  w.round A [B]
+  let _ ← gate (w.ctx 7) 0 B "uid" "0" 6          -- an open (pending) intent
+  let r1 ← ensurePartition (w.ctx 7) 0 (view1 A [])        -- the successor vanishes from the map: NOT solo yet
+  let r2 ← ensurePartition (w.ctx 7) 0 (view1 B [A])       -- another master without a committed intent: refused
+  return r1 == rec0 && r2 == rec0
+
+/-- the gate needs the master's confirmation, a candidate in the membership, and a record -/
+def tGatePreconditions : IO Bool := do
+  let w ← World.new [A, B, C]
+  w.setNode A fun x => { x with reachable := false }       -- the master never confirmed
+  let r ← ensurePartition (w.ctx 7) 0 (view1 A [B])
+  let g1 ← gate (w.ctx 7) 0 B "uid" "0" 6                  -- unconfirmed membership
+  let sentPrepare ← w.firstSent B "prepare"
+  w.setNode A fun x => { x with reachable := true }
+  let _ ← ensurePartition (w.ctx 7) 0 (view1 A [B])
+  let g2 ← gate (w.ctx 7) 0 C "uid" "0" 6                  -- not a successor
+  let w2 ← World.new [A, B]
+  let g3 ← gate (w2.ctx 7) 0 B "uid" "0" 6                 -- no record at all
+  return (match r with | some m => !m.acked | none => false) && isHold g1 && sentPrepare == none && isHold g2 && isHold g3
+    && (← w2.firstSent B "prepare") == none
+
+/-- a committed intent is not undone: after the CAS the old leader's cancel is refused and the
+    successor stays committed -/
+def tTerminal : IO Bool := do
+  let w ← World.new [A, B]
+  let _ ← ensurePartition (w.ctx 7) 0 (view1 A [B])
+  w.setClock 1000
+  w.round A [B]
+  let _ ← gate (w.ctx 7) 0 B "uid" "0" 6
+  w.setClock 12000
+  let g ← gate (w.ctx 7) 0 B "uid" "0" 6
+  let c ← w.clientFor (iname 0 2 1)
+  let res ← cancelIntent c (refOf (w.ctx 7) 0 { term := 1, gen := 1, master := A, successors := [B], acked := true } 1 B "uid" "0") (.leader 7) { clock := (w.ctx 7).clock, t := 12000 }
+  let nB ← w.node B
+  return g == .proceed && (match res with | .refused _ _ => true | _ => false) && nB.state == "committed"
+    && (← w.decision (iname 0 2 1)) == some .committed
+
+def checks : IO (List (String × Bool)) := do
+  return [
+    ("driver: steady state — record, floor on the successor, membership confirmed by the master, idempotent", ← tSteady),
+    ("driver: C' failover — no commit message before the successor's promise end (after the old master's last deadline); then term + 1 and the new master solo", ← tFailover),
+    ("driver: an unreadable successor never commits; the cancel the successor missed is sent again before a new attempt", ← tUnknownAndRecancel),
+    ("driver: operator restart — the old pending intent is cancelled by the new leader (clocks are not compared) and re-made", ← tOperatorRestart),
+    ("driver: the membership is frozen while an intent is open; a master change without a committed intent is refused", ← tFrozen),
+    ("driver: no promotion without the master's confirmation, a candidate in the membership, and a record", ← tGatePreconditions),
+    ("driver: a committed intent is terminal — the leader's cancel is refused, the successor stays committed", ← tTerminal) ]
+
+end FlareOperator.WriteAuthorityDriverChecks

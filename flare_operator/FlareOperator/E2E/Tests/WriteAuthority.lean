@@ -54,10 +54,18 @@ def authorityText (cfg : ClusterConfig) (pod : String) : IO String := do
   | .ok o => pure o
   | .error e => pure s!"ERR {e}"
 
-/-- The pod that holds a valid grant for partition 0 (the master), if any. -/
+/-- The pod that holds the grant the cluster is meant to be under (partition 0, the master),
+    if any: a replicated cluster (more than one copy) is under a grant from its successors'
+    promises (NOT the solo grant the master holds before its replica is Active — a seed
+    started on that one would meet the switch to the replicated grant), a single copy under
+    the solo grant. -/
 def grantedPod (cfg : ClusterConfig) : IO (Option String) := do
   for p in ← getPodNames s!"cluster={cfg.name}" cfg.«namespace» do
-    if containsSubstr (← authorityText cfg p) "STAT grant_valid 1" then return some p
+    let t ← authorityText cfg p
+    let held := containsSubstr t "STAT grant_valid 1"
+    let kind := if cfg.replicas > 1 then containsSubstr t "STAT members_mode replicated" && containsSubstr t "STAT grant_solo 0"
+      else containsSubstr t "STAT grant_solo 1"
+    if held && kind then return some p
   return none
 
 def waitAuthority (cfg : ClusterConfig) (secs : Nat) : IO Bool :=

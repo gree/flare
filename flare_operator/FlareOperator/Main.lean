@@ -2110,8 +2110,7 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
             promotionAbortedRef.set true
             return
           | some (uid, rc) =>
-            let ctx : WriteAuthorityDriver.Ctx :=
-              { cfg, cr := (← historyCrRef.get), ns, token := (← leaderEpochRef.get), node := "operator" }
+            let ctx := WriteAuthorityDriver.Ctx.live cfg (← historyCrRef.get) ns (← leaderEpochRef.get) "operator"
             match ← WriteAuthorityDriver.gate ctx part.toNat k uid (toString (rc.getD 0)) 6 with
             | .proceed => IO.eprintln s!"[flare-operator] write authority: promotion of {k} (P{part}) passed the intent gate"
             | .hold why =>
@@ -2441,7 +2440,7 @@ private def authorityPass (crName ns leaseName identity : String) (st : FlareClu
       | .ok ps => pure ps
       | .error _ => pure []
     let usable := fun (k : String) => pods.any fun pd => pd.toNodeKey == k && pd.ready && !pd.terminating
-    let ctx : WriteAuthorityDriver.Ctx := { cfg, cr := crName, ns, token := (← leaderEpochRef.get), node := "operator" }
+    let ctx := WriteAuthorityDriver.Ctx.live cfg crName ns (← leaderEpochRef.get) "operator"
     for p in parts do
       let master := (st.nodeMap.find? fun kv => kv.2.role == FlareRole.Master && kv.2.partition == p).map (·.1)
       let succ := (st.nodeMap.filter fun kv =>

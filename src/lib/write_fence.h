@@ -27,6 +27,28 @@
  *	between them. A barrier read under generation g is valid only while the
  *	fence is still at g: after a lapse, writes may have been acknowledged
  *	after the barrier (review 2026-10-19 #1).
+ *
+ *	WRITE AUTHORITY (C', docs/design-node-operations-2026-10-19.md §12, §13):
+ *	the same check path also carries a time-bounded, term-ordered authority
+ *	to MASTER writes, so a silent old master (cut from the control plane,
+ *	still reachable by clients) stops acknowledging after its authority
+ *	ends. It is OFF by default (no behaviour change) and is switched on only
+ *	through authority_set_enabled (a test/admin seam). While on, an entry is
+ *	refused unless a valid grant is held, and the grant seen at admission is
+ *	the one that must still be current when the mutation is acknowledged
+ *	(entry::ack_ok). Rules:
+ *	- a grant is bound to partition, term, membership generation, this
+ *	  node's pod UID / boot id / copy id, and the nonce of the request this
+ *	  node itself sent;
+ *	- time is the node's own CLOCK_BOOTTIME; the deadline is the REQUEST SEND
+ *	  point + ttl, so a late reply never extends it;
+ *	- a reply for a request that is not pending (old, duplicate, from before a
+ *	  restart), for an older term/generation, or at or below a revoke, is
+ *	  refused; a revoke wins over a later-arriving older grant;
+ *	- a `solo` grant (the authoritative membership says there is no
+ *	  successor) has no deadline; an unreachable operator is only expiry.
+ *	Not yet role-aware: while on, the node-level check also gates a
+ *	replica's apply paths, so the seam must not be enabled in production.
  */
 #ifndef	WRITE_FENCE_H
 #define	WRITE_FENCE_H
@@ -34,6 +56,7 @@
 #include <pthread.h>
 #include <stdint.h>
 #include <time.h>
+#include <map>
 #include <string>
 
 namespace gree {
@@ -77,11 +100,54 @@ public:
 		entry();
 		~entry();
 		bool fenced() const { return this->_fenced; }
+		/** the SERVER_ERROR text of a refusal ("fenced" or "no write authority") */
+		const char* refusal() const { return this->_no_authority ? "no write authority" : "fenced"; }
+		/** call right before the ACK of the mutation: true when the grant
+		    admitted with this entry is still the current, unexpired one (a
+		    renewed or replaced grant counts as different: refuse). Always
+		    true when the authority engine was off at admission and is off. */
+		bool ack_ok();
 	private:
 		bool _fenced;
+		bool _no_authority;
+		bool _bound;
+		uint64_t _bound_serial;
 		entry(const entry&);
 		entry& operator=(const entry&);
 	};
+
+	/** a grant reply (see WRITE AUTHORITY above) */
+	struct authority_grant {
+		authority_grant(): partition(0), term(0), generation(0), nonce(0), ttl_ns(0), solo(false) { }
+		uint32_t	partition;
+		uint64_t	term;
+		uint64_t	generation;		// membership generation
+		std::string	pod_uid;
+		std::string	boot_id;
+		std::string	copy_id;
+		uint64_t	nonce;			// of the request this node sent
+		uint64_t	ttl_ns;			// from the request send point; ignored when solo
+		bool		solo;			// authoritative membership: no successor
+	};
+	/** test/admin seam: engine on/off (default off). Switching it clears every grant. */
+	static void authority_set_enabled(bool on);
+	static bool authority_enabled();
+	/** this node's identity; a grant for another one is refused */
+	static void authority_set_identity(uint32_t partition, const std::string& pod_uid,
+		const std::string& boot_id, const std::string& copy_id);
+	/** the node asks for (or renews) a grant NOW: records the send point on
+	    the node's own boottime clock and returns the request nonce */
+	static uint64_t authority_begin_request();
+	/** install a grant reply; false (and `why`) when refused */
+	static bool authority_apply_grant(const authority_grant& g, std::string& why);
+	/** revoke every grant of (term, generation) and below for the partition */
+	static bool authority_revoke(uint32_t partition, uint64_t term, uint64_t generation, std::string& why);
+	/** a valid grant is held now */
+	static bool authority_valid();
+	/** how many mutations were refused for lack of authority (admission or ack) */
+	static uint64_t authority_refused();
+	/** test seam: boottime clock in nanoseconds (default CLOCK_BOOTTIME) */
+	static void authority_set_clock(uint64_t (*clock)());
 
 	/** test seam: a clock in seconds (default time(NULL)) */
 	static void set_clock(time_t (*clock)());
@@ -93,6 +159,7 @@ public:
 
 private:
 	static bool _active_locked(time_t now);
+	static bool _authority_valid_locked(uint64_t now);
 
 	static pthread_mutex_t	_mutex;
 	static bool				_armed;
@@ -103,6 +170,22 @@ private:
 	static uint64_t			_generation;
 	static time_t			(*_clock)();
 	static void				(*_entry_hook)();
+
+	static bool				_auth_enabled;
+	static bool				_auth_identity_set;
+	static uint32_t			_auth_partition;
+	static std::string		_auth_pod_uid, _auth_boot_id, _auth_copy_id;
+	static uint64_t			_auth_next_nonce;
+	static uint64_t			_auth_last_nonce;
+	static std::map<uint64_t, uint64_t>	_auth_pending;	// nonce -> send point (ns)
+	static bool				_auth_have;
+	static uint64_t			_auth_term, _auth_gen, _auth_deadline;
+	static bool				_auth_solo;
+	static uint64_t			_auth_serial;
+	static bool				_auth_revoked;
+	static uint64_t			_auth_revoked_term, _auth_revoked_gen;
+	static uint64_t			_auth_refused;
+	static uint64_t			(*_auth_clock)();
 };
 
 }	// namespace flare

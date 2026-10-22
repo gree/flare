@@ -477,3 +477,12 @@ master (旧)                 operator leader               新 master
 | `write-authority-solo` | 1 copy の partition が solo grant で書き続け、operator 不在でも止まらない |
 
 実行コマンドは `flare_e2e --filter <suite>`（1 suite ずつ。`node-ops-*` は multi-node kind、他は single-node）。
+
+### 13.3 独立レビュー（コードのみ。safety の反例なし）で出た liveness の指摘と対応
+
+レビューは (a) 二重 ACK、(c) lock / race、(d) intent なしの昇格、(e) flared の status 出力と Lean の parse / command の arity の不一致、のどれにも反例を見つけなかった。見つかったのは可用性の問題で、直したもの:
+1. **放棄された prepare が健全な master を止め続ける（高）。** operator が failover を始めて successor を prepare した後、分断が治って「昇格は不要」になると、gate は呼ばれず cancel を送る者がいなかった（successor は timer で戻らない）。対応: `ensurePartition` は、**その pass で昇格 commit 点が gate に尋ねなかった successor の pending intent** を放棄とみなし、terminal CAS（leader の cancel）→ successor へ `authority cancel` を送る（約束と master の grant が再開する）。operator 不在の間に残る intent は、次の leader が最初の pass でこれを行う。**COMMITTED の intent は取り消せない**: 昇格されないまま master が変わらない場合は CRITICAL ログに出す（その successor が約束しないので master は昇格まで書けない。手動）。unit: `driver: an intent nobody asked about in this pass is abandoned`。
+2. **partition ごとの round を 1 本の thread が直列に回すと、死んだ successor の timeout が別の健全な partition の grant を遅らせる（中）。** 対応: round は partition ごとの短命 thread（1 partition に同時 1 本）、loop は送信点を取って dispatch するだけ。unit: `test_a_dead_successor_of_one_partition_does_not_delay_another_partitions_round`。
+3. **intent id が term ごとに 1 から始まり、遅れた commit / cancel が別 term の同じ id に当たりうる（中・低確率）。** 対応: successor に渡す id を `(term+1)*100 + attempt` にして term をまたいで一意にする。
+4. 低: solo → replicated の切替で master は最初の round まで約 1 renew 間隔 write を拒否する（旧 solo grant を先に revoke するため）。proxy → master の昇格は gate しない（operator は既存の slave だけを昇格するので、operator ON では起きない。起きるのは map が slave → proxy → master と回る場合）。operator の ttl が flared の max-ttl を超えると約束が拒否され master は grant を得られない（fail closed、実行時にだけ分かる: **max-ttl ≥ operator の ttl** にすること）。membership record を消して term 1 から作り直すと、pod が持つ floor との term 不一致で約束が拒否され続ける（record は消さない）。
+5. 代償の追記: operator 不在 + replica の再起動で replica は floor を失い、operator が戻るまで約束と forward を拒否する（master の grant は ttl 後に切れる）。operator 不在 + master の再起動（§13 の 9）と同じ種類。

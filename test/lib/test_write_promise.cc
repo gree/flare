@@ -567,4 +567,44 @@ namespace test_write_promise
 		cut_assert_false(h.run_once());										// solo: no request goes out
 		cut_assert_true(write_fence::authority_valid(0));
 	}
+
+	// A successor that never answers costs ITS partition up to ttl/4 and nobody else's: the rounds
+	// of two partitions run on their own threads (a serial loop would have held the healthy one
+	// behind the dead one's timeout).
+	void test_a_dead_successor_of_one_partition_does_not_delay_another_partitions_round()
+	{
+		srv_start();
+		// a peer that accepts the connection (the kernel does) and never answers
+		int dead = socket(AF_INET, SOCK_STREAM, 0);
+		struct sockaddr_in a;
+		memset(&a, 0, sizeof(a));
+		a.sin_family = AF_INET;
+		a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+		a.sin_port = 0;
+		cut_assert_equal_int(0, bind(dead, reinterpret_cast<struct sockaddr*>(&a), sizeof(a)));
+		cut_assert_equal_int(0, listen(dead, 4));
+		socklen_t l = sizeof(a);
+		getsockname(dead, reinterpret_cast<struct sockaddr*>(&a), &l);
+		const int dead_port = ntohs(a.sin_port);
+		mock_cluster cl("localhost", 12121);
+		handler_authority h(shared_thread(), &cl);
+		char k0[64], k2[64];
+		snprintf(k0, sizeof(k0), "127.0.0.1:%d", srv_port);
+		snprintf(k2, sizeof(k2), "127.0.0.1:%d", dead_port);
+		std::string why;
+		cut_assert_true(write_promise::set_members(2, 1, 1, TTL_MS, RENEW_MS, std::vector<std::string>(1, k2), why));
+		cut_assert_true(write_promise::set_members(0, 1, 1, TTL_MS, RENEW_MS, std::vector<std::string>(1, k0), why));
+		cppcut_assert_equal(static_cast<size_t>(2), h.dispatch());
+		// the healthy partition's grant arrives while the dead one's request is still waiting
+		bool granted = false;
+		for (int i = 0; i < 100 && !granted; i++) {
+			usleep(10000);
+			granted = write_fence::authority_valid(0);
+		}
+		cut_assert_true(granted);
+		cut_assert_false(write_fence::authority_valid(2));
+		cppcut_assert_equal(static_cast<size_t>(0), h.dispatch());			// both busy or not yet due: no second round on top
+		close(dead);
+		srv_end();
+	}
 }

@@ -311,11 +311,14 @@ bool write_fence::entry::_admit_replica(int partition, const std::string& tag) {
 			// no floor yet: the first token is NOT accepted (an old master's forward
 			// could be it). The operator gives the floor before the engine matters
 			// (authority_set_floor / `authority floor`), design §13.
-			if (!ps.floor_set || tt < ps.floor_term || (tt == ps.floor_term && tg < ps.floor_gen)) {
+			// The floor fences by TERM. The membership generation moves with the successor set
+			// of the SAME master (docs §13): a forward admitted at generation g that reaches this
+			// replica after one of g+1 is an acknowledged write and must be applied, not refused.
+			if (!ps.floor_set || tt < ps.floor_term) {
 				_refuse_admission_locked(*this);
 				return false;
 			}
-			const bool higher = tt > ps.floor_term || (tt == ps.floor_term && tg > ps.floor_gen);
+			const bool higher = tt > ps.floor_term;
 			if (higher && !raise) {
 				raise = true;
 				continue;

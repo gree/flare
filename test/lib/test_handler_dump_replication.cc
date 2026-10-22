@@ -92,7 +92,9 @@ namespace test_handler_dump_replication {
 		handler_dump_replication::seed_connect_attempts = 6;
 		handler_dump_replication::seed_retry_base_ms = 5000;
 
-		if (sigaction(SIGUSR1, &prev_sigusr1_action, NULL) < 0) {
+		// keep the no-op handler when the previous action was the default (terminate): a thread still
+		// finishing its shutdown can get its SIGUSR1 after this teardown (exit 138, 'User defined signal 1')
+		if (prev_sigusr1_action.sa_handler != SIG_DFL && sigaction(SIGUSR1, &prev_sigusr1_action, NULL) < 0) {
 			log_err("sigaction for %d failed: %s (%d)", SIGUSR1, util::strerror(errno), errno);
 			return;
 		}

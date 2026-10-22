@@ -360,6 +360,8 @@ master (旧)                 operator leader               新 master
 
 ### 12.6 flared 側の write authority（実装済みの部分と、未配線の入口。C' は完了していない）
 
+**（integ/cprime での更新: 下の表の「未」は §13.1 で閉じた。floor は term だけで fence する（§13）。operator 側と E2E は §13 に配線した。以下は前回時点の記述）**
+
 実装: `src/lib/write_fence.{h,cc}`（既存の fence と**同じ mutex・同じ `entry` の検査路**。第二の gate は作っていない）、試験 `test/lib/test_write_authority.cc`。
 
 - **grant** は partition・term・membership generation・自ノードの pod UID / boot id / copy id・自分が送った request の nonce に束縛される
@@ -449,3 +451,13 @@ master (旧)                 operator leader               新 master
 **混在 build**: 全ノードが同時に切り替える。engine ON の replica は `wa=` を持たない変更を拒否するので、旧 build の master と混在させない。ローリングでの有効化はしない（flared を全部再起動して設定を入れる）。
 
 **代償として残るもの（再掲）**: (1) master と全 successor の約束が切れる経路では master は ttl 後に write を止める。(2) 死んだ successor が membership にいる間（operator が外すまで）master は止まる: successors は「Active で Ready で terminating でない slave」なので、計画 drain では先に外れる。突然死では operator の検出 + 1 pass の間止まる。(3) prepare 中の operator 不在。(4) operator 不在の間に master が再起動した場合。(5) async 複製のため、旧 master が権限内で ACK し replica に届いていない write は昇格後に失われうる（§12.4-3、変わらない）。(6) forward の TOCTOU（§12.6）は閉じていない。
+
+**counterexamples found while wiring (each pinned in `test_write_promise` / `test_write_authority` / `WriteAuthorityChecks`):**
+1. *A generation change refused the master's own forwards.* The replica's floor was ordered by (term, generation), and the operator gave it the record's generation: a membership change (generation + 1, pushed to the replica first) made the replica refuse the forwards and renewals the master still sent at the old generation — acknowledged writes not replicated, and the promise refused. Now the floor fences by TERM only (the operator gives (term, 0), a replica admits any generation of the current term and refuses an older term); a late forward of an older generation is applied (`test_a_generation_change_does_not_refuse_the_masters_forwards`).
+2. *An unlimited solo grant outlived a membership change.* A master that held the solo grant and then got a successor kept the unlimited grant, so promoting the successor would not have ended its authority. `members` for a newer (term, generation) revokes the older solo grant before anything else (`test_a_solo_master_keeps_serving_and_leaving_solo_ends_the_unlimited_grant`), and the operator promotes only when the master confirmed the record (`acked`).
+3. *A deposed master kept asking for promises and kept its grant.* `note_role(demoted)` now drops its membership and revokes its grant (`test_a_demoted_master_loses_its_membership_and_its_grant`).
+4. *A restarted successor forgot its promises.* Quiet time after its own start = max-ttl + margin (`test_a_restarted_replica_forgets_its_promises_but_waits_the_quiet_time`).
+5. *A delayed reply must not extend the master.* Deadline = send point + ttl; a reply after it, an old and a duplicate nonce are refused (`test_a_delayed_reply_does_not_extend_the_master_and_an_old_nonce_is_refused`).
+6. *The membership shrinking while an intent is open would hand the old master its authority back.* `Members.next` never changes the successor set while an intent is pending or committed and unpromoted, and a master change without a committed intent keeps the old record (the new master gets no grant) — `tNext`.
+7. *A role-based dual-write inference cannot judge the engine* (the isolated master keeps its role for the whole cut): C' is judged on the acknowledgements (`partVerdictWa`), and an unclassified acknowledgement can only make the check stricter.
+8. *A client-path precondition that needs an ACK after the cut cannot hold with the engine on* (the isolated master stops acknowledging after its grant ran out): with the engine on the old master's own answer (ack or its refusal) proves the client path is open.

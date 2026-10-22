@@ -3044,6 +3044,15 @@ int cluster::_reconstruct_node_partition(bool lock) {
 
 	this->_node_partition_map = npm;
 	this->_node_partition_prepare_map = nppm;
+	// C' (design §13.1): a partition-count change (a prepare map) is not supported with the write
+	// authority on; the prepare master has no grant, so writes through it are refused. Said once.
+	if (write_promise::enabled() && !nppm.empty()) {
+		static bool said = false;
+		if (!said) {
+			said = true;
+			log_err("write authority is ON and the partition count is changing (prepare map of %d partition(s)): partition-count change is NOT supported with write-authority-enabled; writes through the prepare master are refused (switch the authority off cluster-wide first)", static_cast<int>(nppm.size()));
+		}
+	}
 
 	if (lock) {
 		pthread_rwlock_unlock(&this->_mutex_node_partition_map);

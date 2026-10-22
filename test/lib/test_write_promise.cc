@@ -328,6 +328,45 @@ namespace test_write_promise
 		cut_assert_true(e.admit_master(0));
 	}
 
+	void test_a_generation_change_does_not_refuse_the_masters_forwards()
+	{
+		// the operator gives the floor by TERM (generation 0); the master's tokens carry its own
+		// generation, which moves with the successor set. Neither the forward of an older
+		// generation of the same term nor one of a newer generation may be refused.
+		write_fence::authority_set_floor(4, 2, 0);
+		{
+			write_fence::entry e;
+			cut_assert_true(e.admit_replica(4, "4:2:1"));
+		}
+		{
+			write_fence::entry e;
+			cut_assert_true(e.admit_replica(4, "4:2:7"));
+		}
+		{
+			write_fence::entry e;
+			cut_assert_false(e.admit_replica(4, "4:1:9"));						// an older TERM is refused
+		}
+		{
+			write_fence::entry e;
+			cut_assert_true(e.admit_replica(4, "4:2:1"));						// and a LATE forward of an older generation is applied
+		}
+	}
+
+	void test_a_demoted_master_loses_its_membership_and_its_grant()
+	{
+		std::string why;
+		cut_assert_true(write_promise::set_solo(0, 1, 1, why));
+		cut_assert_true(write_fence::authority_valid(0));
+		write_promise::note_role(0, true);										// still the master: nothing happens
+		cut_assert_true(write_fence::authority_valid(0));
+		write_promise::note_role(0, false);										// the map took the role away
+		cut_assert_false(write_fence::authority_valid(0));
+		write_promise::members m;
+		cut_assert_false(write_promise::get_members(0, m));
+		cut_assert_true(write_promise::set_solo(0, 2, 1, why));					// a later term can master it again
+		cut_assert_true(write_fence::authority_valid(0));
+	}
+
 	void test_a_replica_without_a_floor_refuses_changes()
 	{
 		write_fence::entry e;

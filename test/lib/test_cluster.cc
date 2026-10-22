@@ -76,7 +76,9 @@ namespace test_cluster
 		singleton<logger>::instance().close();
 		cut_remove_path(tmp_dir.c_str(), NULL);
 
-		if (sigaction(SIGUSR1, &prev_sigusr1_action, NULL) < 0) {
+		// keep the no-op handler when the previous action was the default (terminate): a thread still
+		// finishing its shutdown can get its SIGUSR1 after this teardown (exit 138, 'User defined signal 1')
+		if (prev_sigusr1_action.sa_handler != SIG_DFL && sigaction(SIGUSR1, &prev_sigusr1_action, NULL) < 0) {
 			log_err("sigaction for %d failed: %s (%d)", SIGUSR1, util::strerror(errno), errno);
 			return;
 		}

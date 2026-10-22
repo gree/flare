@@ -63,6 +63,7 @@ namespace test_write_authority
 
 	TEST_OP_CLASS_BEGIN(op_set, NULL, NULL)
 		test_op_set(shared_connection c, cluster* cl, storage* st) : op_set(c, cl, st) { }
+		EXPOSE(op_set, _entry);
 	TEST_OP_CLASS_END;
 	TEST_OP_CLASS_BEGIN(op_delete, NULL, NULL)
 		test_op_delete(shared_connection c, cluster* cl, storage* st) : op_delete(c, cl, st) { }
@@ -741,7 +742,7 @@ namespace test_write_authority
 		}
 		{
 			write_fence::entry e;
-			cut_assert_false(e.admit_replica(0, "0:3:0"));	// same term, older generation
+			cut_assert_true(e.admit_replica(0, "0:3:0"));	// same term, another generation: fenced by TERM only (docs §13)
 		}
 		{
 			write_fence::entry e;
@@ -931,5 +932,42 @@ namespace test_write_authority
 		cut_assert_equal_string("STORED\r\n", dynamic_cast<connection_sstream&>(*c).get_output().c_str());
 		delete qst;
 		delete c2;
+	}
+
+	// The real forward: a client set on the master applied under a grant leaves the op with the
+	// authority token of that grant, and the request the proxy queue writes to a replica carries
+	// it as `wa=p:term:gen`; the replica's op accepts exactly that line under its floor, and not
+	// under a floor of a newer term (C', docs §13).
+	void test_the_forward_carries_the_authority_token_to_the_replica()
+	{
+		grant_now(3, 2);
+		std::string wire;
+		{
+			shared_connection c(new connection_sstream(" fwdkey 0 0 5\r\nVALUE\r\n"));
+			test_op_set op(c, cl, st);
+			cut_assert_equal_int(0, op._parse_text_server_parameters());
+			op._run_server();
+			cut_assert_equal_string("0:3:2", op._entry.auth_tag.c_str());
+			shared_connection out(new connection_sstream(""));
+			test_op_set fwd(out, cl, st);
+			cut_assert_equal_int(0, fwd._run_client(op._entry));
+			wire = dynamic_cast<connection_sstream&>(*out).get_output();
+		}
+		cut_assert_true(wire.find(" wa=0:3:2") != std::string::npos);
+		cut_assert_equal_string("set fwdkey 0 0 5 wa=0:3:2\r\nVALUE\r\n", wire.c_str());
+		// the same line, applied by a replica of partition 0 (no master grant, floor of term 3)
+		write_fence::reset_for_test();
+		write_fence::authority_set_clock(fake_clock);
+		write_fence::authority_set_enabled(true);
+		write_fence::authority_set_floor(0, 3, 0);
+		{
+			shared_connection c(new connection_sstream(" fwdkey 0 0 5 wa=0:3:2\r\nVALUE\r\n"));
+			test_op_set op(c, cl, st);
+			cut_assert_equal_int(0, op._parse_text_server_parameters());
+			cut_assert_equal_string("0:3:2", op._entry.auth_tag.c_str());
+		}
+		write_fence::authority_set_floor(0, 4, 0);
+		write_fence::entry stale;
+		cut_assert_false(stale.admit_replica(0, "0:3:2"));
 	}
 }

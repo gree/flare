@@ -152,6 +152,15 @@ int op_set::_run_server() {
 	// storage i/o
 	storage::result r_storage;
 	int retcode;
+	// write authority at the APPLY point: an entry whose authority ended
+	// (revoke / term / generation / identity / its own deadline) must not
+	// write; the section stays open only across the storage call
+	if (!fence_entry.apply_begin()) {
+		if (this->_entry.option & storage::option_noreply) {
+			return 0;
+		}
+		return this->_send_result(result_server_error, "write authority lost before apply");
+	}
 	// SAF-10b stage 3: a forwarded change that carries a replication identity
 	// goes through the COMMON APPLY RULE, so it is ordered against the copy
 	// of itself that the WAL stream will deliver, instead of overwriting
@@ -161,6 +170,7 @@ int op_set::_run_server() {
 		storage_access_info info = { this->_thread };
 		time_watcher_scoped_observer ob(info);
 		const int applied = this->_storage->apply_identified_change(this->_entry.repl_tag, this->_entry, false);
+		fence_entry.apply_end();
 		switch (applied) {
 			case storage::identified_applied:
 				stats_object->increment_total_items();
@@ -176,12 +186,19 @@ int op_set::_run_server() {
 			default:
 				break;		// identified_unsupported: fall through
 		}
+		if (!fence_entry.apply_begin()) {
+			if (this->_entry.option & storage::option_noreply) {
+				return 0;
+			}
+			return this->_send_result(result_server_error, "write authority lost before apply");
+		}
 	}
 	{
 		storage_access_info info = { this->_thread };
 		time_watcher_scoped_observer ob(info);
 		retcode = this->_storage->set(this->_entry, r_storage, this->_behavior);
 	}
+	fence_entry.apply_end();
 	if (stats_object->diag_enabled() && this->is_proxy_request()) {
 		stats_object->diag_incr("recv_proxied_set:local rc=" + boost::lexical_cast<string>(retcode)
 			+ " result=" + boost::lexical_cast<string>(static_cast<int>(r_storage)));
@@ -199,9 +216,11 @@ int op_set::_run_server() {
 		} else if (this->get_ident() == "touch"){
 			stats_object->increment_touch_hits();
 		}
-		r_proxy = this->_cluster->post_proxy_write(this,
-																							 this->_is_sync(this->_entry.option,
-																															this->_cluster->get_replication_type()));
+		if (fence_entry.still_authorized()) {	// else no forward; the ACK is refused below
+			r_proxy = this->_cluster->post_proxy_write(this,
+																								 this->_is_sync(this->_entry.option,
+																																this->_cluster->get_replication_type()));
+		}
 	} else {
 		if ((this->_behavior & storage::behavior_cas) || this->get_ident() == "cas"){
 			if (r_storage == storage::result_exists){

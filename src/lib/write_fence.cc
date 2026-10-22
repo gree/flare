@@ -12,15 +12,27 @@ static time_t default_clock() {
 	return time(NULL);
 }
 
+static int (*gettime_fn)(clockid_t, struct timespec*) = clock_gettime;
+
 static uint64_t default_boottime_ns() {
 	struct timespec ts;
-	clock_gettime(CLOCK_BOOTTIME, &ts);
+	ts.tv_sec = 0;
+	ts.tv_nsec = 0;
+	if (gettime_fn(CLOCK_BOOTTIME, &ts) != 0 || ts.tv_sec < 0 || ts.tv_nsec < 0) {
+		return write_fence::authority_clock_failed;		// fail closed
+	}
 	return static_cast<uint64_t>(ts.tv_sec) * 1000000000ULL + static_cast<uint64_t>(ts.tv_nsec);
 }
 
 static const size_t authority_max_pending = 64;
 
 pthread_mutex_t	write_fence::_mutex = PTHREAD_MUTEX_INITIALIZER;
+#ifdef PTHREAD_RWLOCK_WRITER_NONRECURSIVE_INITIALIZER_NP
+// a waiting change of authority must not starve behind a stream of writes
+pthread_rwlock_t	write_fence::_apply_rw = PTHREAD_RWLOCK_WRITER_NONRECURSIVE_INITIALIZER_NP;
+#else
+pthread_rwlock_t	write_fence::_apply_rw = PTHREAD_RWLOCK_INITIALIZER;
+#endif
 bool			write_fence::_armed = false;
 std::string		write_fence::_token;
 time_t			write_fence::_expires = 0;
@@ -51,6 +63,13 @@ uint64_t		write_fence::_auth_refused = 0;
 uint64_t		(*write_fence::_auth_clock)() = default_boottime_ns;
 
 namespace {
+class exclusive {
+public:
+	explicit exclusive(pthread_rwlock_t* l, bool take): _l(take ? l : NULL) { if (_l) pthread_rwlock_wrlock(_l); }
+	~exclusive() { if (_l) pthread_rwlock_unlock(_l); }
+private:
+	pthread_rwlock_t* _l;
+};
 class scoped {
 public:
 	explicit scoped(pthread_mutex_t* m): _m(m) { pthread_mutex_lock(_m); }
@@ -163,7 +182,10 @@ write_fence::entry::entry() {
 		scoped l(&_mutex);
 		this->_no_authority = false;
 		this->_bound = false;
+		this->_applying = false;
+		this->_bound_solo = false;
 		this->_bound_serial = 0;
+		this->_bound_deadline = 0;
 		this->_fenced = _active_locked(_clock());
 		if (this->_fenced) {
 			_refused++;
@@ -177,6 +199,8 @@ write_fence::entry::entry() {
 			if (_auth_enabled) {
 				this->_bound = true;
 				this->_bound_serial = _auth_serial;
+				this->_bound_solo = _auth_solo;
+				this->_bound_deadline = _auth_deadline;
 			}
 			_in_flight++;
 			hook = _entry_hook;
@@ -191,8 +215,21 @@ write_fence::entry::~entry() {
 	if (this->_fenced) {
 		return;
 	}
+	this->apply_end();
 	scoped l(&_mutex);
 	_in_flight--;
+}
+
+// the authority this entry was admitted under is still the current one
+// (no revoke / new term / generation / identity / engine switch since: the
+// serial) and its OWN deadline has not passed. A renewal of the same
+// authority does not change the serial, and the entry never gets the new TTL.
+bool write_fence::_bound_ok_locked(const entry& e, uint64_t now) {
+	if (now == authority_clock_failed) {
+		return false;
+	}
+	return e._bound && _auth_enabled && _auth_have && _auth_serial == e._bound_serial
+		&& (e._bound_solo || now < e._bound_deadline) && _authority_valid_locked(now);
 }
 
 bool write_fence::entry::ack_ok() {
@@ -203,16 +240,57 @@ bool write_fence::entry::ack_ok() {
 	if (!this->_bound && !_auth_enabled) {
 		return true;
 	}
-	if (this->_bound && _auth_enabled && _auth_have && _auth_serial == this->_bound_serial
-			&& _authority_valid_locked(_auth_clock())) {
+	if (_bound_ok_locked(*this, _auth_clock())) {
 		return true;
 	}
 	_auth_refused++;
 	return false;
 }
 
+bool write_fence::entry::still_authorized() {
+	if (this->_fenced) {
+		return false;
+	}
+	scoped l(&_mutex);
+	if (!this->_bound && !_auth_enabled) {
+		return true;
+	}
+	if (_bound_ok_locked(*this, _auth_clock())) {
+		return true;
+	}
+	_auth_refused++;
+	return false;
+}
+
+bool write_fence::entry::apply_begin() {
+	if (this->_fenced || this->_applying) {
+		return false;
+	}
+	pthread_rwlock_rdlock(&_apply_rw);
+	{
+		scoped l(&_mutex);
+		if ((!this->_bound && !_auth_enabled) || _bound_ok_locked(*this, _auth_clock())) {
+			this->_applying = true;
+			return true;
+		}
+		_auth_refused++;
+	}
+	pthread_rwlock_unlock(&_apply_rw);
+	return false;
+}
+
+void write_fence::entry::apply_end() {
+	if (this->_applying) {
+		this->_applying = false;
+		pthread_rwlock_unlock(&_apply_rw);
+	}
+}
+
 bool write_fence::_authority_valid_locked(uint64_t now) {
 	if (!_auth_have) {
+		return false;
+	}
+	if (now == authority_clock_failed) {
 		return false;
 	}
 	return _auth_solo || now < _auth_deadline;
@@ -226,6 +304,7 @@ static void authority_clear_grant_locked(bool& have, uint64_t& deadline, bool& s
 }
 
 void write_fence::authority_set_enabled(bool on) {
+	exclusive x(&_apply_rw, true);
 	scoped l(&_mutex);
 	_auth_enabled = on;
 	authority_clear_grant_locked(_auth_have, _auth_deadline, _auth_solo, _auth_pending);
@@ -239,6 +318,7 @@ bool write_fence::authority_enabled() {
 
 void write_fence::authority_set_identity(uint32_t partition, const std::string& pod_uid,
 		const std::string& boot_id, const std::string& copy_id) {
+	exclusive x(&_apply_rw, true);
 	scoped l(&_mutex);
 	_auth_identity_set = true;
 	_auth_partition = partition;
@@ -253,6 +333,9 @@ void write_fence::authority_set_identity(uint32_t partition, const std::string& 
 uint64_t write_fence::authority_begin_request() {
 	scoped l(&_mutex);
 	const uint64_t now = _auth_clock();		// the SEND point, on our own clock
+	if (now == authority_clock_failed) {
+		return 0;		// nonce 0 is never pending: no request can be granted
+	}
 	const uint64_t nonce = _auth_next_nonce++;
 	if (_auth_pending.size() >= authority_max_pending) {
 		_auth_pending.erase(_auth_pending.begin());
@@ -262,7 +345,24 @@ uint64_t write_fence::authority_begin_request() {
 }
 
 bool write_fence::authority_apply_grant(const authority_grant& g, std::string& why) {
-	scoped l(&_mutex);
+	// a change of authority (other term / generation than the one held)
+	// drains the writes in flight first; a renewal of the same authority
+	// takes no exclusive lock
+	bool drain = false;
+	for (;;) {
+		{
+			exclusive x(&_apply_rw, drain);
+			scoped l(&_mutex);
+			const bool change = _auth_have && !(g.term == _auth_term && g.generation == _auth_gen);
+			if (!change || drain) {
+				return _apply_grant_locked(g, why);
+			}
+		}
+		drain = true;
+	}
+}
+
+bool write_fence::_apply_grant_locked(const authority_grant& g, std::string& why) {
 	if (!_auth_enabled) {
 		why = "authority engine off";
 		return false;
@@ -314,11 +414,14 @@ bool write_fence::authority_apply_grant(const authority_grant& g, std::string& w
 	_auth_gen = g.generation;
 	_auth_solo = g.solo;
 	_auth_deadline = deadline;
-	_auth_serial++;
+	if (!same) {
+		_auth_serial++;		// a renewal of the same authority keeps it
+	}
 	return true;
 }
 
 bool write_fence::authority_revoke(uint32_t partition, uint64_t term, uint64_t generation, std::string& why) {
+	exclusive x(&_apply_rw, true);
 	scoped l(&_mutex);
 	if (!_auth_identity_set || partition != _auth_partition) {
 		why = "another partition";
@@ -349,6 +452,11 @@ bool write_fence::authority_valid() {
 uint64_t write_fence::authority_refused() {
 	scoped l(&_mutex);
 	return _auth_refused;
+}
+
+void write_fence::authority_set_gettime(int (*gettime)(clockid_t, struct timespec*)) {
+	scoped l(&_mutex);
+	gettime_fn = gettime ? gettime : clock_gettime;
 }
 
 void write_fence::authority_set_clock(uint64_t (*clock)()) {
@@ -393,6 +501,7 @@ void write_fence::reset_for_test() {
 	_auth_revoked_term = _auth_revoked_gen = 0;
 	_auth_refused = 0;
 	_auth_clock = default_boottime_ns;
+	gettime_fn = clock_gettime;
 }
 
 }	// namespace flare

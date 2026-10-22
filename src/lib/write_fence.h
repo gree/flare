@@ -47,6 +47,21 @@
  *	  refused; a revoke wins over a later-arriving older grant;
  *	- a `solo` grant (the authoritative membership says there is no
  *	  successor) has no deadline; an unreachable operator is only expiry.
+ *	- the grant is checked again where the mutation is applied: an entry
+ *	opens an apply section (entry::apply_begin) right before the storage
+ *	write, so an entry whose authority was revoked, replaced (term /
+ *	generation), re-identified, or whose own deadline passed neither
+ *	mutates storage nor forwards (the ACK check alone would be too late);
+ *	- a routine renewal (same term and generation) does not change the
+ *	authority: an entry keeps the deadline it was admitted with and may
+ *	finish within it, never re-mapped to the new TTL.
+ *	LOCK ORDER (audited): _apply_rw (shared by entries across the storage
+ *	write; exclusive for a change of authority, which therefore drains the
+ *	writes in flight) -> storage wholelock -> key slot lock; _mutex is
+ *	innermost, held only for a few loads/stores, never across the storage
+ *	write, a forward, a sleep or a callback, and never while taking another
+ *	lock. Nothing under a slot lock takes _apply_rw. A renewal takes no
+ *	exclusive lock.
  *	Not yet role-aware: while on, the node-level check also gates a
  *	replica's apply paths, so the seam must not be enabled in production.
  */
@@ -107,11 +122,29 @@ public:
 		    renewed or replaced grant counts as different: refuse). Always
 		    true when the authority engine was off at admission and is off. */
 		bool ack_ok();
+		/** call right before the STORAGE WRITE of the mutation and keep it
+		    until the write has returned (apply_end, or the destructor): true
+		    when the authority admitted with this entry is still the current
+		    one and its OLD deadline has not passed. While an apply section is
+		    open, no revoke / new term / generation / identity change becomes
+		    effective (it waits, see LOCK ORDER), so an entry that got true
+		    has written under the authority it was admitted with. False: the
+		    mutation must NOT write. Always true when the engine was off at
+		    admission and is off. */
+		bool apply_begin();
+		void apply_end();
+		/** the same check for a step that is not held (the forward to the
+		    replicas): true when the admitted authority is still current. */
+		bool still_authorized();
 	private:
+		friend class write_fence;
 		bool _fenced;
 		bool _no_authority;
 		bool _bound;
+		bool _applying;
+		bool _bound_solo;
 		uint64_t _bound_serial;
+		uint64_t _bound_deadline;
 		entry(const entry&);
 		entry& operator=(const entry&);
 	};
@@ -146,8 +179,13 @@ public:
 	static bool authority_valid();
 	/** how many mutations were refused for lack of authority (admission or ack) */
 	static uint64_t authority_refused();
-	/** test seam: boottime clock in nanoseconds (default CLOCK_BOOTTIME) */
+	/** test seam: boottime clock in nanoseconds (default CLOCK_BOOTTIME).
+	    A clock that cannot be read returns authority_clock_failed, and
+	    everything fails closed (no grant request, no admission, no ack). */
 	static void authority_set_clock(uint64_t (*clock)());
+	static const uint64_t authority_clock_failed = ~static_cast<uint64_t>(0);
+	/** test seam: replaces clock_gettime for the default clock */
+	static void authority_set_gettime(int (*gettime)(clockid_t, struct timespec*));
 
 	/** test seam: a clock in seconds (default time(NULL)) */
 	static void set_clock(time_t (*clock)());
@@ -160,8 +198,11 @@ public:
 private:
 	static bool _active_locked(time_t now);
 	static bool _authority_valid_locked(uint64_t now);
+	static bool _bound_ok_locked(const entry& e, uint64_t now);
+	static bool _apply_grant_locked(const authority_grant& g, std::string& why);
 
 	static pthread_mutex_t	_mutex;
+	static pthread_rwlock_t	_apply_rw;
 	static bool				_armed;
 	static std::string		_token;
 	static time_t			_expires;

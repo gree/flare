@@ -19,6 +19,8 @@
 #include <op_set.h>
 #include <op_delete.h>
 #include <time_watcher.h>
+#include <pthread.h>
+#include <unistd.h>
 
 using namespace gree::flare;
 
@@ -90,9 +92,9 @@ namespace test_write_authority
 		cl = NULL;
 	}
 
-	static std::string run_set(const char* key)
+	static std::string run_set(const char* key, const char* value = "VALUE")
 	{
-		shared_connection c(new connection_sstream(std::string(" ") + key + " 0 0 5\r\nVALUE\r\n"));
+		shared_connection c(new connection_sstream(std::string(" ") + key + " 0 0 5\r\n" + value + "\r\n"));
 		test_op_set op(c, cl, st);
 		cut_assert_equal_int(0, op._parse_text_server_parameters());
 		op._run_server();
@@ -115,6 +117,15 @@ namespace test_write_authority
 		storage::result r;
 		st->get(e, r);
 		return r == storage::result_found;
+	}
+
+	static std::string value_of(const char* key)
+	{
+		storage::entry e;
+		e.key = key;
+		storage::result r;
+		st->get(e, r);
+		return r == storage::result_found ? std::string(reinterpret_cast<const char*>(e.data.get()), e.size) : std::string("<none>");
 	}
 
 	static void grant_now(uint64_t term = 1, uint64_t gen = 1)
@@ -164,10 +175,9 @@ namespace test_write_authority
 		cut_assert_false(stored("k4"));
 	}
 
-	// The grant was valid at admission but ended while the mutation ran
-	// (e.g. it waited for a lock): the ACK is withheld. Storage was written
-	// (the unknown-outcome case a client already handles); it is NOT
-	// acknowledged under a different grant.
+	// The authority ended (its deadline passed) while the mutation waited
+	// between admission and the apply: it must NOT write (P1: refusing only
+	// the ACK would leave the old value in storage).
 	static void expire_in_between() { fake_ns += TTL; }
 	static void renew_in_between()
 	{
@@ -175,23 +185,68 @@ namespace test_write_authority
 		write_fence::authority_apply_grant(grant(write_fence::authority_begin_request()), why);
 	}
 
-	void test_ack_is_refused_when_the_grant_ends_after_admission()
+	void test_expired_after_admission_does_not_write()
 	{
 		grant_now();
 		write_fence::set_entry_hook(expire_in_between);
-		cut_assert_equal_string("SERVER_ERROR write authority lost before ack\r\n", run_set("k5").c_str());
+		cut_assert_equal_string("SERVER_ERROR write authority lost before apply\r\n", run_set("k5").c_str());
 		write_fence::set_entry_hook(NULL);
-		cut_assert_true(stored("k5"));
+		cut_assert_false(stored("k5"));
+		cppcut_assert_equal(static_cast<uint64_t>(0), write_fence::in_flight());
 	}
 
-	void test_ack_is_refused_when_the_grant_is_renewed_after_admission()
+	// a routine renewal of the SAME authority between admission and apply is
+	// not a reason to fail the request (P2)
+	void test_same_authority_renewal_after_admission_is_acknowledged()
 	{
 		grant_now();
 		write_fence::set_entry_hook(renew_in_between);
-		cut_assert_equal_string("SERVER_ERROR write authority lost before ack\r\n", run_set("k6").c_str());
+		cut_assert_equal_string("STORED\r\n", run_set("k6").c_str());
 		write_fence::set_entry_hook(NULL);
-		// the next request is admitted under the renewed grant and is acknowledged
+		cut_assert_true(stored("k6"));
 		cut_assert_equal_string("STORED\r\n", run_set("k7").c_str());
+	}
+
+	// P1 counterexample, same key K: term 1 "K=v1" admitted and paused; term
+	// 2 installed; "K=v2" is acknowledged; the old request resumes. It
+	// answers an error and K stays v2 (it neither writes nor forwards).
+	static void install_term2_and_write_v2()
+	{
+		write_fence::set_entry_hook(NULL);
+		std::string why;
+		cut_assert_true(write_fence::authority_apply_grant(grant(write_fence::authority_begin_request(), 2, 1), why));
+		cut_assert_equal_string("STORED\r\n", run_set("K", "vals2").c_str());
+	}
+
+	void test_old_term_request_does_not_overwrite_the_new_term_value()
+	{
+		grant_now(1, 1);
+		write_fence::set_entry_hook(install_term2_and_write_v2);
+		cut_assert_equal_string("SERVER_ERROR write authority lost before apply\r\n", run_set("K", "vals1").c_str());
+		write_fence::set_entry_hook(NULL);
+		cut_assert_equal_string("vals2", value_of("K").c_str());
+		cppcut_assert_equal(static_cast<uint64_t>(0), write_fence::in_flight());
+	}
+
+	static void revoke_in_between()
+	{
+		std::string why;
+		write_fence::authority_revoke(0, 1, 1, why);
+	}
+
+	void test_revoked_after_admission_does_not_write_or_delete()
+	{
+		grant_now();
+		cut_assert_equal_string("STORED\r\n", run_set("k8", "keep1").c_str());
+		write_fence::set_entry_hook(revoke_in_between);
+		cut_assert_equal_string("SERVER_ERROR write authority lost before apply\r\n", run_set("k8", "lost1").c_str());
+		write_fence::set_entry_hook(NULL);
+		cut_assert_equal_string("keep1", value_of("k8").c_str());
+		grant_now(2, 1);
+		write_fence::set_entry_hook(revoke_in_between);	// term 1 revoke: term 2 stays
+		cut_assert_equal_string("STORED\r\n", run_set("k9", "keep2").c_str());
+		write_fence::set_entry_hook(NULL);
+		cut_assert_equal_string("keep2", value_of("k9").c_str());
 	}
 
 	void test_default_is_off_and_changes_nothing()
@@ -435,16 +490,139 @@ namespace test_write_authority
 		}
 		cut_assert_true(write_fence::authority_apply_grant(grant(write_fence::authority_begin_request(), 1, 2), why));
 		{
-			// renewed while the mutation waited: refuse, do not ack under the new grant
+			// renewed (same term / generation) while the mutation waited:
+			// still acknowledged within the OLD deadline
 			write_fence::entry e;
 			cut_assert_true(write_fence::authority_apply_grant(grant(write_fence::authority_begin_request(), 1, 2), why));
+			cut_assert_true(e.ack_ok());
+		}
+		{
+			// a new generation while it waited: refuse
+			write_fence::entry e;
+			cut_assert_true(write_fence::authority_apply_grant(grant(write_fence::authority_begin_request(), 1, 3), why));
 			cut_assert_false(e.ack_ok());
 		}
 		{
 			// revoked while it waited
 			write_fence::entry e;
-			cut_assert_true(write_fence::authority_revoke(0, 1, 2, why));
+			cut_assert_true(write_fence::authority_revoke(0, 1, 3, why));
 			cut_assert_false(e.ack_ok());
 		}
+	}
+
+	// the renewal pair of repro/flare-wauth-renew-review.cc: admit at 0,
+	// renew the SAME term/generation at +2 (TTL 10): the held entry still
+	// completes before the OLD deadline, and is refused from the OLD
+	// deadline on (never re-mapped to the new TTL, which ends at +12)
+	void test_renewal_pair_old_deadline_holds()
+	{
+		std::string why;
+		grant_now(1, 1);
+		write_fence::entry held;
+		cut_assert_false(held.fenced());
+		cut_assert_true(held.ack_ok());
+		fake_ns += 2 * S;
+		grant_now(1, 1);						// renewal, deadline now +12
+		cut_assert_true(write_fence::authority_valid());
+		fake_ns += 7 * S;						// +9: before the old deadline
+		cut_assert_true(held.apply_begin());
+		held.apply_end();
+		cut_assert_true(held.ack_ok());
+		cut_assert_true(held.still_authorized());
+		fake_ns += 1 * S;						// +10: the old deadline
+		cut_assert_true(write_fence::authority_valid());	// the new grant lives on
+		cut_assert_false(held.apply_begin());
+		cut_assert_false(held.ack_ok());
+		cut_assert_false(held.still_authorized());
+		write_fence::entry fresh;				// admitted under the renewed grant
+		cut_assert_true(fresh.ack_ok());
+	}
+
+	void test_renewal_pair_revoke_or_new_term_in_between_refuses()
+	{
+		std::string why;
+		grant_now(1, 1);
+		write_fence::entry a;
+		fake_ns += 2 * S;
+		grant_now(1, 1);
+		cut_assert_true(write_fence::authority_revoke(0, 1, 1, why));
+		cut_assert_false(a.apply_begin());
+		cut_assert_false(a.ack_ok());
+		grant_now(2, 1);
+		write_fence::entry b;
+		grant_now(2, 1);						// renewal of term 2: b is fine
+		cut_assert_true(b.ack_ok());
+		grant_now(3, 1);						// new term: b is not
+		cut_assert_false(b.apply_begin());
+		cut_assert_false(b.ack_ok());
+	}
+
+	// clock_gettime(CLOCK_BOOTTIME) fails: fail closed, no uninitialised time
+	static int failing_gettime(clockid_t, struct timespec*) { return -1; }
+	static int junk_gettime(clockid_t, struct timespec* ts)
+	{
+		ts->tv_sec = 5;		// a value written before returning an error
+		ts->tv_nsec = 5;
+		return -1;
+	}
+
+	void test_clock_failure_fails_closed()
+	{
+		std::string why;
+		grant_now();
+		write_fence::entry held;
+		cut_assert_true(held.ack_ok());
+		write_fence::authority_set_clock(NULL);		// the real default clock ...
+		write_fence::authority_set_gettime(junk_gettime);	// ... that cannot be read
+		cut_assert_false(write_fence::authority_valid());
+		cut_assert_false(held.ack_ok());
+		cut_assert_false(held.apply_begin());
+		{
+			write_fence::entry e;
+			cut_assert_true(e.fenced());
+		}
+		cppcut_assert_equal(static_cast<uint64_t>(0), write_fence::authority_begin_request());
+		cut_assert_false(write_fence::authority_apply_grant(grant(0), why));
+		write_fence::authority_set_gettime(failing_gettime);
+		cppcut_assert_equal(static_cast<uint64_t>(0), write_fence::authority_begin_request());
+		// a solo grant has no deadline, but an unreadable clock still refuses
+		write_fence::authority_set_gettime(NULL);
+		write_fence::authority_set_clock(fake_clock);
+		cut_assert_true(write_fence::authority_apply_grant(grant(write_fence::authority_begin_request(), 1, 5, true), why));
+		write_fence::authority_set_clock(NULL);
+		write_fence::authority_set_gettime(failing_gettime);
+		cut_assert_false(write_fence::authority_valid());
+		// the clock back: a grant is needed again only if it had expired
+		write_fence::authority_set_gettime(NULL);
+		write_fence::authority_set_clock(fake_clock);
+		cut_assert_true(write_fence::authority_valid());
+	}
+
+	// a change of authority waits for a write in flight (so that no old
+	// write lands after it took effect); a renewal does not wait
+	static volatile int revoke_done = 0;
+	static void* revoker(void*)
+	{
+		std::string why;
+		write_fence::authority_revoke(0, 1, 1, why);
+		revoke_done = 1;
+		return NULL;
+	}
+
+	void test_change_of_authority_drains_writes_in_flight_but_renewal_does_not()
+	{
+		grant_now(1, 1);
+		write_fence::entry e;
+		cut_assert_true(e.apply_begin());			// a storage write is in progress
+		grant_now(1, 1);							// renewal: no wait, no exclusive lock
+		revoke_done = 0;
+		pthread_t t;
+		cut_assert_equal_int(0, pthread_create(&t, NULL, revoker, NULL));
+		usleep(100 * 1000);
+		cppcut_assert_equal(0, static_cast<int>(revoke_done));	// the revoke waits for the write
+		e.apply_end();
+		pthread_join(t, NULL);
+		cppcut_assert_equal(1, static_cast<int>(revoke_done));
+		cut_assert_false(write_fence::authority_valid());
 	}
 }

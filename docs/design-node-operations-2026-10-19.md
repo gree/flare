@@ -323,17 +323,21 @@ master (旧)                 operator leader               新 master
 - **時間:** 自ノードの CLOCK_BOOTTIME。期限は**要求を送った時点** + ttl。受信時刻は入らない。期限後に届いた返事、pending でない nonce（古い・重複・再起動前）、古い term / generation、revoke 済みの (term, generation) 以下は拒否。revoke は後から着く古い grant に勝つ。更新で期限は短くならない
 - **solo:** grant が `solo`（権威ある membership に successor なし）と明示する時だけ期限なし。operator に届かないだけでは solo にならず、期限切れ = 拒否
 - **既定は OFF**（既存の動作のまま）。`write_fence::authority_set_enabled(true)` は test / admin seam で、本番の既定でも設定項目でもない。ttl は試験のパラメータ（既定値なし）
-- **ACK への束縛:** admission で見た grant の serial を entry が持ち、ACK の直前に `ack_ok()` が同じ grant が現在も有効かを見る。期限切れ・revoke・**更新または置換**（別の grant）のいずれでも ACK せず `SERVER_ERROR write authority lost before ack` を返す（storage への適用は済んでいる: client には結果不明のエラー）
+- **apply 点への束縛（P1）:** ACK の拒否だけでは古い request が storage を書き戻す（term 1 の `K=v1` が admission 後に止まり、term 2 の `K=v2` が ACK された後に再開すると K が v1 に戻る）。entry は storage 書き込みの直前に `apply_begin()` で admission 時の権威がなお現在のものか（revoke / term / generation / identity / engine 切替が無く、**admission 時の自分の期限**が過ぎていないか）を検査し、書き込みが戻るまで apply 区間を開く。偽なら storage を書かず forward もせず `SERVER_ERROR write authority lost before apply`。forward の直前は `still_authorized()`（偽なら forward せず、後段の `ack_ok()` も偽）
+- **lock 順序（監査済み）:** `_apply_rw`（entry は共有で storage 書き込みの間だけ保持。権威の変更 = revoke / 新 term / generation / identity / engine 切替は排他で取り、書き込み中の entry を drain してから有効になる）→ storage の wholelock → key の slot lock。`_mutex` は最内で、数個の load/store の間だけ・他の lock を取らず・storage 書き込み、forward、sleep、callback をまたがない。slot lock 配下から `_apply_rw` は取らない（storage_rocksdb の lazy expiry の `entry` は `_mutex` のみ）。**同 term / generation の更新は排他 lock を取らない**。排他 lock は writer 優先（更新が書き込みの連続に飢えない）。全 mutation をまたぐ巨大 mutex も sleep をまたぐ保持もない
+- **通常の更新（P2）:** 同 term・同 generation の grant は権威を変えない（serial を進めない）。admission 済みの entry は**自分の期限**まで完了できる（新しい TTL に付け替えない）。期限後・revoke・新 term / generation・identity 変更は拒否。ACK 直前の `ack_ok()` も同じ判定
+- **clock 失敗:** CLOCK_BOOTTIME が読めない時は `authority_clock_failed` を返し、有効判定・admission・apply・ACK・request 送信（nonce 0、受理されない）すべて fail closed（solo も）。未初期化の timespec は使わない
+- **残る窓:** forward の「検査 → `post_proxy_write`」は同じ区間ではない。検査後に権威が失効しても、その時点で正当に適用済みの変更が replica へ送られることはある（ACK は `ack_ok()` で拒否される）。pre-proxy（他の master への転送）には検査を足していない（このノードの権威を使わない経路）
 - 試験（注入 clock）: 期限切れ・revoke・新 term が古い in-flight request を拒否・古い nonce の返事・再起動（新 boot）は権限なし・solo は明示の no-successor の時だけ・operator 不在は期限切れ。実 op（client の set / delete が op handler から storage へ）で、期限後の旧 master が拒否し storage に届かないこと
 
 **mutation 入口の表（review-safe-eviction §4.3 の列挙）:**
 
 | 入口 | admission（grant 必須） | ACK 直前の再確認 |
 |---|---|---|
-| client set / add / replace / append / prepend / cas / touch / gat（`op_set` 系） | 配線済み | 配線済み（共通の最終 ACK 経路のみ） |
-| client incr / decr（`op_incr`） | 配線済み | 配線済み |
-| client delete（`op_delete`） | 配線済み | 配線済み |
-| 他ノードからの proxy write（同じ op） | 配線済み（node 単位。下記の制約） | 未（identity 付きの forwarded change の早期 return 経路は ACK 検査なし） |
+| client set / add / replace / append / prepend / cas / touch / gat（`op_set` 系） | 配線済み | 配線済み（apply 点・forward 直前・ACK 直前の 3 か所） |
+| client incr / decr（`op_incr`） | 配線済み | 配線済み（同 3 か所） |
+| client delete（`op_delete`） | 配線済み | 配線済み（同 3 か所） |
+| 他ノードからの proxy write（同じ op） | 配線済み（node 単位。下記の制約） | identity 付きの forwarded change も apply 点は配線済み（`apply_identified_change` の前後）。その経路の ACK 直前検査は未（早期 return） |
 | cross-cluster の受信 write | 配線済み（同じ op 経由） | 未 |
 | flush_all | 配線済み | 未（ACK 検査なし） |
 | snapshot push 受信 | 配線済み | 未 |

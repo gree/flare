@@ -185,7 +185,18 @@ int op_incr::_run_server() {
 
 	// storage i/o
 	storage::result r_storage;
-	if (this->_storage->incr(this->_entry, this->_value, r_storage, this->_incr) < 0) {
+	// write authority at the APPLY point: an entry whose authority ended
+	// (revoke / term / generation / identity / its own deadline) must not
+	// write; the section stays open only across the storage call
+	if (!fence_entry.apply_begin()) {
+		if (this->_entry.option & storage::option_noreply) {
+			return 0;
+		}
+		return this->_send_result(result_server_error, "write authority lost before apply");
+	}
+	const int r_incr = this->_storage->incr(this->_entry, this->_value, r_storage, this->_incr);
+	fence_entry.apply_end();
+	if (r_incr < 0) {
 		return this->_send_result(result_server_error, "i/o error");
 	}
 
@@ -196,7 +207,9 @@ int op_incr::_run_server() {
 			stats_object->increment_decr_hits();
 		}
 		// post-proxy (notify updates to slaves if we need)
-		r_proxy = this->_cluster->post_proxy_write(this, this->_is_sync(this->_entry.option, this->_cluster->get_replication_type()));
+		if (fence_entry.still_authorized()) {	// else no forward; the ACK is refused below
+			r_proxy = this->_cluster->post_proxy_write(this, this->_is_sync(this->_entry.option, this->_cluster->get_replication_type()));
+		}
 	} else if (r_storage == storage::result_not_found) {
 		if(this->_incr){
 			stats_object->increment_incr_misses();

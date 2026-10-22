@@ -408,3 +408,22 @@ master (旧)                 operator leader               新 master
 3. operator 側: grant の発行・更新・revoke・membership の永続化（`kjob/flare-cprime` の terminal CAS との接続）、request の送信、flared の stats / 管理 op による観測
 4. 実行時 E2E（C' の二重 write 0）
 5. 単一 node 内の複数 partition（grant は 1 partition のみ）、壁時計・ドリフト・VM 停止の影響
+
+## 13. C' の結線（write authority を operator の昇格経路につなぐ。integ/cprime。既定 OFF、フラグでのみ有効）
+
+§12.2 / §12.5 / §12.6 / §12.7 の方式を、次の具体的な規則で実装する。§12 が決めている詳細（要求起点の期限、nonce、約束の束縛、terminal CAS、S1〜S7）はそのまま従う。ここは**そこで未決だった点**と結線だけを書く。数値（ttl / renew / margin）は設定値で、本番の既定値は持たない。
+
+**フラグ（全部 OFF が既定）。** flared: `write-authority-enabled`（bool）、`write-authority-margin-ms`、`write-authority-max-ttl-ms`（受け付ける約束の ttl の上限。再起動後の静止時間 = max-ttl + margin）。有効なのに margin / max-ttl が 0 なら起動時に拒否。operator: 環境変数 `FLARE_WRITE_AUTHORITY_TTL_MS` / `_RENEW_MS` / `_MARGIN_MS`（TTL が未設定または 0 なら operator 側の C' 経路は全部無効）。**全ノードが同時に切り替える**（混在は未対応: 旧 build の master は `wa=` を運ばず、有効な replica は token の無い変更を拒否する。ローリングでの有効化はしない）。
+
+**決めたこと（§12 の未決の判断）。**
+1. 時計の持ち主: intent の `deadline` は **operator leader の時計**（`ClockId` = operator, 起動ごとの boot）。deadline を過ぎた commit は拒否され、その intent は leader が cancel する。successor の自己 cancel（store 経由の timer cancel）は**実装しない**: flared は store に届かない。**代償:** prepare の後に operator が消えると、replica は新しい leader が intent を引き継ぐまで PREPARING のままで、約束を出さないので master は ttl の後に write を止める（S1 の代償。operator 単独故障が write を止めるのは、prepare 中に限る）。
+2. membership: partition ごとに `{term, generation, master, successors}`。operator が ConfigMap `{cr}-authority-p{N}` に CAS（resourceVersion）で永続化する。successors = ノードマップで Active の slave。master 変更で term+1、successors 集合の変更で generation+1。**進行中の（terminal でない、または commit 済みで未昇格の）intent がある partition の membership は変えない**（solo や縮小で旧 master の権限を戻さない）。solo = successors が空。
+3. master の権限は successor の約束から: master は operator の `authority members` を受け、`renew` 間隔ごとに **全 successor** に `authority promise` を送る（送信点 q を自分の CLOCK_BOOTTIME で記録、同じ nonce）。全員が PROMISED を返した時だけ grant（期限 = q + ttl）。1 つでも欠けたら更新しない（期限は延びない）。solo は operator の `authority solo`（明示）の時だけ期限なし。
+4. replica の約束: FOLLOWING の間だけ。受理条件 = engine ON、この node がその partition の slave、floor が設定済みで term が floor の term と等しく generation が floor 以下、ttl ≤ max-ttl。**約束の終わり = 受信時刻 + ttl + margin を記録してから**返事を送る。
+5. 昇格の gate（flared、最後の砦）: slave から master へ変わる時、engine ON なら、その partition の intent が COMMITTED で、約束の終わり・起動後の静止時間（boot + max-ttl + margin）がともに自分の時計で過ぎている時だけ通す。通らなければ既存の promotion refusal の latch に入る（reads / writes を拒否）。proxy から master（新規 partition の最初の master）は対象外。
+6. operator の駆動（commit 点 = `commitChecked`）: 既存の copy を昇格するすべての pass（計画 drain、failover）で、フラグ ON なら、intent 作成 → successor に `authority prepare`（PREPARING。更新を止める）→ prepared 確認 → successor が `promotable_in_ms` を報告し終えるまで待つ → terminal CAS で commit → `authority commit`（flared に伝える）→ 昇格（ノードマップの commit）。各 pass は 1 歩ずつ進み、完了しない pass は昇格を commit しない（次の pass が続ける）。cancel は同じ terminal CAS（leader の cancel）の後に `authority cancel` を送る。**Unknown（store 不達・record 破損・返事なし）では cancel も commit もしない。** 旧 leader は record の fence で拒否される。
+7. floor / term: 昇格後の最初の pass で membership の term が +1 される（intent が committed の partition の master 変更だけがこれを起こせる）。operator は到達できる全 replica に `authority floor p term gen` を先に送り、その後に新 master へ `authority solo` / `authority members` を送る。replica は floor 未設定なら**変更を拒否する**（最初の token を受け入れない。operator が floor を渡してから受ける）。
+8. partition 数の変更（prepare map）中は engine を ON にしない: `partition-count-change` の pass では authority の push を止め、flared は prepare map の master 宛 forward を engine ON のとき拒否する（既存）。
+9. flared の再起動: grant / floor / 約束 / membership は永続化しない（tmpfs 前提）。再起動した master は operator が membership を再送するまで write を拒否する。再起動した replica は静止時間の間は昇格を受けない。**operator が不在の間に master が再起動すると、operator の復帰まで write は止まる**（権威ある membership を持たずに solo を名乗らない、という選択の代償）。
+
+**止まる条件（可用性）。** (a) master と全 successor の約束が切れる経路 → ttl 後に master は write を止める（C'）。(b) prepare 中の operator 不在 → master は ttl 後に停止（上記 1）。(c) 再起動した master と operator 不在の重なり（上記 9）。operator だけが落ちている間（prepare なし）、master と successor がつながっていれば write は続く。

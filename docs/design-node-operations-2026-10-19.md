@@ -461,3 +461,19 @@ master (旧)                 operator leader               新 master
 6. *The membership shrinking while an intent is open would hand the old master its authority back.* `Members.next` never changes the successor set while an intent is pending or committed and unpromoted, and a master change without a committed intent keeps the old record (the new master gets no grant) — `tNext`.
 7. *A role-based dual-write inference cannot judge the engine* (the isolated master keeps its role for the whole cut): C' is judged on the acknowledgements (`partVerdictWa`), and an unclassified acknowledgement can only make the check stricter.
 8. *A client-path precondition that needs an ACK after the cut cannot hold with the engine on* (the isolated master stops acknowledging after its grant ran out): with the engine on the old master's own answer (ack or its refusal) proves the client path is open.
+
+### 13.2 E2E（kind）で走らせる suite（authority ON。ここでは実行していない。ホストの CI で実行）
+
+数値はすべてテストの選択: ttl 6 s / renew 2 s / flared margin 5 s / prepare 窓 120 s。flared は `write-authority-enabled = true`（+ margin / max-ttl）、operator は `FLARE_WRITE_AUTHORITY_{TTL,RENEW,MARGIN,PREPARE_TIMEOUT}_MS`。
+
+| suite | 何を示す（示さない） |
+|---|---|
+| `node-ops-drain-wa` | A / A': 計画 drain が intent 経由で昇格し、ACK 済みの write が新 master と再構築した replica にある |
+| `node-ops-hold-wa` | #3 / D: 遅れた replica のときの保留（intent は作られない） |
+| `node-ops-stop-wa` | B / B': worker 停止。successor の約束が切れた後に intent 経由で昇格 |
+| `node-ops-partition-wa` | C / C': C' は ACK の時刻で判定（旧 master の最後の ACK が、新 master が ACK し得る最初の時刻より前）。昇格しない / 新 master が ACK しない = NOT VERIFIED（緑にしない）。注入が成立しない = PRECONDITION NOT MET |
+| `failover-wa` | 既存 failover suite（2 partition、P0 の master Pod を kill）に authority を ON |
+| `write-authority-operator-absent` | operator を 0 にして 60 s（ttl の 10 倍）write が全部 ACK され、grant が最後まで有効 |
+| `write-authority-solo` | 1 copy の partition が solo grant で書き続け、operator 不在でも止まらない |
+
+実行コマンドは `flare_e2e --filter <suite>`（1 suite ずつ。`node-ops-*` は multi-node kind、他は single-node）。

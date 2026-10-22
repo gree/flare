@@ -13,6 +13,8 @@
     node-ops-partition-wa  C, C' : the cuts of node-ops-partition, authority ON;
                            C' is judged on the acknowledgements (zero interval in
                            which both the old and the new master acknowledge)
+    failover-wa            : the existing failover suite (2 partitions, the P0 master
+                           pod is killed) with the authority ON
     write-authority-operator-absent : the operator is scaled to 0 while writes
                            continue: every write keeps being acknowledged
     write-authority-solo   : a 1-copy partition (no successor) keeps serving, also
@@ -23,6 +25,7 @@ import FlareOperator.E2E.Helpers
 import FlareOperator.E2E.Setup
 import FlareOperator.E2E.NodeOpsHarness
 import FlareOperator.E2E.Tests.NodeOps
+import FlareOperator.E2E.Tests.Failover
 import FlareOperator.K8s.Bridge
 import FlareOperator.Kubectl
 
@@ -49,28 +52,35 @@ def waOf (c : ClusterConfig) : ClusterConfig :=
 def waCfg (name : String) (tmpfs pvc : Bool) : ClusterConfig :=
   waOf (FlareOperator.E2E.Tests.NodeOps.cfgOf name tmpfs pvc)
 
-def authorityText (cfg : ClusterConfig) (pod : String) : IO String := do
-  match ← FlareOperator.K8s.Bridge.queryPodStats pod cfg.«namespace» "authority status 0" with
+def authorityTextP (cfg : ClusterConfig) (pod : String) (p : Nat) : IO String := do
+  match ← FlareOperator.K8s.Bridge.queryPodStats pod cfg.«namespace» s!"authority status {p}" with
   | .ok o => pure o
   | .error e => pure s!"ERR {e}"
+
+def authorityText (cfg : ClusterConfig) (pod : String) : IO String := authorityTextP cfg pod 0
 
 /-- The pod that holds the grant the cluster is meant to be under (partition 0, the master),
     if any: a replicated cluster (more than one copy) is under a grant from its successors'
     promises (NOT the solo grant the master holds before its replica is Active — a seed
     started on that one would meet the switch to the replicated grant), a single copy under
     the solo grant. -/
-def grantedPod (cfg : ClusterConfig) : IO (Option String) := do
-  for p in ← getPodNames s!"cluster={cfg.name}" cfg.«namespace» do
-    let t ← authorityText cfg p
+def grantedPodOf (cfg : ClusterConfig) (p : Nat) : IO (Option String) := do
+  for pod in ← getPodNames s!"cluster={cfg.name}" cfg.«namespace» do
+    let t ← authorityTextP cfg pod p
     let held := containsSubstr t "STAT grant_valid 1"
     let kind := if cfg.replicas > 1 then containsSubstr t "STAT members_mode replicated" && containsSubstr t "STAT grant_solo 0"
       else containsSubstr t "STAT grant_solo 1"
-    if held && kind then return some p
+    if held && kind then return some pod
   return none
 
+def grantedPod (cfg : ClusterConfig) : IO (Option String) := grantedPodOf cfg 0
+
+/-- Every partition's master holds its grant. -/
 def waitAuthority (cfg : ClusterConfig) (secs : Nat) : IO Bool :=
-  waitForCondition "a master holds a valid write grant (the operator established the membership)" secs do
-    return (← grantedPod cfg).isSome
+  waitForCondition "every partition's master holds a valid write grant (the operator established the membership)" secs do
+    for p in List.range cfg.partitions do
+      if (← grantedPodOf cfg p).isNone then return false
+    return true
 
 def waSetup (cfg : ClusterConfig) : IO Unit := do
   deployCluster cfg
@@ -150,6 +160,17 @@ def partitionWaSuite : TestSuite :=
       { name := "(C', authority ON) the master's worker is also cut from the control plane while the client still reaches it: ZERO interval in which both the old and the new master acknowledge (judged on the acknowledgements; unclassified acks make the check stricter); no failover / no new-master ack = NOT VERIFIED, never green"
         run := FlareOperator.E2E.Tests.NodeOps.partitionTestWa { cfg, suite := "node-ops-partition-wa", test := "c-node" } true }
     ] }
+
+/-- The existing failover suite (2 partitions x 2 copies, the master pod of P0 is killed) with the
+    write authority ON: the promotion goes through the promotion intent, within a longer bound. -/
+def failoverWaSuite : TestSuite :=
+  let cfg : ClusterConfig := { FlareOperator.E2E.Tests.Failover.cfg with
+    name := "failover-wa", «namespace» := "flare-failover-wa", debugPod := "debug-failover-wa",
+    extraFlaredConf := "write-authority-enabled = true\nwrite-authority-margin-ms = 5000\nwrite-authority-max-ttl-ms = 6000",
+    operatorEnv := waOperatorEnv }
+  FlareOperator.E2E.Tests.Failover.mkSuite "failover-wa" cfg
+    (do if !(← waitAuthority cfg 240) then throw (IO.userError "the write authority was not established on every partition's master"))
+    240
 
 /-! ## operator absent, solo -/
 

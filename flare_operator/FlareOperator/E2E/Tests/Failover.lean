@@ -16,7 +16,7 @@ open FlareOperator.E2E.Helpers
 open FlareOperator.E2E.Setup
 open FlareOperator.Kubectl
 
-private def cfg : ClusterConfig := {
+def cfg : ClusterConfig := {
   name := "failover-test"
   -- Use unique namespace per test run for isolation (timestamp-based)
   «namespace» := "flare-failover"
@@ -26,17 +26,22 @@ private def cfg : ClusterConfig := {
   debugPod := "debug-failover"
 }
 
-private def numPods : Nat := cfg.partitions * cfg.replicas
 private def totalKeys : Nat := 100
 
-def suite : TestSuite := {
-  name := "failover"
+/-- The failover suite over `cfg` (the write-authority variant passes its own cfg, an extra
+    wait for the grants after the cluster is stable, and a longer bound for the promotion, which
+    then goes through the promotion intent: prepare, the successor's promise, commit). -/
+def mkSuite (suiteName : String) (cfg : ClusterConfig) (afterStable : IO Unit) (promoteWaitSec : Nat) : TestSuite :=
+  let numPods := cfg.partitions * cfg.replicas
+  {
+  name := suiteName
   setup := do
     cleanupCluster cfg
     deployCluster cfg
     let stable ← waitForStable cfg 50
     if !stable then
       throw (IO.userError "cluster did not stabilize")
+    afterStable
   onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
   teardown := cleanupCluster cfg
   tests := [
@@ -127,7 +132,7 @@ def suite : TestSuite := {
           let _ ← kubectl ["delete", "pod", oldMaster, "-n", cfg.«namespace»,
                             "--force", "--grace-period=0"]
           -- Wait for new master
-          let ok ← waitForCondition "P0 master available" 90 do
+          let ok ← waitForCondition "P0 master available" promoteWaitSec do
             let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
             let entries := parseNodeSync sync
             match findMasterPod entries 0 with
@@ -142,7 +147,7 @@ def suite : TestSuite := {
               return .pass
             | none => return .fail "master not found after wait"
           else
-            return .fail "no P0 master within 90s" },
+            return .fail s!"no P0 master within {promoteWaitSec}s" },
 
     -- Role-consistent read balance after failover: every Master must carry
     -- balance 100 and every Slave 0 (normalizeBalances at the commit
@@ -218,5 +223,7 @@ def suite : TestSuite := {
         else return .skip "items may have been lost during pod restart" }
   ]
 }
+
+def suite : TestSuite := mkSuite "failover" cfg (pure ()) 90
 
 end FlareOperator.E2E.Tests.Failover

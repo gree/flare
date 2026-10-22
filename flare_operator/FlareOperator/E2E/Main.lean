@@ -124,6 +124,7 @@ def main (args : List String) : IO UInt32 :=
     Tests.WriteAuthority.partitionWaSuite,
     Tests.WriteAuthority.operatorAbsentSuite,
     Tests.WriteAuthority.soloSuite,
+    Tests.WriteAuthority.failoverWaSuite,
     Tests.NodeOps.drainControlSuite,
     Tests.StatsCost.suite,
     Tests.NodeOps.holdControlSuite,

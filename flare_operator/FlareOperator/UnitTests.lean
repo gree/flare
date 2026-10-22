@@ -37,6 +37,7 @@ import FlareOperator.E2E.PromotionTimeline
 import FlareOperator.E2E.Tests.NodeOps
 import FlareOperator.StateMachine.WriteLeaseModel
 import FlareOperator.StateMachine.PromotionIntentChecks
+import FlareOperator.StateMachine.PromotionIntentStoreChecks
 import FlareOperator.StateMachine.SourceEligibility
 import FlareOperator.StateMachine.RebuildConcurrency
 import FlareOperator.StateMachine.AuthoritativeHistory
@@ -3203,6 +3204,10 @@ def checkSnapshotPushSwitch (ctx : Ctx) : IO Unit := do
 def checkPromotionIntent (ctx : Ctx) : IO Unit := do
   for (n, ok) in FlareOperator.PromotionIntentChecks.checks do check ctx n ok
 
+/-- C' terminal CAS adapter against the in-memory fake client (not wired into the runtime). -/
+def checkPromotionIntentStore (ctx : Ctx) : IO Unit := do
+  for (n, ok) in ← FlareOperator.PromotionIntentStoreChecks.checks do check ctx n ok
+
 def run : IO UInt32 := do
   let ctx : Ctx := { failures := ← IO.mkRef [], count := ← IO.mkRef 0 }
   checkObserve ctx
@@ -3251,6 +3256,7 @@ def run : IO UInt32 := do
   checkMigrationForwardGate ctx
   checkSnapshotPushSwitch ctx
   checkPromotionIntent ctx
+  checkPromotionIntentStore ctx
   let failures ← ctx.failures.get
   let n ← ctx.count.get
   IO.println s!"1..{n}"

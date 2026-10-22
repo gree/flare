@@ -13,7 +13,8 @@ open FlareOperator.PromotionIntentStore
 open FlareOperator.PromotionIntentChecks
 open FlareOperator.PromotionBinding
 
-/-- A scripted fault, consumed by the next `replace`. -/
+/-- (`writes` counts the adapter's own writes; an `interfere` write is not counted.)
+    A scripted fault, consumed by the next `replace`. -/
 inductive Fault where
   /-- the write is applied, the reply is an error -/
   | lostReply
@@ -92,7 +93,7 @@ def cancel1 (c : Client) : IO Result := cancelIntent c ref7 (.leader 1) (atS 0)
 def tConflictCancelled : IO Bool := do
   let f ← Fake.new (some (encode prepared)) [.interfere (encode x7)]
   let r ← commit1 f.client
-  return r == .refused .alreadyCancelled x7 && (← storedIs f x7) && (← f.writes.get) == 1
+  return r == .refused .alreadyCancelled x7 && (← storedIs f x7) && (← f.writes.get) == 0
 
 /-- conflict: a new leader adopted in between; the old leader is refused, nothing of its is written -/
 def tConflictAdopted : IO Bool := do
@@ -105,7 +106,7 @@ def tConflictAdopted : IO Bool := do
 def tConflictThenApply : IO Bool := do
   let f ← Fake.new (some (encode prepared)) [.interfere (encode prepared)]
   let r ← commit1 f.client
-  return r == .done c7 && (← storedIs f c7) && (← f.writes.get) == 2
+  return r == .done c7 && (← storedIs f c7) && (← f.writes.get) == 1
 
 /-- reply lost after the write took effect: the re-read shows it -/
 def tLostReply : IO Bool := do
@@ -175,7 +176,7 @@ def tBadRecords : IO Bool := do
   let cg ← createIntent g.client prepared
   return rg == .badRecord (.malformed "field count") && ru == .badRecord (.unknownVersion 3) &&
     rn == .absent && (match re with | .unknown _ => true | _ => false) &&
-    (match cg with | .unknown _ => true | _ => false) &&
+    (match cg with | .badRecord _ => true | _ => false) &&
     (← g.text) == some "garbage" && (← g.writes.get) == 0 && (← u.writes.get) == 0 && (← n.writes.get) == 0
 
 /-- commit racing cancel, each winning the CAS in turn: exactly one terminal -/

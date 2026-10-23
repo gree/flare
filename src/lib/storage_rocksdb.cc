@@ -26,6 +26,7 @@
  */
 #include "app.h"
 #include "write_fence.h"
+#include "write_promise.h"
 #include <sys/statvfs.h>
 #include <sys/vfs.h>
 #include "storage_rocksdb.h"
@@ -704,6 +705,29 @@ int storage_rocksdb::clear_rebuilt_from() {
 	return r;
 }
 
+
+static storage_rocksdb* authority_identity_storage = NULL;
+
+static void authority_identity_probe(std::string& boot, std::string& copy) {
+	char b[32];
+	snprintf(b, sizeof(b), "%llu", (unsigned long long)(stats_object != NULL ? stats_object->get_reconstruction_boot_id() : 0));
+	boot = b;
+	copy.clear();		// undetermined: the authority engine refuses everything bound to it
+	storage_rocksdb* s = authority_identity_storage;
+	if (s != NULL) {
+		const string id = s->get_copy_id();
+		for (size_t i = 0; i < id.size(); i++) {
+			if (id[i] > ' ' && id[i] < 0x7f) {
+				copy += id[i];
+			}
+		}
+	}
+}
+
+void storage_rocksdb::install_authority_identity(storage_rocksdb* s) {
+	authority_identity_storage = s;
+	write_promise::set_identity_probe(&authority_identity_probe);
+}
 
 string storage_rocksdb::get_copy_id() {
 	pthread_rwlock_rdlock(&this->_mutex_generations);

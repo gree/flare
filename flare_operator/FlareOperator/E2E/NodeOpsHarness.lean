@@ -23,6 +23,7 @@
 import FlareOperator.E2E.Framework
 import FlareOperator.E2E.Helpers
 import FlareOperator.E2E.Setup
+import FlareOperator.K8s.Bridge
 import FlareOperator.Kubectl
 
 namespace FlareOperator.E2E.NodeOps
@@ -200,8 +201,21 @@ def placementVerdict (masterPod : Option String) (replicas : List String) (pods 
           if spare.isEmpty then .error (notSetUp "no spare data worker to relocate to")
           else .ok { master := m, replica := r, spare }
 
+/-- With the write authority ON: the master holds a REPLICATED grant (its
+    successor's promise), not the solo grant it holds until the replica is
+    Active. Solo -> replicated ends the solo grant first (write_promise.cc
+    set_members), so a write started on the solo grant meets a gap of one
+    promise round (39927176239 D: 49/50 seeded, the members record landed
+    2 s after the replica turned Active). True when the authority is off. -/
+def Ctx.authorityReady (c : Ctx) (master : String) : IO Bool := do
+  if !containsSubstr c.cfg.extraFlaredConf "write-authority-enabled = true" then return true
+  match ← FlareOperator.K8s.Bridge.queryPodStats master c.cfg.«namespace» "authority status 0" with
+  | .ok t => return containsSubstr t "STAT grant_valid 1" && containsSubstr t "STAT members_mode replicated" && containsSubstr t "STAT grant_solo 0"
+  | .error _ => return false
+
 /-- Wait (bounded) for one master and one ACTIVE replica of partition 0, both
-    Ready, on different data workers with a spare worker; record it. -/
+    Ready, on different data workers with a spare worker (and, authority ON,
+    the master under its replicated grant); record it. -/
 def Ctx.placement (c : Ctx) (timeoutSec : Nat := 300) : IO (Except String Placement) := do
   -- a fault injected during the operator's startup grace (dead-node
   -- detection off) measures the grace, not the product (39197119445 B:
@@ -223,8 +237,10 @@ def Ctx.placement (c : Ctx) (timeoutSec : Nat := 300) : IO (Except String Placem
       match last with
       | .ok p =>
         if p.master.ready && p.replica.ready then
-          c.art "conditions.txt" s!"placement master {p.master.name}@{p.master.node} replica {p.replica.name}@{p.replica.node} spare {p.spare}"
-          return last
+          if (← c.authorityReady p.master.name) then
+            c.art "conditions.txt" s!"placement master {p.master.name}@{p.master.node} replica {p.replica.name}@{p.replica.node} spare {p.spare}"
+            return last
+          last := .error (notSetUp s!"the master {p.master.name} does not hold a replicated write grant")
       | .error _ => pure ()
     | _, _ => last := .error (unobservable "the pods or the operator's map could not be read")
     if (← nowSec) ≥ deadline then break

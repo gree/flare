@@ -169,6 +169,10 @@ def partitionWaSuite : TestSuite :=
 def failoverWaSuite : TestSuite :=
   let cfg : ClusterConfig := { FlareOperator.E2E.Tests.Failover.cfg with
     name := "failover-wa", «namespace» := "flare-failover-wa", debugPod := "debug-failover-wa",
+    -- the write authority needs a persistent copy id: flared refuses to start on the default tch
+    -- storage (flared.cc "write-authority-enabled needs a storage with a persistent copy id"), the
+    -- pod crash-loops and the StatefulSet never rolls out (39927148972: "cluster did not stabilize")
+    storageBackend := "rocksdb",
     extraFlaredConf := "write-authority-enabled = true\nwrite-authority-margin-ms = 5000\nwrite-authority-max-ttl-ms = 6000",
     operatorEnv := waOperatorEnv }
   FlareOperator.E2E.Tests.Failover.mkSuite "failover-wa" cfg
@@ -329,6 +333,20 @@ private def twoFailoversRun (c : Ctx) : IO TestResult := do
     return .fail "failover 1 did not complete (no other pod holds a grant within 300 s)"
   names := names ++ (← writersOnPods c "p2")
   IO.sleep 8000
+  -- The second kill must not hit the window between the promotion commit and the operator's adoption
+  -- of the new master's history: a master lost with its intent unresolved holds the partition
+  -- (AuthoritativeHistory.resolveIntent, "is not the master in the map that carries the intent": the
+  -- acknowledged writes of that master are unknown, nothing is promoted automatically; RUNBOOK
+  -- #history-held-masterless). That hold is the product's safety stop, not the property under test
+  -- (39927148972: commit 09:37:47, the operator lease lapsed during a 20 s reconcile, the kill came
+  -- at ~09:38:05, HELD for good). Wait for the adoption; if it does not come the run has no
+  -- precondition, not a verdict.
+  let adopted ← waitForCondition "the operator adopted the new master's history (the promotion intent is resolved)" 180 do
+    return containsSubstr (← kubectlLogsLabel s!"app={c.cfg.operatorName}" c.cfg.«namespace» 10000000) s!"adopted as generation"
+  if !adopted then
+    discard <| obs.finish
+    for n in names do discard <| c.stopWriter n
+    return .fail (notSetUp s!"the operator did not adopt {m2}'s history within 180 s of its promotion (the second failover would meet an unresolved promotion intent)")
   -- second failover, in a row (the previous master's copy is still being rebuilt)
   killPod c m2
   let ok2 ← waitForCondition "a pod other than the second killed master holds the grant (failover 2)" 300 do
@@ -349,6 +367,9 @@ private def twoFailoversRun (c : Ctx) : IO TestResult := do
     | some wl => ws := ws ++ wl.ws; complete := complete && wl.complete
     | none => complete := false
   c.art "report.txt" s!"masters {m1} -> {m2} -> {m3}; writes {ws.length}; acks {(ws.filter fun w => classify w.reply == .ack).length}"
+  -- a failover that did not complete is the finding, whatever the writer logs of the dead window say
+  -- (a writer that never got an ack is rejected as unobserved and would mask it as UNOBSERVABLE)
+  if !ok2 then return .fail s!"the second failover did not complete: no pod other than {m2} holds a grant within 300 s (a prepare is stuck, or the partition is held: see the operator log)"
   if !complete then return .fail (unobservable "a writer log was not confirmed complete")
   let verdict := ackVerdict samples ws
   if let some v := verdict then

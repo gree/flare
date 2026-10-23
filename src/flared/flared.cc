@@ -36,6 +36,7 @@
 #include "handler_reaper.h"
 #include "handler_authority.h"
 #include "write_promise.h"
+#include "op_authority.h"
 #include "handler_storage_check.h"
 #include "handler_request.h"
 #include "op_repl_snapshot_push.h"
@@ -185,6 +186,15 @@ static bool flared_is_slave_of(int partition) {
 	cluster::state st = cluster::state_down;
 	int p = -1;
 	return cl != NULL && cl->get_own_assignment(r, st, p) && r == cluster::role_slave && p == partition;
+}
+
+// `authority first` was accepted: re-run the promotion it was missing for (the same gates as the
+// validator thread's retry), now, so the first master's epoch is advanced before the operator reads it
+static void flared_retry_refused_promotion() {
+	cluster* cl = singleton<flared>::instance().get_cluster();
+	if (cl != NULL) {
+		cl->retry_refused_promotion();
+	}
 }
 
 int flared::startup(int argc, char **argv) {
@@ -408,6 +418,7 @@ int flared::startup(int argc, char **argv) {
 		return -1;
 	#endif
 		write_promise::set_role_probe(&flared_is_slave_of);
+		op_authority::set_first_build_hook(&flared_retry_refused_promotion);
 	}
 	this->_storage->set_listener(this);
 	this->_cluster->set_storage(this->_storage);

@@ -431,6 +431,35 @@ namespace test_write_promise
 		return b;
 	}
 
+	static int hook_calls = 0;
+	static void count_hook() { hook_calls++; }
+
+	// the accepted `authority first` re-runs the refused promotion at once (the operator reads the
+	// history after the reply: the epoch the promotion advances must already be in place); a refused
+	// one (another incarnation / copy) runs nothing
+	void test_an_accepted_first_build_runs_the_promotion_hook_once_a_refused_one_does_not()
+	{
+		write_promise::set_identity_probe(probe);
+		probe_boot = "b1";
+		probe_copy = "c1";
+		hook_calls = 0;
+		op_authority::set_first_build_hook(count_hook);
+		int rc = 0;
+		std::string out = run_op(" first 2 b0 c1\r\n", rc);
+		cppcut_assert_equal(0, rc);
+		cppcut_assert_equal(0, hook_calls);
+		out = run_op(" first 2 b1 c-other\r\n", rc);
+		cppcut_assert_equal(0, hook_calls);
+		out = run_op(" first 2 b1 c1\r\n", rc);
+		cppcut_assert_equal(0, rc);
+		cppcut_assert_equal(1, hook_calls);
+		op_authority::set_first_build_hook(NULL);
+		out = run_op(" first 3 b1 c1\r\n", rc);		// no hook installed: still accepted, nothing called
+		cppcut_assert_equal(1, hook_calls);
+		std::string why;
+		cut_assert_true(write_promise::may_first_build(3, why));
+	}
+
 	void test_the_op_promise_replies_promised_or_an_error()
 	{
 		int rc = 0;

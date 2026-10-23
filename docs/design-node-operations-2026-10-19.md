@@ -495,3 +495,12 @@ master (旧)                 operator leader               新 master
 3. **intent id が term ごとに 1 から始まり、遅れた commit / cancel が別 term の同じ id に当たりうる（中・低確率）。** 対応: successor に渡す id を `(term+1)*100 + attempt` にして term をまたいで一意にする。
 4. 低: solo → replicated の切替で master は最初の round まで約 1 renew 間隔 write を拒否する（旧 solo grant を先に revoke するため）。proxy → master の昇格は gate しない（operator は既存の slave だけを昇格するので、operator ON では起きない。起きるのは map が slave → proxy → master と回る場合）。operator の ttl が flared の max-ttl を超えると約束が拒否され master は grant を得られない（fail closed、実行時にだけ分かる: **max-ttl ≥ operator の ttl** にすること）。membership record を消して term 1 から作り直すと、pod が持つ floor との term 不一致で約束が拒否され続ける（record は消さない）。
 5. 代償の追記: operator 不在 + replica の再起動で replica は floor を失い、operator が戻るまで約束と forward を拒否する（master の grant は ttl 後に切れる）。operator 不在 + master の再起動（§13 の 9）と同じ種類。
+
+### 13.4 authority ON の E2E 実行（df9621e）で出た 5 件の原因と対応（integ-f9）
+
+1. **first build の epoch 競合（product）。** `authority first` は allowance を入れるだけで、拒否されていた昇格は validator thread の再評価（約 2 秒周期）で完了し、そのとき source epoch が 1→2 に進む。operator はその前に履歴を読んで「epoch 1」を記録でき（node-stop-wa-t: 読取 09:24:02.91、昇格 02.86 の実行は別 thread で記録は 1:…）、以後 replica の rebuild は「record と別の履歴」で永久に HELD になる。対応: `authority first` を受理した worker thread が、その場で `retry_refused_promotion()` を呼ぶ（flared が起動時に hook を登録。同じ gate を丸ごと通す。回避ではない）。operator が `first` の応答を受けた時点で epoch は進んでいる。
+2. **solo → replicated の 1 round 分の write 拒否（既知: 上の 4）。** D の seed 49/50 は、前の test の abort 後に旧 master が replica に戻る途中（replica Active 後 2 秒で members が入る）に seed を始めたため。harness を直し、placement は master が replicated grant を持つまで待つ（authority ON のときのみ）。
+3. **昇格直後の master を殺す 2 回目の failover（harness。product の hold は安全停止）。** commit 後、operator が新 master の履歴を採用する前に新 master が失われると、intent が未解決のまま `HELD`（RUNBOOK #history-held-masterless）。two-failovers は採用を待ってから 2 回目を殺す。failover が完了しないことは writer log の完全性より先に判定する（writer が ack なしで UNOBSERVABLE に化けていた）。
+4. **failover-wa は storage-type が tch（harness）。** authority ON の flared は rocksdb 以外では起動しない（CrashLoop）。suite の cfg を rocksdb にした。
+5. **C'（harness＋所要時間）。** NotReady 検出 105 秒 + gate（切断された master への kubectl exec が 30 秒ずつ timeout）で 1 pass が 144 秒かかり、330 秒の cut が終わる直前にしか昇格が通らなかった。cut は replica が自分の view で master になって 30 秒たつまで（最大 900 秒）にした。判定は緩めていない（二重 ACK 区間ゼロ、かつ new master の ACK）。
+   - 提案（未実装。safety の条件に触れるため）: `ackedFor` は unreachable な master を 2 回 exec する。1 回に減らすと pass が 30 秒短くなるが、一過性の読取失敗を「master なし」と扱う側に倒れるので、レビューのうえで。

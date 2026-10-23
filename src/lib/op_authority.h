@@ -37,6 +37,7 @@ protected:
 	uint32_t			_partition;
 	uint64_t			_a, _b, _c, _d, _e;
 	vector<string>		_keys;
+	static void			(*_first_build_hook)();
 	vector<string>		_ids;		// boot id, copy id of the receiver (prepare / commit / cancel / first)
 
 public:
@@ -44,6 +45,12 @@ public:
 	virtual ~op_authority();
 
 	/** client side of `authority promise`: true when the peer answered PROMISED <nonce> in time */
+	/** called after an `authority first` was accepted (no lock of write_promise held): flared re-runs the
+	    promotion the missing allowance refused, so the epoch it advances is in place BEFORE the operator
+	    answers its reading of the history (else the operator records the epoch before the promotion and
+	    holds the replica's rebuild for good: "holds another history than the record") */
+	static void set_first_build_hook(void (*hook)());
+
 	static bool request_promise(const string& host, int port, uint32_t partition, uint64_t term, uint64_t generation,
 		uint64_t ttl_ms, uint64_t nonce, int timeout_ms, string& why);
 

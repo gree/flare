@@ -855,7 +855,28 @@ def partitionRun (c : Ctx) (nodeLevel : Bool) (wa : Bool := false) : IO (Except 
         c.art "api-endpoint.txt" s!"probes after the cut {after.map fun (a, r) => s!"{a}={r.label}"}; established peers after {peersAfter}"
       c.event s!"probes after the cut: replica->master open={inj.replicaToMaster} operator->master open={inj.operatorToMaster} worker->API before={inj.apiBefore} after={inj.apiAfter}"
       if rulesOk then
-        discard <| observe c (if nodeLevel then 330 else 90) (pure false)
+        if wa && nodeLevel then
+          -- With the authority ON the failover is: NotReady detection (2 operator ticks, ~105 s of
+          -- slow passes) + the intent gate (prepare, the successor's promise to the old master over,
+          -- terminal commit; each step may wait on kubectl timeouts against the cut node). 39927163369
+          -- C': the cut ended at 352 s, the gate had just passed (promotion committed 16 s after the
+          -- heal) and no write was ever acknowledged by the new master during the cut. The cut lasts
+          -- until the replica reports master by its own view and has had `settleSec` to acknowledge
+          -- (the verdict still demands zero dual-ack interval AND acks by the new master in the cut),
+          -- at most `maxCutSec` (reached = the run stays NOT VERIFIED, never green).
+          let settleSec := 30
+          let maxCutSec := 900
+          let sinceRef ← IO.mkRef (none : Option Nat)
+          discard <| observe c maxCutSec (do
+            let isMaster := match ← c.statsTimed p.replica.ip with
+              | some (_, _, o) => (o.bind ownVOf).map (·.role) == some "master"
+              | none => false
+            if isMaster && (← sinceRef.get).isNone then sinceRef.set (some (← nowSec))
+            match ← sinceRef.get with
+            | some t => return (← nowSec) ≥ t + settleSec
+            | none => return false)
+        else
+          discard <| observe c (if nodeLevel then 330 else 90) (pure false)
       let mut cs : List (String × Option Nat) := []
       for r in installed do
         let n ← cutCounter r

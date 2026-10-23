@@ -153,6 +153,12 @@ int op_authority::_send_status(uint32_t partition) {
 	return this->_send_result(result_end);
 }
 
+void (*op_authority::_first_build_hook)() = NULL;
+
+void op_authority::set_first_build_hook(void (*hook)()) {
+	_first_build_hook = hook;
+}
+
 int op_authority::_run_server() {
 	string why;
 	write_promise::status s;
@@ -190,6 +196,9 @@ int op_authority::_run_server() {
 			return this->_send_result(result_server_error, why.c_str());
 		}
 		log_notice("write authority: a fresh first build of partition %u is allowed once for this incarnation", this->_partition);
+		if (_first_build_hook != NULL) {
+			_first_build_hook();
+		}
 	} else if (this->_action == "floor") {
 		if (!write_promise::set_floor(this->_partition, this->_a, this->_b, why)) {
 			return this->_send_result(result_server_error, why.c_str());

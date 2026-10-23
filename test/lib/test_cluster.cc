@@ -298,7 +298,8 @@ namespace test_cluster
 	static uint64_t fake_ns = 0;
 	static uint64_t fake_clock() { return fake_ns; }
 	static const uint64_t S = 1000000000ULL;
-	static void probe(std::string& b, std::string& c) { b = "b1"; c = "c1"; }
+	static std::string probe_boot = "b1", probe_copy = "c1";
+	static void probe(std::string& b, std::string& c) { b = probe_boot; c = probe_copy; }
 
 	struct authority_fixture {
 		authority_fixture(const char* dir):
@@ -306,6 +307,8 @@ namespace test_cluster
 			write_fence::reset_for_test();
 			write_promise::reset_for_test();
 			fake_ns = 1000 * S;
+			probe_boot = "b1";
+			probe_copy = "c1";
 			write_fence::authority_set_clock(fake_clock);
 			std::string why;
 			cut_assert_true(write_promise::configure(true, 2000, 10000, why));
@@ -387,6 +390,115 @@ namespace test_cluster
 		cut_assert_true(write_promise::allow_first_build(0, "b1", "c1", why));
 		cppcut_assert_equal(0, f.cl.retry_refused_promotion());		// nothing pending: the proof does not make it master
 		cut_assert_false(f.cl.is_promotion_refused());
+	}
+	// a copy that is forbidden as a master is a refusal of its own reason: when it clears, the whole
+	// shift runs again (authority gate included) without a new map — and the first-build allowance is
+	// not burnt by the shifts the copy refused before
+	void test_forbidden_copy_refusal_is_re_evaluated_when_the_copy_is_fit_again()
+	{
+		mkdir((tmp_dir + "/wa4").c_str(), 0700);
+		authority_fixture f((tmp_dir + "/wa4").c_str());
+		f.st.forbidden = true;
+		f.st.forbidden_why = "copy not fit";
+		std::string why;
+		cut_assert_true(write_promise::allow_first_build(0, "b1", "c1", why));
+		f.boot_as_master();
+		cut_assert_true(f.cl.is_promotion_refused());
+		cppcut_assert_equal(std::string("copy not fit"), f.cl.get_promotion_refused_why());
+		for (int i = 0; i < 3; i++) {
+			cppcut_assert_equal(0, f.cl.retry_refused_promotion());
+			cut_assert_true(f.cl.is_promotion_refused());
+		}
+		f.st.forbidden = false;		// nothing else changes: no map, no restart
+		cppcut_assert_equal(0, f.cl.retry_refused_promotion());
+		cut_assert_false(f.cl.is_promotion_refused());		// the allowance survived the refused shifts
+	}
+
+	void test_forbidden_copy_that_clears_still_meets_the_authority_gate()
+	{
+		mkdir((tmp_dir + "/wa5").c_str(), 0700);
+		authority_fixture f((tmp_dir + "/wa5").c_str());
+		f.st.forbidden = true;
+		f.st.forbidden_why = "copy not fit";
+		f.boot_as_master();
+		cut_assert_true(f.cl.is_promotion_refused());
+		f.st.forbidden = false;
+		cppcut_assert_equal(0, f.cl.retry_refused_promotion());
+		cut_assert_true(f.cl.is_promotion_refused());		// the copy is fit; no proof, no intent: the gate still refuses
+		cut_assert_true(f.cl.get_promotion_refused_why().find("write authority") == 0);
+		std::string why;
+		cut_assert_true(write_promise::allow_first_build(0, "b1", "c1", why));
+		cppcut_assert_equal(0, f.cl.retry_refused_promotion());
+		cut_assert_false(f.cl.is_promotion_refused());
+	}
+
+	// control: an existing copy (no first-build proof, no committed intent) stays refused across any
+	// number of retries and across a forbidden copy that clears
+	void test_existing_copy_proxy_to_master_stays_refused_across_retries()
+	{
+		mkdir((tmp_dir + "/wa6").c_str(), 0700);
+		authority_fixture f((tmp_dir + "/wa6").c_str());
+		f.boot_as_master();
+		for (int i = 0; i < 20; i++) {
+			fake_ns += 10 * S;
+			cppcut_assert_equal(0, f.cl.retry_refused_promotion());
+			cut_assert_true(f.cl.is_promotion_refused());
+		}
+		f.st.forbidden = true;
+		f.st.forbidden_why = "x";
+		cppcut_assert_equal(0, f.cl.retry_refused_promotion());
+		f.st.forbidden = false;
+		cppcut_assert_equal(0, f.cl.retry_refused_promotion());
+		cut_assert_true(f.cl.is_promotion_refused());
+		cut_assert_true(f.cl.get_promotion_refused_why().find("no first-build proof") != std::string::npos);
+	}
+
+	// the allowance is bound to the exact incarnation and copy, and is used once
+	void test_first_build_allowance_is_not_reusable_after_a_restart()
+	{
+		mkdir((tmp_dir + "/wa7").c_str(), 0700);
+		authority_fixture f((tmp_dir + "/wa7").c_str());
+		f.boot_as_master();
+		std::string why;
+		cut_assert_true(write_promise::allow_first_build(0, "b1", "c1", why));
+		probe_boot = "b2";		// the node restarted: a new boot id
+		cppcut_assert_equal(0, f.cl.retry_refused_promotion());
+		cut_assert_true(f.cl.is_promotion_refused());
+		probe_boot = "b1";		// even the old identity does not bring it back: it was voided
+		cppcut_assert_equal(0, f.cl.retry_refused_promotion());
+		cut_assert_true(f.cl.is_promotion_refused());
+	}
+
+	void test_first_build_allowance_is_not_reusable_after_a_copy_change()
+	{
+		mkdir((tmp_dir + "/wa8").c_str(), 0700);
+		authority_fixture f((tmp_dir + "/wa8").c_str());
+		f.boot_as_master();
+		std::string why;
+		cut_assert_true(write_promise::allow_first_build(0, "b1", "c1", why));
+		probe_copy = "c2";		// the data directory was replaced: a new copy id
+		cppcut_assert_equal(0, f.cl.retry_refused_promotion());
+		cut_assert_true(f.cl.is_promotion_refused());
+		probe_copy = "c1";
+		cppcut_assert_equal(0, f.cl.retry_refused_promotion());
+		cut_assert_true(f.cl.is_promotion_refused());
+	}
+
+	void test_first_build_allowance_is_consumed_by_the_promotion_it_allowed()
+	{
+		mkdir((tmp_dir + "/wa9").c_str(), 0700);
+		authority_fixture f((tmp_dir + "/wa9").c_str());
+		f.boot_as_master();
+		std::string why;
+		cut_assert_true(write_promise::allow_first_build(0, "b1", "c1", why));
+		cppcut_assert_equal(0, f.cl.retry_refused_promotion());
+		cut_assert_false(f.cl.is_promotion_refused());
+		vector<cluster::node> v;		// demoted, then named master again by a later map
+		v.push_back(mk("localhost", 11211, cluster::role_proxy, cluster::state_active, -1));
+		cppcut_assert_equal(0, f.cl.reconstruct_node(v, f.cl.get_node_map_version() + 10));
+		v[0] = mk("localhost", 11211, cluster::role_master, cluster::state_active, 0);
+		cppcut_assert_equal(0, f.cl.reconstruct_node(v, f.cl.get_node_map_version() + 10));
+		cut_assert_true(f.cl.is_promotion_refused());		// the old allowance is gone
 	}
 }
 

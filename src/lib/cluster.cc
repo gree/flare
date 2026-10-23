@@ -1387,9 +1387,8 @@ int cluster::_run_boot_shift_locked() {
  *	master of that partition drops the retry.
  */
 int cluster::retry_refused_promotion() {
-	if (!this->_promotion_retry_pending) {
-		return 0;
-	}
+	// _promotion_retry_pending is guarded by both rwlocks (reconstruct_node / _shift_node_role write it
+	// under them): it is read only under them, never ahead of them
 	pthread_rwlock_wrlock(&this->_mutex_node_map);
 	pthread_rwlock_wrlock(&this->_mutex_node_partition_map);
 	int result = 0;
@@ -2371,6 +2370,30 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 	if (new_role != role_master && old_role == role_master && old_partition >= 0) {
 		write_promise::note_role(static_cast<uint32_t>(old_partition), false);
 	}
+	// decision 2026-10-08: flared refuses, on its own, to act as a master over a copy it knows is not
+	// fit (the operator classifies by reason and aborts such a commit; this is the last line if the state
+	// changed after that check). No new source epoch is started over it; reads and writes for its
+	// partitions fail (pre_proxy_read / pre_proxy_write). Checked BEFORE the authority gate: the gate
+	// consumes the first-build allowance, which a shift refused afterwards must not burn. The reason is
+	// kept apart from the authority's: a copy that stops being forbidden re-runs this whole shift
+	// (retry_refused_promotion, from the validator thread), authority gate included — no bypass.
+	const bool was_retry = this->_promotion_retry_pending;
+	if (new_role == role_master && old_role != role_master && this->_storage != NULL) {
+		string why;
+		if (this->_storage->promotion_forbidden(why)) {
+			this->_promotion_retry_old_role = old_role;
+			this->_promotion_retry_old_partition = old_partition;
+			this->_promotion_retry_new_partition = new_partition;
+			this->_promotion_retry_pending = true;
+			this->_promotion_retry_reason = retry_copy;
+			if (!was_retry || !this->_promotion_refused || this->_promotion_refused_why != why) {
+				log_err("CRITICAL: PROMOTION REFUSED by this node: %s — it serves no reads or writes as master until the map takes the role away (re-evaluated periodically)", why.c_str());
+			}
+			this->_promotion_refused_why = why;
+			this->_promotion_refused = true;
+			return 0;
+		}
+	}
 	if (new_role == role_master && old_role != role_master && new_partition >= 0 && write_promise::enabled()) {
 		// every shift to master of an EXISTING copy (from Slave or from Proxy: a slave demoted and
 		// returned) goes through the committed intent. Only a Proxy that the operator proved to be
@@ -2387,23 +2410,27 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 				why += "; " + why2;
 			}
 		}
-		if (allowed) {
-			if (this->_promotion_retry_pending) {
-				// the refusal being lifted is the authority gate's own (the checks below latch again)
-				log_notice("write authority: the refused promotion of partition %d is now allowed (re-evaluated)", new_partition);
-				this->_promotion_refused = false;
-			}
-			this->_promotion_retry_pending = false;
-		} else {
+		if (!allowed) {
 			this->_promotion_retry_old_role = old_role;
 			this->_promotion_retry_old_partition = old_partition;
 			this->_promotion_retry_new_partition = new_partition;
 			this->_promotion_retry_pending = true;
-			this->_promotion_refused_why = "write authority: " + why;
+			this->_promotion_retry_reason = retry_authority;
+			const string refused_why = "write authority: " + why;
+			if (!was_retry || !this->_promotion_refused || this->_promotion_refused_why != refused_why) {
+				log_err("CRITICAL: PROMOTION REFUSED by this node: %s — it serves no reads or writes as master until the map takes the role away (re-evaluated periodically)", refused_why.c_str());
+			}
+			this->_promotion_refused_why = refused_why;
 			this->_promotion_refused = true;
-			log_err("CRITICAL: PROMOTION REFUSED by this node: %s — it serves no reads or writes as master until the map takes the role away", this->_promotion_refused_why.c_str());
 			return 0;
 		}
+	}
+	if (was_retry && new_role == role_master) {
+		// both gates (copy fit, write authority) passed on this re-run: the refusal they latched ends
+		// (the checks below latch again for their own reasons, final as before)
+		log_notice("the refused promotion of partition %d is now allowed (re-evaluated)", new_partition);
+		this->_promotion_refused = false;
+		this->_promotion_retry_pending = false;
 	}
 	if (new_role != role_master) {
 		this->_promotion_retry_pending = false;
@@ -2411,20 +2438,6 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 	if (new_role != role_master && this->_promotion_refused) {
 		log_notice("promotion refusal lifted: no longer a master (new_role=%s)", cluster::role_cast(new_role).c_str());
 		this->_promotion_refused = false;
-	}
-	// decision 2026-10-08: flared refuses, on its own, to act as a master
-	// over a copy it knows is not fit (the operator classifies by reason and
-	// aborts such a commit; this is the last line if the state changed after
-	// that check). No new source epoch is started over it; reads and writes
-	// for its partitions fail (pre_proxy_read / pre_proxy_write).
-	if (new_role == role_master && old_role != role_master && this->_storage != NULL) {
-		string why;
-		if (this->_storage->promotion_forbidden(why)) {
-			this->_promotion_refused_why = why;
-			this->_promotion_refused = true;
-			log_err("CRITICAL: PROMOTION REFUSED by this node: %s — it serves no reads or writes as master until the map takes the role away", why.c_str());
-			return 0;
-		}
 	}
 	// restore provenance (restore-isolated 5): a RESTORED copy of another
 	// partition or routing layout — or one that cannot show which — never

@@ -444,6 +444,14 @@ master (旧)                 operator leader               新 master
 | restore / dump 受信 | 分類: **INTERNAL-pull**（replica が master の WAL / dump を引く再構築。forward ではなく `wa=` を持たず、client に ACK しない）。gate しない。旧 master が権限を失った後は新しい write を受けないので、引かれるのはそれ以前の内容 |
 | pre-proxy | `pre_proxy_write` の判定は `cluster::write_role`（自分が master か、prepare map の master か）で partition を決めてから master-write の admission（配線済み。他 master への転送は受けた側の admission） |
 
+**first build と、拒否された昇格の再評価（f7 / f8）。** flared の「Proxy → master」は、既存 copy なら committed intent を要求し、operator が**新規 first build と証明した**ときだけ `authority first`（boot id・copy id に束縛、1 回限り、期限あり）で免除する。起動時の map が最初から master を名指すと、権限メッセージより先に shift が来て拒否される。拒否は最終ではない: 拒否した shift を保持し、validator thread が約 2 秒ごとに `cluster::retry_refused_promotion()` で**同じ `_shift_node_role` を丸ごと**再実行する（バイパスなし）。決定:
+1. **理由は 2 つに分ける**（`_promotion_retry_reason`）。(a) `retry_copy`: `storage->promotion_forbidden()`（copy が master に不適）。(b) `retry_authority`: write authority gate（`may_promote` / `may_first_build`）の拒否。どちらも map が master を取り上げるまで保持し、取り上げれば破棄する。
+2. **再実行の契機は「条件が改善したかもしれない」周期**であり、map の再適用ではない。再実行は両方の gate を毎回通すので、copy が回復しても authority が未許可なら (b) で拒否のまま（`test_forbidden_copy_that_clears_still_meets_the_authority_gate`）。
+3. **gate の順序: copy の適格性 → authority。** `may_first_build` は allowance を消費する（used or void）ので、copy が不適で拒否される shift が allowance を使い切ってはならない。copy を先に検査し、拒否された間 allowance は温存される（`test_forbidden_copy_refusal_is_re_evaluated_when_the_copy_is_fit_again`）。allowance は boot id・copy id の完全一致に束縛され、別 boot / 別 copy での照合は失敗し、かつ破棄される（再起動・copy 交換後に元の identity に戻しても復活しない）。昇格が通ったとき、または role を失ったときも消費・削除される。pod UID は flared の identity に含まれない（operator 側の `authority first` の証明が pod UID を含む履歴 holder と照合する）。
+4. 既存 copy の Proxy → master（証明なし・intent なし）は、何回再評価しても拒否のまま（`test_existing_copy_proxy_to_master_stays_refused_across_retries`）。
+5. 同期: `_promotion_retry_pending` は node map / partition map の両 rwlock の下でのみ読み書きする（retry は先頭で無条件に両 lock を取る）。volatile は同期ではない。
+6. 後段の検査（partition binding・cursor 再調整）の拒否は従来どおり最終（再評価しない）。
+
 **replica の最初の token**: floor が未設定の replica は変更を**拒否**する（最初の token を受け入れない）。operator が floor を渡してから受ける（`authority floor`）。再起動した replica は operator が floor を再送するまで forward を受けない（欠けた分は WAL follow が埋める）。
 
 **partition 数の変更（prepare map）**: engine ON の間は未対応。operator は CR の partitions とマップの partition 数が違う pass では何も push せず（ログに明記）、flared は prepare master 宛の forward を master-write として admission する（grant がないので拒否）。**対応していないことを明示して拒否する**。

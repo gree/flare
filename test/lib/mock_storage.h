@@ -40,6 +40,15 @@ namespace flare {
 class mock_storage : public storage {
 public:
 	int		iter_wait;
+	// test seam: a copy that is forbidden as a master (storage::promotion_forbidden)
+	bool		forbidden;
+	string	forbidden_why;
+	virtual bool promotion_forbidden(std::string& why) {
+		if (this->forbidden) {
+			why = this->forbidden_why;
+		}
+		return this->forbidden;
+	}
 
 protected:
 	map<string, storage::entry>						_map;

@@ -201,7 +201,12 @@ protected:
 	// C' write authority: a refusal by the authority gate is NOT final. The shift that was refused is
 	// kept here and run again (same checks, same gate) when the missing condition may have arrived: the
 	// first-build allowance, the COMMITTED intent / quiet time, a grant. Cleared when the map moves.
-	volatile bool					_promotion_retry_pending = false;
+	// Guarded by _mutex_node_map + _mutex_node_partition_map (every reader and writer holds both).
+	// Two reasons, kept apart: retry_copy (the copy is forbidden as a master) and retry_authority (the
+	// write authority gate said no). Either way the retry re-runs the WHOLE shift, both gates.
+	enum promotion_retry_reason { retry_authority, retry_copy };
+	bool									_promotion_retry_pending = false;
+	promotion_retry_reason		_promotion_retry_reason = retry_authority;
 	role									_promotion_retry_old_role = role_proxy;
 	int										_promotion_retry_old_partition = -1;
 	int										_promotion_retry_new_partition = -1;

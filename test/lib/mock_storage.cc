@@ -38,6 +38,7 @@ namespace flare {
 mock_storage::mock_storage(string data_dir, int mutex_slot_size, int header_cache_size):
 	storage(data_dir, mutex_slot_size, header_cache_size),
 	iter_wait(-1),
+	forbidden(false),
 	_is_iter(false) {
 	this->_it = this->_map.end();
 	pthread_mutex_init(&this->_mutex, NULL);

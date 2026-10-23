@@ -179,6 +179,13 @@ def refOf (ctx : Ctx) (p : Nat) (m : Members) (n : Nat) (key : String) (b : Bind
 def wireOf (m : Members) (n : Nat) (b : Bind) : WireScope :=
   { id := wid m n, termNext := m.term + 1, gen := m.gen, boot := b.boot, copy := b.copy }
 
+/-- The ORIGINAL wire scope of an existing attempt, rebuilt from its intent (generation and receiver
+    binding as created) and the term it was scanned under: every message about that attempt (prepare,
+    commit, cancel, re-cancel) uses it, never the current membership's generation. -/
+def wireOfAttempt (m : Members) (a : Attempt) : WireScope :=
+  { id := wid m a.n, termNext := m.term + 1, gen := a.intent.ref.scope.generation,
+    boot := a.intent.binding.bootId, copy := a.intent.binding.copyId }
+
 def membershipOf (ctx : Ctx) (p : Nat) (m : Members) : Membership :=
   { scope := { cluster := ctx.cr, partition := p, generation := m.gen }, members := m.successors }
 
@@ -227,7 +234,7 @@ def doCreate (ctx : Ctx) (p : Nat) (m : Members) (as : List Attempt) (key : Stri
   | _ => pure false
 
 def doPrepare (ctx : Ctx) (p : Nat) (m : Members) (a : Attempt) (key : String) (b : Bind) : IO Bool := do
-  let sc := wireOf m a.n b
+  let sc := wireOfAttempt m a
   match (← ask ctx key (cmdPrepare p sc)).bind Status.parse with
   | none => pure false
   | some s =>
@@ -237,7 +244,7 @@ def doPrepare (ctx : Ctx) (p : Nat) (m : Members) (a : Attempt) (key : String) (
       if !(← ensureFence c ctx.token a.intent) then pure false
       else
         let oldUntil : At := { clock := { node := key, boot := b.boot }, t := s.remainingMs }
-        match ← markPrepared c (refOf ctx p m a.n key b) ctx.token oldUntil with
+        match ← markPrepared c a.intent.ref ctx.token oldUntil with
         | .done _ => pure true
         | .settled _ => pure true
         | .refused _ _ => pure true
@@ -247,7 +254,7 @@ def doPrepare (ctx : Ctx) (p : Nat) (m : Members) (a : Attempt) (key : String) (
     `true` when the store says cancelled. -/
 def doCancelAttempt (ctx : Ctx) (p : Nat) (m : Members) (a : Attempt) : IO Bool := do
   let c ← ctx.clientFor (intentName ctx.cr p (m.term + 1) a.n)
-  let sendCancel : IO Unit := discard <| ask ctx a.intent.successor (cmdCancel p (wireOf m a.n (bindingOfIntent a.intent)))
+  let sendCancel : IO Unit := discard <| ask ctx a.intent.successor (cmdCancel p (wireOfAttempt m a))
   if (← ensureFence c ctx.token a.intent) then
     match ← cancelIntent c a.intent.ref (.leader ctx.token) (← nowAt ctx) with
     | .done _ => sendCancel; pure true
@@ -258,11 +265,11 @@ def doCancelAttempt (ctx : Ctx) (p : Nat) (m : Members) (a : Attempt) : IO Bool 
 def doCancel (ctx : Ctx) (p : Nat) (m : Members) (a : Attempt) : IO Unit :=
   discard <| doCancelAttempt ctx p m a
 
-def doCommit (ctx : Ctx) (p : Nat) (m : Members) (a : Attempt) (key : String) (b : Bind) : IO Bool := do
+def doCommit (ctx : Ctx) (p : Nat) (m : Members) (a : Attempt) : IO Bool := do
   let c ← ctx.clientFor (intentName ctx.cr p (m.term + 1) a.n)
   if !(← ensureFence c ctx.token a.intent) then pure false
   else
-    match ← commitIntent c (refOf ctx p m a.n key b) (.leader ctx.token) (membershipOf ctx p m) (← nowAt ctx) with
+    match ← commitIntent c a.intent.ref (.leader ctx.token) (membershipOf ctx p m) (← nowAt ctx) with
     | .done _ => pure true
     | .settled _ => pure true
     | _ => pure false
@@ -276,10 +283,14 @@ def ackedFor (ctx : Ctx) (p : Nat) (m : Members) : IO Bool := do
   match m.ackBind with
   | none => return false
   | some ab =>
-    match ← statusOf ctx m.master p with
-    | none => return true
-    | some s =>
-      pure (s.holds m && s.idBoot == ab.boot && s.idCopy == ab.copy)
+    match ← bindingNow ctx m.master p with
+    | none =>
+      -- unreadable (or the pod changed during the reading): the durable ACK stands only when the
+      -- flared itself cannot be read; a readable flared with an unreadable pod UID is Unknown
+      match ← statusOf ctx m.master p with
+      | none => return true
+      | some _ => return false
+    | some (s, bnd) => pure (s.holds m && bnd == ab)
 
 /-- One promotion of `key` (a slave of partition `p`, pod `uid`): each call takes the next steps the
     stores and the successor allow (bounded). The attempt is bound to the incarnation read now (pod
@@ -306,7 +317,7 @@ partial def gate (ctx : Ctx) (p : Nat) (key uid : String) (fuel : Nat) : IO Gate
           return .hold "an attempt of another incarnation of the candidate was cancelled; the next pass starts one for this incarnation"
         let now ← nowAt ctx
         let a := newestFor as key b
-        let sc := (a.map fun x => wireOf m x.n b).getD (wireOf m 0 b)
+        let sc := (a.map fun x => wireOfAttempt m x).getD (wireOf m 0 b)
         let rv := some (replicaOf st sc)
         let id := (a.map fun x => wid m x.n).getD 0
         let acked ← ackedFor ctx p m
@@ -333,21 +344,21 @@ partial def gate (ctx : Ctx) (p : Nat) (key uid : String) (fuel : Nat) : IO Gate
           match a with
           | none => return .hold "no intent"
           | some x =>
-            if ← doCommit ctx p m x key b then
-              discard <| ask ctx key (cmdCommit p (wireOf m x.n b))
+            if ← doCommit ctx p m x then
+              discard <| ask ctx key (cmdCommit p (wireOfAttempt m x))
               gate ctx p key uid (fuel - 1)
             else return .hold "the commit CAS did not apply"
         | .sendCommit =>
           match a with
           | none => return .hold "no intent"
           | some x =>
-            discard <| ask ctx key (cmdCommit p (wireOf m x.n b))
+            discard <| ask ctx key (cmdCommit p (wireOfAttempt m x))
             gate ctx p key uid (fuel - 1)
         | .sendCancel =>
           match a with
           | none => return .hold "no intent"
           | some x =>
-            discard <| ask ctx key (cmdCancel p (wireOf m x.n b))
+            discard <| ask ctx key (cmdCancel p (wireOfAttempt m x))
             return .hold "the cancel of the abandoned prepare was sent again; the next pass starts a new attempt"
 
 /-- One pass for one partition: decide the record, persist it, push it. `wanted` = the node keys the

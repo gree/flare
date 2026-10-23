@@ -121,10 +121,11 @@ def World.clientFor (w : World) (name : String) : IO Client := do
     w.stores.modify (· ++ [(name, f)])
     return f.client
 
-def World.ctx (w : World) (token : Nat) (clockOffset : Nat := 0) : Ctx :=
+def World.ctx (w : World) (token : Nat) (clockOffset : Nat := 0)
+    (uidOf : String → IO (Option String) := fun _ => pure (some "uid")) : Ctx :=
   { cfg := { ttlMs := 6000, renewMs := 2000, marginMs := 5000, prepareTimeoutMs := 120000 },
     cr := "c", ns := "n", token, node := "operator",
-    askNode := w.ask, clientFor := w.clientFor, podUid := fun _ => pure (some "uid"), nowMs := do return (← w.clock.get) + clockOffset }
+    askNode := w.ask, clientFor := w.clientFor, podUid := uidOf, nowMs := do return (← w.clock.get) + clockOffset }
 
 def World.setClock (w : World) (t : Nat) : IO Unit := w.clock.set t
 
@@ -402,6 +403,82 @@ def tMasterRestart : IO Bool := do
   return isHold g1 && sent == none
     && (match r with | some m => m.acked && m.ackBind == some { bnd with boot := "b2" } | none => false)
 
+/-- the record moves to a newer generation of the same term (the pending intent was made under the old one) -/
+def World.bumpGen (w : World) : IO Unit := do
+  let c ← recClient (w.ctx 7) 0
+  match ← readRec c with
+  | .ok (some (m, rv)) => discard <| writeRec c (some rv) { m with gen := m.gen + 1 }
+  | _ => pure ()
+
+def lastSent (w : World) (key verb : String) : IO (Option String) := do
+  return ((← w.sent.get).filter fun (_, k, c) => k == key && c.startsWith s!"authority {verb} ").getLast?.map (·.2.2)
+
+/-- review (cancel scope): a pending prepare cancelled after a generation change is cancelled in its
+    ORIGINAL scope (id / term / generation 1 / boot / copy), so the successor is released and a new
+    prepare is accepted -/
+def tCancelOldScope : IO Bool := do
+  let w ← World.new [A, B]
+  let _ ← ensurePartition (w.ctx 7) 0 (view1 A [B])
+  w.setClock 1000
+  w.round A [B]
+  let _ ← gate (w.ctx 7) 0 B "uid" 6                      -- prepared: id 201, term_next 2, gen 1
+  let n1 ← w.node B
+  w.bumpGen
+  let _ ← ensurePartition (w.ctx 7) 0 (view1 A [B]) []    -- not asked: cancelled under the gen-2 record
+  let n2 ← w.node B
+  let cl ← lastSent w B "cancel"
+  let d1 ← w.decision (iname 0 2 1)
+  w.round A [B]
+  let _ ← gate (w.ctx 7) 0 B "uid" 6                      -- a new attempt is accepted
+  let n3 ← w.node B
+  return n1.state == "preparing" && n1.pGen == 1 && n2.state == "following" && d1 == some .cancelled
+    && cl == some (cmdCancel 0 { id := 201, termNext := 2, gen := 1, boot := "b1", copy := "c1" })
+    && n3.state == "preparing" && n3.intent == 202 && n3.pGen == 2
+
+/-- review (cancel scope): the cancel message is lost (store cancelled, successor unreachable), the
+    generation changes, and the re-cancel of the `.cancelled` branch is sent in the ORIGINAL scope; then a
+    new prepare is accepted (a prepare state never expires by itself) -/
+def tRecancelOldScope : IO Bool := do
+  let w ← World.new [A, B]
+  let _ ← ensurePartition (w.ctx 7) 0 (view1 A [B])
+  w.setClock 1000
+  w.round A [B]
+  let _ ← gate (w.ctx 7) 0 B "uid" 6
+  w.setNode B fun x => { x with reachable := false }
+  let _ ← ensurePartition (w.ctx 7) 0 (view1 A [B]) []    -- store: cancelled; the delayed cancel never arrives
+  let d1 ← w.decision (iname 0 2 1)
+  w.bumpGen
+  w.setNode B fun x => { x with reachable := true }
+  let _ ← ensurePartition (w.ctx 7) 0 (view1 A [B]) []
+  let nMid ← w.node B                                      -- still preparing under gen 1
+  let g1 ← gate (w.ctx 7) 0 B "uid" 6                      -- the re-cancel (original scope)
+  let n2 ← w.node B
+  let cl ← lastSent w B "cancel"
+  w.round A [B]
+  let _ ← gate (w.ctx 7) 0 B "uid" 6
+  let n3 ← w.node B
+  return d1 == some .cancelled && nMid.state == "preparing" && isHold g1 && n2.state == "following"
+    && cl == some (cmdCancel 0 { id := 201, termNext := 2, gen := 1, boot := "b1", copy := "c1" })
+    && n3.state == "preparing" && n3.intent == 202
+
+/-- review (ackedFor): the COMPLETE incarnation (pod UID, boot id, copy id) must be the one that
+    acknowledged; a same-name pod recreated with only the UID changed is not; an unknown part is not;
+    with the master unreadable altogether the durable ACK stands -/
+def tAckedUid : IO Bool := do
+  let w ← World.new [A, B]
+  let r ← ensurePartition (w.ctx 7) 0 (view1 A [B])
+  match r with
+  | none => return false
+  | some m =>
+    let same ← ackedFor (w.ctx 7) 0 m
+    let uid2 ← ackedFor (w.ctx 7 0 fun _ => pure (some "uid2")) 0 m
+    let unk ← ackedFor (w.ctx 7 0 fun _ => pure none) 0 m
+    w.setNode A fun x => { x with boot := "b2" }
+    let boot2 ← ackedFor (w.ctx 7) 0 m
+    w.setNode A fun x => { x with boot := "b1", reachable := false }
+    let gone ← ackedFor (w.ctx 7 0 fun _ => pure none) 0 m
+    return same && !uid2 && !unk && !boot2 && gone
+
 def checks : IO (List (String × Bool)) := do
   return [
     ("driver: steady state — record, floor on the successor, membership confirmed by the master, idempotent", ← tSteady),
@@ -415,6 +492,9 @@ def checks : IO (List (String × Bool)) := do
     ("driver: a transient absence / ineligibility removes no member (no solo); only an authoritative removal does", ← tTransient),
     ("driver: a delayed command of another term / generation / copy changes nothing; an old cancel releases nothing", ← tWireScope),
     ("driver: a restarted master is acknowledged anew (its incarnation is bound); no promotion before", ← tMasterRestart),
+    ("driver: a pending prepare cancelled after a generation change is cancelled in its original scope; a new prepare is then accepted", ← tCancelOldScope),
+    ("driver: the delayed cancel is sent again in the original scope (not the current generation); a new prepare is then accepted", ← tRecancelOldScope),
+    ("driver: the master's ACK needs the complete incarnation — a pod recreated with only the UID changed (or an unknown part) is not acknowledged", ← tAckedUid),
     ("driver: a committed intent is terminal — the leader's cancel is refused, the successor stays committed", ← tTerminal) ]
 
 end FlareOperator.WriteAuthorityDriverChecks

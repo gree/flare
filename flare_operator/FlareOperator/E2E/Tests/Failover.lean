@@ -28,10 +28,30 @@ def cfg : ClusterConfig := {
 
 private def totalKeys : Nat := 100
 
+/-- `"ok"` once the seed (test 4) ran under a held setup predicate and stored every key on both partitions;
+    the P0 master is not killed otherwise (suites with a `seedGuard`). -/
+initialize seedVerdictRef : IO.Ref (Option String) ← IO.mkRef none
+
+/-- Samples `guard` every second until stopped: the CONTINUOUS setup predicate (a one-shot check passed
+    in 39947084993 while P1's master was not yet established, and the seed landed 48/100, P0 = 0). -/
+private partial def guardLoop (guard : IO (Option String)) (stop : IO.Ref Bool)
+    (acc : IO.Ref (List (Option String))) : IO Unit := do
+  acc.modify (· ++ [← (try guard catch e => pure (some s!"the predicate failed: {e}"))])
+  IO.sleep 1000
+  if !(← stop.get) then guardLoop guard stop acc
+
+private def startGuardSampler (guard : IO (Option String)) :
+    IO (IO.Ref Bool × IO.Ref (List (Option String)) × Task (Except IO.Error Unit)) := do
+  let stop ← IO.mkRef false
+  let acc ← IO.mkRef ([] : List (Option String))
+  let t ← IO.asTask (prio := .dedicated) (guardLoop guard stop acc)
+  return (stop, acc, t)
+
 /-- The failover suite over `cfg` (the write-authority variant passes its own cfg, an extra
     wait for the grants after the cluster is stable, and a longer bound for the promotion, which
     then goes through the promotion intent: prepare, the successor's promise, commit). -/
-def mkSuite (suiteName : String) (cfg : ClusterConfig) (afterStable : IO Unit) (promoteWaitSec : Nat) : TestSuite :=
+def mkSuite (suiteName : String) (cfg : ClusterConfig) (afterStable : IO Unit) (promoteWaitSec : Nat)
+    (seedGuard : Option (IO (Option String)) := none) : TestSuite :=
   let numPods := cfg.partitions * cfg.replicas
   {
   name := suiteName
@@ -106,10 +126,43 @@ def mkSuite (suiteName : String) (cfg : ClusterConfig) (afterStable : IO Unit) (
           match ← getPodIp masterPod cfg.«namespace» with
           | none => return .fail s!"could not get IP for {masterPod}"
           | some ip =>
+            seedVerdictRef.set none
+            -- the setup predicate holds from before the first write to after the last (sampled every second)
+            let pre ← match seedGuard with
+              | some g => g
+              | none => pure none
+            if let some why := pre then
+              return .fail s!"the setup predicate does not hold at the seed start: {why}"
+            let sampler ← match seedGuard with
+              | some g => some <$> startGuardSampler g
+              | none => pure none
             let stored ← writeKeys cfg.debugPod cfg.«namespace» ip cfg.flarePort "fo" totalKeys
             IO.eprintln s!"# Wrote via {masterPod}: stored {stored}/{totalKeys}"
-            if stored == totalKeys then return .pass
-            else return .fail s!"only {stored}/{totalKeys} keys stored" },
+            let samples ← match sampler with
+              | some (stop, acc, t) => do
+                stop.set true
+                discard <| IO.wait t
+                pure (some (← acc.get))
+              | none => pure none
+            if let some ss := samples then
+              IO.eprintln s!"# seed predicate: {ss.length} sample(s) during the seed, {(ss.filter (·.isSome)).length} violation(s)"
+              if let some why := (ss.filterMap id).head? then
+                return .fail s!"the setup predicate was lost during the seed ({(ss.filter (·.isSome)).length}/{ss.length} samples): {why}"
+              if ss.isEmpty then return .fail "the setup predicate was never sampled during the seed"
+            if stored != totalKeys then return .fail s!"only {stored}/{totalKeys} keys stored"
+            if seedGuard.isSome then
+              -- proceed only with BOTH partitions populated and the predicate still true
+              let p0 ← getPartitionMasterItems cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort 0 cfg.flarePort
+              let p1 ← getPartitionMasterItems cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort 1 cfg.flarePort
+              IO.eprintln s!"# seed distribution: P0={p0}, P1={p1}"
+              if !(p0 > 0 && p1 > 0 && p0 + p1 == totalKeys) then
+                return .fail s!"seed stored {stored}/{totalKeys} but P0={p0}, P1={p1} (both partitions must be populated, total {totalKeys})"
+              let post ← match seedGuard with
+                | some g => g
+                | none => pure none
+              if let some why := post then return .fail s!"the setup predicate does not hold after the seed: {why}"
+              seedVerdictRef.set (some "ok")
+            return .pass },
 
     -- Test 5: verify keys distributed across both partitions
     { name := "verify key distribution (P0 > 0, P1 > 0, total = 100)"
@@ -125,6 +178,11 @@ def mkSuite (suiteName : String) (cfg : ClusterConfig) (afterStable : IO Unit) (
       run := do
         let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
         let entries := parseNodeSync sync
+        match findMasterPod entries 0 with
+        | none => return .fail "no P0 master to kill"
+        | some _ =>
+        if seedGuard.isSome && (← seedVerdictRef.get) != some "ok" then
+          return .fail "the seed precondition did not hold (see the seed test): the P0 master is NOT killed, nothing is verified"
         match findMasterPod entries 0 with
         | none => return .fail "no P0 master to kill"
         | some oldMaster =>

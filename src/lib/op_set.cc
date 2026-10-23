@@ -184,6 +184,7 @@ int op_set::_run_server() {
 		fence_entry.apply_end();
 		switch (applied) {
 			case storage::identified_applied:
+				fence_entry.trace_applied("set", this->_entry.key);
 				stats_object->increment_total_items();
 				if (!fence_entry.ack_ok()) {
 					return this->_send_result(result_server_error, "write authority lost before ack");
@@ -228,6 +229,7 @@ int op_set::_run_server() {
 	}
 	if (r_storage == storage::result_stored
 			|| r_storage == storage::result_touched) {
+		fence_entry.trace_applied(this->get_ident().c_str(), this->_entry.key);
 		if ((this->_behavior & storage::behavior_cas) || this->get_ident() == "cas"){
 			stats_object->increment_cas_hits();
 		} else if (this->get_ident() == "touch"){

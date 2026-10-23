@@ -31,6 +31,7 @@ import FlareOperator.E2E.Tests.NodeOps
 import FlareOperator.E2E.Tests.Failover
 import FlareOperator.K8s.Bridge
 import FlareOperator.Kubectl
+import Std.Data.HashMap
 
 namespace FlareOperator.E2E.Tests.WriteAuthority
 
@@ -195,6 +196,21 @@ def partitionWaSuite : TestSuite :=
         run := FlareOperator.E2E.Tests.NodeOps.partitionTestWa { cfg, suite := "node-ops-partition-wa", test := "c-node" } true }
     ] }
 
+/-- The setup predicate of failover-wa, sampled continuously from the seed start: every partition has an
+    ACTIVE master in the operator's map AND that master holds the replicated grant (members_mode replicated,
+    grant valid, not solo) — the same pod. `none` = holds. -/
+def failoverWaSeedGuard (cfg : ClusterConfig) : IO (Option String) := do
+  let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
+  let entries := parseNodeSync sync
+  for p in List.range cfg.partitions do
+    match findMasterPod entries p with
+    | none => return some s!"P{p} has no Active master in the map"
+    | some m =>
+      match ← grantedPodOf cfg p with
+      | none => return some s!"P{p}: no pod holds the replicated grant (map master {m})"
+      | some g => if g != m then return some s!"P{p}: the replicated grant is held by {g}, the map master is {m}"
+  return none
+
 /-- The existing failover suite (2 partitions x 2 copies, the master pod of P0 is killed) with the
     write authority ON: the promotion goes through the promotion intent, within a longer bound. -/
 def failoverWaSuite : TestSuite :=
@@ -208,7 +224,7 @@ def failoverWaSuite : TestSuite :=
     operatorEnv := waOperatorEnv }
   FlareOperator.E2E.Tests.Failover.mkSuite "failover-wa" cfg
     (do if !(← waitAuthority cfg 240) then throw (IO.userError "the write authority was not established on every partition's master"))
-    240
+    240 (some (failoverWaSeedGuard cfg))
 
 /-! ## operator absent, solo -/
 
@@ -340,10 +356,52 @@ def ownApplier (rs : List Reading) (pods : List String) (target : Option String)
         | [(u, _)] => if st.all (·.2.isSome) then some u else none
         | _ => none
 
+/-! ### Direct evidence: flared's write trace
+
+With `write-authority-trace = true` (tests only) every flared logs one `write-trace` line per applied mutation:
+`write-trace op=set key=K role=master|replica|unbound partition=P term=T gen=G solo=S mono_ns=N boot=B copy=C`.
+The harness follows each pod's log while the test runs (a force-killed pod's log is gone afterwards) and
+prefixes each line with the pod's name. An acknowledged write whose key was applied as the MASTER by exactly
+one pod is attributed to that pod, whatever the map or the own-view samples say. -/
+
+/-- `(key, pod)` of a trace line (`<pod> ... write-trace ...`) applied as the master; other roles / lines: none. -/
+def parseTraceMaster (line : String) : Option (String × String) :=
+  match line.splitOn "write-trace " with
+  | pre :: rest :: _ =>
+    let pod := ((pre.trim.splitOn " ").filter (!·.isEmpty)).head?.getD ""
+    let fields := (rest.splitOn " ").filter (!·.isEmpty)
+    let get (k : String) : Option String :=
+      fields.findSome? fun f => if f.startsWith s!"{k}=" then some (f.drop (k.length + 1)) else none
+    match get "key", get "role" with
+    | some key, some "master" => if pod.isEmpty then none else some (key, pod)
+    | _, _ => none
+  | _ => none
+
+/-- key -> the distinct pods that applied it as the master. -/
+def traceIndex (lines : List String) : Std.HashMap String (List String) :=
+  lines.foldl (init := {}) fun m l =>
+    match parseTraceMaster l with
+    | some (k, pod) =>
+      match m.get? k with
+      | some ps => if ps.contains pod then m else m.insert k (pod :: ps)
+      | none => m.insert k [pod]
+    | none => m
+
+/-- The pod that applied the write as the master, by the trace: exactly one. Zero (no line) or several
+    (two pods applied the same key as master) is no attribution. -/
+def traceApplier (idx : Std.HashMap String (List String)) (w : WriteRec) : Option String :=
+  match idx.get? w.key with
+  | some [p] => some p
+  | _ => none
+
 /-- The applier of an ack: the map master (`ackApplier`) and the nodes' own readings (`ownApplier`, only with
     readings) — either attributes; both attributing to different nodes is no attribution (never a pick). -/
 def ackApplierBoth (samples : List (Nat × Option String × List (String × String))) (rs : List Reading)
-    (pods : List String) (w : WriteRec) : Option String :=
+    (pods : List String) (w : WriteRec) (trace : Std.HashMap String (List String) := {}) : Option String :=
+  match trace.get? w.key with
+  | some [p] => some p
+  | some (_ :: _ :: _) => none      -- two pods applied this key as the master: never a pick
+  | _ =>
   let byMap := ackApplier samples w
   if rs.isEmpty then byMap else
   let target := ((samples.filter fun (t, _, _) => t ≤ w.span.1).getLast?).bind fun (_, _, ips) => ips.lookup w.ip
@@ -357,10 +415,11 @@ def ackApplierBoth (samples : List (Nat × Option String × List (String × Stri
     sweep over the start times: one witness per later ack); and every acknowledged write whose applier cannot
     be attributed (`unattributed`). `own` = the nodes' own role readings (empty: the map only). -/
 def ackOverlaps (samples : List (Nat × Option String × List (String × String))) (ws : List WriteRec)
-    (own : List Reading := []) : List (WriteRec × WriteRec) × List WriteRec :=
+    (own : List Reading := []) (trace : Std.HashMap String (List String) := {}) :
+    List (WriteRec × WriteRec) × List WriteRec :=
   let pods := (own.map (·.pod)).eraseDups
   let acks := ws.filter fun w => classify w.reply == .ack
-  let ap := acks.map fun w => (w, ackApplierBoth samples own pods w)
+  let ap := acks.map fun w => (w, ackApplierBoth samples own pods w trace)
   let att := ap.filterMap fun (w, a) => a.map (w, ·)
   let unatt := ap.filterMap fun (w, a) => if a.isNone then some w else none
   -- per applier, the attributed ack that ends last so far; an ack that starts no later than it ends
@@ -379,14 +438,14 @@ def ackOverlaps (samples : List (Nat × Option String × List (String × String)
     PRODUCT GAP; any ack that cannot be attributed to the node that applied it makes the run NOT
     VERIFIED (never green). `none`: every ack attributed and no overlap. -/
 def ackVerdict (samples : List (Nat × Option String × List (String × String))) (ws : List WriteRec)
-    (own : List Reading := []) : Option String :=
-  let (dual, unatt) := ackOverlaps samples ws own
+    (own : List Reading := []) (trace : Std.HashMap String (List String) := {}) : Option String :=
+  let (dual, unatt) := ackOverlaps samples ws own trace
   match dual.head? with
   | some (a, b) =>
     some s!"PRODUCT GAP (dual acknowledgement over two failovers, authority ON): acks of two nodes overlap ({a.ip} {a.span} / {b.ip} {b.span}); {dual.length} overlapping ack(s)"
   | none =>
     match unatt.head? with
-    | some w => some s!"NOT VERIFIED: {unatt.length} acknowledgement(s) cannot be attributed to the node that applied them (neither the map master nor the nodes' own role readings over the write name one applier, e.g. {w.ip} {w.span}): an overlap cannot be ruled out"
+    | some w => some s!"NOT VERIFIED: {unatt.length} acknowledgement(s) cannot be attributed to the node that applied them (neither the write trace of any flared, the map master, nor the nodes' own role readings over the write name one applier, e.g. {w.ip} {w.span} key {w.key}; trace lines for it: {((trace.get? w.key).getD []).length}): an overlap cannot be ruled out"
     | none => none
 
 /-- One reading round of every pod's own view (the debug pod's clock), for the attribution. -/
@@ -398,6 +457,32 @@ private def tfOwn (c : Ctx) : IO (List Reading) := do
       | some (a, b, o) => out := out ++ [{ pod := p.name, ts := a, te := b, view := o.bind ownVOf }]
       | none => pure ()
   return out
+
+/-- Follows the flared log of each pod (all incarnations: the loop re-attaches after a kill) into a local
+    file, keeping only the `write-trace` lines prefixed with the pod's name. The logs of a force-killed pod
+    are gone afterwards, so they must be streamed while the test runs. -/
+structure TraceFollow where
+  file : String
+
+private def startTraceFollow (c : Ctx) (pods : List String) : IO TraceFollow := do
+  let file := s!"/tmp/flare-wtrace-{c.cfg.«namespace»}-{← IO.monoNanosNow}.txt"
+  IO.FS.writeFile file ""
+  let ns := c.cfg.«namespace»
+  let one (pod : String) : String :=
+    s!"( while [ ! -e {file}.stop ]; do kubectl logs -f {pod} -n {ns} -c flared 2>/dev/null | grep --line-buffered 'write-trace ' | sed -u 's|^|{pod} |' >> {file}; sleep 0.3; done ) &"
+  let script := "trap 'kill 0' TERM; " ++ " ".intercalate (pods.map one) ++ " wait"
+  discard <| IO.Process.spawn { cmd := "setsid", args := #["sh", "-c", script], stdin := .null, stdout := .null, stderr := .null }
+  return { file }
+
+/-- Stop the followers (a last re-attach is not awaited) and read what they collected. -/
+private def stopTraceFollow (t : TraceFollow) : IO (List String) := do
+  IO.FS.writeFile s!"{t.file}.stop" ""
+  discard <| IO.Process.output { cmd := "pkill", args := #["-TERM", "-f", s!"{t.file}"] }
+  IO.sleep 500
+  let txt ← IO.FS.readFile t.file
+  IO.FS.removeFile t.file
+  discard <| IO.Process.output { cmd := "rm", args := #["-f", s!"{t.file}.stop"] }
+  return (txt.splitOn "\n").filter (!·.isEmpty)
 
 private def killPod (c : Ctx) (pod : String) : IO Unit := do
   c.event s!"killing {pod} (force)"
@@ -419,6 +504,8 @@ private def twoFailoversRun (c : Ctx) : IO TestResult := do
   -- the nodes' own role readings (every pod's own view, timed on the writers' clock): the second source of
   -- who applied an ack, where the operator's map does not say (its master changed / unknown around it)
   let ownObs ← startObserver (tfOwn c) 1000
+  -- the write trace of every flared (direct per-request evidence of the applier), streamed while it runs
+  let traceFollow ← startTraceFollow c ((← c.pods).getD [] |>.map (·.name))
   let mut names ← writersOnPods c "p1"
   IO.sleep 15000
   -- first failover
@@ -430,6 +517,7 @@ private def twoFailoversRun (c : Ctx) : IO TestResult := do
   if !ok1 || m2 == m1 then
     discard <| obs.finish
     discard <| ownObs.finish
+    discard <| stopTraceFollow traceFollow
     for n in names do discard <| c.stopWriter n
     return .fail "failover 1 did not complete (no other pod holds a grant within 300 s)"
   names := names ++ (← writersOnPods c "p2")
@@ -447,6 +535,7 @@ private def twoFailoversRun (c : Ctx) : IO TestResult := do
   if !adopted then
     discard <| obs.finish
     discard <| ownObs.finish
+    discard <| stopTraceFollow traceFollow
     for n in names do discard <| c.stopWriter n
     return .fail (notSetUp s!"the operator did not adopt {m2}'s history within 180 s of its promotion (the second failover would meet an unresolved promotion intent)")
   -- second failover, in a row (the previous master's copy is still being rebuilt)
@@ -461,11 +550,13 @@ private def twoFailoversRun (c : Ctx) : IO TestResult := do
     | .ok l => pure l
     | .error e => do
       discard <| ownObs.finish
+      discard <| stopTraceFollow traceFollow
       for n in names do discard <| c.stopWriter n
       return .fail (unobservable e)
   let own ← match ← ownObs.finish with
     | .ok l => pure (l.flatMap id)
     | .error e => do
+      discard <| stopTraceFollow traceFollow
       for n in names do discard <| c.stopWriter n
       return .fail (unobservable s!"own-view observer: {e}")
   let mut ws : List WriteRec := []
@@ -474,14 +565,22 @@ private def twoFailoversRun (c : Ctx) : IO TestResult := do
     match ← c.stopWriter n with
     | some wl => ws := ws ++ wl.ws; complete := complete && wl.complete
     | none => complete := false
-  let (_, unattributed) := ackOverlaps samples ws own
+  IO.sleep 1500
+  let traceLines ← stopTraceFollow traceFollow
+  let trace := traceIndex traceLines
+  let acks := ws.filter fun w => classify w.reply == .ack
+  let byTrace := acks.filter fun w => (traceApplier trace w).isSome
+  let twoAppliers := acks.filter fun w => ((trace.get? w.key).getD []).length > 1
+  let (_, unattributed) := ackOverlaps samples ws own trace
+  let (_, unattNoTrace) := ackOverlaps samples ws own
   let (_, unattByMap) := ackOverlaps samples ws
-  c.art "report.txt" s!"masters {m1} -> {m2} -> {m3}; writes {ws.length}; acks {(ws.filter fun w => classify w.reply == .ack).length}; unattributed by the map alone {unattByMap.length}, with the nodes' own role readings {unattributed.length} ({own.length} readings)"
+  c.art "report.txt" s!"masters {m1} -> {m2} -> {m3}; writes {ws.length}; acks {acks.length}; write-trace lines {traceLines.length} (keys {trace.size}); acks attributed by the write trace {byTrace.length}, applied as master by two pods {twoAppliers.length}; unattributed: by the map alone {unattByMap.length}, with the own role readings {unattNoTrace.length} ({own.length} readings), with the trace as well {unattributed.length}"
+  c.event s!"attribution: {acks.length} acks, {byTrace.length} by the write trace ({traceLines.length} trace lines), {unattributed.length} unattributed (map+own alone: {unattNoTrace.length})"
   -- a failover that did not complete is the finding, whatever the writer logs of the dead window say
   -- (a writer that never got an ack is rejected as unobserved and would mask it as UNOBSERVABLE)
   if !ok2 then return .fail s!"the second failover did not complete: no pod other than {m2} holds a grant within 300 s (a prepare is stuck, or the partition is held: see the operator log); writer logs complete: {complete} ({names.length} writers)"
   if !complete then return .fail (unobservable "a writer log was not confirmed complete")
-  let verdict := ackVerdict samples ws own
+  let verdict := ackVerdict samples ws own trace
   if let some v := verdict then
     if v.startsWith "PRODUCT GAP" then return .fail v
   let after := (ws.filter fun w => classify w.reply == .ack && pathOf samples w == "local" && w.ip != "").filter fun w =>
@@ -492,7 +591,9 @@ private def twoFailoversRun (c : Ctx) : IO TestResult := do
   return .pass
 
 def twoFailoversSuite : TestSuite :=
-  let cfg := { waCfg "wa-two" true false with multiNode := false, partitions := 1, replicas := 3 }
+  let cfg0 := { waCfg "wa-two" true false with multiNode := false, partitions := 1, replicas := 3 }
+  -- flared logs one line per applied mutation (write-authority-trace, tests only): the direct evidence of the applier
+  let cfg := { cfg0 with extraFlaredConf := cfg0.extraFlaredConf ++ "\nwrite-authority-trace = true" }
   { name := "write-authority-two-failovers"
     setup := waSetup cfg
     teardown := cleanupCluster cfg

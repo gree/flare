@@ -217,6 +217,7 @@ int op_incr::_run_server() {
 	}
 
 	if (r_storage == storage::result_stored) {
+		fence_entry.trace_applied(this->_incr ? "incr" : "decr", this->_entry.key);
 		if(this->_incr){
 			stats_object->increment_incr_hits();
 		} else {

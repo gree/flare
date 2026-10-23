@@ -37,6 +37,7 @@
 #include "handler_reaper.h"
 #include "handler_authority.h"
 #include "write_promise.h"
+#include "write_fence.h"
 #include "op_authority.h"
 #include "handler_storage_check.h"
 #include "handler_request.h"
@@ -189,6 +190,11 @@ static bool flared_is_slave_of(int partition) {
 	return cl != NULL && cl->get_own_assignment(r, st, p) && r == cluster::role_slave && p == partition;
 }
 
+// write-authority-trace (tests): one log line per applied mutation (write_fence::entry::trace_applied)
+static void flared_write_trace_sink(const string& line) {
+	log_notice("%s", line.c_str());
+}
+
 // `authority first` was accepted: re-run the promotion it was missing for (the same gates as the
 // validator thread's retry), now, so the first master's epoch is advanced before the operator reads it
 static const int first_build_hook_lock_wait_ms = 500;
@@ -243,6 +249,10 @@ int flared::startup(int argc, char **argv) {
 				ini_option_object().get_write_authority_max_ttl_ms(), why)) {
 			log_err("write-authority: %s", why.c_str());
 			return -1;
+		}
+		if (ini_option_object().is_write_authority_trace()) {
+			write_fence::trace_set_sink(&flared_write_trace_sink);
+			log_notice("write authority trace ENABLED (test only): one write-trace line per applied mutation%s", "");
 		}
 		if (ini_option_object().is_write_authority_enabled()) {
 			log_notice("write authority ENABLED (margin=%llu ms, max ttl=%llu ms): writes need the operator-given membership and the successors' promises",

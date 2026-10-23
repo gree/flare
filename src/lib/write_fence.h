@@ -97,6 +97,10 @@ namespace flare {
 
 class write_fence {
 public:
+	/** install (or, with NULL, remove) the sink of the write trace (see entry::trace_applied). Off by
+	    default; flared installs it only with write-authority-trace (tests): a line per applied mutation. */
+	static void trace_set_sink(void (*sink)(const std::string& line));
+
 	/** arm (or re-arm with the SAME token, extending the TTL). Fails when
 	    another token holds an unexpired fence or the arguments are invalid.
 	    `why` names the reason on failure. */
@@ -167,6 +171,13 @@ public:
 		    admission and is off. */
 		bool apply_begin();
 		void apply_end();
+		/** WRITE TRACE (off unless a sink is installed, see trace_set_sink): call after the storage write
+		    of a mutation that was applied (stored / deleted / incremented). Emits ONE line naming the
+		    operation, the key, the role this node applied it in (master / replica / unbound), the
+		    partition, the authority's term / generation / solo flag, this node's monotonic clock (ns) and
+		    its identity (boot id, copy id): the direct evidence of WHICH node applied an acknowledged
+		    write as the master. Only entries whose apply_begin() succeeded are traced. */
+		void trace_applied(const char* op, const std::string& key);
 		/** the same check for a step that is not held (the forward to the
 		    replicas): true when the admitted authority is still current. */
 		bool still_authorized();
@@ -178,6 +189,7 @@ public:
 		bool _bound_replica;
 		bool _applying;
 		bool _bound_solo;
+		bool _applied;
 		bool _admit_master(int partition);
 		bool _admit_replica(int partition, const std::string& tag);
 		uint32_t _bound_partition;
@@ -306,6 +318,7 @@ private:
 	static std::map<uint32_t, part_state>	_auth_parts;
 	static std::set<uint32_t>	_auth_registered;
 	static uint64_t			_auth_refused;
+	static void				(*_trace_sink)(const std::string& line);
 	static uint64_t			(*_auth_clock)();
 };
 

@@ -1621,7 +1621,31 @@ def partChecks : List (String × Bool) :=
         -- two appliers overlapping by the own readings: p0 as master 105..113 and p1 acking in 108..112 (p1 slave by its own view -> forwarded to the unique master p0: same applier, no overlap)
         && ackVerdict gap [ak 6 105 113 "ip0", ak 7 108 112 "ip1"] own == none
         -- a map-only run (no readings) behaves as before
-        && startsWith (ackVerdict gap [ak 8 120 121 "ip1"]) "NOT VERIFIED")
+        && startsWith (ackVerdict gap [ak 8 120 121 "ip1"]) "NOT VERIFIED"),
+    ("two failovers (authority ON): flared's WRITE TRACE binds each ack to the pod that applied it as the master — exactly one pod -> attributed (even where the map and the own views cannot); replica / other-role lines never attribute; no line -> falls back to the map and own views (else NOT VERIFIED); a key applied as master by TWO pods is never attributed",
+      let ips := [("ip0", "p0"), ("ip1", "p1"), ("ip2", "p2")]
+      let smp := fun (t : Nat) (m : Option String) => ((t, m, ips) : Nat × Option String × List (String × String))
+      let gap := (List.range 40).map fun i => smp (100 + i) (if i < 15 then some "p0" else if i < 30 then none else some "p1")
+      let ak := fun (n t0 t : Nat) (ip : String) => ({ n, t0, t, ip, key := s!"k{n}", value := "v", reply := "STORED" } : WriteRec)
+      let line := fun (pod key role : String) =>
+        s!"{pod} [123][NTC]x.cc:9-f] write-trace op=set key={key} role={role} partition=0 term=2 gen=2 solo=0 mono_ns=5 boot=b copy=c"
+      let tr := traceIndex [line "p1" "k1" "master", line "p0" "k1" "replica", line "p2" "k2" "replica",
+        line "p0" "k3" "master", line "p1" "k3" "master", "p1 unrelated log line", line "p0" "k5" "master"]
+      -- k1 at 120 (no master in the map, no readings): p1 by the trace; the replica line of p0 does not count
+      traceApplier tr (ak 1 120 121 "ip1") == some "p1"
+        && ackVerdict gap [ak 1 120 121 "ip1"] [] tr == none
+        -- k2 has only a replica line: no trace attribution; the map says nothing at 120 -> NOT VERIFIED
+        && traceApplier tr (ak 2 120 121 "ip1") == none
+        && startsWith (ackVerdict gap [ak 2 120 121 "ip1"] [] tr) "NOT VERIFIED"
+        -- k3 applied as master by two pods: never attributed, and the map's answer is not used instead
+        && traceApplier tr (ak 3 105 106 "ip0") == none
+        && startsWith (ackVerdict gap [ak 3 105 106 "ip0"] [] tr) "NOT VERIFIED"
+        -- k4 has no line at all (trace lost at a kill): the map master (p0, stable at 105) still attributes it
+        && ackVerdict gap [ak 4 105 106 "ip0"] [] tr == none
+        -- the trace wins over the map: k5 was applied by p0, the map said p1 at 133 -> two appliers overlapping is a PRODUCT GAP
+        && startsWith (ackVerdict gap [ak 5 133 134 "ip1", ak 6 133 134 "ip1"] [] (traceIndex [line "p0" "k5" "master", line "p1" "k6" "master"])) "PRODUCT GAP"
+        -- no trace: unchanged
+        && startsWith (ackVerdict gap [ak 2 120 121 "ip1"]) "NOT VERIFIED")
   ]
 
 -- §11 write-authority DESIGN MODEL (not product code): the review's

@@ -153,6 +153,7 @@ int op_delete::_run_server() {
 		fence_entry.apply_end();
 		switch (applied) {
 			case storage::identified_applied:
+				fence_entry.trace_applied("delete", this->_entry.key);
 				stats_object->increment_delete_hits();
 				if (!fence_entry.ack_ok()) {
 					return this->_send_result(result_server_error, "write authority lost before ack");
@@ -188,6 +189,7 @@ int op_delete::_run_server() {
 	}
 
 	if (r_storage == storage::result_deleted) {
+		fence_entry.trace_applied("delete", this->_entry.key);
 		stats_object->increment_delete_hits();
 		// post-proxy (notify updates to slaves if we need)
 		if (fence_entry.still_authorized()) {	// else no forward; the ACK is refused below

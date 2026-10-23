@@ -6,6 +6,7 @@
 #include "write_fence.h"
 
 #include <stdio.h>
+#include <time.h>
 
 namespace gree {
 namespace flare {
@@ -56,6 +57,7 @@ std::map<uint32_t, write_fence::part_state>	write_fence::_auth_parts;
 std::set<uint32_t>	write_fence::_auth_registered;
 uint64_t		write_fence::_auth_refused = 0;
 uint64_t		(*write_fence::_auth_clock)() = default_boottime_ns;
+void			(*write_fence::_trace_sink)(const std::string& line) = NULL;
 
 namespace {
 class exclusive {
@@ -186,6 +188,7 @@ write_fence::entry::entry() {
 		this->_bound_replica = false;
 		this->_applying = false;
 		this->_bound_solo = false;
+		this->_applied = false;
 		this->_bound_partition = 0;
 		this->_bound_serial = 0;
 		this->_bound_deadline = 0;
@@ -424,12 +427,48 @@ bool write_fence::entry::apply_begin() {
 		scoped l(&_mutex);
 		if ((!this->_bound && !_auth_enabled) || _bound_ok_locked(*this, _auth_clock())) {
 			this->_applying = true;
+			this->_applied = true;
 			return true;
 		}
 		_auth_refused++;
 	}
 	pthread_rwlock_unlock(&_apply_rw);
 	return false;
+}
+
+void write_fence::trace_set_sink(void (*sink)(const std::string& line)) {
+	scoped l(&_mutex);
+	_trace_sink = sink;
+}
+
+void write_fence::entry::trace_applied(const char* op, const std::string& key) {
+	if (!this->_applied) {
+		return;
+	}
+	void (*sink)(const std::string& line) = NULL;
+	std::string boot_id, copy_id;
+	{
+		scoped l(&_mutex);
+		sink = _trace_sink;
+		boot_id = _auth_boot_id;
+		copy_id = _auth_copy_id;
+	}
+	if (sink == NULL) {
+		return;
+	}
+	struct timespec ts;
+	unsigned long long mono_ns = 0;
+	if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0) {
+		mono_ns = static_cast<unsigned long long>(ts.tv_sec) * 1000000000ULL + static_cast<unsigned long long>(ts.tv_nsec);
+	}
+	char buf[512];
+	snprintf(buf, sizeof(buf),
+		"write-trace op=%s key=%s role=%s partition=%u term=%llu gen=%llu solo=%d mono_ns=%llu boot=%s copy=%s",
+		op, key.c_str(), this->_bound_replica ? "replica" : (this->_bound ? "master" : "unbound"),
+		static_cast<unsigned>(this->_bound_partition), static_cast<unsigned long long>(this->_bound_term),
+		static_cast<unsigned long long>(this->_bound_gen), this->_bound_solo ? 1 : 0, mono_ns,
+		boot_id.c_str(), copy_id.c_str());
+	sink(std::string(buf));
 }
 
 void write_fence::entry::apply_end() {
@@ -791,6 +830,7 @@ void write_fence::reset_for_test() {
 	_auth_refused = 0;
 	_auth_clock = default_boottime_ns;
 	gettime_fn = clock_gettime;
+	_trace_sink = NULL;
 }
 
 }	// namespace flare

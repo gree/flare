@@ -129,6 +129,7 @@ private:
 	bool			_repl_identity_forward;
 	bool			_wal_follow_enabled;
 	bool			_write_authority_enabled;
+	bool			_write_authority_trace;
 	uint64_t		_write_authority_margin_ms;
 	uint64_t		_write_authority_max_ttl_ms;
 	int				_wal_follow_max_batches;
@@ -295,6 +296,7 @@ public:
 	bool is_wal_follow_enabled() { return this->_wal_follow_enabled; }
 	// C' (design §13): startup-only, OFF by default, no numeric default
 	bool is_write_authority_enabled() { return this->_write_authority_enabled; }
+	bool is_write_authority_trace() { return this->_write_authority_trace; }
 	uint64_t get_write_authority_margin_ms() { return this->_write_authority_margin_ms; }
 	uint64_t get_write_authority_max_ttl_ms() { return this->_write_authority_max_ttl_ms; }
 	int get_wal_follow_max_batches() { return this->_wal_follow_max_batches; }

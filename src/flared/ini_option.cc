@@ -107,6 +107,7 @@ ini_option::ini_option():
 		_repl_identity_forward(default_repl_identity_forward),
 		_wal_follow_enabled(default_wal_follow_enabled),
 		_write_authority_enabled(false),
+		_write_authority_trace(false),
 		_write_authority_margin_ms(0),
 		_write_authority_max_ttl_ms(0),
 		_wal_follow_max_batches(default_wal_follow_max_batches),
@@ -487,6 +488,9 @@ int ini_option::load() {
 		}
 		if (opt_var_map.count("write-authority-enabled")) {
 			this->_write_authority_enabled = opt_var_map["write-authority-enabled"].as<bool>();
+		}
+		if (opt_var_map.count("write-authority-trace")) {
+			this->_write_authority_trace = opt_var_map["write-authority-trace"].as<bool>();
 		}
 		if (opt_var_map.count("write-authority-margin-ms")) {
 			this->_write_authority_margin_ms = opt_var_map["write-authority-margin-ms"].as<uint64_t>();
@@ -967,6 +971,7 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("flush-all-enabled",					program_options::value<bool>(),		"administrative gate for the flush_all op; false refuses it with SERVER_ERROR (default true, dynamic)")
 		("repl-identity-forward",			program_options::value<bool>(),		"carry the source's replication identity on forwarded writes so the destination orders them against the WAL stream (SAF-10b); enable only when every node understands it (default false, dynamic)")
 		("write-authority-enabled",			program_options::value<bool>(),		"C' no dual writer (design §13): a master writes only while its successors promise not to be promoted; the operator drives promotion through an intent. Startup-only, default false; every node of the cluster must switch together")
+		("write-authority-trace",			program_options::value<bool>(),		"test only: log one 'write-trace' line per applied mutation (operation, key, role, partition, term, generation, monotonic ns, boot / copy id), the direct evidence of which node applied an acknowledged write as the master. Startup-only, default false")
 		("write-authority-margin-ms",		program_options::value<uint64_t>(),	"clock drift margin added to every promise a replica gives (required, > 0, when write-authority-enabled; no default)")
 		("write-authority-max-ttl-ms",		program_options::value<uint64_t>(),	"upper bound of a promise's ttl a replica accepts; also its quiet time after a restart (required, > 0, when write-authority-enabled; no default)")
 		("repl-follow-enabled",				program_options::value<bool>(),		"run a continuous WAL follower on an active RocksDB slave so a blip is recovered from the applied position without a rebuild (SAF-10c); requires repl-identity-forward cluster-wide (default false, dynamic)")

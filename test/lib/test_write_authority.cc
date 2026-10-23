@@ -21,6 +21,8 @@
 #include <time_watcher.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <vector>
+#include <string>
 
 using namespace gree::flare;
 
@@ -969,5 +971,30 @@ namespace test_write_authority
 		write_fence::authority_set_floor(0, 4, 0);
 		write_fence::entry stale;
 		cut_assert_false(stale.admit_replica(0, "0:3:2"));
+	}
+
+	static std::vector<std::string> traced;
+	static void collect_trace(const std::string& line) { traced.push_back(line); }
+
+	// the write trace (off by default): one line per APPLIED mutation naming the key, the role, the partition,
+	// the authority's term / generation and this node's identity; nothing for a refused write
+	void test_write_trace_names_the_applier_of_every_applied_write()
+	{
+		traced.clear();
+		grant_now(3, 2);
+		cut_assert_equal_string("STORED\r\n", run_set("untraced").c_str());	// no sink: silent
+		cut_assert_equal_int(0, static_cast<int>(traced.size()));
+		write_fence::trace_set_sink(&collect_trace);
+		cut_assert_equal_string("STORED\r\n", run_set("tk1").c_str());
+		cut_assert_equal_string("STORED\r\n", run_set("tk2").c_str());
+		cut_assert_equal_int(2, static_cast<int>(traced.size()));
+		cut_assert_equal_string("write-trace op=set key=tk1 role=master partition=0 term=3 gen=2 solo=0", traced[0].substr(0, traced[0].find(" mono_ns=")).c_str());
+		cut_assert_true(traced[0].find(" boot=boot-1 copy=copy-1") != std::string::npos);
+		cut_assert_equal_string("write-trace op=set key=tk2 role=master partition=0 term=3 gen=2 solo=0", traced[1].substr(0, traced[1].find(" mono_ns=")).c_str());
+		// no authority (expired): refused, so NOT traced
+		fake_ns += 100 * S;
+		run_set("tk3");
+		cut_assert_equal_int(2, static_cast<int>(traced.size()));
+		write_fence::trace_set_sink(NULL);
 	}
 }

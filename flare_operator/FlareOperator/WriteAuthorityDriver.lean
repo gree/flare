@@ -98,7 +98,10 @@ def recClient (ctx : Ctx) (p : Nat) : IO Client :=
 
 /-! ## The intents of one partition and term -/
 
+/-- One intent of the partition: `termNext` is the term it was made for (part of its resource name and
+    of its wire scope), `n` its number within that term. -/
 structure Attempt where
+  termNext : Nat
   n : Nat
   intent : Intent
 
@@ -106,12 +109,40 @@ partial def scanFrom (ctx : Ctx) (p termNext n : Nat) (acc : List Attempt) : IO 
   if n > 16 then return .error "too many promotion attempts for one term (manual)"
   let c ← ctx.clientFor (intentName ctx.cr p termNext n)
   match ← readIntent c with
-  | .settled i => scanFrom ctx p termNext (n + 1) (acc ++ [{ n, intent := i }])
+  | .settled i => scanFrom ctx p termNext (n + 1) (acc ++ [{ termNext, n, intent := i }])
   | .absent => pure (.ok acc)
   | _ => pure (.error "a promotion intent record is unreadable or broken")
 
 def scanAttempts (ctx : Ctx) (p termNext : Nat) : IO (Except String (List Attempt)) :=
   scanFrom ctx p termNext 1 []
+
+/-- How many earlier terms are looked at for a pending intent that was never reclaimed (bounded: one
+    read per term and pass). -/
+def reclaimTerms : Nat := 4
+
+/-- The intents of the terms before `termNext` (oldest first), within `reclaimTerms`. -/
+def scanEarlier (ctx : Ctx) (p termNext : Nat) : IO (Except String (List Attempt)) := do
+  let mut acc : List Attempt := []
+  for i in [0:reclaimTerms] do
+    let t := termNext - (reclaimTerms - i)
+    if t ≥ 1 && t < termNext then
+      match ← scanFrom ctx p t 1 [] with
+      | .ok l => acc := acc ++ l
+      | .error e => return .error e
+  pure (.ok acc)
+
+/-- The intents of the current term and (before them) of the earlier terms that may still be pending. -/
+def scanAll (ctx : Ctx) (p termNext : Nat) : IO (Except String (List Attempt)) := do
+  match ← scanEarlier ctx p termNext with
+  | .error e => pure (.error e)
+  | .ok old =>
+    match ← scanAttempts ctx p termNext with
+    | .error e => pure (.error e)
+    | .ok cur => pure (.ok (old ++ cur))
+
+/-- The attempts made for the term that the record `termNext` is about to start. -/
+def currentTerm (termNext : Nat) (atts : List Attempt) : List Attempt :=
+  atts.filter (·.termNext == termNext)
 
 /-- Finished or not: pending, or committed while the old master is still the map's master. -/
 def frozenBy (atts : List Attempt) : Bool :=
@@ -168,7 +199,8 @@ def nowAt (ctx : Ctx) : IO At := do
 
 /-- The id the successor knows an attempt by: unique across terms (an intent message that was
     delayed from an older term can never match a newer one). -/
-def wid (m : Members) (n : Nat) : Nat := (m.term + 1) * 100 + n
+def widOf (termNext n : Nat) : Nat := termNext * 100 + n
+def wid (m : Members) (n : Nat) : Nat := widOf (m.term + 1) n
 
 /-- The intent's binding is the REAL incarnation: pod UID, flared boot id, persistent copy id. -/
 def refOf (ctx : Ctx) (p : Nat) (m : Members) (n : Nat) (key : String) (b : Bind) : Ref :=
@@ -179,12 +211,24 @@ def refOf (ctx : Ctx) (p : Nat) (m : Members) (n : Nat) (key : String) (b : Bind
 def wireOf (m : Members) (n : Nat) (b : Bind) : WireScope :=
   { id := wid m n, termNext := m.term + 1, gen := m.gen, boot := b.boot, copy := b.copy }
 
-/-- The ORIGINAL wire scope of an existing attempt, rebuilt from its intent (generation and receiver
-    binding as created) and the term it was scanned under: every message about that attempt (prepare,
-    commit, cancel, re-cancel) uses it, never the current membership's generation. -/
-def wireOfAttempt (m : Members) (a : Attempt) : WireScope :=
-  { id := wid m a.n, termNext := m.term + 1, gen := a.intent.ref.scope.generation,
+/-- The ORIGINAL wire scope of an existing attempt, rebuilt from the attempt itself (its own term,
+    generation and receiver binding as created): every message about that attempt (prepare, commit,
+    cancel, re-cancel) uses it, never the current membership's term or generation. -/
+def wireOfAttempt (a : Attempt) : WireScope :=
+  { id := widOf a.termNext a.n, termNext := a.termNext, gen := a.intent.ref.scope.generation,
     boot := a.intent.binding.bootId, copy := a.intent.binding.copyId }
+
+/-- The attempt was made for exactly the term and generation of the record in force. -/
+def inScope (m : Members) (a : Attempt) : Bool :=
+  a.termNext == m.term + 1 && a.intent.ref.scope.generation == m.gen
+
+/-- A pending attempt of an older term or generation: it can never be committed (the commit needs the
+    current membership), so it is to be cancelled in its original scope. -/
+def stalePending (m : Members) (a : Attempt) : Bool :=
+  a.intent.decision == .pending && !inScope m a
+
+def attemptName (ctx : Ctx) (p : Nat) (a : Attempt) : String :=
+  intentName ctx.cr p a.termNext a.n
 
 def membershipOf (ctx : Ctx) (p : Nat) (m : Members) : Membership :=
   { scope := { cluster := ctx.cr, partition := p, generation := m.gen }, members := m.successors }
@@ -200,8 +244,8 @@ def bindingOfIntent (i : Intent) : Bind :=
   { uid := i.binding.podUid, boot := i.binding.bootId, copy := i.binding.copyId }
 
 /-- The newest attempt for this exact incarnation of the candidate (pod UID, flared boot id, copy id). -/
-def newestFor (as : List Attempt) (key : String) (b : Bind) : Option Attempt :=
-  (as.filter fun a => a.intent.successor == key && bindingOfIntent a.intent == b).getLast?
+def newestFor (m : Members) (as : List Attempt) (key : String) (b : Bind) : Option Attempt :=
+  (as.filter fun a => inScope m a && a.intent.successor == key && bindingOfIntent a.intent == b).getLast?
 
 def viewOf (a : Option Attempt) (now : At) : IntentView :=
   match a with
@@ -224,7 +268,7 @@ def ensureFence (c : Client) (token : Nat) (i : Intent) : IO Bool := do
   else pure false
 
 def doCreate (ctx : Ctx) (p : Nat) (m : Members) (as : List Attempt) (key : String) (b : Bind) : IO Bool := do
-  let n := (as.map (·.n)).foldl max 0 + 1
+  let n := ((currentTerm (m.term + 1) as).map (·.n)).foldl max 0 + 1
   let now ← nowAt ctx
   let deadline : At := { now with t := now.t + ctx.cfg.prepareTimeoutMs }
   let c ← ctx.clientFor (intentName ctx.cr p (m.term + 1) n)
@@ -234,13 +278,13 @@ def doCreate (ctx : Ctx) (p : Nat) (m : Members) (as : List Attempt) (key : Stri
   | _ => pure false
 
 def doPrepare (ctx : Ctx) (p : Nat) (m : Members) (a : Attempt) (key : String) (b : Bind) : IO Bool := do
-  let sc := wireOfAttempt m a
+  let sc := wireOfAttempt a
   match (← ask ctx key (cmdPrepare p sc)).bind Status.parse with
   | none => pure false
   | some s =>
     if s.state != "preparing" || !(replicaOf s sc).scopeOk then pure false
     else
-      let c ← ctx.clientFor (intentName ctx.cr p (m.term + 1) a.n)
+      let c ← ctx.clientFor (attemptName ctx p a)
       if !(← ensureFence c ctx.token a.intent) then pure false
       else
         let oldUntil : At := { clock := { node := key, boot := b.boot }, t := s.remainingMs }
@@ -252,9 +296,9 @@ def doPrepare (ctx : Ctx) (p : Nat) (m : Members) (a : Attempt) (key : String) (
 
 /-- Cancel one attempt (the terminal CAS first, then the successor with the attempt's own scope).
     `true` when the store says cancelled. -/
-def doCancelAttempt (ctx : Ctx) (p : Nat) (m : Members) (a : Attempt) : IO Bool := do
-  let c ← ctx.clientFor (intentName ctx.cr p (m.term + 1) a.n)
-  let sendCancel : IO Unit := discard <| ask ctx a.intent.successor (cmdCancel p (wireOfAttempt m a))
+def doCancelAttempt (ctx : Ctx) (p : Nat) (a : Attempt) : IO Bool := do
+  let c ← ctx.clientFor (attemptName ctx p a)
+  let sendCancel : IO Unit := discard <| ask ctx a.intent.successor (cmdCancel p (wireOfAttempt a))
   if (← ensureFence c ctx.token a.intent) then
     match ← cancelIntent c a.intent.ref (.leader ctx.token) (← nowAt ctx) with
     | .done _ => sendCancel; pure true
@@ -262,11 +306,11 @@ def doCancelAttempt (ctx : Ctx) (p : Nat) (m : Members) (a : Attempt) : IO Bool 
     | _ => pure false
   else pure false
 
-def doCancel (ctx : Ctx) (p : Nat) (m : Members) (a : Attempt) : IO Unit :=
-  discard <| doCancelAttempt ctx p m a
+def doCancel (ctx : Ctx) (p : Nat) (a : Attempt) : IO Unit :=
+  discard <| doCancelAttempt ctx p a
 
 def doCommit (ctx : Ctx) (p : Nat) (m : Members) (a : Attempt) : IO Bool := do
-  let c ← ctx.clientFor (intentName ctx.cr p (m.term + 1) a.n)
+  let c ← ctx.clientFor (attemptName ctx p a)
   if !(← ensureFence c ctx.token a.intent) then pure false
   else
     match ← commitIntent c a.intent.ref (.leader ctx.token) (membershipOf ctx p m) (← nowAt ctx) with
@@ -302,7 +346,7 @@ partial def gate (ctx : Ctx) (p : Nat) (key uid : String) (fuel : Nat) : IO Gate
   | .error e => return .hold s!"the membership record: {e}"
   | .ok none => return .hold "no membership record yet"
   | .ok (some (m, _)) =>
-    match ← scanAttempts ctx p (m.term + 1) with
+    match ← scanAll ctx p (m.term + 1) with
     | .error e => return .hold e
     | .ok as =>
       match ← bindingNow ctx key p with
@@ -311,15 +355,30 @@ partial def gate (ctx : Ctx) (p : Nat) (key uid : String) (fuel : Nat) : IO Gate
         if b.uid != uid then return .hold "the candidate's pod is not the one the commit point observed"
         -- a pending attempt of ANOTHER incarnation of this candidate (restart, replaced copy) is dead:
         -- cancel it (terminal CAS), then go on with an attempt of the incarnation read now
-        let stale := as.filter fun a => a.intent.successor == key && bindingOfIntent a.intent != b && a.intent.decision == .pending
+        -- (also dead: a pending attempt of an earlier term or generation — it can never be committed
+        -- under the record in force; cancelled on its ORIGINAL resource and in its ORIGINAL scope)
+        let stale := as.filter fun a => a.intent.decision == .pending
+          && ((a.intent.successor == key && bindingOfIntent a.intent != b) || stalePending m a)
         if let some x := stale.head? then
-          discard <| doCancelAttempt ctx p m x
-          return .hold "an attempt of another incarnation of the candidate was cancelled; the next pass starts one for this incarnation"
+          discard <| doCancelAttempt ctx p x
+          return .hold "an attempt of another incarnation, term or generation was cancelled; the next pass starts a fresh one"
+        -- a CANCELLED attempt out of scope whose cancel never arrived (the node still prepares exactly
+        -- its scope): the cancel is sent again, in the original scope
+        let lost := as.filter fun a => a.intent.decision == .cancelled && !inScope m a
+          && a.intent.successor == key && (replicaOf st (wireOfAttempt a)).scopeOk && st.state == "preparing"
+        if let some x := lost.head? then
+          discard <| ask ctx key (cmdCancel p (wireOfAttempt x))
+          return .hold "the cancel of an abandoned prepare (older term / generation) was sent again; the next pass starts a fresh one"
+        -- a COMMITTED attempt of this term under another generation is never re-used or dropped
+        if as.any fun a => a.termNext == m.term + 1 && a.intent.decision == .committed
+            && a.intent.successor == key && !inScope m a then
+          IO.eprintln s!"[flare-operator] CRITICAL: write authority P{p}: a COMMITTED promotion intent of {key} belongs to an older generation of this term (manual)"
+          return .hold "a committed attempt of an older generation exists (fail-closed)"
         let now ← nowAt ctx
-        let a := newestFor as key b
-        let sc := (a.map fun x => wireOfAttempt m x).getD (wireOf m 0 b)
+        let a := newestFor m as key b
+        let sc := (a.map fun x => wireOfAttempt x).getD (wireOf m 0 b)
         let rv := some (replicaOf st sc)
-        let id := (a.map fun x => wid m x.n).getD 0
+        let id := (a.map fun x => widOf x.termNext x.n).getD 0
         let acked ← ackedFor ctx p m
         match gateDecide (m.successors.contains key) acked (viewOf a now) rv id with
         | .proceed => return .proceed
@@ -338,27 +397,27 @@ partial def gate (ctx : Ctx) (p : Nat) (key uid : String) (fuel : Nat) : IO Gate
           match a with
           | none => return .hold "no intent"
           | some x =>
-            doCancel ctx p m x
+            doCancel ctx p x
             return .hold s!"cancelled: {why}"
         | .commitCas =>
           match a with
           | none => return .hold "no intent"
           | some x =>
             if ← doCommit ctx p m x then
-              discard <| ask ctx key (cmdCommit p (wireOfAttempt m x))
+              discard <| ask ctx key (cmdCommit p (wireOfAttempt x))
               gate ctx p key uid (fuel - 1)
             else return .hold "the commit CAS did not apply"
         | .sendCommit =>
           match a with
           | none => return .hold "no intent"
           | some x =>
-            discard <| ask ctx key (cmdCommit p (wireOfAttempt m x))
+            discard <| ask ctx key (cmdCommit p (wireOfAttempt x))
             gate ctx p key uid (fuel - 1)
         | .sendCancel =>
           match a with
           | none => return .hold "no intent"
           | some x =>
-            discard <| ask ctx key (cmdCancel p (wireOfAttempt m x))
+            discard <| ask ctx key (cmdCancel p (wireOfAttempt x))
             return .hold "the cancel of the abandoned prepare was sent again; the next pass starts a new attempt"
 
 /-- One pass for one partition: decide the record, persist it, push it. `wanted` = the node keys the
@@ -372,9 +431,9 @@ def abandonUnwanted (ctx : Ctx) (p : Nat) (m : Members) (as : List Attempt) (wan
     IO (List Attempt) := do
   let mut out : List Attempt := []
   for a in as do
-    if a.intent.decision == .pending && !wanted.contains a.intent.successor then
-      if ← doCancelAttempt ctx p m a then
-        IO.eprintln s!"[flare-operator] write authority P{p}: the pending promotion intent {a.n} of {a.intent.successor} was not asked for in this pass: cancelled (its promises resume)"
+    if a.intent.decision == .pending && (!wanted.contains a.intent.successor || stalePending m a) then
+      if ← doCancelAttempt ctx p a then
+        IO.eprintln s!"[flare-operator] write authority P{p}: the pending promotion intent {a.n} (term {a.termNext}, generation {a.intent.ref.scope.generation}) of {a.intent.successor} was not asked for in this pass or is of an older term / generation: cancelled (its promises resume)"
         out := out ++ [{ a with intent := { a.intent with decision := .cancelled, decidedBy := some ctx.token } }]
       else out := out ++ [a]
     else out := out ++ [a]
@@ -390,7 +449,7 @@ def ensurePartition (ctx : Ctx) (p : Nat) (v : View) (wanted : List String := []
     let old := cur.map (·.1)
     let termNext := (old.map (·.term)).getD 0 + 1
     let atts ← match old with
-      | some _ => scanAttempts ctx p termNext
+      | some _ => scanAll ctx p termNext
       | none => pure (.ok [])
     match atts with
     | .error e =>
@@ -402,11 +461,11 @@ def ensurePartition (ctx : Ctx) (p : Nat) (v : View) (wanted : List String := []
         | none => pure as0
       let master := v.master.getD ""
       if (old.map (·.master)) == v.master then
-        for a in as do
+        for a in currentTerm termNext as do
           if a.intent.decision == .committed && !wanted.contains a.intent.successor then
             IO.eprintln s!"[flare-operator] CRITICAL: write authority P{p}: the promotion intent {a.n} of {a.intent.successor} is COMMITTED but the master did not change: that successor no longer promises, so the master cannot write until it is promoted (manual)"
-      let frozen := frozenBy as && (old.map (·.master)) == v.master
-      let want := Members.next old v frozen (committedFor as master)
+      let frozen := frozenBy (currentTerm termNext as) && (old.map (·.master)) == v.master
+      let want := Members.next old v frozen (committedFor (currentTerm termNext as) master)
       let m ← match want with
         | none => pure none
         | some w =>

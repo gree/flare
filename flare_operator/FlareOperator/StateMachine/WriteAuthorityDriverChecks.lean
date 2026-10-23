@@ -461,6 +461,123 @@ def tRecancelOldScope : IO Bool := do
     && cl == some (cmdCancel 0 { id := 201, termNext := 2, gen := 1, boot := "b1", copy := "c1" })
     && n3.state == "preparing" && n3.intent == 202
 
+/-- review (same-term generation change): the generation moves while the candidate stays WANTED. The
+    stale pending attempt (gen 1) is cancelled on ITS OWN resource and in ITS OWN scope — by the gate and
+    by the pass — then a fresh attempt for generation 2 is prepared and accepted. A stale COMMITTED
+    attempt is never re-used: the gate holds and nothing new is started. -/
+def tGenChangeWanted : IO Bool := do
+  let w ← World.new [A, B]
+  let _ ← ensurePartition (w.ctx 7) 0 (view1 A [B]) [B]
+  w.setClock 1000
+  w.round A [B]
+  let _ ← gate (w.ctx 7) 0 B "uid" 6                      -- prepared: id 201, term_next 2, gen 1
+  let n1 ← w.node B
+  w.bumpGen
+  let g1 ← gate (w.ctx 7) 0 B "uid" 6                     -- B is wanted, but the attempt is of gen 1
+  let n2 ← w.node B
+  let cl ← lastSent w B "cancel"
+  let d1 ← w.decision (iname 0 2 1)
+  let _ ← ensurePartition (w.ctx 7) 0 (view1 A [B]) [B]   -- the master acknowledges generation 2
+  w.round A [B]
+  let g2 ← gate (w.ctx 7) 0 B "uid" 6                     -- a fresh attempt for generation 2
+  let n3 ← w.node B
+  let d2 ← w.decision (iname 0 2 2)
+  let d1' ← w.decision (iname 0 2 1)
+  -- the same through the pass alone (ensurePartition): B stays wanted
+  let w2 ← World.new [A, B]
+  let _ ← ensurePartition (w2.ctx 7) 0 (view1 A [B]) [B]
+  w2.setClock 1000
+  w2.round A [B]
+  let _ ← gate (w2.ctx 7) 0 B "uid" 6
+  w2.bumpGen
+  let _ ← ensurePartition (w2.ctx 7) 0 (view1 A [B]) [B]
+  let m1 ← w2.node B
+  let e1 ← w2.decision (iname 0 2 1)
+  -- a committed attempt of an older generation is fail-closed
+  let w3 ← World.new [A, B]
+  let _ ← ensurePartition (w3.ctx 7) 0 (view1 A [B]) [B]
+  w3.setClock 1000
+  w3.round A [B]
+  let _ ← gate (w3.ctx 7) 0 B "uid" 6
+  w3.setClock 12000
+  let gc ← gate (w3.ctx 7) 0 B "uid" 6
+  w3.bumpGen
+  let _ ← ensurePartition (w3.ctx 7) 0 (view1 A [B]) [B]
+  let gh ← gate (w3.ctx 7) 0 B "uid" 6
+  let q ← w3.node B
+  return n1.state == "preparing" && n1.pGen == 1 && isHold g1 && n2.state == "following" && d1 == some .cancelled
+    && cl == some (cmdCancel 0 { id := 201, termNext := 2, gen := 1, boot := "b1", copy := "c1" })
+    && isHold g2 && n3.state == "preparing" && n3.intent == 202 && n3.pGen == 2 && d2 == some .pending && d1' == some .cancelled
+    && m1.state == "following" && e1 == some .cancelled
+    && gc == .proceed && isHold gh && q.state == "committed" && (← w3.decision (iname 0 2 2)) == none
+
+/-- review (cross-term pending): term 2 is pending on B, then C is promoted for term 3. The next pass
+    reclaims B's old intent (its own resource, its own scope: term_next 2), B promises again and accepts a
+    new prepare; a cancel of the old term sent later touches nothing of the new prepare. -/
+def tCrossTermPending : IO Bool := do
+  let w ← World.new [A, B, C]
+  let _ ← ensurePartition (w.ctx 7) 0 (view1 A [B, C]) [B]
+  w.setClock 1000
+  w.round A [B, C]
+  let _ ← gate (w.ctx 7) 0 B "uid" 6                      -- term 2 pending on B: id 201, term_next 2
+  let n1 ← w.node B
+  w.setNode A fun x => { x with reachable := false }
+  -- C was promoted for term 2 (another route): the record moves to term 2, master C
+  let c ← recClient (w.ctx 7) 0
+  match ← readRec c with
+  | .ok (some (m, rv)) =>
+    discard <| writeRec c (some rv) { m with term := 2, gen := 2, master := C, successors := [A, B], acked := false, ackBind := none }
+  | _ => pure ()
+  let r ← ensurePartition (w.ctx 7) 0 (view1 C [A, B]) []
+  let n2 ← w.node B
+  let cl ← lastSent w B "cancel"
+  let d1 ← w.decision (iname 0 2 1)
+  w.setClock 2000
+  w.round C [B]                                           -- B gives promises to the new master again
+  let n3 ← w.node B
+  let gm ← gate (w.ctx 7) 0 B "uid" 6                     -- term 3 attempt: id 301, term_next 3
+  let n4 ← w.node B
+  let old ← w.ask B (cmdCancel 0 { id := 201, termNext := 2, gen := 1, boot := "b1", copy := "c1" })
+  let n5 ← w.node B
+  return n1.state == "preparing" && n1.pTerm == 2 && (match r with | some m => m.term == 2 && m.master == C | none => false)
+    && n2.state == "following" && d1 == some .cancelled
+    && cl == some (cmdCancel 0 { id := 201, termNext := 2, gen := 1, boot := "b1", copy := "c1" })
+    && n3.promiseEnd > 0 && isHold gm && n4.state == "preparing" && n4.intent == 301 && n4.pTerm == 3
+    && (match old with | some t => t.startsWith "SERVER_ERROR" | none => false) && n5.state == "preparing" && n5.intent == 301
+
+/-- two failovers in a row: A is cut off and B is promoted (term 2), then B is cut off and C is promoted
+    (term 3). Each commit waits for the successor's own promise end; the second failover starts from the
+    record the first one left; the last master is solo. -/
+def tTwoFailovers : IO Bool := do
+  let w ← World.new [A, B, C]
+  let _ ← ensurePartition (w.ctx 7) 0 (view1 A [B, C]) [B]
+  w.setClock 1000
+  w.round A [B, C]
+  w.setNode A fun x => { x with reachable := false }
+  let _ ← gate (w.ctx 7) 0 B "uid" 6                      -- B prepared (promise to 12000)
+  w.setClock 11999
+  let g1 ← gate (w.ctx 7) 0 B "uid" 6
+  w.setClock 12000
+  let g2 ← gate (w.ctx 7) 0 B "uid" 6
+  let r1 ← ensurePartition (w.ctx 7) 0 (view1 B [C])      -- B is the master of term 2
+  let nB ← w.node B
+  w.round B [C]                                           -- B's last round: its grant runs on, C promised to 23000
+  w.setNode B fun x => { x with reachable := false }
+  let g3 ← gate (w.ctx 7) 0 C "uid" 6                     -- C prepared for term 3
+  let nC1 ← w.node C
+  w.setClock 22999
+  let g4 ← gate (w.ctx 7) 0 C "uid" 6
+  w.setClock 23000
+  let g5 ← gate (w.ctx 7) 0 C "uid" 6
+  let r2 ← ensurePartition (w.ctx 7) 0 (view1 C [])       -- C is the master of term 3
+  let nC2 ← w.node C
+  return isHold g1 && g2 == .proceed && (match r1 with | some m => m.term == 2 && m.master == B && m.successors == [C] | none => false)
+    && nB.mode == "replicated" && nB.memTerm == 2
+    && isHold g3 && nC1.state == "preparing" && nC1.intent == 301 && nC1.pTerm == 3
+    && isHold g4 && g5 == .proceed && (← w.decision (iname 0 3 1)) == some .committed
+    && (match r2 with | some m => m.term == 3 && m.master == C && m.successors.isEmpty | none => false)
+    && nC2.mode == "solo" && nC2.grant && nC2.memTerm == 3
+
 /-- review (ackedFor): the COMPLETE incarnation (pod UID, boot id, copy id) must be the one that
     acknowledged; a same-name pod recreated with only the UID changed is not; an unknown part is not;
     with the master unreadable altogether the durable ACK stands -/
@@ -494,6 +611,9 @@ def checks : IO (List (String × Bool)) := do
     ("driver: a restarted master is acknowledged anew (its incarnation is bound); no promotion before", ← tMasterRestart),
     ("driver: a pending prepare cancelled after a generation change is cancelled in its original scope; a new prepare is then accepted", ← tCancelOldScope),
     ("driver: the delayed cancel is sent again in the original scope (not the current generation); a new prepare is then accepted", ← tRecancelOldScope),
+    ("driver: a generation change with the candidate still wanted — the stale pending attempt is cancelled on its own resource / scope, a fresh one is prepared; a stale committed one is fail-closed", ← tGenChangeWanted),
+    ("driver: a previous term's pending prepare is reclaimed in its own scope after another node is promoted; the node promises and accepts a new prepare", ← tCrossTermPending),
+    ("driver: two failovers in a row — each waits for the successor's promise end; the last master is solo", ← tTwoFailovers),
     ("driver: the master's ACK needs the complete incarnation — a pod recreated with only the UID changed (or an unknown part) is not acknowledged", ← tAckedUid),
     ("driver: a committed intent is terminal — the leader's cancel is refused, the successor stays committed", ← tTerminal) ]
 

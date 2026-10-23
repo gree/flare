@@ -15,7 +15,7 @@ def mem (term gen : Nat) (master : String) (succ : List String) (acked := false)
 def reply (state : String) (intent remaining : Nat) (promotable : Bool) (mode : String) (mt mg : Nat)
     (grant solo : Bool) : String :=
   let b : Bool → String := fun x => if x then "1" else "0"
-  s!"STAT authority_enabled 1\r\nSTAT authority_refused 0\r\nSTAT promise_state {state}\r\nSTAT promise_intent {intent}\r\nSTAT promise_have 1\r\nSTAT promise_remaining_ms {remaining}\r\nSTAT promise_promotable {b promotable}\r\nSTAT floor_term 3\r\nSTAT floor_gen 4\r\nSTAT floor_set 1\r\nSTAT members_mode {mode}\r\nSTAT members_term {mt}\r\nSTAT members_gen {mg}\r\nSTAT members_successors -\r\nSTAT grant_valid {b grant}\r\nSTAT grant_term 3\r\nSTAT grant_gen 4\r\nSTAT grant_solo {b solo}\r\nSTAT grant_remaining_ms 0\r\nEND\r\n"
+  s!"STAT authority_enabled 1\r\nSTAT authority_refused 0\r\nSTAT promise_state {state}\r\nSTAT promise_intent {intent}\r\nSTAT promise_have 1\r\nSTAT promise_remaining_ms {remaining}\r\nSTAT promise_promotable {b promotable}\r\nSTAT floor_term 3\r\nSTAT floor_gen 4\r\nSTAT floor_set 1\r\nSTAT members_mode {mode}\r\nSTAT members_term {mt}\r\nSTAT members_gen {mg}\r\nSTAT members_successors -\r\nSTAT promise_term_next 0\r\nSTAT promise_gen 0\r\nSTAT promise_boot b1\r\nSTAT promise_copy c1\r\nSTAT identity_boot b1\r\nSTAT identity_copy c1\r\nSTAT members_boot b1\r\nSTAT members_copy c1\r\nSTAT grant_valid {b grant}\r\nSTAT grant_term 3\r\nSTAT grant_gen 4\r\nSTAT grant_solo {b solo}\r\nSTAT grant_remaining_ms 0\r\nEND\r\n"
 
 def tConfig : Bool :=
   let ok := Config.ofValues (some 10000) (some 3000) (some 2000) (some 60000)
@@ -29,16 +29,21 @@ def tConfig : Bool :=
     && (Config.ofValues (some 10000) (some 3000) (some 2000) (some 12000)).isNone
 
 def tCodec : Bool :=
-  let m := mem 3 7 "n-0.x.svc:12121" ["n-1.x.svc:12121", "n-2.x.svc:12121"] true
+  let bd : Bind := { uid := "u", boot := "b1", copy := "c1" }
+  let m : Members := { mem 3 7 "n-0.x.svc:12121" ["n-1.x.svc:12121", "n-2.x.svc:12121"] true with ackBind := some bd }
   let solo := mem 1 1 "n-0.x.svc:12121" []
   Members.decode m.encode == some m
     && Members.decode solo.encode == some solo
-    && (Members.decode "v=1 term=03 gen=1 acked=0 master=a succ=").isNone
+    && (Members.decode "v=2 term=03 gen=1 acked=0 master=a succ= ack=-").isNone
     && (Members.decode "v=2 term=3 gen=1 acked=0 master=a succ=").isNone
-    && (Members.decode "v=1 gen=1 term=3 acked=0 master=a succ=").isNone
-    && (Members.decode "v=1 term=3 gen=1 acked=2 master=a succ=").isNone
-    && (Members.decode "v=1 term=3 gen=1 acked=0 master= succ=").isNone
-    && (Members.decode "v=1 term=3 gen=1 acked=0 master=a succ=b,,c").isNone
+    && (Members.decode "v=1 term=3 gen=1 acked=0 master=a succ= ack=-").isNone
+    && (Members.decode "v=2 gen=1 term=3 acked=0 master=a succ= ack=-").isNone
+    && (Members.decode "v=2 term=3 gen=1 acked=2 master=a succ= ack=-").isNone
+    && (Members.decode "v=2 term=3 gen=1 acked=0 master= succ= ack=-").isNone
+    && (Members.decode "v=2 term=3 gen=1 acked=0 master=a succ=b,,c ack=-").isNone
+    -- an acknowledgement names its incarnation; one without the other is broken
+    && (Members.decode "v=2 term=3 gen=1 acked=1 master=a succ= ack=-").isNone
+    && (Members.decode "v=2 term=3 gen=1 acked=0 master=a succ= ack=u,b1,c1").isNone
     && (Members.decode (m.encode ++ " extra=1")).isNone
     && (Members.decode "").isNone
 
@@ -57,8 +62,14 @@ def tNext : Bool :=
     && Members.next (some o) (v1 (some a) [b]) false none == some o
     -- a changed set bumps the generation and needs a new ack
     && Members.next (some o) (v1 (some a) [b, c]) false none == some (mem 2 6 a [b, c])
-    -- losing the only successor: solo, a new generation
-    && Members.next (some o) (v1 (some a) []) false none == some (mem 2 6 a [])
+    -- an observation without the member (rebuilding / not Ready / unreachable) removes nobody: never solo from it
+    && Members.next (some o) (v1 (some a) []) false none == some o
+    && Members.next (some o) { v1 (some a) [] with pods := none } false none == some o
+    && Members.next (some o) { v1 (some a) [] with pods := some [a, b] } false none == some o
+    -- only an authoritative removal (the pod list was read in full and the member's pod is gone) is solo, a new generation
+    && Members.next (some o) { v1 (some a) [] with pods := some [a] } false none == some (mem 2 6 a [])
+    -- a newly eligible node is added, the kept member stays
+    && Members.next (some o) { v1 (some a) [c] with pods := some [a, b, c] } false none == some (mem 2 6 a [b, c])
     -- frozen by an unfinished intent: never changed (an old master does not get solo back)
     && Members.next (some o) (v1 (some a) []) true none == some o
     && Members.next (some o) (v1 (some a) [b, c]) true none == some o
@@ -88,20 +99,26 @@ def tStatus : Bool :=
     && (Status.parse (r1.replace "END\r\n" "")).isNone
     && (Status.parse "SERVER_ERROR write authority is off\r\n").isNone
     && (Status.parse (r1.replace "STAT floor_gen 4\r\n" "")).isNone
+    -- an undetermined identity ("-") is Unknown (fail closed); a membership bound to another copy is not held
+    && (Status.parse (r1.replace "STAT identity_copy c1" "STAT identity_copy -")).isNone
+    && (Status.parse (r1.replace "STAT identity_boot b1" "STAT identity_boot -")).isNone
+    && (Status.parse (r1.replace "STAT members_copy c1" "STAT members_copy c0")).map (·.holds m) == some false
+    && (Status.parse (r1.replace "STAT grant_gen 4" "STAT grant_gen 9")).map (·.holds m) == some false
     && (Status.parse (r1.replace "promise_remaining_ms 0" "promise_remaining_ms x")).isNone
 
 def tCmds : Bool :=
+  let sc : WireScope := { id := 7, termNext := 3, gen := 4, boot := "b1", copy := "c1" }
   let c : Config := { ttlMs := 10000, renewMs := 3000, marginMs := 2000, prepareTimeoutMs := 60000 }
   cmdMembers 0 (mem 2 5 "a" ["b:1", "c:1"]) c == "authority members 0 2 5 10000 3000 b:1 c:1"
     && cmdMembers 1 (mem 2 5 "a" []) c == "authority solo 1 2 5"
     && cmdFloor 0 (mem 2 5 "a" ["b"]) == "authority floor 0 2 0"
-    && cmdPrepare 0 7 3 == "authority prepare 0 7 3"
-    && cmdCommit 0 7 == "authority commit 0 7"
-    && cmdCancel 0 7 == "authority cancel 0 7"
+    && cmdPrepare 0 sc == "authority prepare 0 7 3 4 b1 c1"
+    && cmdCommit 0 sc == "authority commit 0 7 3 4 b1 c1"
+    && cmdCancel 0 sc == "authority cancel 0 7 3 4 b1 c1"
     && cmdStatus 2 == "authority status 2"
 
 def rep (state : String) (intent remaining : Nat) (promotable : Bool) : Option Replica :=
-  some { state, intent, remainingMs := remaining, promotable }
+  some { state, intent, scopeOk := true, remainingMs := remaining, promotable }
 
 def tDecide : Bool :=
   gateDecide false true .none none 1 == .abort "the candidate is not in the membership"
@@ -123,6 +140,9 @@ def tDecide : Bool :=
     -- its promise to the old master is not over
     && (match gateDecide true true (.pending true false) (rep "preparing" 1 4000 false) 1 with | .wait _ => true | _ => false)
     && gateDecide true true (.pending true false) (rep "preparing" 1 0 false) 1 == .commitCas
+    -- a prepare under another scope (term / generation / incarnation / copy) is not this attempt
+    && (match gateDecide true true (.pending true false) (some { state := "preparing", intent := 1, scopeOk := false, remainingMs := 0, promotable := false }) 1 with | .cancelCas _ => true | _ => false)
+    && (match gateDecide true true .committed (some { state := "committed", intent := 1, scopeOk := false, remainingMs := 0, promotable := true }) 1 with | .abort _ => true | _ => false)
     -- committed
     && gateDecide true true .committed (rep "committed" 1 0 true) 1 == .proceed
     && gateDecide true true .committed (rep "promoted" 1 0 true) 1 == .proceed
@@ -135,7 +155,7 @@ def tDecideSafety : Bool :=
   let ivs : List IntentView := [.none, .pending false false, .pending false true, .pending true false, .pending true true, .committed, .cancelled]
   let states := ["following", "preparing", "committed", "promoted"]
   let rvs : List (Option Replica) :=
-    none :: (states.flatMap fun s => [0, 1, 2].flatMap fun i => [0, 5].flatMap fun r => [true, false].map fun p => some { state := s, intent := i, remainingMs := r, promotable := p })
+    none :: (states.flatMap fun s => [0, 1, 2].flatMap fun i => [0, 5].flatMap fun r => [true, false].map fun p => some { state := s, intent := i, scopeOk := true, remainingMs := r, promotable := p })
   let all := [true, false].flatMap fun succ => [true, false].flatMap fun acked => ivs.flatMap fun iv => rvs.map fun rv => (succ, acked, iv, rv)
   all.all fun (succ, acked, iv, rv) =>
     let id := 1

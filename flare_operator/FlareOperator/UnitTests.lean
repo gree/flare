@@ -1455,7 +1455,7 @@ def partChecks : List (String × Bool) :=
   let w := fun (n t0 t : Nat) (ip : String) (r : String) => ({ n, t0, t, ip, key := s!"k{n}", value := "v", reply := r } : WriteRec)
   let ack := fun (n t0 t : Nat) (ip : String) => w n t0 t ip "STORED"
   let inj : Injection := { rulesInstalled := true, counters := [("r", some 9)], replicaToMasterBefore := some true, operatorToMasterBefore := some true, replicaToMaster := some false, operatorToMaster := some false, apiBefore := some true, apiAfter := some false, clientAcksAfterCut := 50 }
-  let base : PartObs := { nodeLevel := true, oldMaster := "old", replica := "rep", inj, tCut := 100, tHeal := 400, samples := noFail, oldAcks := [(ack 1 250 250 "o", "local")], peerAcks := [(ack 2 250 250 "p", "forwarded")], lostAcks := some 0, summary := "" }
+  let base : PartObs := { nodeLevel := true, oldMaster := "old", replica := "rep", inj, tCut := 100, tCutDone := 390, tHeal := 400, samples := noFail, oldAcks := [(ack 1 250 250 "o", "local")], peerAcks := [(ack 2 250 250 "p", "forwarded")], lostAcks := some 0, summary := "" }
   let startsWith := fun (o : Option String) (p : String) => (o.map (·.startsWith p)).getD false
   [
     ("C': acfa862 shape — FORWARD-only rules, the worker still reaches the API server -> injection NOT established (never a verdict)",
@@ -1576,7 +1576,7 @@ def partChecks : List (String × Bool) :=
         && startsWith (partVerdictWa { good with oldAcks := good.oldAcks ++ [(ack 3 304 305 "o", "local")], peerAcks := good.peerAcks ++ [(ack 4 310 311 "p", "forwarded")] }) "PRODUCT GAP"),
     ("C' with the write authority ON: the write trace attributes the acks forwarded through the replica (applied by the replica -> a new-master ack, applied by the old master -> an old-master ack that can overlap); unattributable stays NOT VERIFIED; the trace time parser reads the runtime's RFC3339 stamps",
       let c : PartObs := { base with samples := withFail }
-      let good := { c with oldAcks := [(ack 1 150 151 "o", "local")], peerAcks := [(ack 2 300 301 "p", "local")] }
+      let good := { c with oldAcks := [(ack 1 105 106 "o", "local")], peerAcks := [(ack 2 300 301 "p", "local")] }
       let line := fun (pod key role : String) =>
         s!"{pod} 2026-10-23T14:37:49.500Z [1][NTC]x.cc:9-f] write-trace op=set key={key} role={role} partition=0 term=2 gen=3 solo=0 mono_ns=5 boot=b copy=c"
       let fwd := { good with peerAcks := good.peerAcks ++ [(ack 4 310 311 "p", "forwarded")] }
@@ -1598,7 +1598,7 @@ def partChecks : List (String × Bool) :=
         && startsWith (partVerdictWa { good with oldAcks := good.oldAcks ++ [(ack 5 100 150 "o", "local")], trace := traceIndex [line "rep" "k5" "master"] }) "PRODUCT GAP"),
     ("C' with the write authority ON: lost acks are dated against the cut and the old master's grant (ttl 6 s + slack 2 s after the rules were in): within it they are the design's async-replication loss and only reported; one that began after it, or a write the old master's own trace shows applied after it, is a PRODUCT GAP",
       let c : PartObs := { base with samples := withFail, tCutDone := 102 }
-      let good := { c with oldAcks := [(ack 1 150 151 "o", "local")], peerAcks := [(ack 2 300 301 "p", "local")] }
+      let good := { c with oldAcks := [(ack 1 105 106 "o", "local")], peerAcks := [(ack 2 300 301 "p", "local")] }
       let line := fun (ms : Nat) (key : String) =>
         s!"old {(String.intercalate "" ["1970-01-01T00:00:", (if ms / 1000 < 10 then "0" else ""), toString (ms / 1000), ".000Z"])} [1] write-trace op=set key={key} role=master partition=0 term=2 gen=3 solo=0 mono_ns=5 boot=b copy=c"
       let within := { good with lostAcks := some 2, lostWrites := [ack 7 101 103 "o", ack 8 108 109 "o"] }
@@ -1614,7 +1614,13 @@ def partChecks : List (String × Bool) :=
         -- the old master's own trace: a write applied as master after the bound (epoch 111 s) = defect; before it = fine
         && partVerdictWa { good with traceLines := [(parseTraceLine (line 105000 "k1")).get!], trace := {} } == none
         && startsWith (partVerdictWa { good with traceLines := [(parseTraceLine (line 112000 "k1")).get!] }) "PRODUCT GAP"
-        && (lostStats { good with traceLines := [(parseTraceLine (line 105000 "k1")).get!] }).oldLastApplyRel == some 3),
+        && (lostStats { good with traceLines := [(parseTraceLine (line 105000 "k1")).get!] }).oldLastApplyRel == some 3
+        -- scenario C (run 40009396726): master-role applies AFTER the heal are the link being back, not a lapse failure
+        && !startsWith ((partVerdictWa { good with tHeal := 111, traceLines := [(parseTraceLine (line 112000 "k1")).get!], trace := {} }).getD "") "PRODUCT GAP"
+        && (lostStats { good with tHeal := 111, traceLines := [(parseTraceLine (line 112000 "k1")).get!] }).oldAppliedAfterHeal == 1
+        -- an ack the old master gave to a write sent after the bound is a master write accepted after the lapse
+        && startsWith (partVerdictWa { good with oldAcks := good.oldAcks ++ [(ack 6 150 151 "o", "local")] }) "PRODUCT GAP"
+        && (lostStats { good with oldAcks := good.oldAcks ++ [(ack 6 150 151 "o", "local")] }).acksAfterBound == 1),
     ("two failovers (authority ON): every ack must be attributable to the node that applied it — an ack in a window where the map master changes (proxied or local) -> NOT VERIFIED, never green; stable master -> pass; acks of two appliers overlapping -> PRODUCT GAP",
       let ips := [("ip0", "p0"), ("ip1", "p1")]
       let smp := fun (t : Nat) (m : Option String) => ((t, m, ips) : Nat × Option String × List (String × String))

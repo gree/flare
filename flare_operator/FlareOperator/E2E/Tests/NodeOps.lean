@@ -1064,13 +1064,22 @@ structure LostStats where
   oldLastApplyRel : Option Int
   oldLastApplyTermGen : Option (Option Nat × Option Nat)
   oldAfterBound : Bool
+  /-- the old master's acknowledged writes of the cut that BEGAN after the bound (master writes accepted after
+      the lapse; must be 0) and its master-role trace lines after the heal (legitimate: the link is back, not judged) -/
+  acksAfterBound : Nat
+  acksEndedAfterBound : Nat
+  oldAppliedAfterHeal : Nat
   deriving Repr
 
 def lostStats (o : PartObs) : LostStats :=
   let done := if o.tCutDone == 0 then o.tCut else o.tCutDone
   let bound := done + waGrantTtlSec + waLossSlackSec
   let rel := fun (t : Nat) => (t : Int) - (o.tCut : Int)
-  let oldApplies := (o.traceLines.filter fun l => l.pod == o.oldMaster && l.role == "master").filter (·.ms.isSome)
+  -- only the cut counts: after the heal the old master hears the promises again and writes as master legitimately
+  let oldMaster := (o.traceLines.filter fun l => l.pod == o.oldMaster && l.role == "master").filter (·.ms.isSome)
+  let inCutMs := fun (l : TraceLine) => l.ms.getD 0 ≤ o.tHeal * 1000
+  let oldApplies := oldMaster.filter inCutMs
+  let cutAcks := (o.oldAcks.map (·.1)).filter fun w => w.span.1 ≥ o.tCut && w.span.2 ≤ o.tHeal
   let last := oldApplies.foldl (fun (acc : Option TraceLine) l =>
     match acc with
     | none => some l
@@ -1084,11 +1093,14 @@ def lostStats (o : PartObs) : LostStats :=
     ambiguous := (o.lostWrites.filter fun w => w.span.1 ≤ bound && w.span.2 > bound).length,
     oldLastApplyRel := last.bind fun l => l.ms.map fun ms => ((ms / 1000 : Nat) : Int) - (done : Int),
     oldLastApplyTermGen := last.map fun l => (l.term, l.gen),
-    oldAfterBound := oldApplies.any afterMs }
+    oldAfterBound := oldApplies.any afterMs,
+    acksAfterBound := (cutAcks.filter fun w => w.span.1 > bound).length,
+    acksEndedAfterBound := (cutAcks.filter fun w => w.span.1 ≤ bound && w.span.2 > bound).length,
+    oldAppliedAfterHeal := (oldMaster.filter fun l => !inCutMs l).length }
 
 def LostStats.render (l : LostStats) : String :=
   if l.n == 0 then s!"no acknowledged write lost"
-  else s!"{l.n} lost ack(s), ended {l.minRel}..{l.maxRel} s relative to the cut start; grant bound = ttl {waGrantTtlSec} s + slack {waLossSlackSec} s after the rules were in place (epoch {l.bound}): {l.certain} began after it, {l.ambiguous} began before and ended after it; the old master's own trace: last write applied as master {(l.oldLastApplyRel.map fun x => s!"{x} s after the rules were in place").getD "none seen"}, term/gen {l.oldLastApplyTermGen}"
+  else s!"{l.n} lost ack(s), ended {l.minRel}..{l.maxRel} s relative to the cut start; grant bound = ttl {waGrantTtlSec} s + slack {waLossSlackSec} s after the rules were in place (epoch {l.bound}): {l.certain} began after it, {l.ambiguous} began before and ended after it; the old master's own trace: last write applied as master {(l.oldLastApplyRel.map fun x => s!"{x} s after the rules were in place").getD "none seen"}, term/gen {l.oldLastApplyTermGen}; old master's acks in the cut after the bound: {l.acksAfterBound} began after it, {l.acksEndedAfterBound} began before and ended after it; its master-role applies after the heal (not judged): {l.oldAppliedAfterHeal}"
 
 /-- The writes of the cut by what became of them, and the acknowledged ones whose path the own views could not
     tell (every one of them WAS acknowledged: `unknown` is the path, not the reply). -/
@@ -1115,6 +1127,8 @@ def partVerdictWa (o0 : PartObs) : Option String :=
     some (unobservable "a writer log was not confirmed complete" ++ cov)
   else if ls.certain > 0 then
     some (s!"PRODUCT GAP (acknowledged writes lost after the old master's grant lapsed): {ls.certain} acknowledged write(s) missing on the final master were sent after cut + ttl {waGrantTtlSec} s + slack {waLossSlackSec} s (epoch {ls.bound}); the design bound is the grant ttl after the cut (async replication, §12.4-3)" ++ cov)
+  else if ls.acksAfterBound > 0 then
+    some (s!"PRODUCT GAP (the old master acknowledged a write after its grant should have lapsed): {ls.acksAfterBound} acknowledgement(s) of writes sent to it after cut + ttl {waGrantTtlSec} s + slack {waLossSlackSec} s (epoch {ls.bound}) and inside the cut" ++ cov)
   else if ls.oldAfterBound then
     some (s!"PRODUCT GAP (the old master applied a write after its grant should have lapsed): the write trace of {o.oldMaster} shows a write applied as master later than cut + ttl {waGrantTtlSec} s + slack {waLossSlackSec} s (epoch {ls.bound}), last at {ls.oldLastApplyRel} s after the rules were in place (term/gen {ls.oldLastApplyTermGen})" ++ cov)
   else if o.nodeLevel then

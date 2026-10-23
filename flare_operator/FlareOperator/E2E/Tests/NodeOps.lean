@@ -622,6 +622,17 @@ structure PartObs where
   /-- both writer logs ended with their end marker (no cut-short line) -/
   logsComplete : Bool := true
   summary : String
+  /-- the acknowledged writes missing on the final master (the same set `lostAcks` counts) -/
+  lostWrites : List WriteRec := []
+  /-- when the cut rules were all installed (the debug pod's clock; 0 = not read): the grants stop being
+      renewed no later than this -/
+  tCutDone : Nat := 0
+  /-- flared's write trace (write-authority-trace), every pod's `write-trace` lines of the run: key -> the
+      pods that applied it as the master; and the lines themselves -/
+  trace : Std.HashMap String (List String) := {}
+  traceLines : List TraceLine := []
+  /-- per writer, inside the cut: (name, acknowledged, refused / failed, no reply) -/
+  replyStats : List (String × Nat × Nat × Nat) := []
 
 /-- Was the injection established? `none` = yes. -/
 def injectionProblem (o : PartObs) : Option String :=
@@ -821,7 +832,14 @@ def partitionRun (c : Ctx) (nodeLevel : Bool) (wa : Bool := false) : IO (Except 
       [{ node := p.master.node, chain := "OUTPUT", src := w, dst := addr : CutRule }, { node := p.master.node, chain := "INPUT", src := addr, dst := w }]
         ++ (if cpIps.contains addr then [{ node := cp, chain := "OUTPUT", src := addr, dst := w : CutRule }, { node := cp, chain := "INPUT", src := w, dst := addr }] else [])
     let pods := (← c.pods).getD []
+    -- authority ON: every pod's write trace (the direct evidence of who applied which ack) from before the
+    -- writers start until after they stop
+    let traceFollow ← if wa then some <$> startTraceFollow c (pods.map (·.name)) else pure none
+    let stopTrace : IO (List String) := match traceFollow with
+      | some t => stopTraceFollow t
+      | none => pure []
     if !(← c.startWriter "old" p.master.ip "wo") || !(← c.startWriter "peer" p.replica.ip "wr") then
+      discard stopTrace
       return .error (notSetUp "a writer did not start")
     let rules := podCutRules nodes p.master.ip p.replica.ip ++ podCutRules nodes p.master.ip opIp ++ (if nodeLevel then apiRules else [])
     -- the observer runs on its own from here to after the heal
@@ -829,10 +847,12 @@ def partitionRun (c : Ctx) (nodeLevel : Bool) (wa : Bool := false) : IO (Except 
     discard <| observe c 10 (pure false)
     let rBefore ← tcpFromPod c.cfg.«namespace» p.replica.name "flared" p.master.ip c.cfg.flarePort
     let oBefore ← tcpFromPod c.cfg.«namespace» opPod "flare-operator" p.master.ip c.cfg.flarePort
-    let some tCut ← debugEpoch c | do discard <| obs.finish; return .error (notSetUp "the debug pod's clock cannot be read")
+    let some tCut ← debugEpoch c | do discard <| obs.finish; discard stopTrace; return .error (notSetUp "the debug pod's clock cannot be read")
     let (installed, rulesOk, rulesWhy) ← match ← installCuts rules with
       | .ok r => pure (r, true, "")
       | .error (why, part) => pure (part, false, why)
+    -- the grants stop being renewed no later than this (the last rule is in)
+    let tCutDone := (← debugEpoch c).getD tCut
     c.event s!"cut: {installed.length}/{rules.length} rules installed{if rulesOk then "" else s!" — FAILED: {rulesWhy}"}"
     let mut inj : Injection := { rulesInstalled := rulesOk, rulesWhy, replicaToMasterBefore := rBefore, operatorToMasterBefore := oBefore,
                                  apiBefore := if !nodeLevel then none else if usable.isEmpty then some false else some true }
@@ -895,8 +915,8 @@ def partitionRun (c : Ctx) (nodeLevel : Bool) (wa : Bool := false) : IO (Except 
     IO.sleep 8000
     let ss ← match ← obs.finish with
       | .ok xs => pure xs
-      | .error e => return .error (unobservable s!"own-view observer: {e}")
-    let some tHeal := tHeal? | return .error (unobservable "the debug pod's clock could not be read at the heal")
+      | .error e => do discard stopTrace; return .error (unobservable s!"own-view observer: {e}")
+    let some tHeal := tHeal? | do discard stopTrace; return .error (unobservable "the debug pod's clock could not be read at the heal")
     let gaps := pods.map fun r => (r.name, maxReadingGap ss r.name tCut tHeal)
     let span := pods.map fun r =>
       let rs := (ss.flatMap (·.reads)).filter (·.pod == r.name)
@@ -905,6 +925,7 @@ def partitionRun (c : Ctx) (nodeLevel : Bool) (wa : Bool := false) : IO (Except 
     let (s2, _) ← observe c 180 (redundant c none)
     let wlOld? ← c.stopWriter "old"
     let wlPeer? ← c.stopWriter "peer"
+    let traceLines ← stopTrace
     let (some wlOld, some wlPeer) := (wlOld?, wlPeer?)
       | return .error (unobservable "a writer's record could not be read or failed its integrity check (never counted as 'no acknowledged write')")
     let wsOld := wlOld.ws
@@ -913,6 +934,9 @@ def partitionRun (c : Ctx) (nodeLevel : Bool) (wa : Bool := false) : IO (Except 
     let finalM := (← c.roles).bind (·.1)
     let copies ← finalCopies c
     let mcopy := finalM.bind fun n => (copies.lookup n).join
+    let lostWs := match mcopy with
+      | some d => missingAcks (wsOld ++ wsPeer) d
+      | none => []
     let lost ← match mcopy with
       | some d => pure (some (← recordMissing c "master" (wsOld ++ wsPeer) d))
       | none => pure none
@@ -930,9 +954,18 @@ def partitionRun (c : Ctx) (nodeLevel : Bool) (wa : Bool := false) : IO (Except 
     let paths := fun (xs : List (WriteRec × String)) => s!"local {(xs.filter (·.2 == "local")).length} / forwarded {(xs.filter (·.2 == "forwarded")).length} / unknown {(xs.filter (·.2 == "unknown")).length}"
     let summary := s!"writer old: {wsOld.length} writes, own-view paths of its acks {paths (acks wsOld)}; writer peer: {wsPeer.length} writes, {paths (acks wsPeer)}; own-view samples {ss.length}, widest reading gap in the cut {gaps}; samples after the heal {s2.length}"
     c.art "report.txt" summary
+    let inCutW := fun (w : WriteRec) => w.span.1 ≥ tCut && w.span.2 ≤ tHeal
+    let outcome := fun (name : String) (ws : List WriteRec) =>
+      let cw := ws.filter inCutW
+      (name, (cw.filter fun w => classify w.reply == .ack).length, (cw.filter fun w => classify w.reply == .error).length,
+        (cw.filter fun w => classify w.reply == .unobserved).length)
+    let parsedTrace := traceLines.filterMap parseTraceLine
+    c.art "report.txt" s!"write trace: {traceLines.length} line(s) ({parsedTrace.length} parsed, {(parsedTrace.filter (·.ms.isSome)).length} with a time), by pod {pods.map fun r => (r.name, (parsedTrace.filter (·.pod == r.name)).length)}; cut {tCut}, rules in place {tCutDone}, heal {tHeal}"
     return .ok { nodeLevel, oldMaster := p.master.name, replica := p.replica.name, inj, tCut, tHeal, samples := ss,
                  oldAcks := acks wsOld, peerAcks := acks wsPeer, lostAcks := lost, summary,
-                 logsComplete := wlOld.complete && wlPeer.complete }
+                 logsComplete := wlOld.complete && wlPeer.complete,
+                 lostWrites := lostWs, tCutDone, trace := traceIndex traceLines, traceLines := parsedTrace,
+                 replyStats := [outcome "old" wsOld, outcome "peer" wsPeer] }
 
 def partitionTest (c : Ctx) (nodeLevel : Bool) : IO TestResult := do
   match ← partitionRun c nodeLevel with
@@ -979,31 +1012,118 @@ def waFirstNewPossible (o : PartObs) : Option Nat :=
     if p == "local" then some w.span.1 else if p == "unknown" then some (max w.span.1 low) else none
   cands.min?
 
-/-- The old master's last acknowledgement inside the cut (any path). -/
+/-- The old master's last acknowledgement inside the cut (any path; and an ack through the replica that
+    the write trace shows the OLD master applied). -/
 def waLastOld (o : PartObs) : Option Nat :=
   let inCut := fun (w : WriteRec) => w.span.1 ≥ o.tCut && w.span.2 ≤ o.tHeal
-  ((o.oldAcks.filter fun (w, _) => inCut w).map (·.1.span.2)).max?
+  (((o.oldAcks ++ o.peerAcks.filter (·.2 == "old")).filter fun (w, _) => inCut w).map (·.1.span.2)).max?
+
+/-- The write trace is the direct evidence of who applied a write: an acknowledged write whose key was applied
+    as the master by exactly one pod is that pod's, whatever the own-view samples could bracket. Through the
+    replica: applied by the replica -> a local (new master) ack; applied by the old master -> an ack of the old
+    master ("old"); not attributable -> as before (forwarded stays forwarded / unknown stays unknown, never
+    guessed). A write the old master answered that the trace shows the REPLICA applied is also a new-master
+    ack (added to the replica's: the check can only get stricter). No trace lines = unchanged. -/
+def refineByTrace (o : PartObs) : PartObs :=
+  if o.trace.isEmpty then o else
+  let peer := o.peerAcks.map fun (w, p) =>
+    match traceApplier o.trace w with
+    | some a => if a == o.replica then (w, "local") else if a == o.oldMaster then (w, "old") else (w, p)
+    | none => (w, p)
+  let oldAsNew := o.oldAcks.filterMap fun (w, _) =>
+    match traceApplier o.trace w with
+    | some a => if a == o.replica then some (w, "local") else none
+    | none => none
+  { o with peerAcks := peer ++ oldAsNew }
 
 /-- Acknowledgements through the replica inside the cut that its own view calls forwarded: some other
     node applied them and which one is not recorded (never counted as the new master's, never ignored). -/
 def waForwardedPeer (o : PartObs) : List WriteRec :=
   ((o.peerAcks.filter fun (w, p) => p == "forwarded" && w.span.1 ≥ o.tCut && w.span.2 ≤ o.tHeal).map (·.1))
 
-def partVerdictWa (o : PartObs) : Option String :=
+/-- The grant's ttl (the operator's `FLARE_WRITE_AUTHORITY_TTL_MS` = flared's max-ttl in the authority suites) and the
+    measurement slack (whole-second clocks of the writers and of the cut: 1 s each end). The design bound
+    (§12.4-3, async replication): what the old master acknowledged before its grant lapsed can be lost, and
+    the last renewal it heard was no later than the cut, so nothing is applied after cut + ttl. -/
+def waGrantTtlSec : Nat := 6
+def waLossSlackSec : Nat := 2
+
+/-- Where the acknowledged writes lost on the final master sit in time, against the cut and the old master's
+    grant: relative seconds to the cut start (before the rules went in) and to the end of the rules'
+    installation (after it no renewal can arrive), the bound `ttl + slack` from the latter, how many lost acks
+    BEGAN after it (certainly after the lapse) / only ENDED after it (ambiguous), and the old master's own
+    trace: its last write applied as master (time after the installation, term / generation). -/
+structure LostStats where
+  n : Nat
+  minRel : Int
+  maxRel : Int
+  cutDone : Nat
+  bound : Nat
+  certain : Nat
+  ambiguous : Nat
+  oldLastApplyRel : Option Int
+  oldLastApplyTermGen : Option (Option Nat × Option Nat)
+  oldAfterBound : Bool
+  deriving Repr
+
+def lostStats (o : PartObs) : LostStats :=
+  let done := if o.tCutDone == 0 then o.tCut else o.tCutDone
+  let bound := done + waGrantTtlSec + waLossSlackSec
+  let rel := fun (t : Nat) => (t : Int) - (o.tCut : Int)
+  let oldApplies := (o.traceLines.filter fun l => l.pod == o.oldMaster && l.role == "master").filter (·.ms.isSome)
+  let last := oldApplies.foldl (fun (acc : Option TraceLine) l =>
+    match acc with
+    | none => some l
+    | some a => if l.ms.getD 0 > a.ms.getD 0 then some l else acc) none
+  let afterMs := fun (l : TraceLine) => l.ms.getD 0 > (bound + 0) * 1000
+  { n := o.lostWrites.length,
+    minRel := ((o.lostWrites.map fun w => rel w.span.2).foldl min (1000000 : Int)),
+    maxRel := ((o.lostWrites.map fun w => rel w.span.2).foldl max (-1000000 : Int)),
+    cutDone := done, bound,
+    certain := (o.lostWrites.filter fun w => w.span.1 > bound).length,
+    ambiguous := (o.lostWrites.filter fun w => w.span.1 ≤ bound && w.span.2 > bound).length,
+    oldLastApplyRel := last.bind fun l => l.ms.map fun ms => ((ms / 1000 : Nat) : Int) - (done : Int),
+    oldLastApplyTermGen := last.map fun l => (l.term, l.gen),
+    oldAfterBound := oldApplies.any afterMs }
+
+def LostStats.render (l : LostStats) : String :=
+  if l.n == 0 then s!"no acknowledged write lost"
+  else s!"{l.n} lost ack(s), ended {l.minRel}..{l.maxRel} s relative to the cut start; grant bound = ttl {waGrantTtlSec} s + slack {waLossSlackSec} s after the rules were in place (epoch {l.bound}): {l.certain} began after it, {l.ambiguous} began before and ended after it; the old master's own trace: last write applied as master {(l.oldLastApplyRel.map fun x => s!"{x} s after the rules were in place").getD "none seen"}, term/gen {l.oldLastApplyTermGen}"
+
+/-- The writes of the cut by what became of them, and the acknowledged ones whose path the own views could not
+    tell (every one of them WAS acknowledged: `unknown` is the path, not the reply). -/
+def unknownBreakdown (o : PartObs) : String :=
+  let inCut := fun (w : WriteRec) => w.span.1 ≥ o.tCut && w.span.2 ≤ o.tHeal
+  let unk := fun (xs : List (WriteRec × String)) => (xs.filter fun (w, p) => inCut w && p == "unknown").map (·.1)
+  let range := fun (ws : List WriteRec) =>
+    if ws.isEmpty then "-" else
+    s!"{(ws.map fun w => (w.span.1 : Int) - (o.tCut : Int)).foldl min (1000000 : Int)}..{(ws.map fun w => (w.span.2 : Int) - (o.tCut : Int)).foldl max (-1000000 : Int)} s"
+  let r := refineByTrace o
+  let stillPeer := (r.peerAcks.filter fun (w, p) => inCut w && p == "unknown").length
+  let stillFwd := (r.peerAcks.filter fun (w, p) => inCut w && p == "forwarded").length
+  s!"unclassified acks in the cut (acknowledged, path not bracketed by the own-view readings): old master's {(unk o.oldAcks).length} (every old-master ack counts as the old master's, classified or not; {range (unk o.oldAcks)}), through the replica {(unk o.peerAcks).length} ({range (unk o.peerAcks)}; after the write trace: {stillPeer} still unknown, {stillFwd} forwarded and unattributed); writes by outcome in the cut (writer: acked / refused-or-failed / no reply) {o.replyStats}"
+
+def partVerdictWa (o0 : PartObs) : Option String :=
+  let o := refineByTrace o0
   let r := partReport o
-  let cov := s!" [{r.render}]"
+  let ls := lostStats o
+  let cov := s!" [{r.render}; {ls.render}; {unknownBreakdown o0}]"
   match r.injection with
   | some why => some (notSetUp s!"injection not established: {why}")
   | none =>
   if !r.logsComplete then
     some (unobservable "a writer log was not confirmed complete" ++ cov)
+  else if ls.certain > 0 then
+    some (s!"PRODUCT GAP (acknowledged writes lost after the old master's grant lapsed): {ls.certain} acknowledged write(s) missing on the final master were sent after cut + ttl {waGrantTtlSec} s + slack {waLossSlackSec} s (epoch {ls.bound}); the design bound is the grant ttl after the cut (async replication, §12.4-3)" ++ cov)
+  else if ls.oldAfterBound then
+    some (s!"PRODUCT GAP (the old master applied a write after its grant should have lapsed): the write trace of {o.oldMaster} shows a write applied as master later than cut + ttl {waGrantTtlSec} s + slack {waLossSlackSec} s (epoch {ls.bound}), last at {ls.oldLastApplyRel} s after the rules were in place (term/gen {ls.oldLastApplyTermGen})" ++ cov)
   else if o.nodeLevel then
     match waLastOld o, waFirstNewPossible o with
     | some lo, some fn =>
       if lo ≥ fn then
         some (s!"PRODUCT GAP (dual acknowledgement with the write authority ON): the old master's last acknowledgement in the cut ended at {lo}, the new master can have acknowledged from {fn} (cut {o.tCut}..{o.tHeal})" ++ cov)
       else if !(waForwardedPeer o).isEmpty then
-        some (s!"NOT VERIFIED: {(waForwardedPeer o).length} acknowledgement(s) through the replica inside the cut were forwarded (by its own view it was not master): the node that applied them cannot be attributed, so an overlap cannot be ruled out" ++ cov)
+        some (s!"NOT VERIFIED: {(waForwardedPeer o).length} acknowledgement(s) through the replica inside the cut were forwarded (by its own view it was not master) and the write trace does not name the node that applied them ({o.traceLines.length} trace lines, {o.trace.size} keys): an overlap cannot be ruled out" ++ cov)
       else if !r.failedOver then
         some ("NOT VERIFIED: the replica was not master by its own view during the cut" ++ cov)
       else none
@@ -1034,7 +1154,11 @@ def partitionTestWa (c : Ctx) (nodeLevel : Bool) : IO TestResult := do
     | none => pure ("NOT VERIFIED", s!"the test did not finish within its {budgetSec} s budget (took {took} s); failover during the cut: UNKNOWN (see the pod logs saved after the heal and the artifacts own.txt / events)", TestResult.fail s!"NOT VERIFIED: the test exceeded its {budgetSec} s budget")
     | some (.error e) => pure (waVerdictWord e, s!"{e}; failover during the cut: UNKNOWN (the run did not reach a verdict input)", TestResult.fail e)
     | some (.ok o) =>
-      IO.eprintln s!"# [{c.test}] write authority ON: old master last ack in the cut {waLastOld o}, new master earliest possible ack {waFirstNewPossible o}; {o.summary}"
+      let ro := refineByTrace o
+      let inCut := fun (w : WriteRec) => w.span.1 ≥ o.tCut && w.span.2 ≤ o.tHeal
+      let byTrace := ((o.oldAcks ++ o.peerAcks).filter fun (w, _) => inCut w && (traceApplier o.trace w).isSome).length
+      let twoAppliers := ((o.oldAcks ++ o.peerAcks).filter fun (w, _) => inCut w && ((o.trace.get? w.key).getD []).length > 1).length
+      IO.eprintln s!"# [{c.test}] write authority ON: old master last ack in the cut {waLastOld ro}, new master earliest possible ack {waFirstNewPossible ro}; write trace: {o.traceLines.length} lines, {byTrace}/{(o.oldAcks ++ o.peerAcks).filter (fun (w, _) => inCut w) |>.length} acks of the cut attributed by it, {twoAppliers} applied as master by two pods; {lostStats o |>.render}; {unknownBreakdown o}; {o.summary}"
       let fo := (partReport o).failedOver
       match partVerdictWa o with
       | some why => pure (waVerdictWord why, s!"{why}; failover during the cut: {fo}", TestResult.fail why)

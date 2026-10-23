@@ -109,7 +109,7 @@ def waSetupDiagnostics (cfg : ClusterConfig) : IO Unit := do
     saveFullLogs ns "setup-failure"
     let op ← kubectlLogsLabel s!"app={cfg.operatorName}" ns 20000
     printMatching "operator: membership deliveries / promise rounds / write authority" op
-      ["write authority", "membership", "promise", "grant", "first-build", "promotion", "authoritative history", "critical"] 150
+      ["write authority", "membership", "promise", "grant", "first-build", "promotion", "authoritative history", "critical", "history state", "rebuild held", "adopted", "first master"] 150
     for pod in ← getPodNames s!"cluster={cfg.name}" ns do
       match ← kubectl ["logs", "-n", ns, pod, "--tail=-1"] with
       | .ok o => printMatching s!"{pod}: authority lines" o ["authority", "membership", "promise", "grant"] 40
@@ -183,7 +183,10 @@ def stopWaSuite : TestSuite :=
     ] }
 
 def partitionWaSuite : TestSuite :=
-  let cfg := waCfg "node-part-wa" true false
+  let cfg0 := waCfg "node-part-wa" true false
+  -- flared logs one line per applied mutation (write-authority-trace, tests only): attributes the acks forwarded
+  -- through the replica inside the cut and dates the old master's last write against its grant
+  let cfg := { cfg0 with extraFlaredConf := cfg0.extraFlaredConf ++ "\nwrite-authority-trace = true" }
   { name := "node-ops-partition-wa"
     setup := waSetup cfg
     teardown := cleanupCluster cfg
@@ -223,7 +226,9 @@ def failoverWaSuite : TestSuite :=
     extraFlaredConf := "write-authority-enabled = true\nwrite-authority-margin-ms = 5000\nwrite-authority-max-ttl-ms = 6000",
     operatorEnv := waOperatorEnv }
   FlareOperator.E2E.Tests.Failover.mkSuite "failover-wa" cfg
-    (do if !(← waitAuthority cfg 240) then throw (IO.userError "the write authority was not established on every partition's master"))
+    (do if !(← waitAuthority cfg 240) then
+          waSetupDiagnostics cfg
+          throw (IO.userError "the write authority was not established on every partition's master"))
     240 (some (failoverWaSeedGuard cfg))
 
 /-! ## operator absent, solo -/
@@ -356,44 +361,6 @@ def ownApplier (rs : List Reading) (pods : List String) (target : Option String)
         | [(u, _)] => if st.all (·.2.isSome) then some u else none
         | _ => none
 
-/-! ### Direct evidence: flared's write trace
-
-With `write-authority-trace = true` (tests only) every flared logs one `write-trace` line per applied mutation:
-`write-trace op=set key=K role=master|replica|unbound partition=P term=T gen=G solo=S mono_ns=N boot=B copy=C`.
-The harness follows each pod's log while the test runs (a force-killed pod's log is gone afterwards) and
-prefixes each line with the pod's name. An acknowledged write whose key was applied as the MASTER by exactly
-one pod is attributed to that pod, whatever the map or the own-view samples say. -/
-
-/-- `(key, pod)` of a trace line (`<pod> ... write-trace ...`) applied as the master; other roles / lines: none. -/
-def parseTraceMaster (line : String) : Option (String × String) :=
-  match line.splitOn "write-trace " with
-  | pre :: rest :: _ =>
-    let pod := ((pre.trim.splitOn " ").filter (!·.isEmpty)).head?.getD ""
-    let fields := (rest.splitOn " ").filter (!·.isEmpty)
-    let get (k : String) : Option String :=
-      fields.findSome? fun f => if f.startsWith s!"{k}=" then some (f.drop (k.length + 1)) else none
-    match get "key", get "role" with
-    | some key, some "master" => if pod.isEmpty then none else some (key, pod)
-    | _, _ => none
-  | _ => none
-
-/-- key -> the distinct pods that applied it as the master. -/
-def traceIndex (lines : List String) : Std.HashMap String (List String) :=
-  lines.foldl (init := {}) fun m l =>
-    match parseTraceMaster l with
-    | some (k, pod) =>
-      match m.get? k with
-      | some ps => if ps.contains pod then m else m.insert k (pod :: ps)
-      | none => m.insert k [pod]
-    | none => m
-
-/-- The pod that applied the write as the master, by the trace: exactly one. Zero (no line) or several
-    (two pods applied the same key as master) is no attribution. -/
-def traceApplier (idx : Std.HashMap String (List String)) (w : WriteRec) : Option String :=
-  match idx.get? w.key with
-  | some [p] => some p
-  | _ => none
-
 /-- The applier of an ack: the map master (`ackApplier`) and the nodes' own readings (`ownApplier`, only with
     readings) — either attributes; both attributing to different nodes is no attribution (never a pick). -/
 def ackApplierBoth (samples : List (Nat × Option String × List (String × String))) (rs : List Reading)
@@ -457,32 +424,6 @@ private def tfOwn (c : Ctx) : IO (List Reading) := do
       | some (a, b, o) => out := out ++ [{ pod := p.name, ts := a, te := b, view := o.bind ownVOf }]
       | none => pure ()
   return out
-
-/-- Follows the flared log of each pod (all incarnations: the loop re-attaches after a kill) into a local
-    file, keeping only the `write-trace` lines prefixed with the pod's name. The logs of a force-killed pod
-    are gone afterwards, so they must be streamed while the test runs. -/
-structure TraceFollow where
-  file : String
-
-private def startTraceFollow (c : Ctx) (pods : List String) : IO TraceFollow := do
-  let file := s!"/tmp/flare-wtrace-{c.cfg.«namespace»}-{← IO.monoNanosNow}.txt"
-  IO.FS.writeFile file ""
-  let ns := c.cfg.«namespace»
-  let one (pod : String) : String :=
-    s!"( while [ ! -e {file}.stop ]; do kubectl logs -f {pod} -n {ns} -c flared 2>/dev/null | grep --line-buffered 'write-trace ' | sed -u 's|^|{pod} |' >> {file}; sleep 0.3; done ) &"
-  let script := "trap 'kill 0' TERM; " ++ " ".intercalate (pods.map one) ++ " wait"
-  discard <| IO.Process.spawn { cmd := "setsid", args := #["sh", "-c", script], stdin := .null, stdout := .null, stderr := .null }
-  return { file }
-
-/-- Stop the followers (a last re-attach is not awaited) and read what they collected. -/
-private def stopTraceFollow (t : TraceFollow) : IO (List String) := do
-  IO.FS.writeFile s!"{t.file}.stop" ""
-  discard <| IO.Process.output { cmd := "pkill", args := #["-TERM", "-f", s!"{t.file}"] }
-  IO.sleep 500
-  let txt ← IO.FS.readFile t.file
-  IO.FS.removeFile t.file
-  discard <| IO.Process.output { cmd := "rm", args := #["-f", s!"{t.file}.stop"] }
-  return (txt.splitOn "\n").filter (!·.isEmpty)
 
 private def killPod (c : Ctx) (pod : String) : IO Unit := do
   c.event s!"killing {pod} (force)"

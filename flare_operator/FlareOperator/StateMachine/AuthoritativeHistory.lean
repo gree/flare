@@ -199,8 +199,16 @@ def establish (s : Store) (p : Nat) (masterKey : Option String) (copies : List (
       | _, _, _ => (s, .held p "no master to take the history from (an approved adoption without a master needs one history on every copy and exactly one last master)")
     | some m =>
       match copies.lookup m with
-      | some (.modern b h healthy empty _ _) =>
+      | some (.modern b h healthy empty _ epochReason) =>
         if !healthy then (s, .held p s!"the master {m} reports an unhealthy copy")
+        -- A FIRST BUILD master that has not been promoted yet still reports the epoch of its fresh DB
+        -- (reason "new"): its promotion (refused until `authority first` arrives and re-run afterwards)
+        -- advances the source epoch and re-mints the master id, so a record taken now would name a
+        -- history the master leaves a moment later and every rebuild from it would be held for good
+        -- ("holds another history than the record", failover-wa 39990382109). Not recorded until the
+        -- master reports the epoch of its promotion; the next pass reads it again.
+        else if state == none && epochReason == "new" then
+          (s, .held p s!"the master {m} has not been promoted yet (its source epoch is still the fresh DB's): recorded after its promotion")
         else if empty && othersHaveData copies m then (s, .held p s!"the master {m} is EMPTY while another copy holds data")
         else
           let reason := if state == none then "first-build" else "adopted"

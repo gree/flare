@@ -712,4 +712,115 @@ def netemDelay (node : String) (ms : Nat) : IO Bool := do
   | .ok _ => return true
   | .error e => IO.eprintln s!"# netem on {node} failed: {e}"; return false
 
+/-! ### Direct evidence: flared's write trace
+
+With `write-authority-trace = true` (tests only) every flared logs one `write-trace` line per applied mutation:
+`write-trace op=set key=K role=master|replica|unbound partition=P term=T gen=G solo=S mono_ns=N boot=B copy=C`.
+The harness follows each pod's log while the test runs (a force-killed pod's log is gone afterwards; the
+cut master's log is read the same way) with the container runtime's timestamps, and prefixes each line with
+the pod's name: `<pod> <RFC3339 time> ... write-trace ...`. An acknowledged write whose key was applied as the
+MASTER by exactly one pod is attributed to that pod, whatever the map or the own-view samples say. -/
+
+/-- Days since 1970-01-01 of a civil date (year >= 1970). -/
+private def daysFromCivil (y m d : Nat) : Nat :=
+  let y' := if m ≤ 2 then y - 1 else y
+  let era := y' / 400
+  let yoe := y' - era * 400
+  let mp := (m + 9) % 12
+  let doy := (153 * mp + 2) / 5 + d - 1
+  let doe := yoe * 365 + yoe / 4 - yoe / 100 + doy
+  era * 146097 + doe - 719468
+
+/-- `2026-10-23T14:37:49.123456789Z` -> epoch milliseconds. -/
+def parseIsoMs (s : String) : Option Nat :=
+  match s.splitOn "T" with
+  | [date, time] =>
+    match date.splitOn "-", (time.dropRightWhile (· == 'Z')).splitOn ":" with
+    | [y, mo, d], [h, mi, sec] =>
+      match y.toNat?, mo.toNat?, d.toNat?, h.toNat?, mi.toNat?, (sec.splitOn ".").head?.bind (·.toNat?) with
+      | some y, some mo, some d, some h, some mi, some sc =>
+        let frac := match sec.splitOn "." with
+          | [_, f] => ((f ++ "000").take 3).toNat?.getD 0
+          | _ => 0
+        if y < 1970 then none else
+        some ((((daysFromCivil y mo d) * 24 + h) * 60 + mi) * 60000 + sc * 1000 + frac)
+      | _, _, _, _, _, _ => none
+    | _, _ => none
+  | _ => none
+
+/-- One `write-trace` line of a pod's log. -/
+structure TraceLine where
+  pod : String
+  /-- the log line's wall-clock time (epoch ms), when the follower asked the runtime for it -/
+  ms : Option Nat
+  op : String
+  key : String
+  role : String
+  term : Option Nat
+  gen : Option Nat
+  deriving Repr, Inhabited
+
+def parseTraceLine (line : String) : Option TraceLine :=
+  match line.splitOn "write-trace " with
+  | pre :: rest :: _ =>
+    let toks := (pre.trim.splitOn " ").filter (!·.isEmpty)
+    let pod := toks.head?.getD ""
+    let fields := (rest.splitOn " ").filter (!·.isEmpty)
+    let get (k : String) : Option String :=
+      fields.findSome? fun f => if f.startsWith s!"{k}=" then some (f.drop (k.length + 1)) else none
+    match get "key", get "role" with
+    | some key, some role =>
+      if pod.isEmpty then none else
+      some { pod, ms := (toks.drop 1).findSome? parseIsoMs, op := (get "op").getD "", key, role,
+             term := (get "term").bind (·.toNat?), gen := (get "gen").bind (·.toNat?) }
+    | _, _ => none
+  | _ => none
+
+/-- `(key, pod)` of a trace line applied as the master; other roles / lines: none. -/
+def parseTraceMaster (line : String) : Option (String × String) :=
+  (parseTraceLine line).bind fun t => if t.role == "master" then some (t.key, t.pod) else none
+
+/-- key -> the distinct pods that applied it as the master. -/
+def traceIndex (lines : List String) : Std.HashMap String (List String) :=
+  lines.foldl (init := {}) fun m l =>
+    match parseTraceMaster l with
+    | some (k, pod) =>
+      match m.get? k with
+      | some ps => if ps.contains pod then m else m.insert k (pod :: ps)
+      | none => m.insert k [pod]
+    | none => m
+
+/-- The pod that applied the write as the master, by the trace: exactly one. Zero (no line) or several
+    (two pods applied the same key as master) is no attribution. -/
+def traceApplier (idx : Std.HashMap String (List String)) (w : WriteRec) : Option String :=
+  match idx.get? w.key with
+  | some [p] => some p
+  | _ => none
+
+/-- Follows the flared log of each pod (all incarnations: the loop re-attaches after a kill) into a local
+    file, keeping only the `write-trace` lines prefixed with the pod's name. The logs of a force-killed pod
+    are gone afterwards, so they must be streamed while the test runs. -/
+structure TraceFollow where
+  file : String
+
+def startTraceFollow (c : Ctx) (pods : List String) : IO TraceFollow := do
+  let file := s!"/tmp/flare-wtrace-{c.cfg.«namespace»}-{← IO.monoNanosNow}.txt"
+  IO.FS.writeFile file ""
+  let ns := c.cfg.«namespace»
+  let one (pod : String) : String :=
+    s!"( while [ ! -e {file}.stop ]; do kubectl logs -f --timestamps {pod} -n {ns} -c flared 2>/dev/null | grep --line-buffered 'write-trace ' | sed -u 's|^|{pod} |' >> {file}; sleep 0.3; done ) &"
+  let script := "trap 'kill 0' TERM; " ++ " ".intercalate (pods.map one) ++ " wait"
+  discard <| IO.Process.spawn { cmd := "setsid", args := #["sh", "-c", script], stdin := .null, stdout := .null, stderr := .null }
+  return { file }
+
+/-- Stop the followers (a last re-attach is not awaited) and read what they collected. -/
+def stopTraceFollow (t : TraceFollow) : IO (List String) := do
+  IO.FS.writeFile s!"{t.file}.stop" ""
+  discard <| IO.Process.output { cmd := "pkill", args := #["-TERM", "-f", s!"{t.file}"] }
+  IO.sleep 500
+  let txt ← IO.FS.readFile t.file
+  IO.FS.removeFile t.file
+  discard <| IO.Process.output { cmd := "rm", args := #["-f", s!"{t.file}.stop"] }
+  return (txt.splitOn "\n").filter (!·.isEmpty)
+
 end FlareOperator.E2E.NodeOps

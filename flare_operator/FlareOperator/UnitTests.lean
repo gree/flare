@@ -1574,6 +1574,47 @@ def partChecks : List (String × Bool) :=
         && startsWith (partVerdictWa { good with peerAcks := good.peerAcks ++ [(ack 4 310 311 "p", "forwarded")] }) "NOT VERIFIED"
         && partVerdictWa { good with peerAcks := good.peerAcks ++ [(ack 4 410 411 "p", "forwarded")] } == none
         && startsWith (partVerdictWa { good with oldAcks := good.oldAcks ++ [(ack 3 304 305 "o", "local")], peerAcks := good.peerAcks ++ [(ack 4 310 311 "p", "forwarded")] }) "PRODUCT GAP"),
+    ("C' with the write authority ON: the write trace attributes the acks forwarded through the replica (applied by the replica -> a new-master ack, applied by the old master -> an old-master ack that can overlap); unattributable stays NOT VERIFIED; the trace time parser reads the runtime's RFC3339 stamps",
+      let c : PartObs := { base with samples := withFail }
+      let good := { c with oldAcks := [(ack 1 150 151 "o", "local")], peerAcks := [(ack 2 300 301 "p", "local")] }
+      let line := fun (pod key role : String) =>
+        s!"{pod} 2026-10-23T14:37:49.500Z [1][NTC]x.cc:9-f] write-trace op=set key={key} role={role} partition=0 term=2 gen=3 solo=0 mono_ns=5 boot=b copy=c"
+      let fwd := { good with peerAcks := good.peerAcks ++ [(ack 4 310 311 "p", "forwarded")] }
+      let tl := fun (ls : List String) => { fwd with trace := traceIndex ls, traceLines := ls.filterMap parseTraceLine }
+      parseIsoMs "2026-10-23T14:37:49.500Z" == some (1792766269 * 1000 + 500)
+        && parseIsoMs "1970-01-01T00:00:01Z" == some 1000
+        && parseIsoMs "garbage" == none
+        && (parseTraceLine (line "rep" "k4" "master")).map (fun l => (l.pod, l.ms, l.term, l.gen)) == some ("rep", some (1792766269 * 1000 + 500), some 2, some 3)
+        -- no trace: unchanged
+        && startsWith (partVerdictWa fwd) "NOT VERIFIED"
+        -- applied by the replica as master: attributed (no longer NOT VERIFIED)
+        && partVerdictWa (tl [line "rep" "k4" "master"]) == none
+        -- only a replica line / two appliers: not attributed
+        && startsWith (partVerdictWa (tl [line "rep" "k4" "replica"])) "NOT VERIFIED"
+        && startsWith (partVerdictWa (tl [line "rep" "k4" "master", (line "old" "k4" "master").replace "2026-10-23T14:37:49.500Z" "1970-01-01T00:01:45.000Z"])) "NOT VERIFIED"
+        -- applied by the OLD master, ending at 311 > the new master's first possible ack at 300: a dual acknowledgement
+        && startsWith (partVerdictWa (tl [(line "old" "k4" "master").replace "2026-10-23T14:37:49.500Z" "1970-01-01T00:01:45.000Z"])) "PRODUCT GAP"
+        -- an old-master ack the trace shows the REPLICA applied is a new-master ack too (stricter)
+        && startsWith (partVerdictWa { good with oldAcks := good.oldAcks ++ [(ack 5 100 150 "o", "local")], trace := traceIndex [line "rep" "k5" "master"] }) "PRODUCT GAP"),
+    ("C' with the write authority ON: lost acks are dated against the cut and the old master's grant (ttl 6 s + slack 2 s after the rules were in): within it they are the design's async-replication loss and only reported; one that began after it, or a write the old master's own trace shows applied after it, is a PRODUCT GAP",
+      let c : PartObs := { base with samples := withFail, tCutDone := 102 }
+      let good := { c with oldAcks := [(ack 1 150 151 "o", "local")], peerAcks := [(ack 2 300 301 "p", "local")] }
+      let line := fun (ms : Nat) (key : String) =>
+        s!"old {(String.intercalate "" ["1970-01-01T00:00:", (if ms / 1000 < 10 then "0" else ""), toString (ms / 1000), ".000Z"])} [1] write-trace op=set key={key} role=master partition=0 term=2 gen=3 solo=0 mono_ns=5 boot=b copy=c"
+      let within := { good with lostAcks := some 2, lostWrites := [ack 7 101 103 "o", ack 8 108 109 "o"] }
+      -- bound = 102 + 6 + 2 = 110
+      let late := { good with lostAcks := some 1, lostWrites := [ack 9 112 113 "o"] }
+      let strad := { good with lostAcks := some 1, lostWrites := [ack 9 109 111 "o"] }
+      (lostStats within).certain == 0 && (lostStats within).ambiguous == 0 && (lostStats within).maxRel == 9
+        && (lostStats strad).ambiguous == 1 && (lostStats strad).certain == 0
+        && (lostStats late).certain == 1 && (lostStats late).bound == 110
+        && partVerdictWa within == none && partVerdictWa strad == none
+        && startsWith (partVerdictWa late) "PRODUCT GAP"
+        && (lostStats within).render.startsWith "2 lost ack(s)"
+        -- the old master's own trace: a write applied as master after the bound (epoch 111 s) = defect; before it = fine
+        && partVerdictWa { good with traceLines := [(parseTraceLine (line 105000 "k1")).get!], trace := {} } == none
+        && startsWith (partVerdictWa { good with traceLines := [(parseTraceLine (line 112000 "k1")).get!] }) "PRODUCT GAP"
+        && (lostStats { good with traceLines := [(parseTraceLine (line 105000 "k1")).get!] }).oldLastApplyRel == some 3),
     ("two failovers (authority ON): every ack must be attributable to the node that applied it — an ack in a window where the map master changes (proxied or local) -> NOT VERIFIED, never green; stable master -> pass; acks of two appliers overlapping -> PRODUCT GAP",
       let ips := [("ip0", "p0"), ("ip1", "p1")]
       let smp := fun (t : Nat) (m : Option String) => ((t, m, ips) : Nat × Option String × List (String × String))
@@ -2388,6 +2429,13 @@ private def checkAuthoritativeHistory (ctx : Ctx) : IO Unit := do
     ((match establish fresh 0 (some "m") cs false "t" with | (_, .recorded 0 r _) => r.reason == "first-build" | _ => false)
       && (establish absent 0 (some "m") cs false "t").2 == .none
       && (match establish absent 0 (some "m") cs true "t" with | (_, .recorded 0 r _) => r.reason == "adopted" | _ => false))
+  -- a first-build master not yet promoted (epoch reason "new") is not recorded: its promotion advances the
+  -- epoch, a record taken before holds every rebuild for good (failover-wa 39990382109)
+  let fbNew := fun (reason : String) => [("m", Seen.modern bM h2 true false [] reason), ("s", modern bS h2 false)]
+  check ctx "history (failover-wa): a first-build record waits for the master's promotion (epoch reason new = held, nothing recorded); after it (promotion) it is recorded; an approved adoption of an existing master is not affected"
+    ((match establish fresh 0 (some "m") (fbNew "new") false "t" with | (s', .held 0 _) => s' == fresh | _ => false)
+      && (match establish fresh 0 (some "m") (fbNew "promotion") false "t" with | (_, .recorded 0 r _) => r.reason == "first-build" | _ => false)
+      && (match establish absent 0 (some "m") (fbNew "new") true "t" with | (_, .recorded 0 r _) => r.reason == "adopted" | _ => false))
   -- the first-build proof the operator sends `authority first` on (flared's gate stays the judge)
   let recFB : Record := { gen := 1, hist := h2, holder := "m", binding := bM, since := "t0", reason := "first-build" }
   let storeFB : Store := { clusterUid := "cu", origin := "first-build", parts := [(0, .known recFB none)] }

@@ -336,7 +336,18 @@ namespace test_cluster
 	{
 		mkdir((tmp_dir + "/wa1").c_str(), 0700);
 		authority_fixture f((tmp_dir + "/wa1").c_str());
-		f.boot_as_master();
+		// startup order: the boot map arrives while the storage is not attached yet (the shift is only
+		// deferred, nothing is recorded), then storage + run_boot_shift record the refusal, and only
+		// that recorded refusal is re-evaluated
+		f.cl._type = cluster::type_node;
+		vector<cluster::node> v;
+		v.push_back(mk("localhost", 11211, cluster::role_master, cluster::state_active, 0));
+		cppcut_assert_equal(0, f.cl.reconstruct_node(v, f.cl.get_node_map_version() + 10));
+		cppcut_assert_equal(0, f.cl.retry_refused_promotion());		// no storage yet: must not touch it
+		cppcut_assert_equal(std::string("none"), f.cl.get_promotion_retry_reason());
+		f.cl.set_storage(&f.st);
+		cppcut_assert_equal(0, f.cl.run_boot_shift());
+		cppcut_assert_equal(std::string("authority"), f.cl.get_promotion_retry_reason());
 		cut_assert_true(f.cl.is_promotion_refused());		// no proof, no intent: a non-serving candidate
 		cppcut_assert_equal(0, f.cl.retry_refused_promotion());
 		cut_assert_true(f.cl.is_promotion_refused());		// nothing changed: still refused
@@ -405,6 +416,7 @@ namespace test_cluster
 		f.boot_as_master();
 		cut_assert_true(f.cl.is_promotion_refused());
 		cppcut_assert_equal(std::string("copy not fit"), f.cl.get_promotion_refused_why());
+		cppcut_assert_equal(std::string("copy"), f.cl.get_promotion_retry_reason());
 		for (int i = 0; i < 3; i++) {
 			cppcut_assert_equal(0, f.cl.retry_refused_promotion());
 			cut_assert_true(f.cl.is_promotion_refused());
@@ -412,6 +424,7 @@ namespace test_cluster
 		f.st.forbidden = false;		// nothing else changes: no map, no restart
 		cppcut_assert_equal(0, f.cl.retry_refused_promotion());
 		cut_assert_false(f.cl.is_promotion_refused());		// the allowance survived the refused shifts
+		cppcut_assert_equal(std::string("none"), f.cl.get_promotion_retry_reason());
 	}
 
 	void test_forbidden_copy_that_clears_still_meets_the_authority_gate()
@@ -426,6 +439,7 @@ namespace test_cluster
 		cppcut_assert_equal(0, f.cl.retry_refused_promotion());
 		cut_assert_true(f.cl.is_promotion_refused());		// the copy is fit; no proof, no intent: the gate still refuses
 		cut_assert_true(f.cl.get_promotion_refused_why().find("write authority") == 0);
+		cppcut_assert_equal(std::string("authority"), f.cl.get_promotion_retry_reason());		// the reason moved from copy to authority
 		std::string why;
 		cut_assert_true(write_promise::allow_first_build(0, "b1", "c1", why));
 		cppcut_assert_equal(0, f.cl.retry_refused_promotion());

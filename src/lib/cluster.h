@@ -278,6 +278,8 @@ public:
 	/** re-run a promotion that the write authority gate refused (no-op when none is pending); called
 	    periodically. The gate is evaluated again as for the first attempt: nothing is bypassed. */
 	int retry_refused_promotion();
+	// why a promotion refusal is being re-evaluated: "none", "copy" or "authority" (read under the locks)
+	string get_promotion_retry_reason();
 	void set_activation_pending(bool v) { this->_activation_pending = v; };
 	int _run_boot_shift_locked();
 

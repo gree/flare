@@ -450,7 +450,8 @@ master (旧)                 operator leader               新 master
 3. **gate の順序: copy の適格性 → authority。** `may_first_build` は allowance を消費する（used or void）ので、copy が不適で拒否される shift が allowance を使い切ってはならない。copy を先に検査し、拒否された間 allowance は温存される（`test_forbidden_copy_refusal_is_re_evaluated_when_the_copy_is_fit_again`）。allowance は boot id・copy id の完全一致に束縛され、別 boot / 別 copy での照合は失敗し、かつ破棄される（再起動・copy 交換後に元の identity に戻しても復活しない）。昇格が通ったとき、または role を失ったときも消費・削除される。pod UID は flared の identity に含まれない（operator 側の `authority first` の証明が pod UID を含む履歴 holder と照合する）。
 4. 既存 copy の Proxy → master（証明なし・intent なし）は、何回再評価しても拒否のまま（`test_existing_copy_proxy_to_master_stays_refused_across_retries`）。
 5. 同期: `_promotion_retry_pending` は node map / partition map の両 rwlock の下でのみ読み書きする（retry は先頭で無条件に両 lock を取る）。volatile は同期ではない。
-6. 後段の検査（partition binding・cursor 再調整）の拒否は従来どおり最終（再評価しない）。
+6. `get_promotion_retry_reason()`（none / copy / authority）が理由を公開し、テストで copy → authority の遷移を固定する。storage 未接続の間は shift 自体が走らない（boot map は `_boot_shift_pending` に保留）ので、保留された retry は storage 接続後の `run_boot_shift` が記録した拒否だけで、`retry_refused_promotion` は storage が無ければ何もしない（`test_promotion_refused_by_the_gate_completes_when_the_first_build_is_allowed` が起動順序で確認）。
+7. 後段の検査（partition binding・cursor 再調整）の拒否は従来どおり最終（再評価しない）。
 
 **replica の最初の token**: floor が未設定の replica は変更を**拒否**する（最初の token を受け入れない）。operator が floor を渡してから受ける（`authority floor`）。再起動した replica は operator が floor を再送するまで forward を受けない（欠けた分は WAL follow が埋める）。
 

@@ -1412,6 +1412,16 @@ int cluster::retry_refused_promotion() {
 	return result;
 }
 
+string cluster::get_promotion_retry_reason() {
+	pthread_rwlock_rdlock(&this->_mutex_node_map);
+	pthread_rwlock_rdlock(&this->_mutex_node_partition_map);
+	string r = !this->_promotion_retry_pending ? "none"
+		: (this->_promotion_retry_reason == retry_copy ? "copy" : "authority");
+	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
+	pthread_rwlock_unlock(&this->_mutex_node_map);
+	return r;
+}
+
 /**
  *	[index] set node server monitoring threshold
  */
@@ -2428,7 +2438,8 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 	if (was_retry && new_role == role_master) {
 		// both gates (copy fit, write authority) passed on this re-run: the refusal they latched ends
 		// (the checks below latch again for their own reasons, final as before)
-		log_notice("the refused promotion of partition %d is now allowed (re-evaluated)", new_partition);
+		log_notice("the refused promotion of partition %d is now allowed (re-evaluated; it was refused for the %s)", new_partition,
+			this->_promotion_retry_reason == retry_copy ? "copy" : "write authority");
 		this->_promotion_refused = false;
 		this->_promotion_retry_pending = false;
 	}

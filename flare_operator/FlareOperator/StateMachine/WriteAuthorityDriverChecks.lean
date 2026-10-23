@@ -98,10 +98,12 @@ structure World where
   stores : IO.Ref (List (String × Fake))
   /-- (clock, node, line) of every line sent -/
   sent : IO.Ref (List (Nat × String × String))
+  /-- per node: the world time one ask of it takes (an ask into a cut pod hangs up to its wall) -/
+  cost : IO.Ref (List (String × Nat))
 
 def World.new (keys : List String) : IO World := do
   return { clock := ← IO.mkRef 1000, nodes := ← IO.mkRef (keys.map fun k => (k, ({} : Node))),
-           stores := ← IO.mkRef [], sent := ← IO.mkRef [] }
+           stores := ← IO.mkRef [], sent := ← IO.mkRef [], cost := ← IO.mkRef [] }
 
 def World.node (w : World) (k : String) : IO Node := do
   return ((← w.nodes.get).lookup k).getD {}
@@ -113,6 +115,9 @@ def World.ask (w : World) (key cmd : String) : IO (Option String) := do
   let now ← w.clock.get
   w.sent.modify (· ++ [(now, key, cmd)])
   let n ← w.node key
+  match ((← w.cost.get).lookup key) with
+  | some c => w.clock.modify (· + c)
+  | none => pure ()
   if !n.reachable then return none
   let (n', err) := flaredApply n ((cmd.splitOn " ").filter (· != ""))
   w.setNode key fun _ => n'
@@ -233,7 +238,7 @@ def tUnknownAndRecancel : IO Bool := do
   let d2 ← w.decision (iname 0 2 1)
   w.setNode B fun x => { x with reachable := true }
   let nB2 ← w.node B                               -- still preparing intent 1
-  let g3 ← gate (w.ctx 7) 0 B "uid" 6              -- readable: the expired attempt is cancelled (store, then the successor)
+  let g3 ← gate (w.ctx 7) 0 B "uid" 6              -- readable: the expired attempt is cancelled (store, then the successor), a fresh one follows at once
   let d3 ← w.decision (iname 0 2 1)
   let nB3 ← w.node B
   let g4 ← gate (w.ctx 7) 0 B "uid" 6              -- a new attempt (2): prepared, its old promise long over, committed, promotable
@@ -241,7 +246,7 @@ def tUnknownAndRecancel : IO Bool := do
   let d4 ← w.decision (iname 0 2 2)
   return isHold g1 && d1 == some .pending && c1 == none
     && isHold g2 && d2 == some .pending && nB2.state == "preparing" && nB2.intent == 201
-    && isHold g3 && d3 == some .cancelled && nB3.state == "following"
+    && g3 == .proceed && d3 == some .cancelled && nB3.state == "committed" && nB3.intent == 202
     && g4 == .proceed && nB4.state == "committed" && nB4.intent == 202 && d4 == some .committed
 
 /-- The operator restarts (a new leader token, a new clock): the old pending intent is not
@@ -259,7 +264,8 @@ def tOperatorRestart : IO Bool := do
   let g2 ← gate (w.ctx 8 50000) 0 B "uid" 6   -- attempt 2 under the new token (its promise is long over: committed)
   let d2 ← w.decision (iname 0 2 2)
   let oldCommit := (← w.sent.get).any fun (_, k, c) => k == B && c.startsWith "authority commit 0 201 "
-  return isHold g1 && d1 == some .cancelled && nB1.state == "following"
+  -- the new leader cancels the old attempt (never commits it) and makes attempt 2 in the same call
+  return g1 == .proceed && d1 == some .cancelled && nB1.state == "committed" && nB1.intent == 202
     && g2 == .proceed && d2 == some .committed && !oldCommit
 
 /-- the membership does not move while an intent is open, and a master change without a committed
@@ -841,6 +847,75 @@ def tRegisteredFirstBuild : IO Bool := do
     && r4 && n4.first == none && !r5
     && q0 && q1 && n6a.first == some ("b1", "c1") && n6c.first.isSome && q2 && n7.first == none
 
+def asksTo (w : World) (key : String) : IO Nat := do
+  return ((← w.sent.get).filter fun (_, k, _) => k == key).length
+
+/-- C' (f12, run 39964899657): the master is cut off (every ask into it hangs), the successor is prepared
+    and eligible. The master is read ONCE per gate call (not once per step, twice per reading): the
+    commit lands inside the attempt's prepare window and the successor is promoted in that call. Before
+    the fix the readings alone (8 x 40 s) ran past the 120 s window and the commit CAS was refused -/
+def tColdMasterGate : IO Bool := do
+  let w ← World.new [A, B]
+  let _ ← ensurePartition (w.ctx 7) 0 (view1 A [B])
+  w.setClock 1000
+  w.round A [B]
+  w.setNode A fun x => { x with reachable := false }
+  w.cost.set [(A, 40000)]
+  let before ← asksTo w A
+  let g ← gate (w.ctx 7) 0 B "uid" 6
+  let after ← asksTo w A
+  let d ← w.decision (iname 0 2 1)
+  let nB ← w.node B
+  return g == .proceed && d == some .committed && nB.state == "committed" && after - before == 1
+
+/-- the commit CAS meets a concurrent write of the record once (resourceVersion conflict): it re-reads
+    and commits on the same attempt; no second attempt, and the commit message to the successor still
+    waits for its promise end -/
+def tCommitConflictOnce : IO Bool := do
+  let w ← World.new [A, B]
+  let _ ← ensurePartition (w.ctx 7) 0 (view1 A [B])
+  w.setClock 1000
+  w.round A [B]
+  w.setNode A fun x => { x with reachable := false }
+  let g1 ← gate (w.ctx 7) 0 B "uid" 6              -- prepared; promise to 12000
+  w.setClock 12000
+  match (← w.stores.get).lookup (iname 0 2 1) with
+  | none => return false
+  | some f =>
+    match ← f.text with
+    | none => return false
+    | some t =>
+      f.faults.set [.interfere t]                   -- a concurrent write bumps the resourceVersion once
+      let g2 ← gate (w.ctx 7) 0 B "uid" 6
+      let d1 ← w.decision (iname 0 2 1)
+      let d2 ← w.decision (iname 0 2 2)
+      let c ← w.firstSent B "commit"
+      return isHold g1 && g2 == .proceed && d1 == some .committed && d2 == none && c == some 12000
+
+/-- the prepare window is over (the commit CAS is refused as expired): the attempt is cancelled and a
+    fresh one is made, prepared and committed in the same call (the successor is reachable and eligible);
+    the expired one is never committed -/
+def tExpiredRetriedAtOnce : IO Bool := do
+  let w ← World.new [A, B]
+  let _ ← ensurePartition (w.ctx 7) 0 (view1 A [B])
+  w.setClock 1000
+  w.round A [B]
+  w.setNode A fun x => { x with reachable := false }
+  let _ ← gate (w.ctx 7) 0 B "uid" 6              -- attempt 1, window to 121000
+  w.setClock 200000
+  -- the refusal of the commit itself: expired
+  let c ← recClient (w.ctx 7) 0
+  let rec_ ← readRec c
+  let atts ← scanAttempts (w.ctx 7) 0 2
+  let direct ← match rec_, atts with
+    | .ok (some (m, _)), .ok [a] => doCommit (w.ctx 7) 0 m a
+    | _, _ => pure (.notApplied "setup")
+  let dStill ← w.decision (iname 0 2 1)
+  let g ← gate (w.ctx 7) 0 B "uid" 6
+  let d1 ← w.decision (iname 0 2 1)
+  let d2 ← w.decision (iname 0 2 2)
+  return direct == .expired && dStill == some .pending && g == .proceed && d1 == some .cancelled && d2 == some .committed
+
 def checks : IO (List (String × Bool)) := do
   return [
     ("driver: steady state — record, floor on the successor, membership confirmed by the master, idempotent", ← tSteady),
@@ -867,6 +942,9 @@ def checks : IO (List (String × Bool)) := do
     ("driver: the index limit and the seeding bound fail closed (no new attempt, nothing dropped)", ← tIndexLimits),
     ("driver: the master's ACK needs the complete incarnation — a pod recreated with only the UID changed (or an unknown part) is not acknowledged", ← tAckedUid),
     ("driver: a master registered as master gets the first-build proof (real boot / copy) BEFORE its record exists, only with the history's proof; an existing copy / record / another holder / unreadable identity / unreachable node gets none (the record is held when the proof cannot be sent)", ← tRegisteredFirstBuild),
+    ("driver: C' — a master that cannot be read is asked once per gate call; the commit lands inside the prepare window and the successor is promoted", ← tColdMasterGate),
+    ("driver: C' — a resourceVersion conflict on the commit CAS is retried on the same attempt (committed, no second attempt)", ← tCommitConflictOnce),
+    ("driver: C' — an expired attempt is refused (never committed), cancelled, and a fresh attempt goes through in the same call", ← tExpiredRetriedAtOnce),
     ("driver: a committed intent is terminal — the leader's cancel is refused, the successor stays committed", ← tTerminal) ]
 
 end FlareOperator.WriteAuthorityDriverChecks

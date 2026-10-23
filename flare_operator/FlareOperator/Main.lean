@@ -1446,7 +1446,13 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       -- whole reconstruction — detectDeadNodesPure excludes them by state.
       let unreadyDeadCycles := ((← IO.getEnv "FLARE_UNREADY_DEAD_CYCLES").bind (·.toNat?)).getD 6
       let prevUnready ← unreadyCyclesRef.get
-      let notReadyKeys := (pods.filter (fun p => !p.ready && !p.terminating)).map Bridge.PodInfo.toNodeKey
+      -- A Terminating pod that is NOT Ready counts too (C' 2026-10-23: the master's node was cut from
+      -- the control plane; after the eviction timeout its pod turned Terminating and stuck there. Left out,
+      -- it dropped out of dead detection and fell into the PLANNED drain path, whose guard takes only a
+      -- follower proven current — unprovable with the master unreadable — so the eligible slave was never
+      -- promoted). A Terminating pod that is still Ready (the preStop window) is untouched: that is the
+      -- graceful drain.
+      let notReadyKeys := (pods.filter (fun p => !p.ready)).map Bridge.PodInfo.toNodeKey
       -- a node Down in the last committed map that is a member again now
       -- (it rejoined) starts its NotReady window again
       -- ... and one that LEFT its Active membership (Active -> Prepare through
@@ -2149,7 +2155,7 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
                   promotionAbortedRef.set true
                   return
             else
-              match ← WriteAuthorityDriver.gate ctx part.toNat k uid 4 with
+              match ← WriteAuthorityDriver.gate ctx part.toNat k uid 8 with
               | .proceed => IO.eprintln s!"[flare-operator] write authority: promotion of {k} (P{part}) passed the intent gate"
               | .hold why =>
                 IO.eprintln s!"[flare-operator] write authority: PROMOTION HELD for {k} (P{part}): {why}"

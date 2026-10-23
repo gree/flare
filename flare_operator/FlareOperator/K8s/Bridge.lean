@@ -265,8 +265,8 @@ def updateFlaredConfigMap (cmName ns : String) (nodeMapData : String) : IO (Exce
 -- ===========================================================================
 
 /-- Run a command inside a pod via kubectl exec. -/
-def execInPod (podName ns : String) (cmd : List String) : IO (Except String String) := do
-  kubectl (["exec", podName, "-n", ns, "--"] ++ cmd)
+def execInPod (podName ns : String) (cmd : List String) (wallSecs : Nat := 30) : IO (Except String String) := do
+  kubectlWall wallSecs (["exec", podName, "-n", ns, "--"] ++ cmd)
 
 /-- Send SIGHUP to all pods in a cluster to trigger config reload.
     When flared receives SIGHUP, it re-registers with the index server (operator),
@@ -458,12 +458,12 @@ def writeRepairLedger (crName ns : String) (l : ReplicaRepair.Ledger) : IO (Exce
   | .ok _ => return .ok ()
 
 /-- Query flared stats via kubectl exec and bash /dev/tcp. -/
-def queryPodStats (podName ns : String) (statsCmd : String) : IO (Except String String) :=
+def queryPodStats (podName ns : String) (statsCmd : String) (wallSecs : Nat := 30) : IO (Except String String) :=
   -- Read until the END line and return at once; the connection would stay
   -- open (memcached protocol), so a plain `cat` always ran into its 3 s
   -- timeout and every stats probe cost ≥3 s of reconcile time. The overall
   -- deadline stays (timeout 3), so a hung or silent flared still bounds it.
-  execInPod podName ns ["bash", "-c", s!"exec 3<>/dev/tcp/localhost/12121; printf '{statsCmd}\\r\\n' >&3; timeout 3 bash -c 'while IFS= read -r line; do printf \"%s\\n\" \"$line\"; case \"$line\" in END*|SERVER_ERROR*) break;; esac; done' <&3; exec 3>&-"]
+  execInPod podName ns ["bash", "-c", s!"exec 3<>/dev/tcp/localhost/12121; printf '{statsCmd}\\r\\n' >&3; timeout 3 bash -c 'while IFS= read -r line; do printf \"%s\\n\" \"$line\"; case \"$line\" in END*|SERVER_ERROR*) break;; esac; done' <&3; exec 3>&-"] wallSecs
 
 /-- What a bounded stats probe (`timeout 3` inside the exec) says about a
     pod's data: `(hasData, knownEmpty)`. A pod lands in `knownEmpty` ONLY when

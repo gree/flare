@@ -68,11 +68,17 @@ def podOf (key : String) : String :=
   | p :: _ => p
   | [] => key
 
+/-- Hard wall of one `authority ...` ask through kubectl exec. A pod behind a cut (its node cut from the
+    API server: C') makes `kubectl exec` hang up to the generic 30 s wall; the gate asks the master
+    several times and the intent has its own deadline (`prepareTimeoutMs`), so one ask may not take
+    that long. A shorter wall only turns a slow reply into Unknown (never into a decision). -/
+def authorityAskWallSecs : Nat := 8
+
 /-- The live wiring: kubectl exec into the pod, ConfigMaps through the kubectl client. -/
 def Ctx.live (cfg : Config) (cr ns : String) (token : Nat) (node : String) : Ctx :=
   { cfg, cr, ns, token, node,
     askNode := fun key cmd => do
-      match ← FlareOperator.K8s.Bridge.queryPodStats (podOf key) ns cmd with
+      match ← FlareOperator.K8s.Bridge.queryPodStats (podOf key) ns cmd authorityAskWallSecs with
       | .ok out => pure (some out)
       | .error _ => pure none,
     clientFor := fun name => mkClient kubectlRunner ns name [("app.kubernetes.io/managed-by", "flare-operator")],
@@ -352,6 +358,28 @@ def viewOf (a : Option Attempt) (now : At) : IntentView :=
     | .pending =>
       .pending x.intent.oldUntil.isSome (match now.reached? x.intent.deadline with | some false => false | _ => true)
 
+/-- Why a CAS did not (or did) apply, in words (conflict / stale fence / bad record / unknown ...). -/
+def describeResult : Result → String
+  | .done _ => "applied"
+  | .settled _ => "already in the store"
+  | .refused r cur => s!"refused by the record: {reprStr r} (decision {reprStr cur.decision}, fence {cur.fence}, prepared {cur.oldUntil.isSome})"
+  | .absent => "the record is absent"
+  | .badRecord e => s!"the record is bad: {reprStr e}"
+  | .unknown why => s!"unknown: {why}"
+
+/-- One line for every CAS step that did not take effect: the step, the resource, the reason, and the
+    resourceVersion the record is at now. -/
+def noteCas (what name : String) (c : Client) (r : Result) : IO Unit := do
+  match r with
+  | .done _ => pure ()
+  | .settled _ => pure ()
+  | _ =>
+    let at_ ← match ← c.get with
+      | .found _ rv => pure s!"resourceVersion {rv}"
+      | .notFound => pure "absent"
+      | .error e => pure s!"unreadable ({e})"
+    IO.eprintln s!"[flare-operator] write authority: {what} on {name} did not apply: {describeResult r}; the record is at {at_}"
+
 /-- Make the record carry this leader's token (a stale leader holds). -/
 def ensureFence (c : Client) (token : Nat) (i : Intent) : IO Bool := do
   if i.fence == token then pure true
@@ -362,16 +390,29 @@ def ensureFence (c : Client) (token : Nat) (i : Intent) : IO Bool := do
     | _ => pure false
   else pure false
 
+/-- `ensureFence`, saying why when the record does not carry (and cannot be made to carry) this token. -/
+def fenceOk (name : String) (c : Client) (token : Nat) (i : Intent) : IO Bool := do
+  if i.fence == token then return true
+  else if i.fence < token then
+    match ← adopt c token with
+    | .done _ => pure true
+    | .settled _ => pure true
+    | r => noteCas "adopting the leader token" name c r; pure false
+  else
+    IO.eprintln s!"[flare-operator] write authority: stale fence on {name}: the record carries fence {i.fence}, this operator's token is {token}; a newer leader owns it"
+    pure false
+
 def doCreate (ctx : Ctx) (p : Nat) (m : Members) (as : List Attempt) (key : String) (b : Bind) : IO Bool := do
   let n := ((currentTerm (m.term + 1) as).map (·.n)).foldl max 0 + 1
   let now ← nowAt ctx
   let deadline : At := { now with t := now.t + ctx.cfg.prepareTimeoutMs }
   if !(← addIndex ctx p (m.term + 1) (m.term + 1) n) then return false
-  let c ← ctx.clientFor (intentName ctx.cr p (m.term + 1) n)
+  let name := intentName ctx.cr p (m.term + 1) n
+  let c ← ctx.clientFor name
   match ← createIntent c (Intent.prepare (refOf ctx p m n key b) ctx.token deadline) with
   | .done _ => pure true
   | .settled _ => pure true
-  | _ => pure false
+  | r => noteCas "creating the promotion intent" name c r; pure false
 
 def doPrepare (ctx : Ctx) (p : Nat) (m : Members) (a : Attempt) (key : String) (b : Bind) : IO Bool := do
   let sc := wireOfAttempt a
@@ -380,39 +421,55 @@ def doPrepare (ctx : Ctx) (p : Nat) (m : Members) (a : Attempt) (key : String) (
   | some s =>
     if s.state != "preparing" || !(replicaOf s sc).scopeOk then pure false
     else
-      let c ← ctx.clientFor (attemptName ctx p a)
-      if !(← ensureFence c ctx.token a.intent) then pure false
+      let name := attemptName ctx p a
+      let c ← ctx.clientFor name
+      if !(← fenceOk name c ctx.token a.intent) then pure false
       else
         let oldUntil : At := { clock := { node := key, boot := b.boot }, t := s.remainingMs }
         match ← markPrepared c a.intent.ref ctx.token oldUntil with
         | .done _ => pure true
         | .settled _ => pure true
         | .refused _ _ => pure true
-        | _ => pure false
+        | r => noteCas "recording the prepare" name c r; pure false
 
 /-- Cancel one attempt (the terminal CAS first, then the successor with the attempt's own scope).
     `true` when the store says cancelled. -/
 def doCancelAttempt (ctx : Ctx) (p : Nat) (a : Attempt) : IO Bool := do
-  let c ← ctx.clientFor (attemptName ctx p a)
+  let name := attemptName ctx p a
+  let c ← ctx.clientFor name
   let sendCancel : IO Unit := discard <| ask ctx a.intent.successor (cmdCancel p (wireOfAttempt a))
-  if (← ensureFence c ctx.token a.intent) then
+  if (← fenceOk name c ctx.token a.intent) then
     match ← cancelIntent c a.intent.ref (.leader ctx.token) (← nowAt ctx) with
     | .done _ => sendCancel; pure true
     | .settled _ => sendCancel; pure true
-    | _ => pure false
+    | r => noteCas "the cancel CAS" name c r; pure false
   else pure false
 
 def doCancel (ctx : Ctx) (p : Nat) (a : Attempt) : IO Unit :=
   discard <| doCancelAttempt ctx p a
 
-def doCommit (ctx : Ctx) (p : Nat) (m : Members) (a : Attempt) : IO Bool := do
-  let c ← ctx.clientFor (attemptName ctx p a)
-  if !(← ensureFence c ctx.token a.intent) then pure false
+/-- What the terminal commit CAS came to: committed, REFUSED because the attempt's prepare window is over
+    (`expired`: the attempt can never be committed any more — a fresh one is needed), or not applied for
+    any other reason (the attempt stays pending and the next pass retries the same attempt). -/
+inductive CommitOutcome where
+  | committed
+  | expired
+  | notApplied (why : String)
+  deriving Repr, BEq
+
+def doCommit (ctx : Ctx) (p : Nat) (m : Members) (a : Attempt) : IO CommitOutcome := do
+  let name := attemptName ctx p a
+  let c ← ctx.clientFor name
+  if !(← fenceOk name c ctx.token a.intent) then pure (.notApplied "the record does not carry this leader's token")
   else
     match ← commitIntent c a.intent.ref (.leader ctx.token) (membershipOf ctx p m) (← nowAt ctx) with
-    | .done _ => pure true
-    | .settled _ => pure true
-    | _ => pure false
+    | .done _ => pure .committed
+    | .settled _ => pure .committed
+    | r =>
+      noteCas "the commit CAS" name c r
+      match r with
+      | .refused .expired _ => pure .expired
+      | _ => pure (.notApplied (describeResult r))
 
 /-- The membership record is acknowledged by its master, for the exact generation: the record says
     acked and names the incarnation that did. When the master can be read now, it must still be that
@@ -423,19 +480,26 @@ def ackedFor (ctx : Ctx) (p : Nat) (m : Members) : IO Bool := do
   match m.ackBind with
   | none => return false
   | some ab =>
-    match ← bindingNow ctx m.master p with
+    -- ONE reading of the master (an unreadable flared costs a whole ask wall, so it is asked once):
+    -- pod UID before and after the flared reading, then the incarnation must be the recorded one
+    let u1 ← ctx.podUid m.master
+    match ← statusOf ctx m.master p with
     | none =>
-      -- unreadable (or the pod changed during the reading): the durable ACK stands only when the
-      -- flared itself cannot be read; a readable flared with an unreadable pod UID is Unknown
-      match ← statusOf ctx m.master p with
-      | none => return true
-      | some _ => return false
-    | some (s, bnd) => pure (s.holds m && bnd == ab)
+      -- the flared itself cannot be read (the failover case: the master is gone): the durable
+      -- acknowledgement stands — a master that lost its state holds no grant
+      return true
+    | some s =>
+      match u1 with
+      | none => return false  -- a readable flared with an unreadable pod UID is Unknown
+      | some a =>
+        match ← ctx.podUid m.master with
+        | some b => pure (a == b && s.holds m && s.bind a == ab)
+        | none => pure false
 
 /-- One promotion of `key` (a slave of partition `p`, pod `uid`): each call takes the next steps the
     stores and the successor allow (bounded). The attempt is bound to the incarnation read now (pod
     UID, flared boot id, persistent copy id) and every message carries that scope. -/
-partial def gate (ctx : Ctx) (p : Nat) (key uid : String) (fuel : Nat) : IO GateResult := do
+partial def gate (ctx : Ctx) (p : Nat) (key uid : String) (fuel : Nat) (ackedMemo : Option Bool := none) : IO GateResult := do
   if fuel == 0 then return .hold "the promotion intent is still being driven (next pass)"
   let c ← recClient ctx p
   match ← readRec c with
@@ -475,40 +539,54 @@ partial def gate (ctx : Ctx) (p : Nat) (key uid : String) (fuel : Nat) : IO Gate
         let sc := (a.map fun x => wireOfAttempt x).getD (wireOf m 0 b)
         let rv := some (replicaOf st sc)
         let id := (a.map fun x => widOf x.termNext x.n).getD 0
-        let acked ← ackedFor ctx p m
+        -- read once per gate call: with the master cut off, each reading costs a whole ask wall, and the
+        -- attempt's prepare window (the commit must be inside it) is spent on exactly these
+        let acked ← match ackedMemo with
+          | some v => pure v
+          | none => ackedFor ctx p m
         match gateDecide (m.successors.contains key) acked (viewOf a now) rv id with
         | .proceed => return .proceed
         | .abort why => return .hold s!"abort: {why}"
         | .wait why => return .hold s!"wait: {why}"
         | .createIntent =>
-          if ← doCreate ctx p m as key b then gate ctx p key uid (fuel - 1)
+          if ← doCreate ctx p m as key b then gate ctx p key uid (fuel - 1) (some acked)
           else return .hold "the intent could not be created"
         | .sendPrepare =>
           match a with
           | none => return .hold "no intent"
           | some x =>
-            if ← doPrepare ctx p m x key b then gate ctx p key uid (fuel - 1)
+            if ← doPrepare ctx p m x key b then gate ctx p key uid (fuel - 1) (some acked)
             else return .hold "the successor did not acknowledge the prepare"
         | .cancelCas why =>
           match a with
           | none => return .hold "no intent"
           | some x =>
-            doCancel ctx p x
-            return .hold s!"cancelled: {why}"
+            if ← doCancelAttempt ctx p x then
+              -- the prepare window passed without a commit: the attempt is dead and the successor is
+              -- still reachable and eligible; start the fresh attempt in this same call (bounded by fuel)
+              if (viewOf a now) matches .pending true true then gate ctx p key uid (fuel - 1) (some acked)
+              else return .hold s!"cancelled: {why}"
+            else return .hold s!"cancelled: {why} (the cancel CAS did not apply)"
         | .commitCas =>
           match a with
           | none => return .hold "no intent"
           | some x =>
-            if ← doCommit ctx p m x then
+            match ← doCommit ctx p m x with
+            | .committed =>
               discard <| ask ctx key (cmdCommit p (wireOfAttempt x))
-              gate ctx p key uid (fuel - 1)
-            else return .hold "the commit CAS did not apply"
+              gate ctx p key uid (fuel - 1) (some acked)
+            | .expired =>
+              -- the window ran out between the decision and the CAS: this attempt is dead (terminal CAS
+              -- refuses it); cancel it and go on with a fresh one in this call
+              if ← doCancelAttempt ctx p x then gate ctx p key uid (fuel - 1) (some acked)
+              else return .hold "the commit CAS was refused (the prepare window is over) and the cancel did not apply"
+            | .notApplied why => return .hold s!"the commit CAS did not apply: {why}"
         | .sendCommit =>
           match a with
           | none => return .hold "no intent"
           | some x =>
             discard <| ask ctx key (cmdCommit p (wireOfAttempt x))
-            gate ctx p key uid (fuel - 1)
+            gate ctx p key uid (fuel - 1) (some acked)
         | .sendCancel =>
           match a with
           | none => return .hold "no intent"

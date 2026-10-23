@@ -17,8 +17,10 @@ initialize lastKubectlFailure : IO.Ref (Nat × String) ← IO.mkRef (0, "")
 private def noteFailure (msg : String) : IO Unit :=
   lastKubectlFailure.modify fun (n, _) => (n + 1, msg)
 
-/-- Run kubectl with given arguments and return stdout or error. -/
-def kubectl (args : List String) : IO (Except String String) := do
+/-- Run kubectl with given arguments and return stdout or error. `wallSecs` is the hard wall-clock
+    cap of the subprocess (30 s unless a caller needs a tighter bound: the write-authority asks,
+    whose attempt has its own deadline, must not sit 30 s on every call to a cut pod). -/
+def kubectlWall (wallSecs : Nat) (args : List String) : IO (Except String String) := do
   try
     -- Hard wall-clock cap on every kubectl subprocess. Without one, a
     -- single hung API call blocked a reconcile iteration for 262 SECONDS
@@ -43,12 +45,12 @@ def kubectl (args : List String) : IO (Except String String) := do
       a == "rollout" || a == "wait" || a.startsWith "--timeout")
     let proc := if selfBounded
       then { cmd := "kubectl", args := args.toArray : IO.Process.SpawnArgs }
-      else { cmd := "timeout", args := #["-k", "5", "30", "kubectl"] ++ args.toArray }
+      else { cmd := "timeout", args := #["-k", "5", toString wallSecs, "kubectl"] ++ args.toArray }
     let result ← IO.Process.output proc
     if result.exitCode == 0 then
       return .ok result.stdout
     else if result.exitCode == 124 && !selfBounded then
-      let m := s!"kubectl timed out after 30s (args: {args.take 4})"
+      let m := s!"kubectl timed out after {wallSecs}s (args: {args.take 4})"
       noteFailure m
       return .error m
     else
@@ -58,6 +60,9 @@ def kubectl (args : List String) : IO (Except String String) := do
   catch e =>
     noteFailure s!"kubectl error: {e} (args: {args.take 4})"
     return .error s!"kubectl error: {e}"
+
+/-- Run kubectl with the default 30 s wall. -/
+def kubectl (args : List String) : IO (Except String String) := kubectlWall 30 args
 
 /-- Apply a manifest to the cluster by writing it to a temp file and running
     `kubectl apply -f <file>` (argv-direct, no shell).

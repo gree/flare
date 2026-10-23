@@ -53,6 +53,7 @@
 #include <cerrno>
 #include <copy_switch_fs.h>
 #include <write_fence.h>
+#include <write_promise.h>
 #include <rocksdb/db.h>
 #include <rocksdb/options.h>
 
@@ -5199,5 +5200,41 @@ void test_reseed_serve_to_a_slow_reader_completes_past_several_windows() {
 		cut_remove_path(wal_slave_dir, NULL);
 		delete stats_object;
 	}
+
+// Write authority: the identity the authority engine binds to is the storage's REAL persistent
+// copy id. Startup order (CI 39894190672): the identity was requested before it was installed,
+// so the first shift to master saw "undetermined" and was refused.
+void test_authority_identity_follows_the_copy_id() {
+	write_fence::reset_for_test();
+	write_promise::reset_for_test();
+	std::string why;
+	cut_assert_true(write_promise::configure(true, 100, 1000, why));
+	std::string boot, copy;
+	// before the install (the old startup order): undetermined, a promotion is refused as such
+	write_promise::identity(boot, copy);
+	cut_assert_true(copy.empty());
+	cut_assert_false(write_promise::may_promote(1, why));
+	cut_assert_true(why.find("undetermined") != std::string::npos);
+
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);	// first open: mints the copy id
+	storage_rocksdb::install_authority_identity(s);
+	const string id = s->get_copy_id();
+	cut_assert_true(!id.empty());
+	write_promise::identity(boot, copy);
+	cut_assert_equal_string(id.c_str(), copy.c_str());
+	cut_assert_false(write_promise::may_promote(1, why));
+	cut_assert_true(why.find("undetermined") == std::string::npos);
+
+	// a copy change (truncate bumps the generation) is followed, never inherited
+	cut_assert_equal_int(0, s->truncate(0));
+	const string id2 = s->get_copy_id();
+	cut_assert_true(id2 != id);
+	write_promise::identity(boot, copy);
+	cut_assert_equal_string(id2.c_str(), copy.c_str());
+
+	write_promise::reset_for_test();
+	write_fence::reset_for_test();
+	drop_rocksdb(s, wal_master_dir);
+}
 }
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 noexpandtab autoindent

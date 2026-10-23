@@ -735,6 +735,10 @@ public:
 	// copy changes (truncate, swap, merge dump, a change of the local
 	// history) and replaced when new evidence is recorded. 0 on success.
 	string get_copy_id();
+	// write authority: make `s`'s persistent copy id (read live on every call, so a mint / swap /
+	// staging switch / restore is followed) and the process boot id the identity the authority engine
+	// binds to. Must be called right after open(), BEFORE the first role shift can ask may_promote.
+	static void install_authority_identity(storage_rocksdb* s);
 	// false: the reserved key and COPY_ID disagree (or the second write
 	// failed) — not a normal healthy copy (design §2)
 	bool copy_identity_consistent();

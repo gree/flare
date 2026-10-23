@@ -821,9 +821,25 @@ def tRegisteredFirstBuild : IO Bool := do
   let w5 ← World.new [A]
   w5.setNode A fun x => { x with reachable := false }
   let r5 ← registeredFirstBuild (w5.ctx 7) 0 A (some fresh) false
+  -- 2 partitions, a fresh cluster (failover-wa, f11): P0's master A was recorded as its first build while the map
+  -- still had one partition, then P0's slave B and P1's master C registered; the first pass with both partitions
+  -- must prove EVERY partition's first build (P0 with its slave present, P1 not yet recorded)
+  let h2 : AuthoritativeHistory.Hist := ⟨"M", "1:e"⟩
+  let bumpP0 : AuthoritativeHistory.Store :=
+    { fresh with parts := [(0, .known { gen := 1, hist := h2, holder := A, binding := bC, since := "t", reason := "first-build" } none)] }
+  let w6 ← World.new [A, B, C]
+  let q0 ← registeredFirstBuild (w6.ctx 7) 0 A (some bumpP0) false true
+  let q1 ← registeredFirstBuild (w6.ctx 7) 1 C (some bumpP0) false false
+  let n6a ← w6.node A
+  let n6c ← w6.node C
+  -- a slave beside an UNRECORDED partition is an existing copy: no proof
+  let w7 ← World.new [A, B]
+  let q2 ← registeredFirstBuild (w7.ctx 7) 0 A (some fresh) false true
+  let n7 ← w7.node A
   return r1 && n1.first == some ("b1", "c1") && r2 && n2.first == some ("b1", "c1")
     && r3 && r3b && r3c && n3.first == none && !r3d
     && r4 && n4.first == none && !r5
+    && q0 && q1 && n6a.first == some ("b1", "c1") && n6c.first.isSome && q2 && n7.first == none
 
 def checks : IO (List (String × Bool)) := do
   return [

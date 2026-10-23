@@ -662,7 +662,8 @@ def ensurePartition (ctx : Ctx) (p : Nat) (v : View) (wanted : List String := []
     same checks (the gate is never bypassed). Everything else is left to the gate (an existing copy
     needs the committed intent). `false` = this partition's record must not be created this pass: a
     proof that could not be sent now would be lost with the record. -/
-def registeredFirstBuild (ctx : Ctx) (p : Nat) (mk : String) (store : Option AuthoritativeHistory.Store) (othersHold : Bool) : IO Bool := do
+def registeredFirstBuild (ctx : Ctx) (p : Nat) (mk : String) (store : Option AuthoritativeHistory.Store) (othersHold : Bool)
+    (slavesHold : Bool := false) : IO Bool := do
   let rc ← recClient ctx p
   match ← readRec rc with
   | .ok none =>
@@ -674,7 +675,7 @@ def registeredFirstBuild (ctx : Ctx) (p : Nat) (mk : String) (store : Option Aut
         IO.eprintln s!"[flare-operator] write authority P{p}: the identity of the registered master {mk} is unreadable: its record is not created this pass"
         pure false
       | some (_, b) =>
-        if AuthoritativeHistory.firstBuildProven store p mk b.copy true othersHold then
+        if AuthoritativeHistory.firstBuildProven store p mk b.copy true othersHold slavesHold then
           match (← ask ctx mk (cmdFirst p b.boot b.copy)).bind Status.parse with
           | some _ =>
             IO.eprintln s!"[flare-operator] write authority: {mk} is the first master of P{p} (fresh first build proven by the history; registered as master); allowed once for boot {b.boot}"

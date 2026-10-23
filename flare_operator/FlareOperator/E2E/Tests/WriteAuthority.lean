@@ -39,6 +39,7 @@ open FlareOperator.E2E.Helpers
 open FlareOperator.E2E.Setup
 open FlareOperator.E2E.NodeOps
 open FlareOperator.Kubectl
+open FlareOperator.E2E.Tests.NodeOps (Reading maxBracketSec)
 
 def waFlaredConf : String :=
   FlareOperator.E2E.Tests.NodeOps.followFlags ++
@@ -85,10 +86,40 @@ def waitAuthority (cfg : ClusterConfig) (secs : Nat) : IO Bool :=
       if (← grantedPodOf cfg p).isNone then return false
     return true
 
+/-- Lines of `text` that mention one of `words` (case-insensitive), printed as comments. -/
+private def printMatching (title : String) (text : String) (words : List String) (limit : Nat) : IO Unit := do
+  let hit := (text.splitOn "\n").filter fun l => words.any fun w => containsSubstr l.toLower w
+  IO.eprintln s!"# --- {title}: {hit.length} matching line(s), last {min limit hit.length} ---"
+  for l in hit.drop (hit.length - min limit hit.length) do IO.eprintln s!"# {l}"
+
+/-- A setup that did not reach a valid grant leaves no other trace (the framework runs no onFailure hook for
+    a failed setup, and the namespace is deleted at once): print everything that tells where the chain
+    stopped — every pod's `authority status` for every partition (grant / members / promise state), the
+    operator's membership deliveries and promise-round lines, the flared nodes' own authority lines — and
+    save the full pod logs. (39936446464: "no valid grant within 240 s" could not be diagnosed.) -/
+def waSetupDiagnostics (cfg : ClusterConfig) : IO Unit := do
+  let ns := cfg.«namespace»
+  IO.eprintln s!"# === write authority setup diagnostics ({ns}) ==="
+  try
+    for pod in ← getPodNames s!"cluster={cfg.name}" ns do
+      for p in List.range cfg.partitions do
+        let t ← authorityTextP cfg pod p
+        IO.eprintln s!"# authority status {p} on {pod}: {t.replace "\r\n" " | " |>.replace "\n" " | "}"
+    saveFullLogs ns "setup-failure"
+    let op ← kubectlLogsLabel s!"app={cfg.operatorName}" ns 20000
+    printMatching "operator: membership deliveries / promise rounds / write authority" op
+      ["write authority", "membership", "promise", "grant", "first-build", "promotion", "authoritative history", "critical"] 150
+    for pod in ← getPodNames s!"cluster={cfg.name}" ns do
+      match ← kubectl ["logs", "-n", ns, pod, "--tail=-1"] with
+      | .ok o => printMatching s!"{pod}: authority lines" o ["authority", "membership", "promise", "grant"] 40
+      | .error e => IO.eprintln s!"# {pod}: logs unavailable: {e}"
+  catch e => IO.eprintln s!"# setup diagnostics failed: {e}"
+
 def waSetup (cfg : ClusterConfig) : IO Unit := do
   deployCluster cfg
   IO.sleep 50000
   if !(← waitAuthority cfg 240) then
+    waSetupDiagnostics cfg
     throw (IO.userError "the write authority was not established on any master within 240 s of the cluster start")
 
 /-! ## A, D, B, B', C, C' with the authority ON -/
@@ -277,30 +308,96 @@ def ackApplier (samples : List (Nat × Option String × List (String × String))
     let near := samples.filter fun (t, _, _) => t + attributionGuard ≥ w.span.1 && t ≤ w.span.2 + attributionGuard
     if near.all fun (_, mm, _) => mm == some m then some m else none
 
-/-- Two acknowledgements whose processing intervals overlap and whose appliers differ (`dual`); and
-    every acknowledged write whose applier cannot be attributed (`unattributed`). -/
-def ackOverlaps (samples : List (Nat × Option String × List (String × String))) (ws : List WriteRec) :
-    List (WriteRec × WriteRec) × List WriteRec :=
+/-- The same view over [a, b] from the node's OWN readings (see `ownViewOver`: the strict bracket). -/
+def ownViewOverR (rs : List Reading) (pod : String) (a b : Nat) : Option OwnV :=
+  let rs := rs.filter (·.pod == pod)
+  match (rs.filter (·.te < a)).getLast?, (rs.filter (·.ts > b)).head? with
+  | some x, some y =>
+    if y.ts - x.te > maxBracketSec then none else
+    let between := rs.filter fun r => r.te ≥ x.ts && r.ts ≤ y.te
+    match x.view with
+    | some v => if between.all (·.view == some v) then some v else none
+    | none => none
+  | _, _ => none
+
+/-- The node that applied an acknowledged write, from the NODES' OWN role readings (not the operator's
+    map): the pod that answered (`target`, from the address) was master by its own view over the whole
+    span of the write -> it applied it; it was NOT master by its own view over the whole span, and exactly
+    one other pod was master by its own view over the span while every other pod's view over it is
+    known and not master -> that pod applied the forwarded write. Anything else (a view that changed or
+    cannot be bracketed, a second pod that may have been master) is `none`: never guessed. -/
+def ownApplier (rs : List Reading) (pods : List String) (target : Option String) (w : WriteRec) : Option String :=
+  match target with
+  | none => none
+  | some t =>
+    match ownViewOverR rs t w.span.1 w.span.2 with
+    | none => none
+    | some v =>
+      if v.role == "master" then some t
+      else
+        let st := (pods.filter (· != t)).map fun p => (p, (ownViewOverR rs p w.span.1 w.span.2).map (·.role))
+        match st.filter (·.2 == some "master") with
+        | [(u, _)] => if st.all (·.2.isSome) then some u else none
+        | _ => none
+
+/-- The applier of an ack: the map master (`ackApplier`) and the nodes' own readings (`ownApplier`, only with
+    readings) — either attributes; both attributing to different nodes is no attribution (never a pick). -/
+def ackApplierBoth (samples : List (Nat × Option String × List (String × String))) (rs : List Reading)
+    (pods : List String) (w : WriteRec) : Option String :=
+  let byMap := ackApplier samples w
+  if rs.isEmpty then byMap else
+  let target := ((samples.filter fun (t, _, _) => t ≤ w.span.1).getLast?).bind fun (_, _, ips) => ips.lookup w.ip
+  match byMap, ownApplier rs pods target w with
+  | some a, some b => if a == b then some a else none
+  | some a, none => some a
+  | none, some b => some b
+  | none, none => none
+
+/-- Two acknowledgements whose processing intervals overlap and whose appliers differ (`dual`, found by a
+    sweep over the start times: one witness per later ack); and every acknowledged write whose applier cannot
+    be attributed (`unattributed`). `own` = the nodes' own role readings (empty: the map only). -/
+def ackOverlaps (samples : List (Nat × Option String × List (String × String))) (ws : List WriteRec)
+    (own : List Reading := []) : List (WriteRec × WriteRec) × List WriteRec :=
+  let pods := (own.map (·.pod)).eraseDups
   let acks := ws.filter fun w => classify w.reply == .ack
-  let att := acks.filterMap fun w => (ackApplier samples w).map (w, ·)
-  let unatt := acks.filter fun w => (ackApplier samples w).isNone
-  let pairs := att.flatMap fun (a, pa) => att.filterMap fun (b, pb) =>
-    if pa != pb && a.span.2 ≥ b.span.1 && b.span.2 ≥ a.span.1 && a.t ≤ b.t then some (a, b) else none
+  let ap := acks.map fun w => (w, ackApplierBoth samples own pods w)
+  let att := ap.filterMap fun (w, a) => a.map (w, ·)
+  let unatt := ap.filterMap fun (w, a) => if a.isNone then some w else none
+  -- per applier, the attributed ack that ends last so far; an ack that starts no later than it ends
+  -- overlaps it (every earlier ack started no later)
+  let sorted := att.toArray.qsort fun (a, _) (b, _) => a.span.1 < b.span.1
+  let (pairs, _) := sorted.foldl (init := (([] : List (WriteRec × WriteRec)), ([] : List (String × WriteRec))))
+    fun (acc, ends) (b, pb) =>
+      let hits := ends.filterMap fun (p, a) => if p != pb && a.span.2 ≥ b.span.1 then some (a, b) else none
+      let ends' := match ends.lookup pb with
+        | some a => if a.span.2 ≥ b.span.2 then ends else (pb, b) :: ends.filter (·.1 != pb)
+        | none => (pb, b) :: ends
+      (hits ++ acc, ends')
   (pairs, unatt)
 
 /-- The verdict on the acknowledgements of the two-failovers run: an overlap of different appliers is a
     PRODUCT GAP; any ack that cannot be attributed to the node that applied it makes the run NOT
     VERIFIED (never green). `none`: every ack attributed and no overlap. -/
-def ackVerdict (samples : List (Nat × Option String × List (String × String))) (ws : List WriteRec) :
-    Option String :=
-  let (dual, unatt) := ackOverlaps samples ws
+def ackVerdict (samples : List (Nat × Option String × List (String × String))) (ws : List WriteRec)
+    (own : List Reading := []) : Option String :=
+  let (dual, unatt) := ackOverlaps samples ws own
   match dual.head? with
   | some (a, b) =>
-    some s!"PRODUCT GAP (dual acknowledgement over two failovers, authority ON): acks of two nodes overlap ({a.ip} {a.span} / {b.ip} {b.span}); {dual.length} overlapping pair(s)"
+    some s!"PRODUCT GAP (dual acknowledgement over two failovers, authority ON): acks of two nodes overlap ({a.ip} {a.span} / {b.ip} {b.span}); {dual.length} overlapping ack(s)"
   | none =>
     match unatt.head? with
-    | some w => some s!"NOT VERIFIED: {unatt.length} acknowledgement(s) cannot be attributed to the node that applied them (the map master changed or was unknown around them, e.g. {w.ip} {w.span}): an overlap cannot be ruled out"
+    | some w => some s!"NOT VERIFIED: {unatt.length} acknowledgement(s) cannot be attributed to the node that applied them (neither the map master nor the nodes' own role readings over the write name one applier, e.g. {w.ip} {w.span}): an overlap cannot be ruled out"
     | none => none
+
+/-- One reading round of every pod's own view (the debug pod's clock), for the attribution. -/
+private def tfOwn (c : Ctx) : IO (List Reading) := do
+  let mut out : List Reading := []
+  for p in (← c.pods).getD [] do
+    if !p.ip.isEmpty then
+      match ← c.statsTimed p.ip with
+      | some (a, b, o) => out := out ++ [{ pod := p.name, ts := a, te := b, view := o.bind ownVOf }]
+      | none => pure ()
+  return out
 
 private def killPod (c : Ctx) (pod : String) : IO Unit := do
   c.event s!"killing {pod} (force)"
@@ -319,6 +416,9 @@ private def twoFailoversRun (c : Ctx) : IO TestResult := do
   if !(← waitAuthority c.cfg 240) then return .fail (notSetUp "no master holds a write grant")
   let some m1 ← grantedPod c.cfg | return .fail (notSetUp "the granted pod vanished")
   let obs ← startObserver c.sample 1000
+  -- the nodes' own role readings (every pod's own view, timed on the writers' clock): the second source of
+  -- who applied an ack, where the operator's map does not say (its master changed / unknown around it)
+  let ownObs ← startObserver (tfOwn c) 1000
   let mut names ← writersOnPods c "p1"
   IO.sleep 15000
   -- first failover
@@ -329,6 +429,7 @@ private def twoFailoversRun (c : Ctx) : IO TestResult := do
   c.event s!"failover 1 done: {m1} -> {m2} (completed {ok1})"
   if !ok1 || m2 == m1 then
     discard <| obs.finish
+    discard <| ownObs.finish
     for n in names do discard <| c.stopWriter n
     return .fail "failover 1 did not complete (no other pod holds a grant within 300 s)"
   names := names ++ (← writersOnPods c "p2")
@@ -345,6 +446,7 @@ private def twoFailoversRun (c : Ctx) : IO TestResult := do
     return containsSubstr (← kubectlLogsLabel s!"app={c.cfg.operatorName}" c.cfg.«namespace» 10000000) s!"adopted as generation"
   if !adopted then
     discard <| obs.finish
+    discard <| ownObs.finish
     for n in names do discard <| c.stopWriter n
     return .fail (notSetUp s!"the operator did not adopt {m2}'s history within 180 s of its promotion (the second failover would meet an unresolved promotion intent)")
   -- second failover, in a row (the previous master's copy is still being rebuilt)
@@ -358,20 +460,28 @@ private def twoFailoversRun (c : Ctx) : IO TestResult := do
   let samples ← match ← obs.finish with
     | .ok l => pure l
     | .error e => do
+      discard <| ownObs.finish
       for n in names do discard <| c.stopWriter n
       return .fail (unobservable e)
+  let own ← match ← ownObs.finish with
+    | .ok l => pure (l.flatMap id)
+    | .error e => do
+      for n in names do discard <| c.stopWriter n
+      return .fail (unobservable s!"own-view observer: {e}")
   let mut ws : List WriteRec := []
   let mut complete := true
   for n in names do
     match ← c.stopWriter n with
     | some wl => ws := ws ++ wl.ws; complete := complete && wl.complete
     | none => complete := false
-  c.art "report.txt" s!"masters {m1} -> {m2} -> {m3}; writes {ws.length}; acks {(ws.filter fun w => classify w.reply == .ack).length}"
+  let (_, unattributed) := ackOverlaps samples ws own
+  let (_, unattByMap) := ackOverlaps samples ws
+  c.art "report.txt" s!"masters {m1} -> {m2} -> {m3}; writes {ws.length}; acks {(ws.filter fun w => classify w.reply == .ack).length}; unattributed by the map alone {unattByMap.length}, with the nodes' own role readings {unattributed.length} ({own.length} readings)"
   -- a failover that did not complete is the finding, whatever the writer logs of the dead window say
   -- (a writer that never got an ack is rejected as unobserved and would mask it as UNOBSERVABLE)
   if !ok2 then return .fail s!"the second failover did not complete: no pod other than {m2} holds a grant within 300 s (a prepare is stuck, or the partition is held: see the operator log); writer logs complete: {complete} ({names.length} writers)"
   if !complete then return .fail (unobservable "a writer log was not confirmed complete")
-  let verdict := ackVerdict samples ws
+  let verdict := ackVerdict samples ws own
   if let some v := verdict then
     if v.startsWith "PRODUCT GAP" then return .fail v
   let after := (ws.filter fun w => classify w.reply == .ack && pathOf samples w == "local" && w.ip != "").filter fun w =>

@@ -2489,10 +2489,14 @@ private def authorityPass (crName ns leaseName identity : String) (st : FlareClu
       let go ← match master with
         | some mk =>
           let store ← historyStoreRef.get
+          -- masters / ex-masters of the partition always block the proof; a SLAVE that joined after the
+          -- registered master only blocks while the history does not yet record the partition as this
+          -- master's first build (a sibling registering seconds later must not cost the first build)
           let othersHold := st.nodeMap.any fun (k, n) =>
-            (k != mk && (n.role == FlareRole.Master || n.role == FlareRole.Slave) && n.partition == p)
-              || n.lastMasterOf == p
-          WriteAuthorityDriver.registeredFirstBuild ctx p.toNat mk store othersHold
+            (k != mk && n.role == FlareRole.Master && n.partition == p) || n.lastMasterOf == p
+          let slavesHold := st.nodeMap.any fun (k, n) =>
+            k != mk && n.role == FlareRole.Slave && n.partition == p
+          WriteAuthorityDriver.registeredFirstBuild ctx p.toNat mk store othersHold slavesHold
         | none => pure true
       if go then
         discard <| WriteAuthorityDriver.ensurePartition ctx p.toNat

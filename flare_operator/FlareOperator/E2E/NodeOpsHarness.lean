@@ -25,6 +25,7 @@ import FlareOperator.E2E.Helpers
 import FlareOperator.E2E.Setup
 import FlareOperator.K8s.Bridge
 import FlareOperator.Kubectl
+import Std.Data.HashMap
 
 namespace FlareOperator.E2E.NodeOps
 
@@ -421,7 +422,19 @@ def pathOf (samples : List (Nat × Option String × List (String × String))) (w
 
 /-- Acknowledged writes absent (or with another value) in `copy`. -/
 def missingAcks (ws : List WriteRec) (copy : List (String × String)) : List WriteRec :=
-  ws.filter fun w => classify w.reply == .ack && copy.lookup w.key != some w.value
+  -- a hash index: a list lookup per write is quadratic (a long cut writes 10^5 keys)
+  let idx : Std.HashMap String String := copy.foldl (fun m (k, v) => if m.contains k then m else m.insert k v) {}
+  ws.filter fun w => classify w.reply == .ack && idx.get? w.key != some w.value
+
+/-- Run `act` for at most `ms` milliseconds: `none` = the deadline passed first (the action is abandoned,
+    not cancelled). Lets a test print its verdict before the leg's own timeout can kill the process. -/
+def withDeadline {α : Type} (ms : UInt32) (act : IO α) : IO (Option α) := do
+  let t ← IO.asTask act Task.Priority.dedicated
+  let s ← IO.asTask (IO.sleep ms) Task.Priority.dedicated
+  match ← IO.waitAny [t.map fun e => some e, s.map fun _ => none] with
+  | some (.ok a) => pure (some a)
+  | some (.error e) => throw e
+  | none => pure none
 
 /-- Summary line of one writer's records (for the report). -/
 def writerSummary (name : String) (samples : List (Nat × Option String × List (String × String))) (ws : List WriteRec) : String :=

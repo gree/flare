@@ -887,6 +887,10 @@ def partitionRun (c : Ctx) (nodeLevel : Bool) (wa : Bool := false) : IO (Except 
     finally
       removeCuts installed
     c.event "healed"
+    -- the pods' logs NOW (not only after the test): the failover during the cut is judged from them, and a
+    -- leg that is cut short later (39947098538: exit 124 after "healed") must still leave them
+    saveFullLogs c.cfg.«namespace» s!"{c.test}-after-heal"
+    c.event "pod logs saved after the heal"
     -- the observer keeps reading across the heal, then stops
     IO.sleep 8000
     let ss ← match ← obs.finish with
@@ -905,12 +909,14 @@ def partitionRun (c : Ctx) (nodeLevel : Bool) (wa : Bool := false) : IO (Except 
       | return .error (unobservable "a writer's record could not be read or failed its integrity check (never counted as 'no acknowledged write')")
     let wsOld := wlOld.ws
     let wsPeer := wlPeer.ws
+    c.event s!"post-heal: writer logs read ({wsOld.length} + {wsPeer.length} writes)"
     let finalM := (← c.roles).bind (·.1)
     let copies ← finalCopies c
     let mcopy := finalM.bind fun n => (copies.lookup n).join
     let lost ← match mcopy with
       | some d => pure (some (← recordMissing c "master" (wsOld ++ wsPeer) d))
       | none => pure none
+    c.event s!"post-heal: acknowledged writes checked against the final master's copy (missing {lost})"
     let ipToPod := pods.map fun r => (r.ip, r.name)
     let acks := fun (ws : List WriteRec) => (ws.filter fun w => classify w.reply == .ack).map fun w => (w, ownPathOf ss ipToPod w)
     -- the client path to the old master is open when it ANSWERS: an acknowledgement, or (with the
@@ -1007,14 +1013,34 @@ def partVerdictWa (o : PartObs) : Option String :=
       some ("NOT VERIFIED: the old master acknowledged no write inside the cut" ++ cov)
   else partVerdict o
 
+/-- The classification printed with the verdict (the result lines stay as the framework prints them). -/
+def waVerdictWord (why : String) : String :=
+  if (why.splitOn "NOT VERIFIED").length > 1 || (why.splitOn "UNOBSERVABLE").length > 1
+     || (why.splitOn "PRECONDITION NOT MET").length > 1 then "NOT VERIFIED" else "FAIL"
+
+/-- C / C' with the authority ON. The test ALWAYS prints one verdict line (PASS / FAIL / NOT VERIFIED) with
+    whether a failover happened during the cut: its own time budget ends the run before the leg's timeout can
+    (a run that does not finish in its budget is NOT VERIFIED, never silent and never green). -/
 def partitionTestWa (c : Ctx) (nodeLevel : Bool) : IO TestResult := do
-  match ← partitionRun c nodeLevel true with
-  | .error e => return .fail e
-  | .ok o =>
-    IO.eprintln s!"# [{c.test}] write authority ON: old master last ack in the cut {waLastOld o}, new master earliest possible ack {waFirstNewPossible o}; {o.summary}"
-    match partVerdictWa o with
-    | some why => return .fail why
-    | none => return .pass
+  -- budget: setup + seed (~5 min) + the cut (at most 900 s) + the post-heal checks; well inside the
+  -- leg's limit (the partition-wa leg runs this suite alone)
+  let budgetSec : Nat := if nodeLevel then 2400 else 1200
+  let t0 ← nowSec
+  let out ← try
+      withDeadline (UInt32.ofNat (budgetSec * 1000)) (partitionRun c nodeLevel true)
+    catch e => pure (some (.error s!"{unobservable s!"the run raised: {e}"}"))
+  let took := (← nowSec) - t0
+  let (word, detail, res) ← match out with
+    | none => pure ("NOT VERIFIED", s!"the test did not finish within its {budgetSec} s budget (took {took} s); failover during the cut: UNKNOWN (see the pod logs saved after the heal and the artifacts own.txt / events)", TestResult.fail s!"NOT VERIFIED: the test exceeded its {budgetSec} s budget")
+    | some (.error e) => pure (waVerdictWord e, s!"{e}; failover during the cut: UNKNOWN (the run did not reach a verdict input)", TestResult.fail e)
+    | some (.ok o) =>
+      IO.eprintln s!"# [{c.test}] write authority ON: old master last ack in the cut {waLastOld o}, new master earliest possible ack {waFirstNewPossible o}; {o.summary}"
+      let fo := (partReport o).failedOver
+      match partVerdictWa o with
+      | some why => pure (waVerdictWord why, s!"{why}; failover during the cut: {fo}", TestResult.fail why)
+      | none => pure ("PASS", s!"failover during the cut: {fo}; took {took} s", TestResult.pass)
+  IO.eprintln s!"# [{c.test}] VERDICT {word}: {detail}"
+  return res
 
 def partitionSuite : TestSuite :=
   let cfg := cfgOf "node-part" true false

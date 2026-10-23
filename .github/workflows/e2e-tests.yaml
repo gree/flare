@@ -82,6 +82,9 @@ jobs:
           # copy-protection and authority split too (2026-10-18): in 39036409438
           # copy-protection was cut mid-E2E and authority finished its tests
           # only minutes before the limit (Lean build ~60 min on those runners).
+          # node-ops-partition-wa has a leg of its own (2026-10-23): with node-ops-stop-wa (22 min)
+          # in front of it, C' (cut up to 15 min + the post-heal checks) hit the 75-min inner limit
+          # (39947098538: exit 124 after "healed").
           default='[
             {"group":"topology","suites":"failover,read-balance,scale-out-master,scale-out-slave,scale-in-slave,scale-in-master,continuous-replication-enable-purged"},
             {"group":"replication","suites":"cluster-replication,wal-retention-config,strict-durability,continuous-replication-purge,continuous-replication-limits,continuous-replication-lag-hold-tmpfs,continuous-replication-rebuild-tmpfs"},
@@ -104,7 +107,8 @@ jobs:
             {"group":"node-ops-control","suites":"node-ops-drain-control,node-ops-hold-control"},
             {"group":"authority-wa","suites":"failover-wa,write-authority-operator-absent,write-authority-solo,write-authority-two-failovers"},
             {"group":"node-ops-wa","suites":"node-ops-drain-wa,node-ops-hold-wa"},
-            {"group":"node-ops-wa-faults","suites":"node-ops-stop-wa,node-ops-partition-wa"},
+            {"group":"node-ops-wa-faults","suites":"node-ops-stop-wa"},
+            {"group":"node-ops-partition-wa","suites":"node-ops-partition-wa"},
             {"group":"stats-cost","suites":"stats-cost"},
             {"group":"continuous-replication","suites":"copy-retention-measure,continuous-replication,continuous-replication-scale,continuous-replication-sustained,continuous-replication-outage,continuous-replication-outage-tmpfs,visibility-bench"}
           ]'

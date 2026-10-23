@@ -1592,7 +1592,36 @@ def partChecks : List (String × Bool) :=
         && startsWith (ackVerdict steady [ak 4 90 91 "ip0"]) "NOT VERIFIED"
         -- two appliers with overlapping spans (the map master moved between the two spans)
         && startsWith (ackVerdict (flip ++ []) [ak 5 105 130 "ip0", ak 6 125 129 "ip1"]) "NOT VERIFIED"
-        && (ackOverlaps steady [ak 1 105 106 "ip0", ak 2 107 108 "ip1"]).2.isEmpty)
+        && (ackOverlaps steady [ak 1 105 106 "ip0", ak 2 107 108 "ip1"]).2.isEmpty),
+    ("two failovers (authority ON): the nodes' OWN role readings attribute the acks the operator's map cannot (master changing / unknown); a forwarded ack only when exactly one other pod is master by its own view and every other view is known; conflicting or missing evidence stays NOT VERIFIED; an overlap of two appliers is a PRODUCT GAP",
+      let ips := [("ip0", "p0"), ("ip1", "p1"), ("ip2", "p2")]
+      let smp := fun (t : Nat) (m : Option String) => ((t, m, ips) : Nat × Option String × List (String × String))
+      let gap := (List.range 40).map fun i => smp (100 + i) (if i < 15 then some "p0" else if i < 30 then none else some "p1")
+      let ak := fun (n t0 t : Nat) (ip : String) => ({ n, t0, t, ip, key := s!"k{n}", value := "v", reply := "STORED" } : WriteRec)
+      let rd := fun (pod : String) (t : Nat) (role : String) =>
+        ({ pod, ts := t, te := t, view := some { role, version := 1, boot := "b" } } : FlareOperator.E2E.Tests.NodeOps.Reading)
+      -- p0 master up to 114, nobody master (a failover) 115..129, p1 master from 130 (own views); p2 always a slave
+      let own := (List.range 40).flatMap fun i =>
+        [rd "p0" (100 + i) (if i < 15 then "master" else "slave"), rd "p1" (100 + i) (if i < 30 then "slave" else "master"), rd "p2" (100 + i) "slave"]
+      let own2 := (List.range 40).flatMap fun i =>
+        [rd "p0" (100 + i) (if i < 15 then "master" else "slave"), rd "p1" (100 + i) (if i < 25 then "slave" else "master"), rd "p2" (100 + i) "slave"]
+      -- the map says nothing at 120 (no master), the nodes' views say p0 was master at 105..106 -> but an ack at 120 is
+      -- by NO master by anyone's view: still unattributed
+      startsWith (ackVerdict gap [ak 1 120 121 "ip1"] own) "NOT VERIFIED"
+        -- a local ack of p1 whose span the map straddles (map master unknown until 130 -> none): p1 master by its own view only from 130
+        && ackVerdict gap [ak 2 133 134 "ip1"] own == none
+        -- an ack of p0 sent before its own demotion at 115 (its view master over the whole span 105..106), map p0 then: both agree
+        && ackVerdict gap [ak 3 105 106 "ip0"] own == none
+        -- forwarded through p2 (a slave) while p1 is the only master by its own view: attributed to p1
+        && (ackOverlaps gap [ak 4 135 136 "ip2"] own).2.isEmpty
+        -- p1 is master by its OWN view from 125 while the map still names nobody (until 130): an ack forwarded through
+        -- the slave p2 at 128..129 is p1's; with p1's readings missing, the master cannot be named -> NOT VERIFIED
+        && ackVerdict gap [ak 5 128 129 "ip2"] own2 == none
+        && startsWith (ackVerdict gap [ak 5 128 129 "ip2"] (own2.filter (·.pod != "p1"))) "NOT VERIFIED"
+        -- two appliers overlapping by the own readings: p0 as master 105..113 and p1 acking in 108..112 (p1 slave by its own view -> forwarded to the unique master p0: same applier, no overlap)
+        && ackVerdict gap [ak 6 105 113 "ip0", ak 7 108 112 "ip1"] own == none
+        -- a map-only run (no readings) behaves as before
+        && startsWith (ackVerdict gap [ak 8 120 121 "ip1"]) "NOT VERIFIED")
   ]
 
 -- §11 write-authority DESIGN MODEL (not product code): the review's
@@ -2346,6 +2375,9 @@ private def checkAuthoritativeHistory (ctx : Ctx) : IO Unit := do
       && !firstBuildProven absent 0 "m" "u1:3" false false                -- not a first-build store (restored / migrated)
       && !firstBuildProven { fresh with origin := "" } 0 "m" "u1:3" false false
       && firstBuildProven storeFB 0 "m" "u1:3" true false
+      && firstBuildProven storeFB 0 "m" "u1:3" true false true            -- a slave joined after the recorded first build (f11: P0 of failover-wa)
+      && !firstBuildProven fresh 0 "m" "u1:3" true false true             -- nothing recorded: a slave means an existing copy
+      && !firstBuildProven storeFB 0 "m" "u1:3" true true true            -- an ex-master / another master always blocks
       && !firstBuildProven storeFB 0 "m" "u1:3" false false               -- a recorded partition of a node that is not master yet: an existing copy
       && !firstBuildProven storeFB 0 "s" "u1:3" true false                -- another holder
       && !firstBuildProven storeFB 0 "m" "u1:4" true false                -- the copy changed (bulk / replaced)

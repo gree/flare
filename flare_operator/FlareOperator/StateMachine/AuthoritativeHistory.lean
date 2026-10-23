@@ -546,16 +546,19 @@ def writable (s : Store) : Bool :=
         a master / slave / ex-master of the partition other than `key` in the map);
       * the partition is not recorded yet (or explicitly untracked), or — only for a master the map
         ALREADY names (`registered`: the registration reply made it master, no pass promoted it) — it
-        is recorded as the first build of exactly this node's copy: generation 1, reason first-build,
+        is recorded as the first build of exactly this node's copy (a SLAVE that joined afterwards does
+        not change that: the record names the holder since generation 1, so `slavesHold` only matters
+        while nothing is recorded; masters / ex-masters are `othersHold` and always block): generation 1, reason first-build,
         holder `key`, no hold, the copy id the node reports now (a recorded partition of a node that
         is not yet master is an existing copy returning: never proven here).
     The caller adds what is not history: the membership record of the partition is absent, and the
     node reports its promotion refused. -/
-def firstBuildProven (s : Store) (p : Nat) (key copyNow : String) (registered othersHold : Bool) : Bool :=
+def firstBuildProven (s : Store) (p : Nat) (key copyNow : String) (registered othersHold : Bool)
+    (slavesHold : Bool := false) : Bool :=
   s.origin == "first-build" && !othersHold && (s.intentFor p).isNone &&
     match s.part p with
-    | none => true
-    | some (.untracked _) => true
+    | none => !slavesHold
+    | some (.untracked _) => !slavesHold
     | some (.known r hold) =>
       registered && hold.isNone && r.reason == "first-build" && r.gen == 1 && r.holder == key
         && r.binding.copyId == copyNow && !copyNow.isEmpty

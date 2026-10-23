@@ -23,6 +23,22 @@ open FlareOperator.PromotionIntentKube
 open FlareOperator.PromotionIntent
 open FlareOperator.PromotionBinding
 
+/-! ### Limits of the intent index
+
+A ConfigMap holds at most 1 MiB (1048576 bytes) in total. The index value is `"intent-index-v1 "` (16
+bytes) plus `t:n` entries joined by `,`; one entry takes at most `maxEntryBytes` bytes (two 20-digit
+numbers, `:` and `,`). 1000000 bytes are used for the value (the rest of the 1 MiB is the object's
+metadata and the other keys), so an index of at most `maxIndexEntries` entries can never exceed the
+object limit. Past the bound the driver FAILS CLOSED (no new attempt); entries are never dropped or
+truncated to make room. -/
+def maxEntryBytes : Nat := 42
+def maxIndexValueBytes : Nat := 1000000
+def maxIndexEntries : Nat := (maxIndexValueBytes - 16) / maxEntryBytes
+/-- Seeding a missing index reads the intents of every term 1..termNext: at least one API call per term
+    (`scanFrom` stops at the first absent number, at most 17 reads per term), once per partition, and in
+    the same pass. Past this bound the seeding is refused (fail closed, manual). -/
+def maxSeedTerms : Nat := 2000
+
 structure Ctx where
   cfg : Config
   cr : String
@@ -39,6 +55,10 @@ structure Ctx where
   nowMs : IO Nat
   /-- the pod UID of the node key right now (`none`: unreadable) -/
   podUid : String → IO (Option String)
+  /-- the most entries one intent index may hold (see `maxIndexEntries`) -/
+  indexMaxEntries : Nat := maxIndexEntries
+  /-- the most terms the one-time seeding of a missing index reads (see `maxSeedTerms`) -/
+  seedMaxTerms : Nat := maxSeedTerms
 
 def Ctx.clock (c : Ctx) : ClockId := { node := c.node, boot := toString c.token }
 
@@ -153,29 +173,41 @@ def readIndex (c : Client) : IO (Except String (Option (List (Nat × Nat) × Str
     | none => pure (.error "the intent index is malformed (never read as absent)")
 
 /-- Create the index when it does not exist, seeded with every intent of terms 1..`termNext` that is
-    not cancelled. `false`: not confirmed (the next pass again). -/
+    not cancelled. The seeding costs at most `seedMaxTerms` x 17 reads, once; a larger term or a seed
+    that would exceed `indexMaxEntries` is refused (nothing created). `false`: not confirmed (the next
+    pass again). -/
 def ensureIndex (ctx : Ctx) (p termNext : Nat) : IO Bool := do
   let c ← ctx.clientFor (indexName ctx.cr p)
   match ← readIndex c with
   | .error _ => pure false
   | .ok (some _) => pure true
   | .ok none =>
+    if termNext > ctx.seedMaxTerms then
+      IO.eprintln s!"[flare-operator] CRITICAL: write authority P{p}: the intent index does not exist and term {termNext} is beyond the seeding bound ({ctx.seedMaxTerms} terms): no new attempt (manual)"
+      return false
     let mut seed : List (Nat × Nat) := []
     for t in [1:termNext + 1] do
       match ← scanFrom ctx p t 1 [] with
       | .ok l => seed := seed ++ (l.filter (·.intent.decision != .cancelled)).map fun a => (a.termNext, a.n)
       | .error _ => return false
+    if seed.length > ctx.indexMaxEntries then
+      IO.eprintln s!"[flare-operator] CRITICAL: write authority P{p}: the seeded intent index would hold {seed.length} entries (limit {ctx.indexMaxEntries}): no new attempt (manual)"
+      return false
     match ← c.create (encodeIndex seed) with
     | .ok _ => pure true
     | _ => pure false
 
-/-- The entry is in the index (CAS), before the intent is created. -/
+/-- The entry is in the index (CAS), before the intent is created. A full index (`indexMaxEntries`)
+    fails closed: `false`, nothing dropped, so no new attempt is made. -/
 def addIndex (ctx : Ctx) (p termNext t n : Nat) : IO Bool := do
   if !(← ensureIndex ctx p termNext) then return false
   let c ← ctx.clientFor (indexName ctx.cr p)
   match ← readIndex c with
   | .ok (some (l, rv)) =>
     if l.contains (t, n) then pure true
+    else if l.length ≥ ctx.indexMaxEntries then
+      IO.eprintln s!"[flare-operator] CRITICAL: write authority P{p}: the intent index is full ({l.length} entries, limit {ctx.indexMaxEntries}): no new attempt (manual)"
+      pure false
     else
       match ← c.replace rv (encodeIndex (l ++ [(t, n)])) with
       | .ok _ => pure true
@@ -502,14 +534,53 @@ def abandonUnwanted (ctx : Ctx) (p : Nat) (m : Members) (as : List Attempt) (wan
     else out := out ++ [a]
   pure out
 
+/-- The committed attempt `a` was applied to the membership record `m` — the only evidence that lets its
+    index entry go. Proof (Members.next): the term advances only at `o.term + 1` in a pass whose
+    `committedFor` is the master the map shows, i.e. through SOME committed attempt of `termNext = new
+    term` whose successor is the new master; the new record names that successor as `master`, and a
+    later change of the record's master needs another term. So, for `a.termNext == m.term` and
+    `m.master == a.successor`, a committed attempt of this term and successor was applied, and when `a`
+    is the ONLY committed attempt of that term and successor it is exactly the applied one. Anything
+    else is NOT proven and stays: a committed attempt of an earlier term (the record has moved on; which
+    attempt of that term authorised the advance is not recorded), one with another successor than the
+    record's master (never applied: a commit whose promotion did not reach the record), or one of
+    several committed attempts of the same term and successor. Staying costs one entry (and is the
+    fail-closed state, reported by the CRITICAL lines); it never frees a committed intent unproven. -/
+def appliedCommit (m : Members) (as : List Attempt) (a : Attempt) : Bool :=
+  a.intent.decision == .committed && a.termNext == m.term && a.intent.successor == m.master
+    && (as.filter fun b => b.intent.decision == .committed && b.termNext == a.termNext
+        && b.intent.successor == a.intent.successor).length == 1
+
+/-- A pass of a STALE leader (an intent already carries a newer fence than this operator's token) changes
+    nothing in the index: the current leader owns it. -/
+def staleLeader (ctx : Ctx) (as : List Attempt) : Bool :=
+  as.any fun a => a.intent.fence > ctx.token
+
+/-- Remove `gone` from the index: read, filter the FRESH list, replace at that resourceVersion. A conflict
+    (another writer added an entry in between) re-reads and filters again (bounded), so a concurrent
+    add is never overwritten and the removal still happens. -/
+def removeIndex (ctx : Ctx) (p : Nat) (gone : List (Nat × Nat)) (tries : Nat) : IO Unit := do
+  let c ← ctx.clientFor (indexName ctx.cr p)
+  let mut left := tries
+  while left > 0 do
+    left := left - 1
+    match ← readIndex c with
+    | .ok (some (l, rv)) =>
+      match ← c.replace rv (encodeIndex (l.filter fun e => !gone.contains e)) with
+      | .ok _ => left := 0
+      | _ => pure ()
+    | _ => left := 0
+
 /-- Drop from the index (CAS) the intents that need no more watching: cancelled in the store AND the
-    node no longer prepares that scope (read now), or committed and applied to the record. A cancelled
-    intent whose node still prepares its scope gets the cancel again (original scope) and stays. -/
+    node no longer prepares that scope (read now), or committed and PROVEN applied to the record
+    (`appliedCommit`). A cancelled intent whose node still prepares its scope gets the cancel again
+    (original scope) and stays. A stale leader's pass leaves the index alone. -/
 def pruneIndex (ctx : Ctx) (p : Nat) (m : Members) (as : List Attempt) : IO Unit := do
+  if staleLeader ctx as then return
   let mut gone : List (Nat × Nat) := []
   for a in as do
     match a.intent.decision with
-    | .committed => if a.termNext ≤ m.term then gone := gone ++ [(a.termNext, a.n)]
+    | .committed => if appliedCommit m as a then gone := gone ++ [(a.termNext, a.n)]
     | .cancelled =>
       match ← statusOf ctx a.intent.successor p with
       | none => pure ()
@@ -518,12 +589,7 @@ def pruneIndex (ctx : Ctx) (p : Nat) (m : Members) (as : List Attempt) : IO Unit
           discard <| ask ctx a.intent.successor (cmdCancel p (wireOfAttempt a))
         else gone := gone ++ [(a.termNext, a.n)]
     | .pending => pure ()
-  if !gone.isEmpty then
-    let c ← ctx.clientFor (indexName ctx.cr p)
-    match ← readIndex c with
-    | .ok (some (l, rv)) =>
-      discard <| c.replace rv (encodeIndex (l.filter fun e => !gone.contains e))
-    | _ => pure ()
+  if !gone.isEmpty then removeIndex ctx p gone 3
 
 def ensurePartition (ctx : Ctx) (p : Nat) (v : View) (wanted : List String := []) : IO (Option Members) := do
   let c ← recClient ctx p

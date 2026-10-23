@@ -658,6 +658,112 @@ def tIndexCrashAndSeed : IO Bool := do
     && (← w.decision (iname 0 2 1)) == some .pending
     && (match s2 with | .ok l => l.length == 1 && (l.head?.map (·.termNext)) == some 3 | .error _ => false)
 
+/-- pruneIndex as the pass runs it: the record in force and every attempt, read now -/
+def pruneNow (_w : World) (ctx : Ctx) : IO Unit := do
+  match ← readRec (← recClient ctx 0) with
+  | .ok (some (m, _)) =>
+    match ← scanAll ctx 0 (m.term + 1) with
+    | .ok as => pruneIndex ctx 0 m as
+    | .error _ => pure ()
+  | _ => pure ()
+
+/-- B's attempt (term 2, number 1) driven to COMMITTED; the record is still term 1 / master A -/
+def committedB (w : World) : IO Unit := do
+  let _ ← ensurePartition (w.ctx 7) 0 (view1 A [B, C]) [B]
+  w.setClock 1000
+  w.round A [B, C]
+  let _ ← gate (w.ctx 7) 0 B "uid" 6
+  w.setClock 12000
+  let _ ← gate (w.ctx 7) 0 B "uid" 6
+
+/-- review f6 #1: a COMMITTED attempt is dropped from the index only when it is proven applied (the
+    record names its successor as master at its term, and it is the only such commit). A commit whose
+    promotion never reached the record (the term advanced by another path, master C) stays; an earlier
+    term's commit stays; the applied one goes. -/
+def tCommittedNotApplied : IO Bool := do
+  -- not applied: the record is at term 2 but its master is C, not B
+  let w ← World.new [A, B, C]
+  committedB w
+  let d ← w.decision (iname 0 2 1)
+  moveRecord w 2 C [A, B]
+  pruneNow w (w.ctx 7)
+  let i1 ← indexNow w
+  -- the record moved on to term 5 with master B: an earlier term's commit is not proven
+  moveRecord w 5 B [A, C]
+  pruneNow w (w.ctx 7)
+  let i2 ← indexNow w
+  -- applied: term 2, master B (the normal promotion)
+  let w2 ← World.new [A, B, C]
+  committedB w2
+  let _ ← ensurePartition (w2.ctx 7) 0 (view1 B [])      -- the record is written (term 2, master B)
+  let _ ← ensurePartition (w2.ctx 7) 0 (view1 B [])      -- the next pass proves it applied and prunes
+  let i3 ← indexNow w2
+  return d == some .committed && i1 == [(2, 1)] && i2 == [(2, 1)] && i3 == []
+
+/-- review f6 #2: a concurrent writer (the current leader adds an entry between the pruner's read and its
+    CAS) — the pruner's replace conflicts, it re-reads, and the new entry survives while its own removal
+    still happens; a STALE leader's pass (older token than the intents' fence) touches nothing. -/
+def tIndexConcurrent : IO Bool := do
+  let setup : IO World := do
+    let w ← World.new [A, B, C]
+    let _ ← ensurePartition (w.ctx 7) 0 (view1 A [B, C]) [B]
+    w.setClock 1000
+    w.round A [B, C]
+    let _ ← gate (w.ctx 7) 0 B "uid" 6
+    match (← scanAll (w.ctx 7) 0 2) with
+    | .ok [a] => discard <| doCancelAttempt (w.ctx 7) 0 a
+    | _ => pure ()
+    pure w
+  -- (1) the leader adds (2,2) in the middle of the pruner's read-modify-write
+  let w ← setup
+  let gets ← IO.mkRef 0
+  let racing : Ctx := { w.ctx 7 with clientFor := fun name => do
+    let c ← w.clientFor name
+    if name != indexName "c" 0 then return c
+    return { c with get := do
+      let r ← c.get
+      gets.modify (· + 1)
+      -- reads 1 / 2: scanAll (ensure + read); read 3: the pruner's own read-modify-write
+      if (← gets.get) == 3 then discard <| addIndex (w.ctx 7) 0 2 2 2
+      pure r } }
+  pruneNow w racing
+  let i1 ← indexNow w
+  -- (2) a stale leader (token 5 < fence 7) prunes nothing
+  let w2 ← setup
+  pruneNow w2 (w2.ctx 5)
+  let i2 ← indexNow w2
+  return i1 == [(2, 2)] && i2 == [(2, 1)]
+
+/-- review f6 #3: the index limit fails closed — no new attempt, nothing dropped; a seed beyond the
+    entry limit or the term bound creates no index. The bound itself is computed from the entry size. -/
+def tIndexLimits : IO Bool := do
+  let w ← World.new [A, B, C]
+  let _ ← ensurePartition (w.ctx 7) 0 (view1 A [B, C]) [B]
+  let small : Ctx := { w.ctx 7 with indexMaxEntries := 2 }
+  let a1 ← addIndex small 0 2 2 5
+  let a2 ← addIndex small 0 2 2 6
+  let a3 ← addIndex small 0 2 2 7                 -- full: refused
+  let i ← indexNow w
+  let a4 ← addIndex small 0 2 2 6                 -- already listed: fine
+  w.setClock 1000
+  w.round A [B, C]
+  let g ← gate small 0 B "uid" 6                  -- no room for a new attempt: held, no intent made
+  let d ← w.decision (iname 0 2 1)
+  -- seeding refused: a seed of 2 legacy intents against a limit of 1; and a term beyond the bound
+  let w2 ← World.new [A, B, C]
+  let _ ← ensurePartition (w2.ctx 7) 0 (view1 A [B, C]) [B]
+  for n in [1:3] do
+    let cl ← w2.clientFor (intentName "c" 0 2 n)
+    discard <| createIntent cl (Intent.prepare { scope := { cluster := "c", partition := 0, generation := 1 }, id := n, successor := B, binding := { podUid := "uid", bootId := "b1", copyId := "c1" } } 7 { clock := { node := "operator", boot := "7" }, t := 5000 })
+  let e1 ← ensureIndex { w2.ctx 7 with indexMaxEntries := 1 } 0 2
+  let e2 ← ensureIndex { w2.ctx 7 with seedMaxTerms := 1 } 0 2
+  let none1 ← readIndex (← w2.clientFor (indexName "c" 0))
+  let e3 ← ensureIndex (w2.ctx 7) 0 2
+  return a1 && a2 && !a3 && i == [(2, 5), (2, 6)] && a4 && isHold g && d == none
+    && !e1 && !e2 && (match none1 with | .ok none => true | _ => false) && e3
+    && maxIndexEntries * maxEntryBytes + 16 ≤ maxIndexValueBytes && maxIndexValueBytes < 1048576
+    && (encodeIndex ((List.range maxIndexEntries).map fun _ => (18446744073709551615, 18446744073709551615))).utf8ByteSize ≤ maxIndexValueBytes
+
 /-- review (ackedFor): the COMPLETE incarnation (pod UID, boot id, copy id) must be the one that
     acknowledged; a same-name pod recreated with only the UID changed is not; an unknown part is not;
     with the master unreadable altogether the durable ACK stands -/
@@ -697,6 +803,9 @@ def checks : IO (List (String × Bool)) := do
     ("driver: a pending intent is reclaimed 5 terms later after an operator restart (original resource and scope); the index entry is dropped", ← tFarTermReclaim),
     ("driver: the index entry stays until the cancel is confirmed on the node; the cancel is sent again", ← tIndexKeptUntilConfirmed),
     ("driver: index consistent after a crash between add and create; seeded from all terms when absent", ← tIndexCrashAndSeed),
+    ("driver: a committed attempt leaves the index only when proven applied to the record (not applied / earlier term: kept)", ← tCommittedNotApplied),
+    ("driver: a concurrent index writer is never overwritten (CAS conflict re-reads); a stale leader's pass prunes nothing", ← tIndexConcurrent),
+    ("driver: the index limit and the seeding bound fail closed (no new attempt, nothing dropped)", ← tIndexLimits),
     ("driver: the master's ACK needs the complete incarnation — a pod recreated with only the UID changed (or an unknown part) is not acknowledged", ← tAckedUid),
     ("driver: a committed intent is terminal — the leader's cancel is refused, the successor stays committed", ← tTerminal) ]
 

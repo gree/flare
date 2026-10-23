@@ -198,6 +198,13 @@ protected:
 	// that master (fail closed) until the map takes the role away
 	volatile bool					_promotion_refused = false;
 	string								_promotion_refused_why;
+	// C' write authority: a refusal by the authority gate is NOT final. The shift that was refused is
+	// kept here and run again (same checks, same gate) when the missing condition may have arrived: the
+	// first-build allowance, the COMMITTED intent / quiet time, a grant. Cleared when the map moves.
+	volatile bool					_promotion_retry_pending = false;
+	role									_promotion_retry_old_role = role_proxy;
+	int										_promotion_retry_old_partition = -1;
+	int										_promotion_retry_new_partition = -1;
 	string								_server_name;
 	int										_server_port;
 
@@ -263,6 +270,9 @@ public:
 	int set_node_state(string node_server_name, int node_server_port, state node_state);
 	int reconstruct_node(vector<node> v, uint64_t node_map_version = 0);
 	int run_boot_shift();
+	/** re-run a promotion that the write authority gate refused (no-op when none is pending); called
+	    periodically. The gate is evaluated again as for the first attempt: nothing is bypassed. */
+	int retry_refused_promotion();
 	void set_activation_pending(bool v) { this->_activation_pending = v; };
 	int _run_boot_shift_locked();
 

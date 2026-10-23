@@ -65,6 +65,9 @@ void handler_source_validator::probe(const string& node_key, cluster* cl, source
 }
 
 void handler_source_validator::_check_once() {
+	// a promotion refused by the write authority gate is evaluated again here (the allowance or the
+	// committed intent arrives after the map): a master-candidate completes its shift without a restart
+	this->_cluster->retry_refused_promotion();
 	cluster::role r;
 	cluster::state st;
 	int partition = -1;

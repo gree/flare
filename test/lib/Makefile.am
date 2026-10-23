@@ -91,7 +91,7 @@ LIBS =									\
 
 test_binary_header_la_SOURCES	= test_binary_header.cc connection_iostream.cc
 test_connection_tcp_la_SOURCES	= test_connection_tcp.cc common_connection_tests.cc
-test_cluster_la_SOURCES	= test_cluster.cc
+test_cluster_la_SOURCES	= test_cluster.cc mock_storage.cc
 test_connection_iostream_la_SOURCES	= test_connection_iostream.cc common_connection_tests.cc connection_iostream.cc
 test_handler_proxy_la_SOURCES	= test_handler_proxy.cc mock_cluster.cc
 test_handler_cluster_replication_la_SOURCES	= test_handler_cluster_replication.cc

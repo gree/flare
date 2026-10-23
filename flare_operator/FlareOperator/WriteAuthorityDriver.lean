@@ -13,6 +13,7 @@
 import FlareOperator.StateMachine.WriteAuthority
 import FlareOperator.StateMachine.PromotionIntentStore
 import FlareOperator.StateMachine.PromotionIntentKube
+import FlareOperator.StateMachine.AuthoritativeHistory
 import FlareOperator.K8s.Bridge
 
 namespace FlareOperator.WriteAuthorityDriver
@@ -651,5 +652,37 @@ def ensurePartition (ctx : Ctx) (p : Nat) (v : View) (wanted : List String := []
                   pure (some (if ok2 then acked else rec))
                 else pure (some r2)
               | _ => pure (some rec)
+
+/-- A master the REGISTRATION reply already made master (the P0 fast path: no pass promotes it, so the
+    promotion commit point never sees it) starts as a non-serving candidate: flared's gate refuses a
+    Proxy -> master shift without a promotion intent. A proven FRESH FIRST BUILD (authoritative
+    history, see `AuthoritativeHistory.firstBuildProven`, and NO membership record of the partition:
+    the record is created by this very pass, so the proof is taken BEFORE it) is allowed once, for the
+    node's REAL boot / copy identity (`authority first`); flared re-runs its pending shift under the
+    same checks (the gate is never bypassed). Everything else is left to the gate (an existing copy
+    needs the committed intent). `false` = this partition's record must not be created this pass: a
+    proof that could not be sent now would be lost with the record. -/
+def registeredFirstBuild (ctx : Ctx) (p : Nat) (mk : String) (store : Option AuthoritativeHistory.Store) (othersHold : Bool) : IO Bool := do
+  let rc ← recClient ctx p
+  match ← readRec rc with
+  | .ok none =>
+    match store with
+    | none => pure true      -- no history store (the history is off): nothing proves a first build; the gate decides
+    | some store =>
+      match ← bindingNow ctx mk p with
+      | none =>
+        IO.eprintln s!"[flare-operator] write authority P{p}: the identity of the registered master {mk} is unreadable: its record is not created this pass"
+        pure false
+      | some (_, b) =>
+        if AuthoritativeHistory.firstBuildProven store p mk b.copy true othersHold then
+          match (← ask ctx mk (cmdFirst p b.boot b.copy)).bind Status.parse with
+          | some _ =>
+            IO.eprintln s!"[flare-operator] write authority: {mk} is the first master of P{p} (fresh first build proven by the history; registered as master); allowed once for boot {b.boot}"
+            pure true
+          | none =>
+            IO.eprintln s!"[flare-operator] write authority P{p}: {mk} did not accept the first-build proof: its record is not created this pass"
+            pure false
+        else pure true
+  | _ => pure true
 
 end FlareOperator.WriteAuthorityDriver

@@ -1380,6 +1380,40 @@ int cluster::_run_boot_shift_locked() {
 }
 
 /**
+ *	C' write authority: run again a Proxy/Slave -> master shift that the authority gate refused (the
+ *	boot map names this node master before any authority message arrives; the allowance or the committed
+ *	intent comes later and no further map change follows). The shift is re-run whole, under the same
+ *	checks: it is allowed only when write_promise says so now. A map that no longer names this node
+ *	master of that partition drops the retry.
+ */
+int cluster::retry_refused_promotion() {
+	if (!this->_promotion_retry_pending) {
+		return 0;
+	}
+	pthread_rwlock_wrlock(&this->_mutex_node_map);
+	pthread_rwlock_wrlock(&this->_mutex_node_partition_map);
+	int result = 0;
+	if (this->_promotion_retry_pending && this->_storage != NULL) {
+		node_map::iterator me = this->_node_map.find(this->_node_key);
+		if (me == this->_node_map.end() || me->second.node_role != role_master
+				|| me->second.node_partition != this->_promotion_retry_new_partition) {
+			this->_promotion_retry_pending = false;
+		} else {
+			// stays pending through the call: the gate lifts its own refusal when it allows, and sets it
+			// again when it refuses
+			result = this->_shift_node_role(this->_node_key, this->_promotion_retry_old_role,
+				this->_promotion_retry_old_partition, role_master, this->_promotion_retry_new_partition);
+			if (result != 0) {
+				this->_boot_shift_pending = true;
+			}
+		}
+	}
+	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
+	pthread_rwlock_unlock(&this->_mutex_node_map);
+	return result;
+}
+
+/**
  *	[index] set node server monitoring threshold
  */
 int cluster::set_monitor_threshold(int monitor_threshold) {
@@ -2353,12 +2387,26 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 				why += "; " + why2;
 			}
 		}
-		if (!allowed) {
+		if (allowed) {
+			if (this->_promotion_retry_pending) {
+				// the refusal being lifted is the authority gate's own (the checks below latch again)
+				log_notice("write authority: the refused promotion of partition %d is now allowed (re-evaluated)", new_partition);
+				this->_promotion_refused = false;
+			}
+			this->_promotion_retry_pending = false;
+		} else {
+			this->_promotion_retry_old_role = old_role;
+			this->_promotion_retry_old_partition = old_partition;
+			this->_promotion_retry_new_partition = new_partition;
+			this->_promotion_retry_pending = true;
 			this->_promotion_refused_why = "write authority: " + why;
 			this->_promotion_refused = true;
 			log_err("CRITICAL: PROMOTION REFUSED by this node: %s — it serves no reads or writes as master until the map takes the role away", this->_promotion_refused_why.c_str());
 			return 0;
 		}
+	}
+	if (new_role != role_master) {
+		this->_promotion_retry_pending = false;
 	}
 	if (new_role != role_master && this->_promotion_refused) {
 		log_notice("promotion refusal lifted: no longer a master (new_role=%s)", cluster::role_cast(new_role).c_str());

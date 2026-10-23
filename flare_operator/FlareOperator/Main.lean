@@ -2117,7 +2117,7 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
           | some (uid, _) =>
             -- Proxy (or new) -> master: exempt ONLY a fresh first build the authoritative history proves:
             -- no copy of the partition has been held (nobody is its master / slave / ex-master in the map),
-            -- the history store was read and neither tracks nor records the partition, and no membership
+            -- the history store (a first build) was read and does not record the partition, and no membership
             -- record of the partition ever existed. An existing copy returning from Proxy goes through
             -- the same gate as a slave (prepare, COMMITTED, quiet time, copy identity).
             let wasProxyOrNew := curRole != some FlareRole.Slave
@@ -2129,7 +2129,10 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
             let historyProves ← do
               match ← historyStoreRef.get with
               | none => pure false
-              | some st => pure (part ≥ 0 && !st.tracked part.toNat && (st.recorded part.toNat).isNone)
+              | some st =>
+                -- nothing recorded for the partition (not a registered master); the map part of the
+                -- proof (nobody holds it) is firstMasterOfNewPartition just below
+                pure (part ≥ 0 && AuthoritativeHistory.firstBuildProven st part.toNat k "" false false)
             let firstBuild := wasProxyOrNew && noMemberRecord && historyProves
               && PromotionEvidence.firstMasterOfNewPartition wasProxyOrNew members part
             if firstBuild then
@@ -2483,8 +2486,17 @@ private def authorityPass (crName ns leaseName identity : String) (st : FlareClu
       let master := (st.nodeMap.find? fun kv => kv.2.role == FlareRole.Master && kv.2.partition == p).map (·.1)
       let succ := (st.nodeMap.filter fun kv =>
         kv.2.role == FlareRole.Slave && kv.2.partition == p && kv.2.state == FlareState.Active && usable kv.1).map (·.1)
-      discard <| WriteAuthorityDriver.ensurePartition ctx p.toNat
-        { master, successors := succ, pods := some (pods.map Bridge.PodInfo.toNodeKey) } (← gateTouchedRef.get)
+      let go ← match master with
+        | some mk =>
+          let store ← historyStoreRef.get
+          let othersHold := st.nodeMap.any fun (k, n) =>
+            (k != mk && (n.role == FlareRole.Master || n.role == FlareRole.Slave) && n.partition == p)
+              || n.lastMasterOf == p
+          WriteAuthorityDriver.registeredFirstBuild ctx p.toNat mk store othersHold
+        | none => pure true
+      if go then
+        discard <| WriteAuthorityDriver.ensurePartition ctx p.toNat
+          { master, successors := succ, pods := some (pods.map Bridge.PodInfo.toNodeKey) } (← gateTouchedRef.get)
     gateTouchedRef.set []
 
 /-- Prepare-stuck watchdog threshold in reconcile cycles (5s each): 720 ≈ 1h.

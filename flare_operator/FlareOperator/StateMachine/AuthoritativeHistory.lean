@@ -537,4 +537,29 @@ def writable (s : Store) : Bool :=
     | .unknown .corrupt _ | .unknown .foreign _ | .unknown .unreadable _ => true
     | _ => false)
 
+/-- A FRESH FIRST BUILD of partition `p` by the node `key`, proven from the authoritative history
+    (the only thing flared's `authority first` allowance may rest on; anything else goes through the
+    promotion intent):
+      * the store was created as a first build before any node map (`origin`), so the whole cluster is
+        a fresh build (or a first build was approved / explicitly initialised: the same origin);
+      * no promotion intent exists for the partition and nobody else holds or held it (`othersHold`:
+        a master / slave / ex-master of the partition other than `key` in the map);
+      * the partition is not recorded yet (or explicitly untracked), or — only for a master the map
+        ALREADY names (`registered`: the registration reply made it master, no pass promoted it) — it
+        is recorded as the first build of exactly this node's copy: generation 1, reason first-build,
+        holder `key`, no hold, the copy id the node reports now (a recorded partition of a node that
+        is not yet master is an existing copy returning: never proven here).
+    The caller adds what is not history: the membership record of the partition is absent, and the
+    node reports its promotion refused. -/
+def firstBuildProven (s : Store) (p : Nat) (key copyNow : String) (registered othersHold : Bool) : Bool :=
+  s.origin == "first-build" && !othersHold && (s.intentFor p).isNone &&
+    match s.part p with
+    | none => true
+    | some (.untracked _) => true
+    | some (.known r hold) =>
+      registered && hold.isNone && r.reason == "first-build" && r.gen == 1 && r.holder == key
+        && r.binding.copyId == copyNow && !copyNow.isEmpty
+    | some (.unknown ..) => false
+
+
 end FlareOperator.AuthoritativeHistory

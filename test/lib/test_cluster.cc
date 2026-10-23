@@ -31,6 +31,10 @@
 #include <cluster.h>
 #include <coordinator_factory.h>
 #include <stats.h>
+#include <write_fence.h>
+#include <write_promise.h>
+
+#include "mock_storage.h"
 
 using namespace gree::flare;
 
@@ -286,6 +290,103 @@ namespace test_cluster
 		cluster.set_activation_pending(true);
 		cppcut_assert_equal(0, cluster.reconstruct_node(v, ++ver));
 		cut_assert_equal_int(cluster::state_active, cluster.get_node("localhost", 11211).node_state);
+	}
+	// C' write authority: the boot map names this node master before any authority message arrives.
+	// The gate refuses (an existing copy needs the committed intent) and the node stays a non-serving
+	// candidate; the refused shift is re-evaluated when the missing condition arrives, without a new
+	// map and without a restart. Nothing else lifts it.
+	static uint64_t fake_ns = 0;
+	static uint64_t fake_clock() { return fake_ns; }
+	static const uint64_t S = 1000000000ULL;
+	static void probe(std::string& b, std::string& c) { b = "b1"; c = "c1"; }
+
+	struct authority_fixture {
+		authority_fixture(const char* dir):
+				cl(std::string(dir)), st(std::string(tmp_dir) + "/" + dir + "-st", 16, 16) {
+			write_fence::reset_for_test();
+			write_promise::reset_for_test();
+			fake_ns = 1000 * S;
+			write_fence::authority_set_clock(fake_clock);
+			std::string why;
+			cut_assert_true(write_promise::configure(true, 2000, 10000, why));
+			write_promise::set_identity_probe(probe);
+		}
+		~authority_fixture() {
+			cl.set_storage(NULL);
+			write_fence::reset_for_test();
+			write_promise::reset_for_test();
+		}
+		// the boot map: this node (localhost:11211) is the master of partition 0, active
+		void boot_as_master() {
+			cl._type = cluster::type_node;
+			vector<cluster::node> v;
+			v.push_back(mk("localhost", 11211, cluster::role_master, cluster::state_active, 0));
+			cppcut_assert_equal(0, cl.reconstruct_node(v, cl.get_node_map_version() + 10));
+			cl.set_storage(&st);
+			cppcut_assert_equal(0, cl.run_boot_shift());
+		}
+		cluster_test cl;
+		mock_storage st;
+	};
+
+	void test_promotion_refused_by_the_gate_completes_when_the_first_build_is_allowed()
+	{
+		mkdir((tmp_dir + "/wa1").c_str(), 0700);
+		authority_fixture f((tmp_dir + "/wa1").c_str());
+		f.boot_as_master();
+		cut_assert_true(f.cl.is_promotion_refused());		// no proof, no intent: a non-serving candidate
+		cppcut_assert_equal(0, f.cl.retry_refused_promotion());
+		cut_assert_true(f.cl.is_promotion_refused());		// nothing changed: still refused
+		std::string why;
+		cut_assert_false(write_promise::allow_first_build(0, "b1", "c-other", why));		// a proof of another copy
+		cppcut_assert_equal(0, f.cl.retry_refused_promotion());
+		cut_assert_true(f.cl.is_promotion_refused());
+		cut_assert_true(write_promise::allow_first_build(0, "b1", "c1", why));
+		cppcut_assert_equal(0, f.cl.retry_refused_promotion());
+		cut_assert_false(f.cl.is_promotion_refused());		// completed, no new map, no restart
+		cppcut_assert_equal(0, f.cl.retry_refused_promotion());
+		cut_assert_false(f.cl.is_promotion_refused());		// and not refused again
+	}
+
+	void test_promotion_refused_by_the_gate_completes_when_the_committed_intent_is_promotable()
+	{
+		mkdir((tmp_dir + "/wa2").c_str(), 0700);
+		authority_fixture f((tmp_dir + "/wa2").c_str());
+		f.boot_as_master();
+		cut_assert_true(f.cl.is_promotion_refused());
+		write_promise::scope sc;
+		sc.intent = 1;
+		sc.term_next = 2;
+		sc.generation = 1;
+		write_promise::identity(sc.boot, sc.copy);
+		write_promise::status s;
+		std::string why;
+		write_fence::authority_set_floor(0, 1, 1);
+		cut_assert_true(write_promise::prepare(0, sc, s, why));
+		cppcut_assert_equal(0, f.cl.retry_refused_promotion());
+		cut_assert_true(f.cl.is_promotion_refused());		// prepared, not committed
+		cut_assert_true(write_promise::commit(0, sc, s, why));
+		cppcut_assert_equal(0, f.cl.retry_refused_promotion());
+		cut_assert_true(f.cl.is_promotion_refused());		// committed, but the quiet time has not passed
+		fake_ns += 100 * S;
+		cppcut_assert_equal(0, f.cl.retry_refused_promotion());
+		cut_assert_false(f.cl.is_promotion_refused());
+	}
+
+	void test_a_map_that_takes_the_master_role_away_drops_the_retry()
+	{
+		mkdir((tmp_dir + "/wa3").c_str(), 0700);
+		authority_fixture f((tmp_dir + "/wa3").c_str());
+		f.boot_as_master();
+		cut_assert_true(f.cl.is_promotion_refused());
+		vector<cluster::node> v;
+		v.push_back(mk("localhost", 11211, cluster::role_proxy, cluster::state_active, -1));
+		cppcut_assert_equal(0, f.cl.reconstruct_node(v, f.cl.get_node_map_version() + 10));
+		cut_assert_false(f.cl.is_promotion_refused());
+		std::string why;
+		cut_assert_true(write_promise::allow_first_build(0, "b1", "c1", why));
+		cppcut_assert_equal(0, f.cl.retry_refused_promotion());		// nothing pending: the proof does not make it master
+		cut_assert_false(f.cl.is_promotion_refused());
 	}
 }
 

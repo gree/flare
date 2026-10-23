@@ -40,6 +40,8 @@ structure Node where
   /-- the identity the membership is bound to -/
   mbBoot : String := "b1"
   mbCopy : String := "c1"
+  /-- the first-build allowance held: (boot, copy) -/
+  first : Option (String × String) := none
   deriving Inhabited
 
 def statusText (n : Node) (now : Nat) : String :=
@@ -71,6 +73,9 @@ def flaredApply (n : Node) (ws : List String) : Node × Option String :=
     else if newer n (nat t) (nat g) then
       ({ n with mode := "solo", memTerm := nat t, memGen := nat g, grant := true, solo := true, mbBoot := n.boot, mbCopy := n.copy }, none)
     else (n, some "older term / generation than the membership held")
+  | ["authority", "first", _, b, c] =>
+    if b != n.boot || c != n.copy then (n, some "the first-build proof is for another incarnation or copy of this node")
+    else ({ n with first := some (b, c) }, none)
   | ["authority", "prepare", _, id, tn, g, b, c] =>
     if b != n.boot || c != n.copy then (n, some "another incarnation or copy")
     else if n.state == "following" then ({ n with state := "preparing", intent := nat id, pTerm := nat tn, pGen := nat g }, none)
@@ -782,6 +787,44 @@ def tAckedUid : IO Bool := do
     let gone ← ackedFor (w.ctx 7 0 fun _ => pure none) 0 m
     return same && !uid2 && !unk && !boot2 && gone
 
+/-- a master the registration made master (no pass promoted it): the first-build proof is sent BEFORE its
+    record exists, with the node's REAL boot / copy; never for an existing copy, another node holding the
+    partition, a record that exists, or a store that was not a first build -/
+def tRegisteredFirstBuild : IO Bool := do
+  let bC : AuthoritativeHistory.Binding := ⟨"uid", "b1", "c1"⟩
+  let h : AuthoritativeHistory.Hist := ⟨"M", "1:e"⟩
+  let fresh : AuthoritativeHistory.Store := { clusterUid := "cu", origin := "first-build" }
+  let recorded : AuthoritativeHistory.Store :=
+    { fresh with parts := [(0, .known { gen := 1, hist := h, holder := A, binding := bC, since := "t", reason := "first-build" } none)] }
+  -- proven (nothing recorded yet): the node holds the allowance for its real incarnation; the record may be made
+  let w1 ← World.new [A]
+  let r1 ← registeredFirstBuild (w1.ctx 7) 0 A (some fresh) false
+  let n1 ← w1.node A
+  -- proven (recorded as this node's first build, the copy it reports now)
+  let w2 ← World.new [A]
+  let r2 ← registeredFirstBuild (w2.ctx 7) 0 A (some recorded) false
+  let n2 ← w2.node A
+  -- not proven: another node holds the partition / not a first-build store / another copy / no pod identity
+  let w3 ← World.new [A]
+  let r3 ← registeredFirstBuild (w3.ctx 7) 0 A (some fresh) true
+  let r3b ← registeredFirstBuild (w3.ctx 7) 0 A (some { fresh with origin := "" }) false
+  w3.setNode A fun x => { x with copy := "c-other" }
+  let r3c ← registeredFirstBuild (w3.ctx 7) 0 A (some recorded) false
+  let n3 ← w3.node A
+  let r3d ← registeredFirstBuild (w3.ctx 7 0 fun _ => pure none) 0 A (some fresh) false
+  -- the record exists (the master was acknowledged before): an existing copy, never a first build
+  let w4 ← World.new [A]
+  let _ ← ensurePartition (w4.ctx 7) 0 (view1 A [])
+  let r4 ← registeredFirstBuild (w4.ctx 7) 0 A (some fresh) false
+  let n4 ← w4.node A
+  -- the node does not accept it (unreachable): the record must not be made this pass
+  let w5 ← World.new [A]
+  w5.setNode A fun x => { x with reachable := false }
+  let r5 ← registeredFirstBuild (w5.ctx 7) 0 A (some fresh) false
+  return r1 && n1.first == some ("b1", "c1") && r2 && n2.first == some ("b1", "c1")
+    && r3 && r3b && r3c && n3.first == none && !r3d
+    && r4 && n4.first == none && !r5
+
 def checks : IO (List (String × Bool)) := do
   return [
     ("driver: steady state — record, floor on the successor, membership confirmed by the master, idempotent", ← tSteady),
@@ -807,6 +850,7 @@ def checks : IO (List (String × Bool)) := do
     ("driver: a concurrent index writer is never overwritten (CAS conflict re-reads); a stale leader's pass prunes nothing", ← tIndexConcurrent),
     ("driver: the index limit and the seeding bound fail closed (no new attempt, nothing dropped)", ← tIndexLimits),
     ("driver: the master's ACK needs the complete incarnation — a pod recreated with only the UID changed (or an unknown part) is not acknowledged", ← tAckedUid),
+    ("driver: a master registered as master gets the first-build proof (real boot / copy) BEFORE its record exists, only with the history's proof; an existing copy / record / another holder / unreadable identity / unreachable node gets none (the record is held when the proof cannot be sent)", ← tRegisteredFirstBuild),
     ("driver: a committed intent is terminal — the leader's cancel is refused, the successor stays committed", ← tTerminal) ]
 
 end FlareOperator.WriteAuthorityDriverChecks

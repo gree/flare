@@ -2335,6 +2335,26 @@ private def checkAuthoritativeHistory (ctx : Ctx) : IO Unit := do
     ((match establish fresh 0 (some "m") cs false "t" with | (_, .recorded 0 r _) => r.reason == "first-build" | _ => false)
       && (establish absent 0 (some "m") cs false "t").2 == .none
       && (match establish absent 0 (some "m") cs true "t" with | (_, .recorded 0 r _) => r.reason == "adopted" | _ => false))
+  -- the first-build proof the operator sends `authority first` on (flared's gate stays the judge)
+  let recFB : Record := { gen := 1, hist := h2, holder := "m", binding := bM, since := "t0", reason := "first-build" }
+  let storeFB : Store := { clusterUid := "cu", origin := "first-build", parts := [(0, .known recFB none)] }
+  let intentFB : Intent := { id := "i", partition := 0, kind := "promotion", target := "m", binding := bM, fromGen := 1, fromHist := h2, expectedVersion := 1 }
+  check ctx "first build proof: only in a store created as a first build, partition unrecorded (or untracked) — or, for a master the registration already made master, recorded as THIS node's first build with its CURRENT copy id; never for a node that is not yet master with a record, another holder / copy / generation, a hold, a pending intent, another node holding the partition, or a store that was not a first build"
+    (firstBuildProven fresh 0 "m" "u1:3" false false
+      && firstBuildProven { fresh with parts := [(0, .untracked "x")] } 0 "m" "" false false
+      && !firstBuildProven fresh 0 "m" "u1:3" false true                  -- another node holds / held the partition
+      && !firstBuildProven absent 0 "m" "u1:3" false false                -- not a first-build store (restored / migrated)
+      && !firstBuildProven { fresh with origin := "" } 0 "m" "u1:3" false false
+      && firstBuildProven storeFB 0 "m" "u1:3" true false
+      && !firstBuildProven storeFB 0 "m" "u1:3" false false               -- a recorded partition of a node that is not master yet: an existing copy
+      && !firstBuildProven storeFB 0 "s" "u1:3" true false                -- another holder
+      && !firstBuildProven storeFB 0 "m" "u1:4" true false                -- the copy changed (bulk / replaced)
+      && !firstBuildProven storeFB 0 "m" "" true false                    -- the copy id is unreadable
+      && !firstBuildProven { storeFB with parts := [(0, .known { recFB with gen := 2 } none)] } 0 "m" "u1:3" true false
+      && !firstBuildProven { storeFB with parts := [(0, .known { recFB with reason := "promotion" } none)] } 0 "m" "u1:3" true false
+      && !firstBuildProven { storeFB with parts := [(0, .known recFB (some "hold"))] } 0 "m" "u1:3" true false
+      && !firstBuildProven { storeFB with intents := [intentFB] } 0 "m" "u1:3" true false
+      && !firstBuildProven { fresh with parts := [(0, .unknown .held "w")] } 0 "m" "u1:3" true false)
   check ctx "history (1): a corrupt, foreign or unreadable record is NEVER adopted, approved or not, and never written back"
     ((establish (load "cu" 1 (some (some "garbage")) false) 0 (some "m") cs true "t").2 == .none
       && (establish (load "cu" 1 (some (some (serialize { st with clusterUid := "other" }))) false) 0 (some "m") cs true "t").2 == .none

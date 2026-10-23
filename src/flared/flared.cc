@@ -27,6 +27,7 @@
  *	$Id$
  */
 #include <cstring>
+#include <ctime>
 #include <sys/stat.h>
 #include "signal_interrupt.h"
 #include "flared.h"
@@ -190,10 +191,25 @@ static bool flared_is_slave_of(int partition) {
 
 // `authority first` was accepted: re-run the promotion it was missing for (the same gates as the
 // validator thread's retry), now, so the first master's epoch is advanced before the operator reads it
+static const int first_build_hook_lock_wait_ms = 500;
+
 static void flared_retry_refused_promotion() {
 	cluster* cl = singleton<flared>::instance().get_cluster();
 	if (cl != NULL) {
-		cl->retry_refused_promotion();
+		// the operator waits for the reply of `authority first` (kubectl exec: 30 s wall): do not hold it
+		// behind the cluster locks of a long reconstruct — past the bound the validator's periodic retry
+		// (same gate) runs it
+		struct timespec t0, t1;
+		clock_gettime(CLOCK_MONOTONIC, &t0);
+		bool skipped = false;
+		cl->retry_refused_promotion_bounded(first_build_hook_lock_wait_ms, &skipped);
+		clock_gettime(CLOCK_MONOTONIC, &t1);
+		const long ms = (t1.tv_sec - t0.tv_sec) * 1000L + (t1.tv_nsec - t0.tv_nsec) / 1000000L;
+		if (skipped) {
+			log_notice("write authority: first-build promotion retry skipped after %ld ms (cluster locks busy; the periodic retry runs it)", ms);
+		} else {
+			log_notice("write authority: first-build promotion retry took %ld ms", ms);
+		}
 	}
 }
 

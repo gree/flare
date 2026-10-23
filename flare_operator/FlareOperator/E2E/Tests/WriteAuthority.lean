@@ -369,12 +369,11 @@ private def twoFailoversRun (c : Ctx) : IO TestResult := do
   c.art "report.txt" s!"masters {m1} -> {m2} -> {m3}; writes {ws.length}; acks {(ws.filter fun w => classify w.reply == .ack).length}"
   -- a failover that did not complete is the finding, whatever the writer logs of the dead window say
   -- (a writer that never got an ack is rejected as unobserved and would mask it as UNOBSERVABLE)
-  if !ok2 then return .fail s!"the second failover did not complete: no pod other than {m2} holds a grant within 300 s (a prepare is stuck, or the partition is held: see the operator log)"
+  if !ok2 then return .fail s!"the second failover did not complete: no pod other than {m2} holds a grant within 300 s (a prepare is stuck, or the partition is held: see the operator log); writer logs complete: {complete} ({names.length} writers)"
   if !complete then return .fail (unobservable "a writer log was not confirmed complete")
   let verdict := ackVerdict samples ws
   if let some v := verdict then
     if v.startsWith "PRODUCT GAP" then return .fail v
-  if !ok2 then return .fail s!"the second failover did not complete: no pod other than {m2} holds a grant within 300 s (a prepare is stuck)"
   let after := (ws.filter fun w => classify w.reply == .ack && pathOf samples w == "local" && w.ip != "").filter fun w =>
     ((samples.filter fun (t, _, _) => t ≤ w.t).getLast?.bind fun (_, _, ips) => ips.lookup w.ip) == some m3
   if after.isEmpty then

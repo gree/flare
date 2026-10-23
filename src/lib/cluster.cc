@@ -1387,10 +1387,48 @@ int cluster::_run_boot_shift_locked() {
  *	master of that partition drops the retry.
  */
 int cluster::retry_refused_promotion() {
-	// _promotion_retry_pending is guarded by both rwlocks (reconstruct_node / _shift_node_role write it
-	// under them): it is read only under them, never ahead of them
-	pthread_rwlock_wrlock(&this->_mutex_node_map);
-	pthread_rwlock_wrlock(&this->_mutex_node_partition_map);
+	return this->_retry_refused_promotion(-1, NULL);
+}
+
+int cluster::retry_refused_promotion_bounded(int lock_wait_ms, bool* skipped) {
+	return this->_retry_refused_promotion(lock_wait_ms, skipped);
+}
+
+// lock_wait_ms < 0: wait for the locks as long as it takes (the validator thread); otherwise give up
+// after that long with *skipped set and nothing evaluated (the caller must not block behind a long
+// reconstruct: the validator's periodic retry runs it later, through the very same gate)
+int cluster::_retry_refused_promotion(int lock_wait_ms, bool* skipped) {
+	if (skipped != NULL) {
+		*skipped = false;
+	}
+	if (lock_wait_ms < 0) {
+		// _promotion_retry_pending is guarded by both rwlocks (reconstruct_node / _shift_node_role write it
+		// under them): it is read only under them, never ahead of them
+		pthread_rwlock_wrlock(&this->_mutex_node_map);
+		pthread_rwlock_wrlock(&this->_mutex_node_partition_map);
+	} else {
+		struct timespec ts;
+		clock_gettime(CLOCK_REALTIME, &ts);
+		ts.tv_sec += lock_wait_ms / 1000;
+		ts.tv_nsec += static_cast<long>(lock_wait_ms % 1000) * 1000000L;
+		if (ts.tv_nsec >= 1000000000L) {
+			ts.tv_sec++;
+			ts.tv_nsec -= 1000000000L;
+		}
+		if (pthread_rwlock_timedwrlock(&this->_mutex_node_map, &ts) != 0) {
+			if (skipped != NULL) {
+				*skipped = true;
+			}
+			return 0;
+		}
+		if (pthread_rwlock_timedwrlock(&this->_mutex_node_partition_map, &ts) != 0) {
+			pthread_rwlock_unlock(&this->_mutex_node_map);
+			if (skipped != NULL) {
+				*skipped = true;
+			}
+			return 0;
+		}
+	}
 	int result = 0;
 	if (this->_promotion_retry_pending && this->_storage != NULL) {
 		node_map::iterator me = this->_node_map.find(this->_node_key);

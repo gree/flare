@@ -26,6 +26,9 @@
 #include <cppcutter.h>
 
 #include <fstream>
+#include <pthread.h>
+#include <time.h>
+#include <unistd.h>
 
 #include <app.h>
 #include <cluster.h>
@@ -90,6 +93,8 @@ namespace test_cluster
 
 	struct cluster_test : public cluster
 	{
+		void lock_node_map() { pthread_rwlock_wrlock(&this->_mutex_node_map); }
+		void unlock_node_map() { pthread_rwlock_unlock(&this->_mutex_node_map); }
 		cluster_test(std::string data_dir):
 			cluster(req_tp, other_tp, "localhost", 11211) {
 			char cwd[PATH_MAX];
@@ -360,6 +365,55 @@ namespace test_cluster
 		cut_assert_false(f.cl.is_promotion_refused());		// completed, no new map, no restart
 		cppcut_assert_equal(0, f.cl.retry_refused_promotion());
 		cut_assert_false(f.cl.is_promotion_refused());		// and not refused again
+	}
+
+	static void* hold_node_map_lock(void* arg)
+	{
+		cluster_test* cl = static_cast<cluster_test*>(arg);
+		cl->lock_node_map();
+		usleep(1500 * 1000);		// a long reconstruct
+		cl->unlock_node_map();
+		return NULL;
+	}
+
+	// the first-build hook must not wait behind a long reconstruct: with the node map lock held
+	// elsewhere the bounded retry returns within its bound without evaluating anything (the gate is not
+	// touched, the refusal stays), and the periodic retry runs it once the lock is free
+	void test_the_bounded_retry_gives_up_while_the_locks_are_held_and_the_periodic_retry_runs_it_later()
+	{
+		mkdir((tmp_dir + "/wa1b").c_str(), 0700);
+		authority_fixture f((tmp_dir + "/wa1b").c_str());
+		f.cl._type = cluster::type_node;
+		vector<cluster::node> v;
+		v.push_back(mk("localhost", 11211, cluster::role_master, cluster::state_active, 0));
+		cppcut_assert_equal(0, f.cl.reconstruct_node(v, f.cl.get_node_map_version() + 10));
+		f.cl.set_storage(&f.st);
+		cppcut_assert_equal(0, f.cl.run_boot_shift());
+		cut_assert_true(f.cl.is_promotion_refused());
+		std::string why;
+		cut_assert_true(write_promise::allow_first_build(0, "b1", "c1", why));
+
+		pthread_t th;
+		cppcut_assert_equal(0, pthread_create(&th, NULL, hold_node_map_lock, &f.cl));
+		usleep(200 * 1000);		// the holder has the lock
+		struct timespec t0, t1;
+		clock_gettime(CLOCK_MONOTONIC, &t0);
+		bool skipped = false;
+		cppcut_assert_equal(0, f.cl.retry_refused_promotion_bounded(100, &skipped));
+		clock_gettime(CLOCK_MONOTONIC, &t1);
+		const long ms = (t1.tv_sec - t0.tv_sec) * 1000L + (t1.tv_nsec - t0.tv_nsec) / 1000000L;
+		cut_assert_true(skipped);
+		cut_assert_true(ms >= 90 && ms < 1000);		// returned at its bound, not when the holder let go
+		cut_assert_true(f.cl.is_promotion_refused());		// nothing evaluated
+
+		pthread_join(th, NULL);
+		cppcut_assert_equal(0, f.cl.retry_refused_promotion());		// the periodic retry: same gate, now free
+		cut_assert_false(f.cl.is_promotion_refused());
+
+		// free locks: the bounded call evaluates (not skipped) and is a no-op with nothing pending
+		skipped = true;
+		cppcut_assert_equal(0, f.cl.retry_refused_promotion_bounded(100, &skipped));
+		cut_assert_false(skipped);
 	}
 
 	void test_promotion_refused_by_the_gate_completes_when_the_committed_intent_is_promotable()

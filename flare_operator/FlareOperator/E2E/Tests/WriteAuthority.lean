@@ -17,6 +17,9 @@
                            pod is killed) with the authority ON
     write-authority-operator-absent : the operator is scaled to 0 while writes
                            continue: every write keeps being acknowledged
+    write-authority-two-failovers : the master pod is killed twice in a row (the second as soon as
+                           the first new master holds its grant): zero interval in which two
+                           pods acknowledge locally, and the second failover completes
     write-authority-solo   : a 1-copy partition (no successor) keeps serving, also
                            with the operator absent
 -/
@@ -247,6 +250,93 @@ def operatorAbsentSuite : TestSuite :=
     tests := [
       { name := "(R4) the operator is scaled to 0 while writes continue: for 60 s (10 x the grant ttl) every write to the master is acknowledged, and the grant is still valid at the end — the master's authority comes from its successor's promise, not from the operator"
         run := absentRun { cfg, suite := "write-authority-operator-absent", test := "operator-absent" } "operator absent" }
+    ] }
+
+/-! ## two failovers in a row -/
+
+/-- Two LOCAL acknowledgements of different pods whose processing intervals overlap. Only acks the
+    nearest earlier sample attributes to the pod being the master (`local`) are compared: a proxied
+    ack says nothing about which master processed it (a hole, not a stricter check). -/
+def dualAcks (samples : List (Nat × Option String × List (String × String))) (ws : List WriteRec) :
+    List (WriteRec × WriteRec) :=
+  let loc := (ws.filter fun w => classify w.reply == .ack && pathOf samples w == "local").map fun w =>
+    (w, ((samples.filter fun (t, _, _) => t ≤ w.t).getLast?.bind fun (_, _, ips) => ips.lookup w.ip).getD "?")
+  let pairs := loc.flatMap fun (a, pa) => loc.filterMap fun (b, pb) =>
+    if pa != pb && a.span.2 ≥ b.span.1 && b.span.2 ≥ a.span.1 && a.t ≤ b.t then some (a, b) else none
+  pairs
+
+private def killPod (c : Ctx) (pod : String) : IO Unit := do
+  c.event s!"killing {pod} (force)"
+  discard <| kubectl ["delete", "pod", pod, "-n", c.cfg.«namespace», "--force", "--grace-period=0"]
+
+/-- A writer on every pod that has an address now. -/
+private def writersOnPods (c : Ctx) (phase : String) : IO (List String) := do
+  let mut names : List String := []
+  for p in (← c.pods).getD [] do
+    if !p.ip.isEmpty then
+      let n := s!"{phase}-{p.name}"
+      if ← c.startWriter n p.ip "tf" then names := names ++ [n]
+  return names
+
+private def twoFailoversRun (c : Ctx) : IO TestResult := do
+  if !(← waitAuthority c.cfg 240) then return .fail (notSetUp "no master holds a write grant")
+  let some m1 ← grantedPod c.cfg | return .fail (notSetUp "the granted pod vanished")
+  let obs ← startObserver c.sample 1000
+  let mut names ← writersOnPods c "p1"
+  IO.sleep 15000
+  -- first failover
+  killPod c m1
+  let ok1 ← waitForCondition "a pod other than the killed master holds the grant (failover 1)" 300 do
+    return (← grantedPod c.cfg).any (· != m1)
+  let some m2 ← grantedPod c.cfg | return .fail (notSetUp "failover 1: no grant holder")
+  c.event s!"failover 1 done: {m1} -> {m2} (completed {ok1})"
+  if !ok1 || m2 == m1 then
+    discard <| obs.finish
+    for n in names do discard <| c.stopWriter n
+    return .fail "failover 1 did not complete (no other pod holds a grant within 300 s)"
+  names := names ++ (← writersOnPods c "p2")
+  IO.sleep 8000
+  -- second failover, in a row (the previous master's copy is still being rebuilt)
+  killPod c m2
+  let ok2 ← waitForCondition "a pod other than the second killed master holds the grant (failover 2)" 300 do
+    return (← grantedPod c.cfg).any (· != m2)
+  let m3 := (← grantedPod c.cfg).getD "none"
+  c.event s!"failover 2: {m2} -> {m3} (completed {ok2})"
+  names := names ++ (← writersOnPods c "p3")
+  IO.sleep 20000
+  let samples ← match ← obs.finish with
+    | .ok l => pure l
+    | .error e => do
+      for n in names do discard <| c.stopWriter n
+      return .fail (unobservable e)
+  let mut ws : List WriteRec := []
+  let mut complete := true
+  for n in names do
+    match ← c.stopWriter n with
+    | some wl => ws := ws ++ wl.ws; complete := complete && wl.complete
+    | none => complete := false
+  c.art "report.txt" s!"masters {m1} -> {m2} -> {m3}; writes {ws.length}; acks {(ws.filter fun w => classify w.reply == .ack).length}"
+  if !complete then return .fail (unobservable "a writer log was not confirmed complete")
+  let dual := dualAcks samples ws
+  if let some (a, b) := dual.head? then
+    return .fail s!"PRODUCT GAP (dual acknowledgement over two failovers, authority ON): local acks of two pods overlap ({a.ip} {a.span} / {b.ip} {b.span}); {dual.length} overlapping pair(s)"
+  if !ok2 then return .fail s!"the second failover did not complete: no pod other than {m2} holds a grant within 300 s (a prepare is stuck)"
+  let after := (ws.filter fun w => classify w.reply == .ack && pathOf samples w == "local" && w.ip != "").filter fun w =>
+    ((samples.filter fun (t, _, _) => t ≤ w.t).getLast?.bind fun (_, _, ips) => ips.lookup w.ip) == some m3
+  if after.isEmpty then
+    return .fail (unobservable s!"the third master {m3} never acknowledged a local write in the observed window")
+  return .pass
+
+def twoFailoversSuite : TestSuite :=
+  let cfg := { waCfg "wa-two" true false with multiNode := false, partitions := 1, replicas := 3 }
+  { name := "write-authority-two-failovers"
+    setup := waSetup cfg
+    teardown := cleanupCluster cfg
+    onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
+    afterEach := fun i => saveFullLogs cfg.«namespace» s!"after-test-{i}"
+    tests := [
+      { name := "(two failovers in a row, authority ON) the master pod is killed, and the new master is killed as soon as it holds its grant: no interval in which two pods acknowledge locally, and the second failover completes (a pod other than the killed one holds a valid grant; the new master acknowledges)"
+        run := twoFailoversRun { cfg, suite := "write-authority-two-failovers", test := "two-failovers" } }
     ] }
 
 def soloSuite : TestSuite :=

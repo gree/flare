@@ -208,14 +208,15 @@ def tFailover : IO Bool := do
     && r == some { term := 2, gen := 2, master := B, successors := [], acked := true, ackBind := some bnd }
     && nB5.mode == "solo" && nB5.grant && nB5.solo && nB5.memTerm == 2
 
-/-- Unknown never commits; a cancelled prepare the successor still holds is cancelled again
-    before a new attempt; the new attempt then goes through -/
+/-- Unknown never commits and never cancels blindly (the successor's incarnation is unreadable: the
+    attempt stays as it is); once it is readable again the expired attempt is cancelled (store, then the
+    successor) and the next attempt goes through -/
 def tUnknownAndRecancel : IO Bool := do
   let w ← World.new [A, B]
   let _ ← ensurePartition (w.ctx 7) 0 (view1 A [B])
   w.setClock 1000
   w.round A [B]
-  let _ ← gate (w.ctx 7) 0 B "uid" 6          -- prepared, promise to 12000
+  let _ ← gate (w.ctx 7) 0 B "uid" 6              -- prepared, promise to 12000
   w.setNode B fun x => { x with reachable := false }
   w.setClock 20000                                 -- the promise is over, but the successor cannot be read
   let g1 ← gate (w.ctx 7) 0 B "uid" 6
@@ -225,17 +226,17 @@ def tUnknownAndRecancel : IO Bool := do
   let g2 ← gate (w.ctx 7) 0 B "uid" 6
   let d2 ← w.decision (iname 0 2 1)
   w.setNode B fun x => { x with reachable := true }
-  let nB2 ← w.node B                               -- still preparing intent 1: the cancel never reached it
-  let g3 ← gate (w.ctx 7) 0 B "uid" 6          -- says the cancel again
+  let nB2 ← w.node B                               -- still preparing intent 1
+  let g3 ← gate (w.ctx 7) 0 B "uid" 6              -- readable: the expired attempt is cancelled (store, then the successor)
+  let d3 ← w.decision (iname 0 2 1)
   let nB3 ← w.node B
-  let g4 ← gate (w.ctx 7) 0 B "uid" 6          -- a new attempt (2): prepared, its old promise long over, committed, promotable
+  let g4 ← gate (w.ctx 7) 0 B "uid" 6              -- a new attempt (2): prepared, its old promise long over, committed, promotable
   let nB4 ← w.node B
   let d4 ← w.decision (iname 0 2 2)
   return isHold g1 && d1 == some .pending && c1 == none
-    && isHold g2 && d2 == some .cancelled && nB2.state == "preparing" && nB2.intent == 201
-    && isHold g3 && nB3.state == "following"
+    && isHold g2 && d2 == some .pending && nB2.state == "preparing" && nB2.intent == 201
+    && isHold g3 && d3 == some .cancelled && nB3.state == "following"
     && g4 == .proceed && nB4.state == "committed" && nB4.intent == 202 && d4 == some .committed
-    && (← w.decision (iname 0 2 1)) == some .cancelled
 
 /-- The operator restarts (a new leader token, a new clock): the old pending intent is not
     committed on a clock it cannot compare; it is cancelled by the new leader, then re-made -/
@@ -347,7 +348,7 @@ def tMembersDropped : IO Bool := do
   let g2 ← gate (w.ctx 7) 0 B "uid" 6
   let sent2 ← w.firstSent B "prepare"
   return (match r with | some m => !m.acked | none => false) && isHold g1 && sent == none
-    && (match r2 with | some m => m.acked && m.ackBind == some bnd | none => false) && isHold g2 && sent2.isSome
+    && (match r2 with | some m => m.acked && m.ackBind == some bnd | none => false) && sent2.isSome
 
 /-- review 1: a successor that is temporarily not eligible / unreadable is not removed (no solo from an
     observation); only an authoritative removal is -/

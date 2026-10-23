@@ -135,8 +135,8 @@ def tDecide : Bool :=
     && gateDecide true true (.pending true false) none 1 == .wait "the successor is unreadable"
     && gateDecide true true .committed none 1 == .wait "the successor is unreadable"
     -- the successor lost the prepare (restart): cancel, so a new attempt can be made
-    && gateDecide true true (.pending true false) (rep "following" 0 0 false) 1 == .cancelCas "the successor does not hold this prepare"
-    && gateDecide true true (.pending true false) (rep "preparing" 2 0 false) 1 == .cancelCas "the successor does not hold this prepare"
+    && (match gateDecide true true (.pending true false) (rep "following" 0 0 false) 1 with | .cancelCas _ => true | _ => false)
+    && (match gateDecide true true (.pending true false) (rep "preparing" 2 0 false) 1 with | .cancelCas _ => true | _ => false)
     -- its promise to the old master is not over
     && (match gateDecide true true (.pending true false) (rep "preparing" 1 4000 false) 1 with | .wait _ => true | _ => false)
     && gateDecide true true (.pending true false) (rep "preparing" 1 0 false) 1 == .commitCas

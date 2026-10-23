@@ -2104,22 +2104,54 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
     -- cannot finish holds the promotion (nothing from this pass is committed).
     if let some cfg ← writeAuthorityRef.get then
       for k in promoted do
-        if ((cur.lookupNode k).map (·.role)) == some FlareRole.Slave then
+        let curRole := (cur.lookupNode k).map (·.role)
+        if curRole != some FlareRole.Master then
           gateTouchedRef.modify (· ++ [k])
           let part := ((ucs.lookupNode k).map (·.partition)).getD (-1)
+          let ctx := WriteAuthorityDriver.Ctx.live cfg (← historyCrRef.get) ns (← leaderEpochRef.get) "operator"
           match ← podIdentityNow (extractPodName k) ns with
           | none =>
             IO.eprintln s!"[flare-operator] write authority: PROMOTION HELD for {k}: its pod identity is unreadable"
             promotionAbortedRef.set true
             return
-          | some (uid, rc) =>
-            let ctx := WriteAuthorityDriver.Ctx.live cfg (← historyCrRef.get) ns (← leaderEpochRef.get) "operator"
-            match ← WriteAuthorityDriver.gate ctx part.toNat k uid (toString (rc.getD 0)) 4 with
-            | .proceed => IO.eprintln s!"[flare-operator] write authority: promotion of {k} (P{part}) passed the intent gate"
-            | .hold why =>
-              IO.eprintln s!"[flare-operator] write authority: PROMOTION HELD for {k} (P{part}): {why}"
-              promotionAbortedRef.set true
-              return
+          | some (uid, _) =>
+            -- Proxy (or new) -> master: exempt ONLY a fresh first build the authoritative history proves:
+            -- no copy of the partition has been held (nobody is its master / slave / ex-master in the map),
+            -- the history store was read and neither tracks nor records the partition, and no membership
+            -- record of the partition ever existed. An existing copy returning from Proxy goes through
+            -- the same gate as a slave (prepare, COMMITTED, quiet time, copy identity).
+            let wasProxyOrNew := curRole != some FlareRole.Slave
+            let noMemberRecord ← do
+              let rc ← WriteAuthorityDriver.recClient ctx part.toNat
+              match ← WriteAuthorityDriver.readRec rc with
+              | .ok none => pure true
+              | _ => pure false
+            let historyProves ← do
+              match ← historyStoreRef.get with
+              | none => pure false
+              | some st => pure (part ≥ 0 && !st.tracked part.toNat && (st.recorded part.toNat).isNone)
+            let firstBuild := wasProxyOrNew && noMemberRecord && historyProves
+              && PromotionEvidence.firstMasterOfNewPartition wasProxyOrNew members part
+            if firstBuild then
+              match ← WriteAuthorityDriver.bindingNow ctx k part.toNat with
+              | none =>
+                IO.eprintln s!"[flare-operator] write authority: PROMOTION HELD for {k} (P{part}): the first build is proven but the node's identity is unreadable"
+                promotionAbortedRef.set true
+                return
+              | some (_, b) =>
+                match (← WriteAuthorityDriver.ask ctx k (WriteAuthority.cmdFirst part.toNat b.boot b.copy)).bind WriteAuthority.Status.parse with
+                | some _ => IO.eprintln s!"[flare-operator] write authority: {k} is the first master of P{part} (fresh first build proven by the history); allowed once for boot {b.boot}"
+                | none =>
+                  IO.eprintln s!"[flare-operator] write authority: PROMOTION HELD for {k} (P{part}): the node did not accept the first-build proof"
+                  promotionAbortedRef.set true
+                  return
+            else
+              match ← WriteAuthorityDriver.gate ctx part.toNat k uid 4 with
+              | .proceed => IO.eprintln s!"[flare-operator] write authority: promotion of {k} (P{part}) passed the intent gate"
+              | .hold why =>
+                IO.eprintln s!"[flare-operator] write authority: PROMOTION HELD for {k} (P{part}): {why}"
+                promotionAbortedRef.set true
+                return
   -- Copy retention §10: one rebuild per partition and one in the cluster.
   -- A NEW Proxy -> Slave(Prepare) assignment beyond that is held (the node
   -- stays a Proxy this pass). Rejoins over TCP and master reconstructions
@@ -2439,16 +2471,20 @@ private def authorityPass (crName ns leaseName identity : String) (st : FlareClu
     if parts.length != (← desiredPartitionsRef.get) then
       IO.eprintln s!"[flare-operator] write authority: the map has {parts.length} partitions, the CR {← desiredPartitionsRef.get}: partition-count change is not supported with write authority on; nothing is pushed this pass"
       return
+    -- an unreadable pod list decides nothing: nobody is added or removed on it (never solo from Unknown)
     let pods ← match ← Bridge.listFlaredPodsE crName ns with
       | .ok ps => pure ps
-      | .error _ => pure []
+      | .error e =>
+        IO.eprintln s!"[flare-operator] write authority: the pod list could not be read ({e}); the membership is left as it is this pass"
+        return
     let usable := fun (k : String) => pods.any fun pd => pd.toNodeKey == k && pd.ready && !pd.terminating
     let ctx := WriteAuthorityDriver.Ctx.live cfg crName ns (← leaderEpochRef.get) "operator"
     for p in parts do
       let master := (st.nodeMap.find? fun kv => kv.2.role == FlareRole.Master && kv.2.partition == p).map (·.1)
       let succ := (st.nodeMap.filter fun kv =>
         kv.2.role == FlareRole.Slave && kv.2.partition == p && kv.2.state == FlareState.Active && usable kv.1).map (·.1)
-      discard <| WriteAuthorityDriver.ensurePartition ctx p.toNat { master, successors := succ } (← gateTouchedRef.get)
+      discard <| WriteAuthorityDriver.ensurePartition ctx p.toNat
+        { master, successors := succ, pods := some (pods.map Bridge.PodInfo.toNodeKey) } (← gateTouchedRef.get)
     gateTouchedRef.set []
 
 /-- Prepare-stuck watchdog threshold in reconcile cycles (5s each): 720 ≈ 1h.

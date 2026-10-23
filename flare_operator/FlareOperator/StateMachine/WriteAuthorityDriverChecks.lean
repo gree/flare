@@ -450,14 +450,14 @@ def tRecancelOldScope : IO Bool := do
   w.bumpGen
   w.setNode B fun x => { x with reachable := true }
   let _ ← ensurePartition (w.ctx 7) 0 (view1 A [B]) []
-  let nMid ← w.node B                                      -- still preparing under gen 1
-  let g1 ← gate (w.ctx 7) 0 B "uid" 6                      -- the re-cancel (original scope)
-  let n2 ← w.node B
+  let nMid ← w.node B                                      -- the pass re-sent the cancel (index: unconfirmed)
   let cl ← lastSent w B "cancel"
+  let g1 ← gate (w.ctx 7) 0 B "uid" 6                      -- a fresh attempt under gen 2
+  let n2 ← w.node B
   w.round A [B]
   let _ ← gate (w.ctx 7) 0 B "uid" 6
   let n3 ← w.node B
-  return d1 == some .cancelled && nMid.state == "preparing" && isHold g1 && n2.state == "following"
+  return d1 == some .cancelled && nMid.state == "following" && isHold g1 && n2.state == "preparing" && n2.intent == 202
     && cl == some (cmdCancel 0 { id := 201, termNext := 2, gen := 1, boot := "b1", copy := "c1" })
     && n3.state == "preparing" && n3.intent == 202
 
@@ -578,6 +578,86 @@ def tTwoFailovers : IO Bool := do
     && (match r2 with | some m => m.term == 3 && m.master == C && m.successors.isEmpty | none => false)
     && nC2.mode == "solo" && nC2.grant && nC2.memTerm == 3
 
+/-- the index entries now (term, number) -/
+def indexNow (w : World) : IO (List (Nat × Nat)) := do
+  match ← readIndex (← w.clientFor (indexName "c" 0)) with
+  | .ok (some (l, _)) => pure l
+  | _ => pure [(999, 999)]
+
+def moveRecord (w : World) (term : Nat) (master : String) (succs : List String) : IO Unit := do
+  let c ← recClient (w.ctx 7) 0
+  match ← readRec c with
+  | .ok (some (m, rv)) =>
+    discard <| writeRec c (some rv) { m with term, gen := 2, master, successors := succs, acked := false, ackBind := none }
+  | _ => pure ()
+
+/-- review #6: B's pending prepare of term 2 is reclaimed after the record advanced to term 6 (5 terms
+    later, beyond any fixed window) and the operator restarted (a new leader token): its own resource is
+    cancelled, its own scope (201/2/1) goes on the wire, the index entry is dropped afterwards. -/
+def tFarTermReclaim : IO Bool := do
+  let w ← World.new [A, B, C]
+  let _ ← ensurePartition (w.ctx 7) 0 (view1 A [B, C]) [B]
+  w.setClock 1000
+  w.round A [B, C]
+  let _ ← gate (w.ctx 7) 0 B "uid" 6
+  let i1 ← indexNow w
+  let n1 ← w.node B
+  w.setNode A fun x => { x with reachable := false }
+  moveRecord w 6 C [A, B]
+  let r ← ensurePartition (w.ctx 8) 0 (view1 C [A, B]) []   -- operator restarted: token 8
+  let n2 ← w.node B
+  let cl ← lastSent w B "cancel"
+  let i2 ← indexNow w
+  return i1 == [(2, 1)] && n1.state == "preparing" && n1.pTerm == 2 && r.isSome
+    && (← w.decision (iname 0 2 1)) == some .cancelled && n2.state == "following"
+    && cl == some (cmdCancel 0 { id := 201, termNext := 2, gen := 1, boot := "b1", copy := "c1" })
+    && i2 == []
+
+/-- review #6: the cancel is not confirmed (the node is unreachable) — the entry stays in the index; once
+    the node answers it still prepares that scope, the cancel is sent again, and only a later pass that
+    reads the node released drops the entry. -/
+def tIndexKeptUntilConfirmed : IO Bool := do
+  let w ← World.new [A, B, C]
+  let _ ← ensurePartition (w.ctx 7) 0 (view1 A [B, C]) [B]
+  w.setClock 1000
+  w.round A [B, C]
+  let _ ← gate (w.ctx 7) 0 B "uid" 6
+  w.setNode A fun x => { x with reachable := false }
+  moveRecord w 7 C [A, B]
+  w.setNode B fun x => { x with reachable := false }
+  let _ ← ensurePartition (w.ctx 8) 0 (view1 C [A, B]) []
+  let i1 ← indexNow w
+  let d1 ← w.decision (iname 0 2 1)
+  w.setNode B fun x => { x with reachable := true }
+  let _ ← ensurePartition (w.ctx 9) 0 (view1 C [A, B]) []   -- another restart; the cancel goes out again
+  let n2 ← w.node B
+  let i2 ← indexNow w
+  let _ ← ensurePartition (w.ctx 9) 0 (view1 C [A, B]) []
+  let i3 ← indexNow w
+  return i1 == [(2, 1)] && d1 == some .cancelled && n2.state == "following" && i2 == [(2, 1)] && i3 == []
+
+/-- review #6: crash between the index add and the intent create — the index names an intent that does not
+    exist; scanning is fine, the next create re-uses the number (no duplicate entry), and the index lists
+    exactly the existing intent. An index that did not exist yet is seeded from the intents of all terms. -/
+def tIndexCrashAndSeed : IO Bool := do
+  let w ← World.new [A, B, C]
+  let _ ← ensurePartition (w.ctx 7) 0 (view1 A [B, C]) [B]
+  w.setClock 1000
+  w.round A [B, C]
+  let a1 ← addIndex (w.ctx 7) 0 2 2 1                        -- crash before the intent is created
+  let s ← scanAll (w.ctx 7) 0 2
+  let g ← gate (w.ctx 7) 0 B "uid" 6
+  let i1 ← indexNow w
+  -- seed: a legacy intent of term 3 exists without any index
+  let w2 ← World.new [A, B, C]
+  let _ ← ensurePartition (w2.ctx 7) 0 (view1 A [B, C]) [B]
+  let cl ← w2.clientFor (intentName "c" 0 3 1)
+  discard <| createIntent cl (Intent.prepare { scope := { cluster := "c", partition := 0, generation := 1 }, id := 1, successor := B, binding := { podUid := "uid", bootId := "b1", copyId := "c1" } } 7 { clock := { node := "operator", boot := "7" }, t := 5000 })
+  let s2 ← scanAll (w2.ctx 7) 0 9
+  return a1 && (match s with | .ok l => l.isEmpty | .error _ => false) && isHold g && i1 == [(2, 1)]
+    && (← w.decision (iname 0 2 1)) == some .pending
+    && (match s2 with | .ok l => l.length == 1 && (l.head?.map (·.termNext)) == some 3 | .error _ => false)
+
 /-- review (ackedFor): the COMPLETE incarnation (pod UID, boot id, copy id) must be the one that
     acknowledged; a same-name pod recreated with only the UID changed is not; an unknown part is not;
     with the master unreadable altogether the durable ACK stands -/
@@ -614,6 +694,9 @@ def checks : IO (List (String × Bool)) := do
     ("driver: a generation change with the candidate still wanted — the stale pending attempt is cancelled on its own resource / scope, a fresh one is prepared; a stale committed one is fail-closed", ← tGenChangeWanted),
     ("driver: a previous term's pending prepare is reclaimed in its own scope after another node is promoted; the node promises and accepts a new prepare", ← tCrossTermPending),
     ("driver: two failovers in a row — each waits for the successor's promise end; the last master is solo", ← tTwoFailovers),
+    ("driver: a pending intent is reclaimed 5 terms later after an operator restart (original resource and scope); the index entry is dropped", ← tFarTermReclaim),
+    ("driver: the index entry stays until the cancel is confirmed on the node; the cancel is sent again", ← tIndexKeptUntilConfirmed),
+    ("driver: index consistent after a crash between add and create; seeded from all terms when absent", ← tIndexCrashAndSeed),
     ("driver: the master's ACK needs the complete incarnation — a pod recreated with only the UID changed (or an unknown part) is not acknowledged", ← tAckedUid),
     ("driver: a committed intent is terminal — the leader's cancel is refused, the successor stays committed", ← tTerminal) ]
 

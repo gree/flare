@@ -116,26 +116,88 @@ partial def scanFrom (ctx : Ctx) (p termNext n : Nat) (acc : List Attempt) : IO 
 def scanAttempts (ctx : Ctx) (p termNext : Nat) : IO (Except String (List Attempt)) :=
   scanFrom ctx p termNext 1 []
 
-/-- How many earlier terms are looked at for a pending intent that was never reclaimed (bounded: one
-    read per term and pass). -/
-def reclaimTerms : Nat := 4
+/-! ## The persisted intent index
 
-/-- The intents of the terms before `termNext` (oldest first), within `reclaimTerms`. -/
-def scanEarlier (ctx : Ctx) (p termNext : Nat) : IO (Except String (List Attempt)) := do
-  let mut acc : List Attempt := []
-  for i in [0:reclaimTerms] do
-    let t := termNext - (reclaimTerms - i)
-    if t ≥ 1 && t < termNext then
-      match ← scanFrom ctx p t 1 [] with
-      | .ok l => acc := acc ++ l
-      | .error e => return .error e
-  pure (.ok acc)
+One ConfigMap per partition lists the (term, number) of every intent that may still be non-terminal
+(or whose terminal state is not yet confirmed on the wire). Invariants, in the order they are kept:
+  * an entry is added (CAS) BEFORE its intent is created, so the index is a superset of the intents
+    that exist; an entry whose intent was never created (crash in between) is harmless and is re-used
+    by the next create of that number;
+  * an entry is removed (CAS) only after the intent is terminal in the store AND the wire cancel was
+    confirmed (the node no longer prepares that scope) — or the commit is applied to the record;
+  * the index is created once, seeded from ALL terms 1..termNext (so intents of before the index
+    existed are not missed). Nothing depends on how far the term has advanced or on operator restarts. -/
 
-/-- The intents of the current term and (before them) of the earlier terms that may still be pending. -/
-def scanAll (ctx : Ctx) (p termNext : Nat) : IO (Except String (List Attempt)) := do
-  match ← scanEarlier ctx p termNext with
+def indexName (cr : String) (p : Nat) : String := s!"{cr}-authority-intent-index-p{p}"
+
+def encodeIndex (l : List (Nat × Nat)) : String :=
+  "intent-index-v1 " ++ ",".intercalate (l.map fun (t, n) => s!"{t}:{n}")
+
+def decodeIndex (s : String) : Option (List (Nat × Nat)) :=
+  match (s.trim).splitOn " " with
+  | ["intent-index-v1"] => some []
+  | ["intent-index-v1", body] =>
+    (body.splitOn ",").mapM fun e =>
+      match e.splitOn ":" with
+      | [t, n] => do pure (← t.toNat?, ← n.toNat?)
+      | _ => none
+  | _ => none
+
+def readIndex (c : Client) : IO (Except String (Option (List (Nat × Nat) × String))) := do
+  match ← c.get with
   | .error e => pure (.error e)
-  | .ok old =>
+  | .notFound => pure (.ok none)
+  | .found v rv =>
+    match decodeIndex v with
+    | some l => pure (.ok (some (l, rv)))
+    | none => pure (.error "the intent index is malformed (never read as absent)")
+
+/-- Create the index when it does not exist, seeded with every intent of terms 1..`termNext` that is
+    not cancelled. `false`: not confirmed (the next pass again). -/
+def ensureIndex (ctx : Ctx) (p termNext : Nat) : IO Bool := do
+  let c ← ctx.clientFor (indexName ctx.cr p)
+  match ← readIndex c with
+  | .error _ => pure false
+  | .ok (some _) => pure true
+  | .ok none =>
+    let mut seed : List (Nat × Nat) := []
+    for t in [1:termNext + 1] do
+      match ← scanFrom ctx p t 1 [] with
+      | .ok l => seed := seed ++ (l.filter (·.intent.decision != .cancelled)).map fun a => (a.termNext, a.n)
+      | .error _ => return false
+    match ← c.create (encodeIndex seed) with
+    | .ok _ => pure true
+    | _ => pure false
+
+/-- The entry is in the index (CAS), before the intent is created. -/
+def addIndex (ctx : Ctx) (p termNext t n : Nat) : IO Bool := do
+  if !(← ensureIndex ctx p termNext) then return false
+  let c ← ctx.clientFor (indexName ctx.cr p)
+  match ← readIndex c with
+  | .ok (some (l, rv)) =>
+    if l.contains (t, n) then pure true
+    else
+      match ← c.replace rv (encodeIndex (l ++ [(t, n)])) with
+      | .ok _ => pure true
+      | _ => pure false
+  | _ => pure false
+
+/-- Every intent that can be non-terminal: the index entries plus the current term. Complete for any
+    term distance. -/
+def scanAll (ctx : Ctx) (p termNext : Nat) : IO (Except String (List Attempt)) := do
+  if !(← ensureIndex ctx p termNext) then return .error "the intent index could not be read or created"
+  let c ← ctx.clientFor (indexName ctx.cr p)
+  match ← readIndex c with
+  | .error e => pure (.error e)
+  | .ok none => pure (.error "the intent index is missing")
+  | .ok (some (l, _)) =>
+    let mut old : List Attempt := []
+    for (t, n) in l do
+      if t < termNext then
+        match ← readIntent (← ctx.clientFor (intentName ctx.cr p t n)) with
+        | .settled i => old := old ++ [{ termNext := t, n, intent := i }]
+        | .absent => pure ()
+        | _ => return .error "a promotion intent record is unreadable or broken"
     match ← scanAttempts ctx p termNext with
     | .error e => pure (.error e)
     | .ok cur => pure (.ok (old ++ cur))
@@ -271,6 +333,7 @@ def doCreate (ctx : Ctx) (p : Nat) (m : Members) (as : List Attempt) (key : Stri
   let n := ((currentTerm (m.term + 1) as).map (·.n)).foldl max 0 + 1
   let now ← nowAt ctx
   let deadline : At := { now with t := now.t + ctx.cfg.prepareTimeoutMs }
+  if !(← addIndex ctx p (m.term + 1) (m.term + 1) n) then return false
   let c ← ctx.clientFor (intentName ctx.cr p (m.term + 1) n)
   match ← createIntent c (Intent.prepare (refOf ctx p m n key b) ctx.token deadline) with
   | .done _ => pure true
@@ -439,6 +502,29 @@ def abandonUnwanted (ctx : Ctx) (p : Nat) (m : Members) (as : List Attempt) (wan
     else out := out ++ [a]
   pure out
 
+/-- Drop from the index (CAS) the intents that need no more watching: cancelled in the store AND the
+    node no longer prepares that scope (read now), or committed and applied to the record. A cancelled
+    intent whose node still prepares its scope gets the cancel again (original scope) and stays. -/
+def pruneIndex (ctx : Ctx) (p : Nat) (m : Members) (as : List Attempt) : IO Unit := do
+  let mut gone : List (Nat × Nat) := []
+  for a in as do
+    match a.intent.decision with
+    | .committed => if a.termNext ≤ m.term then gone := gone ++ [(a.termNext, a.n)]
+    | .cancelled =>
+      match ← statusOf ctx a.intent.successor p with
+      | none => pure ()
+      | some s =>
+        if s.state == "preparing" && (replicaOf s (wireOfAttempt a)).scopeOk then
+          discard <| ask ctx a.intent.successor (cmdCancel p (wireOfAttempt a))
+        else gone := gone ++ [(a.termNext, a.n)]
+    | .pending => pure ()
+  if !gone.isEmpty then
+    let c ← ctx.clientFor (indexName ctx.cr p)
+    match ← readIndex c with
+    | .ok (some (l, rv)) =>
+      discard <| c.replace rv (encodeIndex (l.filter fun e => !gone.contains e))
+    | _ => pure ()
+
 def ensurePartition (ctx : Ctx) (p : Nat) (v : View) (wanted : List String := []) : IO (Option Members) := do
   let c ← recClient ctx p
   match ← readRec c with
@@ -459,6 +545,7 @@ def ensurePartition (ctx : Ctx) (p : Nat) (v : View) (wanted : List String := []
       let as ← match old with
         | some o => abandonUnwanted ctx p o as0 wanted
         | none => pure as0
+      if let some o := old then pruneIndex ctx p o as
       let master := v.master.getD ""
       if (old.map (·.master)) == v.master then
         for a in currentTerm termNext as do

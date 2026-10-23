@@ -254,16 +254,49 @@ def operatorAbsentSuite : TestSuite :=
 
 /-! ## two failovers in a row -/
 
-/-- Two LOCAL acknowledgements of different pods whose processing intervals overlap. Only acks the
-    nearest earlier sample attributes to the pod being the master (`local`) are compared: a proxied
-    ack says nothing about which master processed it (a hole, not a stricter check). -/
-def dualAcks (samples : List (Nat × Option String × List (String × String))) (ws : List WriteRec) :
-    List (WriteRec × WriteRec) :=
-  let loc := (ws.filter fun w => classify w.reply == .ack && pathOf samples w == "local").map fun w =>
-    (w, ((samples.filter fun (t, _, _) => t ≤ w.t).getLast?.bind fun (_, _, ips) => ips.lookup w.ip).getD "?")
-  let pairs := loc.flatMap fun (a, pa) => loc.filterMap fun (b, pb) =>
+/-- Seconds before / after an ack's span in which the map master must not have changed for the ack to be
+    attributed (the observer samples every second). -/
+def attributionGuard : Nat := 2
+
+/-- The node that APPLIED an acknowledged write: the map master of the observer's samples, when it is
+    the same pod in the nearest sample before the write's span and in every sample from
+    `span.1 - guard` to `span.2 + guard`. A local ack of the target and an ack forwarded by it are
+    both applied by that master. While the master changes, is unknown, or no sample precedes the
+    write (a failover window), the applier cannot be told: `none`. (The operator's map is the only
+    reading of "who is master" the observer has; a node that wrongly thinks it is master is not seen.) -/
+def ackApplier (samples : List (Nat × Option String × List (String × String))) (w : WriteRec) :
+    Option String :=
+  match (samples.filter fun (t, _, _) => t ≤ w.span.1).getLast? with
+  | none => none
+  | some (_, none, _) => none
+  | some (_, some m, _) =>
+    let near := samples.filter fun (t, _, _) => t + attributionGuard ≥ w.span.1 && t ≤ w.span.2 + attributionGuard
+    if near.all fun (_, mm, _) => mm == some m then some m else none
+
+/-- Two acknowledgements whose processing intervals overlap and whose appliers differ (`dual`); and
+    every acknowledged write whose applier cannot be attributed (`unattributed`). -/
+def ackOverlaps (samples : List (Nat × Option String × List (String × String))) (ws : List WriteRec) :
+    List (WriteRec × WriteRec) × List WriteRec :=
+  let acks := ws.filter fun w => classify w.reply == .ack
+  let att := acks.filterMap fun w => (ackApplier samples w).map (w, ·)
+  let unatt := acks.filter fun w => (ackApplier samples w).isNone
+  let pairs := att.flatMap fun (a, pa) => att.filterMap fun (b, pb) =>
     if pa != pb && a.span.2 ≥ b.span.1 && b.span.2 ≥ a.span.1 && a.t ≤ b.t then some (a, b) else none
-  pairs
+  (pairs, unatt)
+
+/-- The verdict on the acknowledgements of the two-failovers run: an overlap of different appliers is a
+    PRODUCT GAP; any ack that cannot be attributed to the node that applied it makes the run NOT
+    VERIFIED (never green). `none`: every ack attributed and no overlap. -/
+def ackVerdict (samples : List (Nat × Option String × List (String × String))) (ws : List WriteRec) :
+    Option String :=
+  let (dual, unatt) := ackOverlaps samples ws
+  match dual.head? with
+  | some (a, b) =>
+    some s!"PRODUCT GAP (dual acknowledgement over two failovers, authority ON): acks of two nodes overlap ({a.ip} {a.span} / {b.ip} {b.span}); {dual.length} overlapping pair(s)"
+  | none =>
+    match unatt.head? with
+    | some w => some s!"NOT VERIFIED: {unatt.length} acknowledgement(s) cannot be attributed to the node that applied them (the map master changed or was unknown around them, e.g. {w.ip} {w.span}): an overlap cannot be ruled out"
+    | none => none
 
 private def killPod (c : Ctx) (pod : String) : IO Unit := do
   c.event s!"killing {pod} (force)"
@@ -317,14 +350,15 @@ private def twoFailoversRun (c : Ctx) : IO TestResult := do
     | none => complete := false
   c.art "report.txt" s!"masters {m1} -> {m2} -> {m3}; writes {ws.length}; acks {(ws.filter fun w => classify w.reply == .ack).length}"
   if !complete then return .fail (unobservable "a writer log was not confirmed complete")
-  let dual := dualAcks samples ws
-  if let some (a, b) := dual.head? then
-    return .fail s!"PRODUCT GAP (dual acknowledgement over two failovers, authority ON): local acks of two pods overlap ({a.ip} {a.span} / {b.ip} {b.span}); {dual.length} overlapping pair(s)"
+  let verdict := ackVerdict samples ws
+  if let some v := verdict then
+    if v.startsWith "PRODUCT GAP" then return .fail v
   if !ok2 then return .fail s!"the second failover did not complete: no pod other than {m2} holds a grant within 300 s (a prepare is stuck)"
   let after := (ws.filter fun w => classify w.reply == .ack && pathOf samples w == "local" && w.ip != "").filter fun w =>
     ((samples.filter fun (t, _, _) => t ≤ w.t).getLast?.bind fun (_, _, ips) => ips.lookup w.ip) == some m3
   if after.isEmpty then
     return .fail (unobservable s!"the third master {m3} never acknowledged a local write in the observed window")
+  if let some v := verdict then return .fail v
   return .pass
 
 def twoFailoversSuite : TestSuite :=

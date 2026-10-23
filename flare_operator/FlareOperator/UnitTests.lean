@@ -36,6 +36,7 @@ import FlareOperator.E2E.Helpers
 import FlareOperator.E2E.PromotionTimeline
 import FlareOperator.E2E.Tests.NodeOps
 import FlareOperator.E2E.Tests.RestoreIsolated
+import FlareOperator.E2E.Tests.WriteAuthority
 import FlareOperator.StateMachine.WriteLeaseModel
 import FlareOperator.StateMachine.PromotionIntentChecks
 import FlareOperator.StateMachine.PromotionIntentStoreChecks
@@ -1438,7 +1439,7 @@ def admChecks : List (String × Bool) :=
   ]
 
 -- C / C' verdicts (E2E/Tests/NodeOps, review 2026-10-19 C' and its follow-up)
-open FlareOperator.E2E.NodeOps FlareOperator.E2E.Tests.NodeOps in
+open FlareOperator.E2E.NodeOps FlareOperator.E2E.Tests.NodeOps FlareOperator.E2E.Tests.WriteAuthority in
 def partChecks : List (String × Bool) :=
   let m : OwnV := { role := "master", version := 5, boot := "bA" }
   let sl : OwnV := { role := "slave", version := 5, boot := "bB" }
@@ -1565,7 +1566,33 @@ def partChecks : List (String × Bool) :=
         && startsWith (partVerdictWa { c with oldAcks := [(ack 1 150 151 "o", "local")], peerAcks := [(ack 2 250 251 "p", "forwarded")] }) "NOT VERIFIED"
         && startsWith (partVerdictWa { c with oldAcks := [], peerAcks := [(ack 2 250 251 "p", "local")] }) "NOT VERIFIED"
         && startsWith (partVerdictWa { c with oldAcks := [(ack 1 150 151 "o", "local")], peerAcks := [(ack 2 250 251 "p", "local")], logsComplete := false }) "UNOBSERVABLE"
-        && startsWith (partVerdictWa { c with inj := { inj with apiAfter := some true } }) "PRECONDITION NOT MET")
+        && startsWith (partVerdictWa { c with inj := { inj with apiAfter := some true } }) "PRECONDITION NOT MET"),
+    ("C' with the write authority ON: an ack through the replica inside the cut that its own view calls forwarded cannot be attributed to the node that applied it -> NOT VERIFIED (never green); outside the cut it does not matter; an observed overlap is still a PRODUCT GAP",
+      let c : PartObs := { base with samples := withFail }
+      let good := { c with oldAcks := [(ack 1 150 151 "o", "local")], peerAcks := [(ack 2 300 301 "p", "local")] }
+      partVerdictWa good == none
+        && startsWith (partVerdictWa { good with peerAcks := good.peerAcks ++ [(ack 4 310 311 "p", "forwarded")] }) "NOT VERIFIED"
+        && partVerdictWa { good with peerAcks := good.peerAcks ++ [(ack 4 410 411 "p", "forwarded")] } == none
+        && startsWith (partVerdictWa { good with oldAcks := good.oldAcks ++ [(ack 3 304 305 "o", "local")], peerAcks := good.peerAcks ++ [(ack 4 310 311 "p", "forwarded")] }) "PRODUCT GAP"),
+    ("two failovers (authority ON): every ack must be attributable to the node that applied it — an ack in a window where the map master changes (proxied or local) -> NOT VERIFIED, never green; stable master -> pass; acks of two appliers overlapping -> PRODUCT GAP",
+      let ips := [("ip0", "p0"), ("ip1", "p1")]
+      let smp := fun (t : Nat) (m : Option String) => ((t, m, ips) : Nat × Option String × List (String × String))
+      let steady := (List.range 30).map fun i => smp (100 + i) (some "p0")
+      let flip := (List.range 30).map fun i => smp (100 + i) (if i < 15 then some "p0" else some "p1")
+      let gap := (List.range 30).map fun i => smp (100 + i) (if i < 15 then some "p0" else if i < 20 then none else some "p1")
+      let ak := fun (n t0 t : Nat) (ip : String) => ({ n, t0, t, ip, key := s!"k{n}", value := "v", reply := "STORED" } : WriteRec)
+      -- local ack of p0 and an ack proxied through p1 to p0, both while p0 is the stable master
+      ackVerdict steady [ak 1 105 106 "ip0", ak 2 107 108 "ip1"] == none
+        -- the map master changes at 115: acks whose window contains the change are unattributed
+        && startsWith (ackVerdict flip [ak 1 105 106 "ip0", ak 2 114 115 "ip1"]) "NOT VERIFIED"
+        && ackVerdict flip [ak 1 105 106 "ip0", ak 2 120 121 "ip1"] == none
+        -- no master known at the time (the failover window): a proxied ack is unattributed
+        && startsWith (ackVerdict gap [ak 3 117 118 "ip1"]) "NOT VERIFIED"
+        -- no sample before the write at all
+        && startsWith (ackVerdict steady [ak 4 90 91 "ip0"]) "NOT VERIFIED"
+        -- two appliers with overlapping spans (the map master moved between the two spans)
+        && startsWith (ackVerdict (flip ++ []) [ak 5 105 130 "ip0", ak 6 125 129 "ip1"]) "NOT VERIFIED"
+        && (ackOverlaps steady [ak 1 105 106 "ip0", ak 2 107 108 "ip1"]).2.isEmpty)
   ]
 
 -- §11 write-authority DESIGN MODEL (not product code): the review's

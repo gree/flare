@@ -957,6 +957,11 @@ def waLastOld (o : PartObs) : Option Nat :=
   let inCut := fun (w : WriteRec) => w.span.1 ≥ o.tCut && w.span.2 ≤ o.tHeal
   ((o.oldAcks.filter fun (w, _) => inCut w).map (·.1.span.2)).max?
 
+/-- Acknowledgements through the replica inside the cut that its own view calls forwarded: some other
+    node applied them and which one is not recorded (never counted as the new master's, never ignored). -/
+def waForwardedPeer (o : PartObs) : List WriteRec :=
+  ((o.peerAcks.filter fun (w, p) => p == "forwarded" && w.span.1 ≥ o.tCut && w.span.2 ≤ o.tHeal).map (·.1))
+
 def partVerdictWa (o : PartObs) : Option String :=
   let r := partReport o
   let cov := s!" [{r.render}]"
@@ -970,6 +975,8 @@ def partVerdictWa (o : PartObs) : Option String :=
     | some lo, some fn =>
       if lo ≥ fn then
         some (s!"PRODUCT GAP (dual acknowledgement with the write authority ON): the old master's last acknowledgement in the cut ended at {lo}, the new master can have acknowledged from {fn} (cut {o.tCut}..{o.tHeal})" ++ cov)
+      else if !(waForwardedPeer o).isEmpty then
+        some (s!"NOT VERIFIED: {(waForwardedPeer o).length} acknowledgement(s) through the replica inside the cut were forwarded (by its own view it was not master): the node that applied them cannot be attributed, so an overlap cannot be ruled out" ++ cov)
       else if !r.failedOver then
         some ("NOT VERIFIED: the replica was not master by its own view during the cut" ++ cov)
       else none

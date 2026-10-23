@@ -187,6 +187,27 @@ static bool flared_is_slave_of(int partition) {
 	return cl != NULL && cl->get_own_assignment(r, st, p) && r == cluster::role_slave && p == partition;
 }
 
+// C': the identity an operator binds a promotion intent / a membership to: this process (the boot
+// id the reconstruction stats already report) and the storage's persistent copy id
+static void flared_identity(std::string& boot, std::string& copy) {
+	char b[32];
+	snprintf(b, sizeof(b), "%llu", (unsigned long long)(stats_object != NULL ? stats_object->get_reconstruction_boot_id() : 0));
+	boot = b;
+	copy.clear();		// undetermined: the authority engine refuses everything bound to it
+#ifdef HAVE_LIBROCKSDB
+	storage* st = singleton<flared>::instance().get_storage();
+	storage_rocksdb* rdb = dynamic_cast<storage_rocksdb*>(st);
+	if (rdb != NULL) {
+		const string id = rdb->get_copy_id();
+		for (size_t i = 0; i < id.size(); i++) {
+			if (id[i] > ' ' && id[i] < 0x7f) {
+				copy += id[i];
+			}
+		}
+	}
+#endif
+}
+
 int flared::startup(int argc, char **argv) {
 	ini_option_object().set_args(argc, argv);
 	if (ini_option_object().load() < 0) {
@@ -402,7 +423,14 @@ int flared::startup(int argc, char **argv) {
 
 	// C': the master's promise rounds (idle until the operator gives a membership)
 	if (write_promise::enabled()) {
+		string idboot, idcopy;
+		flared_identity(idboot, idcopy);
+		if (idcopy.empty()) {
+			log_err("write-authority-enabled needs a storage with a persistent copy id (storage-type rocksdb): this node has none, refusing to start with the write authority on", 0);
+			return -1;
+		}
 		write_promise::set_role_probe(&flared_is_slave_of);
+		write_promise::set_identity_probe(&flared_identity);
 		shared_thread th_authority = this->_other_thread_pool->get(thread_pool::thread_type_authority);
 		handler_authority* h_authority = new handler_authority(th_authority, this->_cluster);
 		th_authority->trigger(h_authority);

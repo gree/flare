@@ -42,8 +42,13 @@ std::vector<write_promise::members> handler_authority::_due() {
 		}
 		const uint64_t now = write_fence::authority_now_ns();
 		std::map<uint32_t, uint64_t>::const_iterator last = this->_last_round_ns.find(parts[i]);
+		// a new membership (term / generation) has no grant yet (the old one was ended when it was
+		// accepted): its first round does not wait for the renew interval
+		const std::pair<uint64_t, uint64_t> scope(m.term, m.generation);
+		std::map<uint32_t, std::pair<uint64_t, uint64_t> >::const_iterator ls = this->_last_scope.find(parts[i]);
+		const bool new_scope = ls == this->_last_scope.end() || ls->second != scope;
 		if (now == write_fence::authority_clock_failed
-				|| (last != this->_last_round_ns.end() && now >= last->second && now - last->second < m.renew_ms * 1000000ULL)) {
+				|| (!new_scope && last != this->_last_round_ns.end() && now >= last->second && now - last->second < m.renew_ms * 1000000ULL)) {
 			continue;
 		}
 		pthread_mutex_lock(&this->_busy_mutex);
@@ -56,6 +61,7 @@ std::vector<write_promise::members> handler_authority::_due() {
 			continue;
 		}
 		this->_last_round_ns[parts[i]] = now;
+		this->_last_scope[parts[i]] = scope;
 		due.push_back(m);
 	}
 	return due;

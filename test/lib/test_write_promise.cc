@@ -40,6 +40,9 @@ namespace test_write_promise
 	TEST_OP_CLASS_BEGIN(op_authority)
 	TEST_OP_CLASS_END;
 
+	static std::string probe_boot = "b1", probe_copy = "c1";
+	static void probe(std::string& b, std::string& c) { b = probe_boot; c = probe_copy; }
+
 	static bool slave_ok = true;
 	static bool is_slave(int p) { return slave_ok && p == 1; }
 
@@ -53,6 +56,9 @@ namespace test_write_promise
 		std::string why;
 		cut_assert_true(write_promise::configure(true, MARGIN_MS, MAX_TTL_MS, why));
 		write_promise::set_role_probe(is_slave);
+		probe_boot = "b1";
+		probe_copy = "c1";
+		write_promise::set_identity_probe(probe);
 		write_fence::authority_set_floor(1, 1, 1);
 	}
 
@@ -68,6 +74,17 @@ namespace test_write_promise
 		write_promise::reset_for_test();
 		delete stats_object;
 		stats_object = NULL;
+	}
+
+	// the complete scope of an intent for THIS node (partition 1 of the test process): generation 1
+	static write_promise::scope sc(uint64_t intent, uint64_t term_next, uint64_t gen = 1)
+	{
+		write_promise::scope s;
+		s.intent = intent;
+		s.term_next = term_next;
+		s.generation = gen;
+		write_promise::identity(s.boot, s.copy);
+		return s;
 	}
 
 	static std::vector<std::string> one() { return std::vector<std::string>(1, "r:12121"); }
@@ -134,15 +151,15 @@ namespace test_write_promise
 		std::string why;
 		write_promise::status s;
 		cut_assert_true(write_promise::promise(1, 1, 1, TTL_MS, why));
-		cut_assert_true(write_promise::prepare(1, 7, 2, s, why));
+		cut_assert_true(write_promise::prepare(1, sc(7, 2), s, why));
 		cppcut_assert_equal(static_cast<int>(write_promise::st_preparing), static_cast<int>(s.st));
 		cut_assert_false(write_promise::promise(1, 1, 1, TTL_MS, why));			// new and renewed promises are refused
-		cut_assert_true(write_promise::prepare(1, 7, 2, s, why));				// the same intent again: idempotent
-		cut_assert_false(write_promise::prepare(1, 8, 2, s, why));				// another intent while preparing
+		cut_assert_true(write_promise::prepare(1, sc(7, 2), s, why));				// the same intent again: idempotent
+		cut_assert_false(write_promise::prepare(1, sc(8, 2), s, why));				// another intent while preparing
 		fake_ns += 3600 * S;													// a timer never resumes
 		cut_assert_false(write_promise::promise(1, 1, 1, TTL_MS, why));
-		cut_assert_false(write_promise::cancel(1, 8, s, why));					// not this intent
-		cut_assert_true(write_promise::cancel(1, 7, s, why));
+		cut_assert_false(write_promise::cancel(1, sc(8, 2), s, why));					// not this intent
+		cut_assert_true(write_promise::cancel(1, sc(7, 2), s, why));
 		cut_assert_true(write_promise::promise(1, 1, 1, TTL_MS, why));
 	}
 
@@ -153,13 +170,13 @@ namespace test_write_promise
 		fake_ns += 100 * S;														// past the start quiet time
 		cut_assert_true(write_promise::promise(1, 1, 1, TTL_MS, why));			// end = +12 s
 		cut_assert_false(write_promise::may_promote(1, why));					// following: not promotable
-		cut_assert_true(write_promise::prepare(1, 7, 2, s, why));
+		cut_assert_true(write_promise::prepare(1, sc(7, 2), s, why));
 		cut_assert_false(write_promise::may_promote(1, why));					// prepared, not committed
 		fake_ns += 20 * S;														// the promise is over, still not committed
 		cut_assert_false(write_promise::may_promote(1, why));
-		cut_assert_true(write_promise::commit(1, 7, s, why));
+		cut_assert_true(write_promise::commit(1, sc(7, 2), s, why));
 		cut_assert_true(s.promotable);
-		cut_assert_false(write_promise::cancel(1, 7, s, why));					// terminal: no reversal
+		cut_assert_false(write_promise::cancel(1, sc(7, 2), s, why));					// terminal: no reversal
 		cut_assert_true(write_promise::may_promote(1, why));
 		cut_assert_true(write_promise::may_promote(1, why));					// idempotent once promoted
 		write_promise::note_role(1, false);										// demoted: following again
@@ -172,8 +189,8 @@ namespace test_write_promise
 		write_promise::status s;
 		fake_ns += 100 * S;
 		cut_assert_true(write_promise::promise(1, 1, 1, TTL_MS, why));
-		cut_assert_true(write_promise::prepare(1, 7, 2, s, why));
-		cut_assert_true(write_promise::commit(1, 7, s, why));
+		cut_assert_true(write_promise::prepare(1, sc(7, 2), s, why));
+		cut_assert_true(write_promise::commit(1, sc(7, 2), s, why));
 		cut_assert_false(s.promotable);
 		cppcut_assert_equal(static_cast<uint64_t>(12000), s.remaining_ms);
 		cut_assert_false(write_promise::may_promote(1, why));
@@ -187,9 +204,9 @@ namespace test_write_promise
 	{
 		std::string why;
 		write_promise::status s;
-		cut_assert_false(write_promise::commit(1, 7, s, why));
-		cut_assert_true(write_promise::prepare(1, 7, 2, s, why));
-		cut_assert_false(write_promise::commit(1, 8, s, why));
+		cut_assert_false(write_promise::commit(1, sc(7, 2), s, why));
+		cut_assert_true(write_promise::prepare(1, sc(7, 2), s, why));
+		cut_assert_false(write_promise::commit(1, sc(8, 2), s, why));
 	}
 
 	void test_a_restarted_replica_forgets_its_promises_but_waits_the_quiet_time()
@@ -201,8 +218,8 @@ namespace test_write_promise
 		// restart: configure again at the current time; everything is forgotten
 		cut_assert_true(write_promise::configure(true, MARGIN_MS, MAX_TTL_MS, why));
 		write_fence::authority_set_floor(1, 1, 1);
-		cut_assert_true(write_promise::prepare(1, 9, 2, s, why));
-		cut_assert_true(write_promise::commit(1, 9, s, why));
+		cut_assert_true(write_promise::prepare(1, sc(9, 2), s, why));
+		cut_assert_true(write_promise::commit(1, sc(9, 2), s, why));
 		cut_assert_false(write_promise::may_promote(1, why));					// max-ttl + margin after its own start
 		fake_ns += 12 * S;
 		cut_assert_true(write_promise::may_promote(1, why));
@@ -292,8 +309,8 @@ namespace test_write_promise
 		cut_assert_true(write_promise::finish_round(m, nonce, 1, why));
 		// the operator cannot reach the master; it prepares and commits at the replica at q + 2 s
 		fake_ns += 1 * S;
-		cut_assert_true(write_promise::prepare(1, 5, 2, s, why));
-		cut_assert_true(write_promise::commit(1, 5, s, why));
+		cut_assert_true(write_promise::prepare(1, sc(5, 2), s, why));
+		cut_assert_true(write_promise::commit(1, sc(5, 2), s, why));
 		// walk time in 100 ms steps: the master's authority and the successor's permission never overlap
 		bool master_was_valid = false, replica_was_ok = false;
 		for (uint64_t t = q + 2 * S; t < q + 30 * S; t += S / 10) {
@@ -396,12 +413,22 @@ namespace test_write_promise
 	{
 		int rc = 0;
 		const char* bad[] = { " bogus\r\n", " promise 1 1 1 1000\r\n", " promise 1 1 1 1000 5 6\r\n", " promise a 1 1 1000 5\r\n",
-			" members 0 1 1 10000 3000\r\n", " solo 0 1\r\n", " prepare 1 7\r\n", " commit 1\r\n", " status\r\n", " status 1 2\r\n",
+			" members 0 1 1 10000 3000\r\n", " solo 0 1\r\n", " prepare 1 7\r\n", " prepare 1 7 2\r\n", " prepare 1 7 2 1\r\n", " commit 1 7 2 1 b\r\n", " commit 1\r\n", " first 1 b\r\n", " status\r\n", " status 1 2\r\n",
 			" floor 0 1 -1\r\n", " \r\n", NULL };
 		for (int i = 0; bad[i] != NULL; i++) {
 			run_op(bad[i], rc);
 			cppcut_assert_equal(-1, rc);
 		}
+	}
+
+	// "<verb> <p> <intent> <term_next> <gen> <boot> <copy>" with THIS node's identity
+	static std::string wire(const char* verb, unsigned p, unsigned long long intent, unsigned long long term_next, unsigned long long gen)
+	{
+		std::string boot, copy;
+		write_promise::identity(boot, copy);
+		char b[256];
+		snprintf(b, sizeof(b), " %s %u %llu %llu %llu %s %s\r\n", verb, p, intent, term_next, gen, boot.c_str(), copy.c_str());
+		return b;
 	}
 
 	void test_the_op_promise_replies_promised_or_an_error()
@@ -413,7 +440,7 @@ namespace test_write_promise
 		cut_assert_true(write_promise::get_status(1).have_promise);
 		out = run_op(" promise 1 9 1 10000 56\r\n", rc);						// not the term the operator gave
 		cut_assert_equal_string("SERVER_ERROR term does not match the floor\r\n", out.c_str());
-		out = run_op(" prepare 1 7 2\r\n", rc);
+		out = run_op(wire("prepare", 1, 7, 2, 1), rc);
 		cut_assert_true(has(out, "STAT promise_state preparing"));
 		out = run_op(" promise 1 1 1 10000 57\r\n", rc);
 		cut_assert_true(has(out, "SERVER_ERROR not following"));
@@ -424,18 +451,214 @@ namespace test_write_promise
 		int rc = 0;
 		std::string out = run_op(" floor 1 1 1\r\n", rc);
 		cut_assert_true(has(out, "STAT floor_term 1"));
-		out = run_op(" prepare 1 7 2\r\n", rc);
+		out = run_op(wire("prepare", 1, 7, 2, 1), rc);
 		cut_assert_true(has(out, "STAT promise_state preparing"));
 		cut_assert_true(has(out, "STAT promise_intent 7"));
+		cut_assert_true(has(out, "STAT promise_term_next 2"));
+		cut_assert_true(has(out, "STAT promise_gen 1"));
 		cut_assert_true(has(out, "END\r\n"));
-		out = run_op(" cancel 1 8\r\n", rc);
+		out = run_op(wire("cancel", 1, 8, 2, 1), rc);
 		cut_assert_true(has(out, "SERVER_ERROR"));
-		out = run_op(" commit 1 7\r\n", rc);
+		out = run_op(wire("commit", 1, 7, 2, 1), rc);
 		cut_assert_true(has(out, "STAT promise_state committed"));
-		out = run_op(" cancel 1 7\r\n", rc);
+		out = run_op(wire("cancel", 1, 7, 2, 1), rc);
 		cut_assert_true(has(out, "SERVER_ERROR"));							// terminal
 		out = run_op(" status 1\r\n", rc);
 		cut_assert_true(has(out, "STAT promise_state committed"));
+	}
+
+	// the reproduction flare-review-promise-replay.cc, on the WIRE (the op handler): a delayed
+	// term-2 commit for intent 1 must not commit a term-3 prepare of the same id
+	void test_a_delayed_commit_of_another_term_is_refused_on_the_wire()
+	{
+		int rc = 0;
+		std::string out = run_op(wire("prepare", 1, 1, 2, 1), rc);
+		cut_assert_true(has(out, "STAT promise_state preparing"));
+		out = run_op(wire("cancel", 1, 1, 2, 1), rc);
+		cut_assert_true(has(out, "STAT promise_state following"));
+		out = run_op(wire("prepare", 1, 1, 3, 1), rc);
+		cut_assert_true(has(out, "STAT promise_term_next 3"));
+		out = run_op(wire("commit", 1, 1, 2, 1), rc);						// the DELAYED term-2 commit
+		cut_assert_true(has(out, "SERVER_ERROR"));
+		cut_assert_false(has(out, "committed"));
+		write_promise::status s = write_promise::get_status(1);
+		cppcut_assert_equal(static_cast<int>(write_promise::st_preparing), static_cast<int>(s.st));
+		cppcut_assert_equal(static_cast<uint64_t>(3), s.term_next);
+		// the opposite control: an OLD cancel (term 2) must not release the term-3 prepare
+		out = run_op(wire("cancel", 1, 1, 2, 1), rc);
+		cut_assert_true(has(out, "SERVER_ERROR"));
+		cppcut_assert_equal(static_cast<int>(write_promise::st_preparing), static_cast<int>(write_promise::get_status(1).st));
+		// another membership generation of the same term and id is another scope too
+		out = run_op(wire("commit", 1, 1, 3, 2), rc);
+		cut_assert_true(has(out, "SERVER_ERROR"));
+		out = run_op(wire("cancel", 1, 1, 3, 2), rc);
+		cut_assert_true(has(out, "SERVER_ERROR"));
+		cppcut_assert_equal(static_cast<int>(write_promise::st_preparing), static_cast<int>(write_promise::get_status(1).st));
+		// and the complete scope does commit
+		out = run_op(wire("commit", 1, 1, 3, 1), rc);
+		cut_assert_true(has(out, "STAT promise_state committed"));
+	}
+
+	void test_a_command_for_another_incarnation_or_copy_changes_nothing()
+	{
+		int rc = 0;
+		std::string boot, copy;
+		write_promise::identity(boot, copy);
+		// the scope names another boot id (an older process of the same pod) or another copy
+		std::string out = run_op(" prepare 1 1 2 1 " + boot + "9 " + copy + "\r\n", rc);
+		cut_assert_true(has(out, "SERVER_ERROR"));
+		out = run_op(" prepare 1 1 2 1 " + boot + " other-copy\r\n", rc);
+		cut_assert_true(has(out, "SERVER_ERROR"));
+		cppcut_assert_equal(static_cast<int>(write_promise::st_following), static_cast<int>(write_promise::get_status(1).st));
+		out = run_op(wire("prepare", 1, 1, 2, 1), rc);
+		cut_assert_true(has(out, "STAT promise_state preparing"));
+		out = run_op(" commit 1 1 2 1 " + boot + " other-copy\r\n", rc);
+		cut_assert_true(has(out, "SERVER_ERROR"));
+		out = run_op(" cancel 1 1 2 1 " + boot + "9 " + copy + "\r\n", rc);
+		cut_assert_true(has(out, "SERVER_ERROR"));
+		cppcut_assert_equal(static_cast<int>(write_promise::st_preparing), static_cast<int>(write_promise::get_status(1).st));
+	}
+
+	void test_a_copy_change_never_inherits_a_prepare_or_a_commit()
+	{
+		write_promise::set_identity_probe(probe);
+		probe_boot = "b1";
+		probe_copy = "c1";
+		std::string why;
+		write_promise::status s;
+		write_promise::scope a = sc(5, 2);
+		cut_assert_true(write_promise::prepare(1, a, s, why));
+		cut_assert_true(write_promise::commit(1, a, s, why));
+		fake_ns += 100 * S;
+		cut_assert_true(write_promise::get_status(1).promotable);
+		// a snapshot swap / replacement on the same pod and process: another copy id
+		probe_copy = "c2";
+		cut_assert_false(write_promise::get_status(1).promotable);
+		cppcut_assert_equal(static_cast<int>(write_promise::st_following), static_cast<int>(write_promise::get_status(1).st));
+		cut_assert_false(write_promise::may_promote(1, why));
+		// the old scope does not match the new copy, not even when the id comes back later
+		cut_assert_false(write_promise::commit(1, a, s, why));
+		probe_copy = "c1";
+		cut_assert_false(write_promise::may_promote(1, why));
+		// a restarted process (another boot id) is the same
+		cut_assert_true(write_promise::prepare(1, sc(6, 2), s, why));
+		cut_assert_true(write_promise::commit(1, sc(6, 2), s, why));
+		probe_boot = "b2";
+		cut_assert_false(write_promise::may_promote(1, why));
+	}
+
+	void test_only_a_proven_first_build_may_become_master_from_proxy_without_an_intent()
+	{
+		write_promise::set_identity_probe(probe);
+		probe_boot = "b1";
+		probe_copy = "c1";
+		std::string why;
+		cut_assert_false(write_promise::may_first_build(2, why));								// no proof: gated like a slave
+		cut_assert_false(write_promise::allow_first_build(2, "b1", "c-other", why));			// a proof for another copy
+		cut_assert_false(write_promise::allow_first_build(2, "b0", "c1", why));
+		cut_assert_true(write_promise::allow_first_build(2, "b1", "c1", why));
+		probe_copy = "c2";																		// the copy changed after the proof
+		cut_assert_false(write_promise::may_first_build(2, why));
+		probe_copy = "c1";
+		cut_assert_false(write_promise::may_first_build(2, why));								// and the proof was consumed
+		cut_assert_true(write_promise::allow_first_build(2, "b1", "c1", why));
+		cut_assert_true(write_promise::may_first_build(2, why));
+		cut_assert_false(write_promise::may_first_build(2, why));								// once
+		cut_assert_true(write_promise::allow_first_build(3, "b1", "c1", why));
+		fake_ns += 1000 * S;																	// a stale proof
+		cut_assert_false(write_promise::may_first_build(3, why));
+		// off: nothing is gated
+		cut_assert_true(write_promise::configure(false, 0, 0, why));
+		cut_assert_true(write_promise::may_first_build(2, why));
+	}
+
+	// the reproduction flare-review-members-transition.cc, through the wire (`authority members`)
+	// and the helpers: gen1{R1} -> gen2{R1,R2} with a delayed old-round reply
+	void test_a_membership_change_ends_the_old_grant_and_refuses_the_delayed_round()
+	{
+		std::string why;
+		cut_assert_true(write_promise::set_members(0, 1, 1, TTL_MS, RENEW_MS, one(), why));
+		write_promise::members old;
+		cut_assert_true(write_promise::get_members(0, old));
+		const uint64_t first = write_promise::begin_round(old);
+		cut_assert_true(write_promise::finish_round(old, first, 1, why));
+		cut_assert_true(write_fence::authority_valid(0));
+		const uint64_t pending = write_promise::begin_round(old);				// the next gen1 round is SENT
+		std::vector<std::string> two(one());
+		two.push_back("r2:12121");
+		cut_assert_true(write_promise::set_members(0, 1, 2, TTL_MS, RENEW_MS, two, why));		// gen2 accepted (the ACK)
+		uint64_t t = 0, g = 0, rem = 0;
+		bool solo = false;
+		cut_assert_false(write_fence::authority_info(0, t, g, solo, rem));		// the old grant is gone at the ACK
+		cut_assert_false(write_promise::finish_round(old, pending, 1, why));	// the delayed gen1 reply is refused
+		cut_assert_false(write_fence::authority_valid(0));
+		// a write admitted under gen1 cannot apply any more either
+		cut_assert_false(write_promise::finish_round(old, write_promise::begin_round(old), 1, why));
+		// the newcomer is promotable only after an ACK that is already true: the old master is not valid
+		// at that moment, and its next grant needs BOTH promises
+		write_promise::members now;
+		cut_assert_true(write_promise::get_members(0, now));
+		cppcut_assert_equal(static_cast<uint64_t>(2), now.generation);
+		const uint64_t n2 = write_promise::begin_round(now);
+		cut_assert_false(write_promise::finish_round(now, n2, 1, why));			// R2 did not promise: no grant
+		cut_assert_false(write_fence::authority_valid(0));
+		const uint64_t n3 = write_promise::begin_round(now);
+		cut_assert_true(write_promise::finish_round(now, n3, 2, why));
+		cut_assert_true(write_fence::authority_valid(0));
+	}
+
+	void test_a_membership_change_waits_for_a_write_in_its_apply_section()
+	{
+		std::string why;
+		cut_assert_true(write_promise::set_members(0, 1, 1, TTL_MS, RENEW_MS, one(), why));
+		cut_assert_true(round(0));
+		write_fence::entry e;
+		cut_assert_true(e.admit_master(0));
+		cut_assert_true(e.apply_begin());
+		write_promise::members old;
+		cut_assert_true(write_promise::get_members(0, old));
+		// with the section open the ACK cannot be given (it drains first); closing it lets it through
+		struct runner {
+			static void* go(void* a) {
+				std::vector<std::string> two(1, "r:12121");
+				two.push_back("r2:12121");
+				std::string w;
+				*static_cast<bool*>(a) = write_promise::set_members(0, 1, 2, TTL_MS, RENEW_MS, two, w);
+				return NULL;
+			}
+		};
+		bool done = false;
+		pthread_t th;
+		pthread_create(&th, NULL, &runner::go, &done);
+		usleep(100000);
+		cut_assert_false(done);													// still waiting for the section
+		e.apply_end();
+		pthread_join(th, NULL);
+		cut_assert_true(done);
+		cut_assert_false(e.ack_ok());											// the entry's authority is void
+	}
+
+	void test_a_master_copy_change_voids_the_grant_and_rebinds_the_membership()
+	{
+		write_promise::set_identity_probe(probe);
+		probe_boot = "b1";
+		probe_copy = "c1";
+		std::string why;
+		cut_assert_true(write_promise::set_members(0, 1, 1, TTL_MS, RENEW_MS, one(), why));
+		cut_assert_true(round(0));
+		cut_assert_true(write_fence::authority_valid(0));
+		write_promise::members m;
+		cut_assert_true(write_promise::get_members(0, m));
+		cut_assert_true(m.copy == "c1");
+		write_promise::members old = m;
+		const uint64_t nonce = write_promise::begin_round(old);
+		probe_copy = "c2";													// the master's copy was replaced
+		cut_assert_false(write_promise::finish_round(old, nonce, 1, why));		// the round of the old identity is refused
+		cut_assert_false(write_fence::authority_valid(0));						// and the old grant is void
+		cut_assert_true(write_promise::get_members(0, m));
+		cut_assert_true(m.copy == "c2");										// the membership is re-bound: the operator sees it
+		cut_assert_true(round(0));												// and the next round grants under the new identity
+		cut_assert_true(write_fence::authority_valid(0));
 	}
 
 	void test_the_op_sets_members_and_solo()
@@ -544,7 +767,7 @@ namespace test_write_promise
 		cut_assert_true(write_promise::get_status(1).have_promise);					// recorded on the replica
 		// the replica is prepared by the operator: the next round gets no promise, the grant is not renewed
 		write_promise::status s;
-		cut_assert_true(write_promise::prepare(1, 3, 2, s, why));
+		cut_assert_true(write_promise::prepare(1, sc(3, 2), s, why));
 		fake_ns += RENEW_MS * 1000000ULL;
 		cut_assert_true(h.run_once());
 		cut_assert_true(write_fence::authority_valid(0));							// still within the last grant
@@ -606,5 +829,69 @@ namespace test_write_promise
 		cppcut_assert_equal(static_cast<size_t>(0), h.dispatch());			// both busy or not yet due: no second round on top
 		close(dead);
 		srv_end();
+	}
+
+	// (term, generation) is compared lexicographically: the generation is independent across terms
+	void test_a_stale_membership_is_refused_and_revokes_nothing()
+	{
+		std::string why;
+		cut_assert_true(write_promise::set_members(0, 5, 8, TTL_MS, RENEW_MS, one(), why));
+		cut_assert_true(round(0));
+		cut_assert_true(write_fence::authority_valid(0));
+		cut_assert_false(write_promise::set_members(0, 4, 9, TTL_MS, RENEW_MS, one(), why));		// (4,9) is OLDER than (5,8)
+		cut_assert_false(write_promise::set_solo(0, 4, 9, why));
+		cut_assert_true(write_fence::authority_valid(0));										// the master was not stopped
+		int rc = 0;
+		std::string out = run_op(" members 0 4 9 10000 3000 r:12121\r\n", rc);					// and on the wire
+		cut_assert_true(has(out, "SERVER_ERROR"));
+		cut_assert_true(write_fence::authority_valid(0));
+		// the same term, a higher generation: newer; the old grant ends
+		cut_assert_true(write_promise::set_members(0, 5, 9, TTL_MS, RENEW_MS, one(), why));
+		cut_assert_false(write_fence::authority_valid(0));
+		cut_assert_true(round(0));
+		// a higher term with a LOWER generation: newer
+		cut_assert_true(write_promise::set_members(0, 6, 1, TTL_MS, RENEW_MS, one(), why));
+		cut_assert_false(write_fence::authority_valid(0));
+	}
+
+	// a floor without a membership record: an older (term, generation) is refused
+	void test_a_membership_older_than_the_floor_or_the_grant_is_refused()
+	{
+		std::string why;
+		write_fence::authority_set_floor(0, 5, 8);
+		cut_assert_false(write_promise::set_members(0, 4, 9, TTL_MS, RENEW_MS, one(), why));
+		cut_assert_false(write_promise::set_solo(0, 4, 9, why));
+		cut_assert_false(write_promise::set_members(0, 5, 7, TTL_MS, RENEW_MS, one(), why));
+		cut_assert_true(write_promise::set_members(0, 5, 8, TTL_MS, RENEW_MS, one(), why));
+		cut_assert_true(round(0));
+		cut_assert_true(write_fence::authority_valid(0));
+	}
+
+	// authority ON with no determinable copy identity: nothing is accepted, bound or promoted
+	void test_an_undetermined_copy_identity_fails_closed()
+	{
+		std::string why;
+		write_promise::status s;
+		write_promise::scope a = sc(5, 2);
+		probe_copy = "";
+		cut_assert_false(write_promise::set_members(0, 1, 1, TTL_MS, RENEW_MS, one(), why));
+		cut_assert_false(write_promise::set_solo(0, 1, 1, why));
+		cut_assert_false(write_promise::promise(1, 1, 1, TTL_MS, why));
+		a.copy = "";
+		cut_assert_false(write_promise::prepare(1, a, s, why));
+		cut_assert_false(write_promise::commit(1, a, s, why));
+		cut_assert_false(write_promise::cancel(1, a, s, why));
+		cut_assert_false(write_promise::allow_first_build(2, "b1", "", why));
+		cut_assert_false(write_promise::may_first_build(2, why));
+		cut_assert_false(write_promise::may_promote(1, why));
+		int rc = 0;
+		cut_assert_true(has(run_op(" prepare 1 1 2 1 b1 -\r\n", rc), "SERVER_ERROR"));
+		// a determined identity works again; and with the authority OFF nothing is gated
+		probe_copy = "c1";
+		cut_assert_true(write_promise::set_members(0, 1, 1, TTL_MS, RENEW_MS, one(), why));
+		probe_copy = "";
+		cut_assert_true(write_promise::configure(false, 0, 0, why));
+		cut_assert_true(write_promise::may_first_build(2, why));
+		cut_assert_true(write_promise::may_promote(1, why));
 	}
 }

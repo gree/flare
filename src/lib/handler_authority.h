@@ -29,6 +29,7 @@ class handler_authority : public thread_handler {
 protected:
 	cluster*	_cluster;
 	std::map<uint32_t, uint64_t>	_last_round_ns;
+	std::map<uint32_t, std::pair<uint64_t, uint64_t> >	_last_scope;	// (term, generation) the last round was for
 	pthread_mutex_t					_busy_mutex;
 	std::set<uint32_t>				_busy;		// partitions whose round is running
 

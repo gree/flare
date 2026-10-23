@@ -2331,15 +2331,29 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 	this->_storage->set_write_partition(new_role == role_master ? new_partition : -1);
 	// C' (design §13): a slave becomes a master only when its promise to the
 	// old master is over on its own clock and the operator committed the
-	// promotion intent (write_promise::may_promote). A first master from
-	// proxy has no old master to wait for. A refusal uses the same latch as a
+	// promotion intent (write_promise::may_promote); a Proxy -> master of an existing
+	// copy too, unless it is a proven fresh first build. A refusal uses the same latch as a
 	// forbidden copy (no reads / writes until the map takes the role away).
 	if (new_role != role_master && old_role == role_master && old_partition >= 0) {
 		write_promise::note_role(static_cast<uint32_t>(old_partition), false);
 	}
-	if (new_role == role_master && old_role == role_slave && new_partition >= 0 && write_promise::enabled()) {
+	if (new_role == role_master && old_role != role_master && new_partition >= 0 && write_promise::enabled()) {
+		// every shift to master of an EXISTING copy (from Slave or from Proxy: a slave demoted and
+		// returned) goes through the committed intent. Only a Proxy that the operator proved to be
+		// the FRESH FIRST BUILD of the partition (authoritative history: no copy has ever held it;
+		// `authority first`, once, bound to this incarnation and copy) skips it.
 		string why;
-		if (!write_promise::may_promote(static_cast<uint32_t>(new_partition), why)) {
+		bool allowed = write_promise::may_promote(static_cast<uint32_t>(new_partition), why);
+		if (!allowed && old_role == role_proxy) {
+			string why2;
+			if (write_promise::may_first_build(static_cast<uint32_t>(new_partition), why2)) {
+				allowed = true;
+				log_notice("write authority: the first master of partition %d (fresh first build proven by the operator)", new_partition);
+			} else {
+				why += "; " + why2;
+			}
+		}
+		if (!allowed) {
 			this->_promotion_refused_why = "write authority: " + why;
 			this->_promotion_refused = true;
 			log_err("CRITICAL: PROMOTION REFUSED by this node: %s — it serves no reads or writes as master until the map takes the role away", this->_promotion_refused_why.c_str());

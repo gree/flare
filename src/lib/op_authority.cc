@@ -61,22 +61,27 @@ int op_authority::_parse_text_server_parameters() {
 	}
 	this->_action = w[0];
 	size_t need = 0;		// numeric arguments after the verb (partition first)
+	size_t words = 0;		// then this many identity words (boot id, copy id)
 	if (this->_action == "promise") {
 		need = 5;
 	} else if (this->_action == "members") {
 		need = 5;
 	} else if (this->_action == "solo" || this->_action == "floor") {
 		need = 3;
-	} else if (this->_action == "prepare") {
-		need = 3;
-	} else if (this->_action == "commit" || this->_action == "cancel") {
-		need = 2;
+	} else if (this->_action == "prepare" || this->_action == "commit" || this->_action == "cancel") {
+		// <p> <intent> <term_next> <generation> <boot_id> <copy_id>: the complete scope
+		need = 4;
+		words = 2;
+	} else if (this->_action == "first") {
+		// <p> <boot_id> <copy_id>: a fresh first build was proven for this incarnation
+		need = 1;
+		words = 2;
 	} else if (this->_action == "status") {
 		need = 1;
 	} else {
 		return -1;
 	}
-	if (w.size() < 1 + need || (this->_action != "members" && w.size() != 1 + need)) {
+	if (w.size() < 1 + need + words || (this->_action != "members" && w.size() != 1 + need + words)) {
 		return -1;
 	}
 	uint64_t v[5] = { 0, 0, 0, 0, 0 };
@@ -90,6 +95,13 @@ int op_authority::_parse_text_server_parameters() {
 	}
 	this->_partition = static_cast<uint32_t>(v[0]);
 	this->_a = v[1]; this->_b = v[2]; this->_c = v[3]; this->_d = v[4];
+	for (size_t i = 0; i < words; i++) {
+		const string& s = w[1 + need + i];
+		if (s.size() > 128) {
+			return -1;
+		}
+		this->_ids.push_back(s);
+	}
 	if (this->_action == "members") {
 		for (size_t i = 1 + need; i < w.size(); i++) {
 			this->_keys.push_back(w[i]);
@@ -103,11 +115,13 @@ int op_authority::_parse_text_server_parameters() {
 
 int op_authority::_send_status(uint32_t partition) {
 	const write_promise::status s = write_promise::get_status(partition);
+	string idboot, idcopy;
+	write_promise::identity(idboot, idcopy);
 	static const char* names[] = { "following", "preparing", "committed", "promoted" };
 	uint64_t ft = 0, fg = 0;
 	const bool have_floor = write_fence::authority_floor(partition, ft, fg);
 	write_promise::members m;
-	const bool have_m = write_promise::get_members(partition, m);
+	const bool have_m = write_promise::get_members(partition, m);		// re-binds a membership to a changed identity first
 	uint64_t gt = 0, gg = 0, rem = 0;
 	bool gsolo = false;
 	const bool grant = write_fence::authority_info(partition, gt, gg, gsolo, rem);
@@ -120,12 +134,16 @@ int op_authority::_send_status(uint32_t partition) {
 		"STAT authority_enabled %d\r\nSTAT authority_refused %llu\r\n"
 		"STAT promise_state %s\r\nSTAT promise_intent %llu\r\nSTAT promise_have %d\r\n"
 		"STAT promise_remaining_ms %llu\r\nSTAT promise_promotable %d\r\n"
+		"STAT promise_term_next %llu\r\nSTAT promise_gen %llu\r\nSTAT promise_boot %s\r\nSTAT promise_copy %s\r\n"
+		"STAT identity_boot %s\r\nSTAT identity_copy %s\r\nSTAT members_boot %s\r\nSTAT members_copy %s\r\n"
 		"STAT floor_term %llu\r\nSTAT floor_gen %llu\r\nSTAT floor_set %d\r\n"
 		"STAT members_mode %s\r\nSTAT members_term %llu\r\nSTAT members_gen %llu\r\nSTAT members_successors %s\r\n"
 		"STAT grant_valid %d\r\nSTAT grant_term %llu\r\nSTAT grant_gen %llu\r\nSTAT grant_solo %d\r\nSTAT grant_remaining_ms %llu\r\n",
 		write_promise::enabled() ? 1 : 0, static_cast<unsigned long long>(write_fence::authority_refused()),
 		names[s.st], static_cast<unsigned long long>(s.intent), s.have_promise ? 1 : 0,
 		static_cast<unsigned long long>(s.remaining_ms), s.promotable ? 1 : 0,
+		static_cast<unsigned long long>(s.term_next), static_cast<unsigned long long>(s.generation), s.boot.c_str(), s.copy.c_str(),
+		idboot.empty() ? "-" : idboot.c_str(), idcopy.empty() ? "-" : idcopy.c_str(), have_m ? m.boot.c_str() : "-", have_m ? m.copy.c_str() : "-",
 		static_cast<unsigned long long>(ft), static_cast<unsigned long long>(fg), have_floor ? 1 : 0,
 		!have_m ? "none" : (m.solo ? "solo" : "replicated"),
 		static_cast<unsigned long long>(m.term), static_cast<unsigned long long>(m.generation), succ.empty() ? "-" : succ.c_str(),
@@ -138,6 +156,14 @@ int op_authority::_send_status(uint32_t partition) {
 int op_authority::_run_server() {
 	string why;
 	write_promise::status s;
+	write_promise::scope sc;
+	if (this->_action == "prepare" || this->_action == "commit" || this->_action == "cancel") {
+		sc.intent = this->_a;
+		sc.term_next = this->_b;
+		sc.generation = this->_c;
+		sc.boot = this->_ids[0];
+		sc.copy = this->_ids[1];
+	}
 	if (this->_action == "promise") {
 		// members of the line: term, gen, ttl_ms, nonce
 		if (!write_promise::promise(this->_partition, this->_a, this->_b, this->_c, why)) {
@@ -159,22 +185,27 @@ int op_authority::_run_server() {
 		}
 		log_notice("write authority: solo grant for partition %u (term=%llu gen=%llu)", this->_partition,
 			static_cast<unsigned long long>(this->_a), static_cast<unsigned long long>(this->_b));
+	} else if (this->_action == "first") {
+		if (!write_promise::allow_first_build(this->_partition, this->_ids[0], this->_ids[1], why)) {
+			return this->_send_result(result_server_error, why.c_str());
+		}
+		log_notice("write authority: a fresh first build of partition %u is allowed once for this incarnation", this->_partition);
 	} else if (this->_action == "floor") {
 		if (!write_promise::set_floor(this->_partition, this->_a, this->_b, why)) {
 			return this->_send_result(result_server_error, why.c_str());
 		}
 	} else if (this->_action == "prepare") {
-		if (!write_promise::prepare(this->_partition, this->_a, this->_b, s, why)) {
+		if (!write_promise::prepare(this->_partition, sc, s, why)) {
 			return this->_send_result(result_server_error, why.c_str());
 		}
 		log_notice("write authority: PREPARING partition %u for intent %llu (promises stop)", this->_partition, static_cast<unsigned long long>(this->_a));
 	} else if (this->_action == "commit") {
-		if (!write_promise::commit(this->_partition, this->_a, s, why)) {
+		if (!write_promise::commit(this->_partition, sc, s, why)) {
 			return this->_send_result(result_server_error, why.c_str());
 		}
 		log_notice("write authority: intent %llu COMMITTED for partition %u", static_cast<unsigned long long>(this->_a), this->_partition);
 	} else if (this->_action == "cancel") {
-		if (!write_promise::cancel(this->_partition, this->_a, s, why)) {
+		if (!write_promise::cancel(this->_partition, sc, s, why)) {
 			return this->_send_result(result_server_error, why.c_str());
 		}
 		log_notice("write authority: intent %llu cancelled for partition %u (promises resume)", static_cast<unsigned long long>(this->_a), this->_partition);

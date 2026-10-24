@@ -2155,7 +2155,17 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
                   promotionAbortedRef.set true
                   return
             else
-              match ← WriteAuthorityDriver.gate ctx part.toNat k uid 8 with
+              -- a candidate that is NOT a member of the record may still be promoted when it is the sole
+              -- same-history lagging copy (typed eligibility, see WriteAuthority.nonMemberRoute): the old
+              -- master is then fenced by a record member's expired promise. Anything else keeps the abort.
+              let route ← do
+                let rc ← WriteAuthorityDriver.recClient ctx part.toNat
+                match ← WriteAuthorityDriver.readRec rc with
+                | .ok (some (rec, _)) =>
+                  let memberClasses := rec.successors.filterMap fun mk => (ev.find? (·.1 == mk)).map (·.2.1)
+                  pure (WriteAuthority.nonMemberRoute ((ev.find? (·.1 == k)).map (·.2.1)) riskPass memberClasses)
+                | _ => pure WriteAuthority.NonMemberRoute.refuse
+              match ← WriteAuthorityDriver.gate ctx part.toNat k uid 8 none route with
               | .proceed => IO.eprintln s!"[flare-operator] write authority: promotion of {k} (P{part}) passed the intent gate"
               | .hold why =>
                 IO.eprintln s!"[flare-operator] write authority: PROMOTION HELD for {k} (P{part}): {why}"
@@ -2488,10 +2498,30 @@ private def authorityPass (crName ns leaseName identity : String) (st : FlareClu
         return
     let usable := fun (k : String) => pods.any fun pd => pd.toNodeKey == k && pd.ready && !pd.terminating
     let ctx := WriteAuthorityDriver.Ctx.live cfg crName ns (← leaderEpochRef.get) "operator"
+    -- TEST SEAM (FLARE_TEST_HOLD_MEMBER_ADD_FILE): while the file exists, newly eligible successors are NOT
+    -- added to the record (removals are unchanged): the window "a copy is Active but not yet a member".
+    let holdAdd ← match ← IO.getEnv "FLARE_TEST_HOLD_MEMBER_ADD_FILE" with
+      | some f => System.FilePath.pathExists f
+      | none => pure false
     for p in parts do
       let master := (st.nodeMap.find? fun kv => kv.2.role == FlareRole.Master && kv.2.partition == p).map (·.1)
-      let succ := (st.nodeMap.filter fun kv =>
-        kv.2.role == FlareRole.Slave && kv.2.partition == p && kv.2.state == FlareState.Active && usable kv.1).map (·.1)
+      let active := (st.nodeMap.filter fun kv =>
+        kv.2.role == FlareRole.Slave && kv.2.partition == p && kv.2.state == FlareState.Active).map (·.1)
+      -- never silent: an Active slave that is not yet eligible to be added (pod not Ready / terminating)
+      let notUsable := active.filter (!usable ·)
+      if !notUsable.isEmpty then
+        IO.eprintln s!"[flare-operator] write authority P{p}: Active slave(s) {notUsable} not added to the record yet: pod not Ready or terminating (eligible: Slave + Active + pod Ready + not terminating)"
+      let succ0 := active.filter usable
+      let succ ← if !holdAdd then pure succ0 else
+        match ← WriteAuthorityDriver.readRec (← WriteAuthorityDriver.recClient ctx p.toNat) with
+        | .ok (some (rec, _)) =>
+          let held := succ0.filter (!rec.successors.contains ·)
+          if !held.isEmpty then
+            IO.eprintln s!"[flare-operator] TEST SEAM: adding {held} to the record of P{p} is held (FLARE_TEST_HOLD_MEMBER_ADD_FILE)"
+          pure (succ0.filter rec.successors.contains)
+        | _ => pure succ0
+      if master.isNone then
+        IO.eprintln s!"[flare-operator] write authority P{p}: the map has no master: the record is kept as it is (Slave+Active candidates to add: {succ})"
       let go ← match master with
         | some mk =>
           let store ← historyStoreRef.get

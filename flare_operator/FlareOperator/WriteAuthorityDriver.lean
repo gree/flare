@@ -258,7 +258,8 @@ def pushFloors (ctx : Ctx) (p : Nat) (m : Members) : IO Unit := do
   for k in m.successors do
     match ← statusOf ctx k p with
     | some s =>
-      if !s.floorIs m then discard <| ask ctx k (cmdFloor p m)
+      -- a floor beyond the record's term (the FENCE of a committed intent, see `releaseFence`) is never lowered
+      if !(s.floorSet && s.floorTerm ≥ m.term) then discard <| ask ctx k (cmdFloor p m)
     | none => pure ()
 
 /-- The master holds exactly this membership: push, and read it back. The reading that proves it is
@@ -319,6 +320,11 @@ def wireOfAttempt (a : Attempt) : WireScope :=
   { id := widOf a.termNext a.n, termNext := a.termNext, gen := a.intent.ref.scope.generation,
     boot := a.intent.binding.bootId, copy := a.intent.binding.copyId }
 
+/-- The wire scope of the attempt's FENCE: the same id, term and generation, the fence's own boot / copy. -/
+def fenceWireOf (a : Attempt) (f : FenceMember) : WireScope :=
+  { id := widOf a.termNext a.n, termNext := a.termNext, gen := a.intent.ref.scope.generation,
+    boot := f.binding.bootId, copy := f.binding.copyId }
+
 /-- The attempt was made for exactly the term and generation of the record in force. -/
 def inScope (m : Members) (a : Attempt) : Bool :=
   a.termNext == m.term + 1 && a.intent.ref.scope.generation == m.gen
@@ -356,7 +362,7 @@ def viewOf (a : Option Attempt) (now : At) : IntentView :=
     | .committed => .committed
     | .cancelled => .cancelled
     | .pending =>
-      .pending x.intent.oldUntil.isSome (match now.reached? x.intent.deadline with | some false => false | _ => true)
+      .pending (x.intent.oldUntil.isSome && !x.intent.fenceUnprepared) (match now.reached? x.intent.deadline with | some false => false | _ => true)
 
 /-- Why a CAS did not (or did) apply, in words (conflict / stale fence / bad record / unknown ...). -/
 def describeResult : Result → String
@@ -402,14 +408,17 @@ def fenceOk (name : String) (c : Client) (token : Nat) (i : Intent) : IO Bool :=
     IO.eprintln s!"[flare-operator] write authority: stale fence on {name}: the record carries fence {i.fence}, this operator's token is {token}; a newer leader owns it"
     pure false
 
-def doCreate (ctx : Ctx) (p : Nat) (m : Members) (as : List Attempt) (key : String) (b : Bind) : IO Bool := do
+def doCreate (ctx : Ctx) (p : Nat) (m : Members) (as : List Attempt) (key : String) (b : Bind)
+    (fence : Option (String × Bind) := none) : IO Bool := do
   let n := ((currentTerm (m.term + 1) as).map (·.n)).foldl max 0 + 1
   let now ← nowAt ctx
   let deadline : At := { now with t := now.t + ctx.cfg.prepareTimeoutMs }
   if !(← addIndex ctx p (m.term + 1) (m.term + 1) n) then return false
   let name := intentName ctx.cr p (m.term + 1) n
   let c ← ctx.clientFor name
-  match ← createIntent c (Intent.prepare (refOf ctx p m n key b) ctx.token deadline) with
+  let fm : Option FenceMember := fence.map fun (fk, fb) =>
+    { key := fk, binding := { podUid := fb.uid, bootId := fb.boot, copyId := fb.copy } }
+  match ← createIntent c (Intent.prepare (refOf ctx p m n key b) ctx.token deadline fm) with
   | .done _ => pure true
   | .settled _ => pure true
   | r => noteCas "creating the promotion intent" name c r; pure false
@@ -432,12 +441,41 @@ def doPrepare (ctx : Ctx) (p : Nat) (m : Members) (a : Attempt) (key : String) (
         | .refused _ _ => pure true
         | r => noteCas "recording the prepare" name c r; pure false
 
+/-- Prepare the attempt's FENCE member (a record member whose promise fences the old master): the same
+    steps as the candidate's, for the fence's own incarnation. The fence must be the incarnation the
+    intent names (pod UID, boot id, copy id). -/
+def doPrepareFence (ctx : Ctx) (p : Nat) (a : Attempt) (f : FenceMember) : IO Bool := do
+  match ← bindingNow ctx f.key p with
+  | none => pure false
+  | some (_, fb) =>
+    if fb.uid != f.binding.podUid || fb.boot != f.binding.bootId || fb.copy != f.binding.copyId then pure false
+    else
+      let sc := fenceWireOf a f
+      match (← ask ctx f.key (cmdPrepare p sc)).bind Status.parse with
+      | none => pure false
+      | some s =>
+        if s.state != "preparing" || !(replicaOf s sc).scopeOk then pure false
+        else
+          let name := attemptName ctx p a
+          let c ← ctx.clientFor name
+          if !(← fenceOk name c ctx.token a.intent) then pure false
+          else
+            let u : At := { clock := { node := f.key, boot := f.binding.bootId }, t := s.remainingMs }
+            match ← markFencePrepared c a.intent.ref ctx.token f.key f.binding u with
+            | .done _ => pure true
+            | .settled _ => pure true
+            | .refused _ _ => pure true
+            | r => noteCas "recording the fence's prepare" name c r; pure false
+
 /-- Cancel one attempt (the terminal CAS first, then the successor with the attempt's own scope).
     `true` when the store says cancelled. -/
 def doCancelAttempt (ctx : Ctx) (p : Nat) (a : Attempt) : IO Bool := do
   let name := attemptName ctx p a
   let c ← ctx.clientFor name
-  let sendCancel : IO Unit := discard <| ask ctx a.intent.successor (cmdCancel p (wireOfAttempt a))
+  let sendCancel : IO Unit := do
+    discard <| ask ctx a.intent.successor (cmdCancel p (wireOfAttempt a))
+    -- the fence (if any) resumes promising too
+    if let some f := a.intent.fenceMember then discard <| ask ctx f.key (cmdCancel p (fenceWireOf a f))
   if (← fenceOk name c ctx.token a.intent) then
     match ← cancelIntent c a.intent.ref (.leader ctx.token) (← nowAt ctx) with
     | .done _ => sendCancel; pure true
@@ -496,10 +534,37 @@ def ackedFor (ctx : Ctx) (p : Nat) (m : Members) : IO Bool := do
         | some b => pure (a == b && s.holds m && s.bind a == ab)
         | none => pure false
 
+/-- The attempt's FENCE as the gate reads it now: in the membership, its reading under the fence scope
+    (its pod UID must still be the intent's), and whether its floor already fences by the intent's term. -/
+def fenceViewOf (ctx : Ctx) (p : Nat) (m : Members) (a : Attempt) : IO (Option FenceView) := do
+  match a.intent.fenceMember with
+  | none => pure none
+  | some f =>
+    let member := m.successors.contains f.key
+    match ← bindingNow ctx f.key p with
+    | none => pure (some { member, rep := none, floorReached := false })
+    | some (st, b) =>
+      let r := replicaOf st (fenceWireOf a f)
+      pure (some { member, rep := some { r with scopeOk := r.scopeOk && b.uid == f.binding.podUid },
+                   floorReached := st.floorSet && st.floorTerm ≥ a.termNext })
+
+/-- The fence for a new attempt: the smallest record member (never the candidate) whose pod UID, boot id
+    and copy id are readable now (`chooseFence`). -/
+def pickFence (ctx : Ctx) (p : Nat) (m : Members) (key : String) : IO (Option (String × Bind)) := do
+  for k in sortedKeys m.successors do
+    if k != key then
+      match ← bindingNow ctx k p with
+      | some (_, b) => return some (k, b)
+      | none => pure ()
+  pure none
+
 /-- One promotion of `key` (a slave of partition `p`, pod `uid`): each call takes the next steps the
     stores and the successor allow (bounded). The attempt is bound to the incarnation read now (pod
-    UID, flared boot id, persistent copy id) and every message carries that scope. -/
-partial def gate (ctx : Ctx) (p : Nat) (key uid : String) (fuel : Nat) (ackedMemo : Option Bool := none) : IO GateResult := do
+    UID, flared boot id, persistent copy id) and every message carries that scope.
+    `route`: the typed eligibility of a candidate that is NOT a record member (`nonMemberRoute`): only
+    `soleLagging` lets it be promoted, fenced by a record member (see WriteAuthority). -/
+partial def gate (ctx : Ctx) (p : Nat) (key uid : String) (fuel : Nat) (ackedMemo : Option Bool := none)
+    (route : NonMemberRoute := .refuse) : IO GateResult := do
   if fuel == 0 then return .hold "the promotion intent is still being driven (next pass)"
   let c ← recClient ctx p
   match ← readRec c with
@@ -516,9 +581,11 @@ partial def gate (ctx : Ctx) (p : Nat) (key uid : String) (fuel : Nat) (ackedMem
         -- a pending attempt of ANOTHER incarnation of this candidate (restart, replaced copy) is dead:
         -- cancel it (terminal CAS), then go on with an attempt of the incarnation read now
         -- (also dead: a pending attempt of an earlier term or generation — it can never be committed
-        -- under the record in force; cancelled on its ORIGINAL resource and in its ORIGINAL scope)
+        -- under the record in force; cancelled on its ORIGINAL resource and in its ORIGINAL scope;
+        -- and a pending FENCED attempt whose candidate is no longer eligible for the fence route)
         let stale := as.filter fun a => a.intent.decision == .pending
-          && ((a.intent.successor == key && bindingOfIntent a.intent != b) || stalePending m a)
+          && ((a.intent.successor == key && bindingOfIntent a.intent != b) || stalePending m a
+              || (a.intent.successor == key && a.intent.fenceMember.isSome && route == .refuse))
         if let some x := stale.head? then
           discard <| doCancelAttempt ctx p x
           return .hold "an attempt of another incarnation, term or generation was cancelled; the next pass starts a fresh one"
@@ -544,19 +611,39 @@ partial def gate (ctx : Ctx) (p : Nat) (key uid : String) (fuel : Nat) (ackedMem
         let acked ← match ackedMemo with
           | some v => pure v
           | none => ackedFor ctx p m
-        match gateDecide (m.successors.contains key) acked (viewOf a now) rv id with
+        -- the FENCE path: an attempt that names a fence member is decided as one (even if the candidate
+        -- is a member by now: the old master's grant is fenced by that member, not by the candidate);
+        -- it is kept only while the route allows it or once it is committed (never undone)
+        let iv := viewOf a now
+        let fencedA := a.any fun x => x.intent.fenceMember.isSome
+        let fenceMode := fencedA && (route == .soleLagging || iv == .committed)
+        let member := m.successors.contains key
+        let routeEff := if fenceMode then NonMemberRoute.soleLagging else route
+        let fv ← match a with
+          | some x => if fenceMode then fenceViewOf ctx p m x else pure none
+          | none => pure none
+        let wantsChoice := !member && routeEff == .soleLagging && (a.isNone || iv == .cancelled)
+        let choice ← if wantsChoice then pickFence ctx p m key else pure none
+        match gateDecide (member && !fenceMode) acked iv rv id routeEff fv choice.isSome with
         | .proceed => return .proceed
         | .abort why => return .hold s!"abort: {why}"
         | .wait why => return .hold s!"wait: {why}"
         | .createIntent =>
-          if ← doCreate ctx p m as key b then gate ctx p key uid (fuel - 1) (some acked)
+          if let some (fk, _) := choice then
+            IO.eprintln s!"[flare-operator] write authority P{p}: {key} is not a member of the record; it is the sole same-history lagging copy, so the old master is to be fenced by record member {fk} (prepare both, wait the fence's promise out, commit for the candidate)"
+          if ← doCreate ctx p m as key b choice then gate ctx p key uid (fuel - 1) (some acked) route
           else return .hold "the intent could not be created"
         | .sendPrepare =>
           match a with
           | none => return .hold "no intent"
           | some x =>
-            if ← doPrepare ctx p m x key b then gate ctx p key uid (fuel - 1) (some acked)
-            else return .hold "the successor did not acknowledge the prepare"
+            if !(← doPrepare ctx p m x key b) then return .hold "the successor did not acknowledge the prepare"
+            else
+              let fenceOk ← match x.intent.fenceMember with
+                | some f => doPrepareFence ctx p x f
+                | none => pure true
+              if fenceOk then gate ctx p key uid (fuel - 1) (some acked) route
+              else return .hold "the fence did not acknowledge the prepare"
         | .cancelCas why =>
           match a with
           | none => return .hold "no intent"
@@ -564,7 +651,7 @@ partial def gate (ctx : Ctx) (p : Nat) (key uid : String) (fuel : Nat) (ackedMem
             if ← doCancelAttempt ctx p x then
               -- the prepare window passed without a commit: the attempt is dead and the successor is
               -- still reachable and eligible; start the fresh attempt in this same call (bounded by fuel)
-              if (viewOf a now) matches .pending true true then gate ctx p key uid (fuel - 1) (some acked)
+              if (viewOf a now) matches .pending true true then gate ctx p key uid (fuel - 1) (some acked) route
               else return .hold s!"cancelled: {why}"
             else return .hold s!"cancelled: {why} (the cancel CAS did not apply)"
         | .commitCas =>
@@ -573,25 +660,40 @@ partial def gate (ctx : Ctx) (p : Nat) (key uid : String) (fuel : Nat) (ackedMem
           | some x =>
             match ← doCommit ctx p m x with
             | .committed =>
-              discard <| ask ctx key (cmdCommit p (wireOfAttempt x))
-              gate ctx p key uid (fuel - 1) (some acked)
+              if let some f := x.intent.fenceMember then
+                IO.eprintln s!"[flare-operator] PROMOTION NOT LOSS-FREE (write authority): {key} is the sole same-history lagging copy; the old master is fenced by member {f.key} (prepared, promise expired). A write acknowledged only by the old master and not yet in this copy is lost; whether any exists is NOT measured. See RUNBOOK #failover-lag-hold"
+              else
+                discard <| ask ctx key (cmdCommit p (wireOfAttempt x))
+              gate ctx p key uid (fuel - 1) (some acked) route
             | .expired =>
               -- the window ran out between the decision and the CAS: this attempt is dead (terminal CAS
               -- refuses it); cancel it and go on with a fresh one in this call
-              if ← doCancelAttempt ctx p x then gate ctx p key uid (fuel - 1) (some acked)
+              if ← doCancelAttempt ctx p x then gate ctx p key uid (fuel - 1) (some acked) route
               else return .hold "the commit CAS was refused (the prepare window is over) and the cancel did not apply"
             | .notApplied why => return .hold s!"the commit CAS did not apply: {why}"
+        | .pushFloor =>
+          match a with
+          | none => return .hold "no intent"
+          | some x =>
+            match x.intent.fenceMember with
+            | none => return .hold "no fence"
+            | some f =>
+              -- the fence refuses a promise of any term below the new one from now on; only then is the
+              -- candidate told (and the fence read again on the next step)
+              discard <| ask ctx f.key (cmdFloorTerm p x.termNext)
+              gate ctx p key uid (fuel - 1) (some acked) route
         | .sendCommit =>
           match a with
           | none => return .hold "no intent"
           | some x =>
             discard <| ask ctx key (cmdCommit p (wireOfAttempt x))
-            gate ctx p key uid (fuel - 1) (some acked)
+            gate ctx p key uid (fuel - 1) (some acked) route
         | .sendCancel =>
           match a with
           | none => return .hold "no intent"
           | some x =>
             discard <| ask ctx key (cmdCancel p (wireOfAttempt x))
+            if let some f := x.intent.fenceMember then discard <| ask ctx f.key (cmdCancel p (fenceWireOf x f))
             return .hold "the cancel of the abandoned prepare was sent again; the next pass starts a new attempt"
 
 /-- One pass for one partition: decide the record, persist it, push it. `wanted` = the node keys the
@@ -650,23 +752,67 @@ def removeIndex (ctx : Ctx) (p : Nat) (gone : List (Nat × Nat)) (tries : Nat) :
       | _ => pure ()
     | _ => left := 0
 
+/-- The fence of a fenced attempt, read now: `(it still prepares exactly the attempt's fence scope, its
+    floor already fences by the attempt's term)`; `none` = unreadable. -/
+def fenceNow (ctx : Ctx) (p : Nat) (a : Attempt) (f : FenceMember) : IO (Option (Bool × Bool)) := do
+  match ← statusOf ctx f.key p with
+  | none => pure none
+  | some s =>
+    pure (some (s.state == "preparing" && (replicaOf s (fenceWireOf a f)).scopeOk, s.floorSet && s.floorTerm ≥ a.termNext))
+
+/-- One step of the release of the FENCE of a COMMITTED intent (driven from the persisted intent each pass,
+    so it survives an operator restart): once the record is at the new term, the fence's floor is
+    pushed and only then the fence is cancelled, so it resumes promising at the new term only. `true`:
+    the node no longer prepares that scope (nothing left to release). While the record has not moved
+    yet, the floor of the new term is pushed already (`fenceRelease` says keep: never a cancel). -/
+def releaseFence (ctx : Ctx) (p : Nat) (m : Members) (a : Attempt) (f : FenceMember) : IO Bool := do
+  match fenceRelease m.term a.termNext (← fenceNow ctx p a f) with
+  | .done => pure true
+  | .keep _ =>
+    -- not moved yet: keep the old master out (the floor of the new term), never release
+    if m.term < a.termNext then
+      if let some (true, false) ← fenceNow ctx p a f then discard <| ask ctx f.key (cmdFloorTerm p a.termNext)
+    pure false
+  | .pushFloor => discard <| ask ctx f.key (cmdFloorTerm p a.termNext); pure false
+  | .cancel =>
+    IO.eprintln s!"[flare-operator] write authority P{p}: the fence {f.key} of the committed promotion intent {a.n} (term {a.termNext}) is released: the record is at term {m.term} and its floor fences the old term; it promises only at the new term now"
+    discard <| ask ctx f.key (cmdCancel p (fenceWireOf a f))
+    pure false
+
 /-- Drop from the index (CAS) the intents that need no more watching: cancelled in the store AND the
-    node no longer prepares that scope (read now), or committed and PROVEN applied to the record
-    (`appliedCommit`). A cancelled intent whose node still prepares its scope gets the cancel again
-    (original scope) and stays. A stale leader's pass leaves the index alone. -/
+    node no longer prepares that scope (read now; the fence too), or committed and PROVEN applied to
+    the record (`appliedCommit`) with its fence released. A cancelled intent whose node (or fence) still
+    prepares its scope gets the cancel again (original scope) and stays. A committed fenced intent whose
+    record has not moved keeps its fence out (the floor of the new term). A stale leader's pass leaves
+    the index alone. -/
 def pruneIndex (ctx : Ctx) (p : Nat) (m : Members) (as : List Attempt) : IO Unit := do
   if staleLeader ctx as then return
   let mut gone : List (Nat × Nat) := []
   for a in as do
     match a.intent.decision with
-    | .committed => if appliedCommit m as a then gone := gone ++ [(a.termNext, a.n)]
+    | .committed =>
+      match a.intent.fenceMember with
+      | none => if appliedCommit m as a then gone := gone ++ [(a.termNext, a.n)]
+      | some f =>
+        if appliedCommit m as a then
+          if ← releaseFence ctx p m a f then gone := gone ++ [(a.termNext, a.n)]
+        else if a.termNext == m.term + 1 then discard <| releaseFence ctx p m a f
     | .cancelled =>
-      match ← statusOf ctx a.intent.successor p with
-      | none => pure ()
-      | some s =>
-        if s.state == "preparing" && (replicaOf s (wireOfAttempt a)).scopeOk then
-          discard <| ask ctx a.intent.successor (cmdCancel p (wireOfAttempt a))
-        else gone := gone ++ [(a.termNext, a.n)]
+      let candDone ← match ← statusOf ctx a.intent.successor p with
+        | none => pure false
+        | some s =>
+          if s.state == "preparing" && (replicaOf s (wireOfAttempt a)).scopeOk then
+            discard <| ask ctx a.intent.successor (cmdCancel p (wireOfAttempt a)); pure false
+          else pure true
+      let fenceDone ← match a.intent.fenceMember with
+        | none => pure true
+        | some f =>
+          match ← fenceNow ctx p a f with
+          | none => pure false
+          | some (holds, _) =>
+            if holds then discard <| ask ctx f.key (cmdCancel p (fenceWireOf a f)); pure false
+            else pure true
+      if candDone && fenceDone then gone := gone ++ [(a.termNext, a.n)]
     | .pending => pure ()
   if !gone.isEmpty then removeIndex ctx p gone 3
 
@@ -702,8 +848,13 @@ def ensurePartition (ctx : Ctx) (p : Nat) (v : View) (wanted : List String := []
         | none => pure none
         | some w =>
           if some w == old then pure (some w)
-          else if ← writeRec c (cur.map (·.2)) w then pure (some w)
-          else pure old
+          else if ← writeRec c (cur.map (·.2)) w then
+            IO.eprintln s!"[flare-operator] write authority P{p}: membership record written: term {w.term} gen {w.gen} master {w.master} successors {w.successors} (was {old.map fun o => s!"term {o.term} gen {o.gen} master {o.master} successors {o.successors}"})"
+            pure (some w)
+          else
+            -- never silent: the record in force stays, the next pass decides again
+            IO.eprintln s!"[flare-operator] write authority P{p}: the membership record could NOT be written (conflict or unconfirmed reply); it stays at {old.map fun o => s!"term {o.term} gen {o.gen} successors {o.successors}"}, wanted term {w.term} gen {w.gen} successors {w.successors}; the next pass decides again"
+            pure old
       match m with
       | none => pure none
       | some rec =>

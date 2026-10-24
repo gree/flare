@@ -8,6 +8,8 @@
   explicit configuration (env), and a missing one keeps the whole feature OFF.
 -/
 
+import FlareOperator.StateMachine.PromotionEvidence
+
 namespace FlareOperator.WriteAuthority
 
 /-! ## Flag and numbers -/
@@ -318,7 +320,8 @@ def cmdMembers (p : Nat) (m : Members) (c : Config) : String :=
   if m.successors.isEmpty then s!"authority solo {p} {m.term} {m.gen}"
   else s!"authority members {p} {m.term} {m.gen} {c.ttlMs} {c.renewMs} {String.intercalate " " m.successors}"
 
-def cmdFloor (p : Nat) (m : Members) : String := s!"authority floor {p} {m.term} 0"
+def cmdFloorTerm (p term : Nat) : String := s!"authority floor {p} {term} 0"
+def cmdFloor (p : Nat) (m : Members) : String := cmdFloorTerm p m.term
 /-- The complete scope of an intent on the wire: the id (unique across terms), the next term, the
     membership generation and the receiver's flared boot id / copy id. flared matches ALL of it. -/
 structure WireScope where
@@ -367,14 +370,141 @@ inductive Action where
   | sendCancel
   | commitCas
   | sendCommit
+  /-- (fence path) the committed intent's FENCE gets the floor of the next term before the candidate is
+      told: from then on a promise at the old term is refused -/
+  | pushFloor
   | proceed
   deriving Repr, BEq
 
+
+/-! ## Fence-by-member promotion of the sole same-history lagging copy
+
+Design: docs/design-node-operations-2026-10-19.md §12 / §13 (the one liveness gap of the member-only
+gate). The old master's grant needs PROMISED from EVERY successor of the record it holds. A record member
+that is PREPARING (it left FOLLOWING and stays out of it until the operator's cancel) and whose last
+promise has expired (`remaining_ms = 0`: promise end + margin, on its own CLOCK_BOOTTIME) therefore
+proves that the old master holds no grant — the argument the member path already uses for the
+candidate itself. When the candidate is NOT a member (a copy that became eligible after the record was
+written), that member is the FENCE: it is prepared and waited for, and the intent is committed for the
+candidate. The membership check is not relaxed: it applies to the node whose promise fences. -/
+
+/-- How a candidate that is not a record member may still be promoted. The only way to get
+    `soleLagging` is `nonMemberRoute`; the gate never looks at a string. -/
+inductive NonMemberRoute where
+  | refuse
+  | soleLagging
+  deriving Repr, BEq
+
+/-- `soleLagging` only when ALL of: the candidate's evidence is exactly "lagging (same history as the last
+    master)" (never forbidden / rejoining / unknown / legacy / empty), the evidence is from a pass that read
+    every candidate (`readThisPass`), and NO record member has a promotable class (a member that can be
+    promoted is promoted through the member path; the non-member is then never chosen).
+    `memberClasses`: the class read this pass of every record member that has one. -/
+def nonMemberRoute (candidate : Option PromotionEvidence.Class) (readThisPass : Bool)
+    (memberClasses : List PromotionEvidence.Class) : NonMemberRoute :=
+  match candidate with
+  | some .lagging =>
+    if readThisPass && memberClasses.all (fun c => !c.promotable) then .soleLagging else .refuse
+  | _ => .refuse
+
+/-- Which record member fences: the smallest key (deterministic) among the members whose identity is
+    readable now; never the candidate. -/
+def chooseFence (members readable : List String) (candidate : String) : Option String :=
+  (sortedKeys (members.filter fun k => k != candidate && readable.contains k)).head?
+
+/-- The fence member as the gate sees it. -/
+structure FenceView where
+  /-- the fence is in the membership of the scope (`members.check scope fence`) -/
+  member : Bool
+  /-- its reading under the attempt's FENCE scope (`none`: unreadable) -/
+  rep : Option Replica
+  /-- its floor already fences by the intent's next term (floor_term >= term_next) -/
+  floorReached : Bool
+  deriving Repr, BEq
+
+def Replica.holds (r : Replica) (id : Nat) : Bool :=
+  r.state == "preparing" && r.intent == id && r.scopeOk
+
+/-- The fence path of one decision (the candidate is not a record member). Unknown never commits and
+    never sends the commit to the candidate. -/
+def fenceDecide (iv : IntentView) (rv : Option Replica) (id : Nat) (fv : Option FenceView)
+    (fenceAvailable : Bool) : Action :=
+  match iv with
+  | .none =>
+    if fenceAvailable then .createIntent
+    else .wait "no record member's identity is readable to be the fence of the old master"
+  | .cancelled =>
+    let candHeld := match rv with | some r => r.holds id | none => false
+    match fv with
+    | none => .wait "the cancelled attempt's fence is not readable"
+    | some f =>
+      match f.rep with
+      | none => .wait "the cancelled attempt's fence is unreadable (its cancel is not confirmed)"
+      | some fr => if candHeld || fr.holds id then .sendCancel else .createIntent
+  | .pending false _ => .sendPrepare
+  | .pending true reached =>
+    if reached then .cancelCas "the prepare window passed without a commit"
+    else match rv, fv with
+    | none, _ => .wait "the candidate is unreadable"
+    | _, none => .wait "the fence is unreadable"
+    | some r, some f =>
+      match f.rep with
+      | none => .wait "the fence is unreadable"
+      | some fr =>
+        if !r.holds id then .cancelCas "the candidate does not hold this prepare (id, term, generation and incarnation)"
+        else if !f.member then .cancelCas "the fence is not in the membership"
+        else if !fr.holds id then .cancelCas "the fence does not hold this prepare (id, term, generation and incarnation)"
+        else if fr.remainingMs > 0 then .wait s!"the fence's promise to the old master runs {fr.remainingMs} ms more"
+        else .commitCas
+  | .committed =>
+    match rv with
+    | none => .wait "the candidate is unreadable"
+    | some r =>
+      if r.intent != id || !r.scopeOk then .abort "a committed intent the candidate does not know (manual)"
+      else if r.promotable then .proceed
+      else if r.state == "preparing" then
+        match fv with
+        | none => .wait "the fence is unreadable (the commit is not sent to the candidate)"
+        | some f =>
+          match f.rep with
+          | none => .wait "the fence is unreadable (the commit is not sent to the candidate)"
+          | some fr =>
+            if !fr.holds id then .abort "the fence no longer prepares this intent after the commit: it may promise at the old term again (manual)"
+            else if !f.floorReached then .pushFloor
+            else .sendCommit
+      else .wait s!"waiting for {r.remainingMs} ms"
+
+/-- What to do with the fence of a COMMITTED fenced intent once it is no longer needed (restart-safe:
+    decided each pass from the persisted intent and the fence's reading). `recTerm`: the term of the
+    record in force; `termNext`: the intent's. The fence is released (cancel) only when the record has
+    moved to the new term AND the fence's own floor fences by it: from then on it promises only at the
+    new term. -/
+inductive FenceRelease where
+  | keep (why : String)
+  | pushFloor
+  | cancel
+  /-- the node no longer prepares that scope: nothing to release -/
+  | done
+  deriving Repr, BEq
+
+def fenceRelease (recTerm termNext : Nat) (fence : Option (Bool × Bool)) : FenceRelease :=
+  -- fence: none = unreadable; some (holdsScope, floorReached)
+  match fence with
+  | none => .keep "the fence is unreadable"
+  | some (holds, floorReached) =>
+    if !holds then .done
+    else if recTerm < termNext then .keep "the record has not moved to the new term yet"
+    else if floorReached then .cancel
+    else .pushFloor
+
 /-- One decision. Unknown (the replica unreadable) never cancels and never
     commits. A committed intent is not undone. -/
-def gateDecide (isSuccessor acked : Bool) (iv : IntentView) (rv : Option Replica) (id : Nat) : Action :=
-  if !isSuccessor then .abort "the candidate is not in the membership"
+def gateDecide (isSuccessor acked : Bool) (iv : IntentView) (rv : Option Replica) (id : Nat)
+    (route : NonMemberRoute := .refuse) (fv : Option FenceView := none) (fenceAvailable : Bool := false) : Action :=
+  -- a COMMITTED fenced intent is carried through whatever the route is now (a committed intent is not undone)
+  if !isSuccessor && !(iv == .committed && fv.isSome) && route == .refuse then .abort "the candidate is not in the membership"
   else if !acked then .wait "the master has not confirmed this membership"
+  else if !isSuccessor then fenceDecide iv rv id fv fenceAvailable
   else match iv with
   | .none => .createIntent
   | .cancelled =>

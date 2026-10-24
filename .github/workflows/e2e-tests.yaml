@@ -110,6 +110,7 @@ jobs:
             {"group":"node-ops-wa-faults","suites":"node-ops-stop-wa"},
             {"group":"node-ops-partition-wa","suites":"node-ops-partition-wa"},
             {"group":"stats-cost","suites":"stats-cost"},
+            {"group":"lease-failclosed","suites":"operator-lease-failclosed"},
             {"group":"continuous-replication","suites":"copy-retention-measure,continuous-replication,continuous-replication-scale,continuous-replication-sustained,continuous-replication-outage,continuous-replication-outage-tmpfs,visibility-bench"}
           ]'
           all=$(echo "$default" | jq -r '[.[].suites] | join(",")')

@@ -48,7 +48,8 @@ import FlareOperator.StateMachine.RebuildConcurrency
 import FlareOperator.StateMachine.AuthoritativeHistory
 import FlareOperator.StateMachine.CopyDiscardApproval
 import FlareOperator.StateMachine.PromotionEvidence
-import FlareOperator.StateMachine.LeaseRenewal
+import FlareOperator.StateMachine.LeaseGuard
+import FlareOperator.LeaseGuardSim
 
 open FlareOperator.K8s
 open FlareOperator.ReplicaRepair
@@ -98,15 +99,11 @@ def l1 : Ledger := (observe empty masterKey [(slaveKey, 7)]).1
 def drops (l : Ledger) (m : String) (obs : List (String × Nat)) : List (String × Nat) :=
   (observe l m obs).2.1
 
-open FlareOperator.LeaseRenewal in
-def checkLeaseRenewal (ctx : Ctx) : IO Unit := do
-  check ctx "lease renewer: interval is a third of the lease (15 s -> 5000 ms)" (renewIntervalMs 15 == 5000)
-  check ctx "lease renewer: renewed -> continue" (decide "p0" true .unreadable == .continue_)
-  check ctx "lease renewer: renewed -> continue (even if the re-read names another)" (decide "p0" true (.holder "p1") == .continue_)
-  check ctx "lease renewer: refused, another holder -> LOST" (decide "p0" false (.holder "p1") == .lost)
-  check ctx "lease renewer: refused, empty holder -> LOST" (decide "p0" false (.holder "") == .lost)
-  check ctx "lease renewer: refused, still this pod (transient API error) -> continue" (decide "p0" false (.holder "p0") == .continue_)
-  check ctx "lease renewer: refused, lease unreadable -> continue (not a loss)" (decide "p0" false .unreadable == .continue_)
+/-- The lease guard: pure pieces and the model checks on a simulated API and clock
+    (LeaseGuardSim). -/
+def checkLeaseGuard (ctx : Ctx) : IO Unit := do
+  for (name, ok) in ← FlareOperator.LeaseGuardSim.results do
+    checkB ctx name ok
 
 def checkObserve (ctx : Ctx) : IO Unit := do
   check ctx "first observation of a non-zero count is a POSSIBLY UNREPAIRED request (no longer a silent baseline)"
@@ -3474,7 +3471,7 @@ def run : IO UInt32 := do
   checkPromotionIntent ctx
   checkPromotionIntentStore ctx
   checkWriteAuthority ctx
-  checkLeaseRenewal ctx
+  checkLeaseGuard ctx
   let failures ← ctx.failures.get
   let n ← ctx.count.get
   IO.println s!"1..{n}"

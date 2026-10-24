@@ -41,7 +41,7 @@ import FlareOperator.StateMachine.SourceEligibility
 import FlareOperator.StateMachine.RebuildConcurrency
 import FlareOperator.StateMachine.CopyDiscardApproval
 import FlareOperator.StateMachine.PromotionEvidence
-import FlareOperator.StateMachine.LeaseRenewal
+import FlareOperator.StateMachine.LeaseGuard
 import FlareOperator.StateMachine.AuthoritativeHistory
 import FlareOperator.EvictionGuard
 import FlareOperator.WriteAuthorityDriver
@@ -663,6 +663,26 @@ initialize historyCrRef : IO.Ref String ← IO.mkRef ""
 /-- (lease name, this pod's identity): every history write re-checks the lease. -/
 initialize historyLeaseRef : IO.Ref (String × String) ← IO.mkRef ("", "")
 
+/-- The leader's local, fail-closed lease deadline (StateMachine/LeaseGuard).
+    Set in `main` before the first acquire. -/
+initialize leaseGuardRef : IO.Ref (Option LeaseGuard.Guard) ← IO.mkRef none
+
+/-- Held per the LOCAL monotonic deadline (not lost, not fired, now < heldUntil).
+    False when there is no guard: fail closed. -/
+private def localLeaseHeld : IO Bool := do
+  match ← leaseGuardRef.get with
+  | none => return false
+  | some g => g.holds (← IO.monoMsNow)
+
+/-- The authority fences' lease test: the API says this pod holds an unexpired
+    lease AND the local deadline has not passed. -/
+private def leaseValidNow (l : LeaseInfo) (identity : String) : IO Bool := do
+  return l.holderIdentity == identity && !l.expired && (← localLeaseHeld)
+
+/-- A positively confirmed write sent at `sendMs` (monotonic) extends the deadline. -/
+private def confirmLeaseHold (sendMs : Nat) : IO Unit := do
+  if let some g ← leaseGuardRef.get then g.confirm sendMs
+
 private def historyCm (crName : String) : String := s!"{crName}-history"
 
 private def utcNowIso : IO String := do
@@ -765,7 +785,7 @@ private def persistHistory (crName ns : String) (st : AuthoritativeHistory.Store
   let (leaseName, identity) ← historyLeaseRef.get
   let leader ← if leaseName.isEmpty then pure false else
     match ← getLease leaseName ns with
-    | .ok lease => pure (lease.holderIdentity == identity && !lease.expired)
+    | .ok lease => leaseValidNow lease identity
     | .error _ => pure false
   if !leader then
     IO.eprintln s!"[flare-operator] CRITICAL: the authoritative history is NOT written: this pod does not hold a valid lease"
@@ -2484,7 +2504,7 @@ private def authorityPass (crName ns leaseName identity : String) (st : FlareClu
   | none => pure ()
   | some cfg =>
     let holder ← match ← getLease leaseName ns with
-      | .ok l => pure (l.holderIdentity == identity && !l.expired)
+      | .ok l => leaseValidNow l identity
       | .error _ => pure false
     if !holder then return
     let parts := (st.nodeMap.map (·.2.partition)).filter (· ≥ 0) |>.eraseDups
@@ -2923,7 +2943,7 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
     preSendBarrier finalVersion
     let stillLeader ← do
       match ← getLease leaseName ns with
-      | .ok lease => pure (lease.holderIdentity == identity && !lease.expired)
+      | .ok lease => leaseValidNow lease identity
       | .error e =>
         IO.eprintln s!"[flare-operator] lease fence: getLease failed ({e}); skipping broadcast this tick"
         pure false
@@ -3471,7 +3491,7 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
                   IO.eprintln s!"[flare-operator] EMPTY-MASTER SELF-HEAL: successor {sKey} changed during the revalidation reads (incarnation {sIdBefore} -> {sIdAfter}); not deleting"
                 let holdsLease ← do
                   match ← getLease leaseName ns with
-                  | .ok lease => pure (lease.holderIdentity == identity && !lease.expired)
+                  | .ok lease => leaseValidNow lease identity
                   | .error _ => pure false
                 match StatsObservation.deleteGate verdictNow successorOk survivorFollowOk (uidStable && succStable) holdsLease, uidBefore with
                 | .ok (), some uid =>
@@ -3668,19 +3688,22 @@ private def tryAcquireOrRenew (leaseName ns identity : String) : IO Bool := do
   match ← getLease leaseName ns with
   | .error _ =>
     -- Lease not found or transient error. Try to create.
+    let send ← IO.monoMsNow
     match ← createLease leaseName ns identity leaseDurationSeconds with
-    | .ok () => return true
+    | .ok () => confirmLeaseHold send; return true
     | .error _ => return false
   | .ok lease =>
     if lease.holderIdentity == identity then
-      -- We hold it, renew
+      -- We hold it, renew (the send point is taken before the request)
+      let send ← IO.monoMsNow
       match ← renewLease leaseName ns identity with
-      | .ok () => return true
+      | .ok () => confirmLeaseHold send; return true
       | .error _ => return false
     else if lease.expired then
       -- Expired, try to take over
+      let send ← IO.monoMsNow
       match ← acquireLease leaseName ns identity lease.holderIdentity lease.resourceVersion leaseDurationSeconds (lease.transitions + 1) with
-      | .ok () => return true
+      | .ok () => confirmLeaseHold send; return true
       | .error _ => return false
     else
       return false  -- another pod holds a valid lease
@@ -3702,48 +3725,69 @@ private def setRoleLabel (identity ns role : String) : IO Bool := do
     IO.eprintln s!"[flare-operator] WARNING: failed to label pod {identity} role={role}: {e}"
     return false
 
-/-- The LOST LEASE exit, shared by the reconcile loop and the lease renewer:
-    health not-leader, best-effort standby label, flush, END THE PROCESS (see
-    the long comment in the loop on why `throw` is not enough). -/
+/-- The LOST LEASE exit / the lease guard's fail-closed step-down, shared by
+    the reconcile loop, the watchdog and the renewer: stop serving index
+    traffic FIRST (the TCP server answers nothing from here on), health
+    not-leader, best-effort standby label (bounded: it must not delay the
+    exit), flush, END THE PROCESS (see the long comment in the loop on why
+    `throw` is not enough). Runs once per cause; the process is gone within
+    about a second. -/
 private def exitLostLease (healthStatus : HealthStatus) (identity ns : String) : IO Unit := do
+  Server.indexServingRef.set false
   healthStatus.setLeader false  -- Update health status before exit
   -- Best-effort step-down: stop attracting index traffic before the
   -- replacement leader labels itself. If the API is unreachable this
   -- fails too — the pod exits and the boot-time reset covers it.
-  let _ ← setRoleLabel identity ns "standby"
+  let t ← IO.asTask (prio := .dedicated) (do let _ ← setRoleLabel identity ns "standby"; pure ())
+  let mut waited := 0
+  while waited < 1000 && !(← IO.hasFinished t) do
+    IO.sleep 50
+    waited := waited + 50
   (← IO.getStderr).flush
   IO.Process.exit 1
 
-/-- Background renewer while leader: renews every leaseDuration/3 so a long
-    reconcile pass cannot let the lease expire under the fences. Same CAS as
-    the loop (holder test). A refused renew is judged by LeaseRenewal.decide
-    after a re-read: another holder => the LOST LEASE exit; an API error is
-    not a loss (the next tick retries). -/
-private def startLeaseRenewer (healthStatus : HealthStatus) (leaseName ns identity : String) : IO Unit := do
-  let ms := FlareOperator.LeaseRenewal.renewIntervalMs leaseDurationSeconds
-  IO.eprintln s!"[flare-operator] lease renewer started: renewing '{leaseName}' every {ms} ms (lease {leaseDurationSeconds} s) while leader"
-  let _ ← IO.asTask (prio := .dedicated) do
-    while true do
-      IO.sleep ms.toUInt32
-      let renewed ← try
-          match ← renewLease leaseName ns identity with
-          | .ok () => pure (none : Option String)
-          | .error e => pure (some e)
-        catch e => pure (some s!"{e}")
-      match renewed with
-      | none => pure ()
-      | some err =>
-        let reread ← try
-            match ← getLease leaseName ns with
-            | .ok l => pure (FlareOperator.LeaseRenewal.LeaseRead.holder l.holderIdentity)
-            | .error _ => pure FlareOperator.LeaseRenewal.LeaseRead.unreadable
-          catch _ => pure FlareOperator.LeaseRenewal.LeaseRead.unreadable
-        match FlareOperator.LeaseRenewal.decide identity false reread with
-        | .lost =>
-          IO.eprintln s!"[flare-operator] lease renewer: renew refused ({err}) and the lease is held by another pod -- LOST LEASE, exiting"
-          exitLostLease healthStatus identity ns
-        | .continue_ =>
-          IO.eprintln s!"[flare-operator] lease renewer: renew refused ({err}); the lease still names this pod or cannot be read — retrying in {ms} ms (not a loss)"
+/-- The lease guard's API: bounded kubectl calls, the monotonic clock, a
+    microsecond renewTime per attempt. -/
+private def realLeaseApi (leaseName ns identity : String) : LeaseGuard.Api where
+  now := IO.monoMsNow
+  stamp := leaseStamp
+  renew := fun stamp bound => do
+    let r ← try renewLeaseStamped (some bound) leaseName ns identity stamp
+      catch e => pure (.error s!"{e}")
+    match r with
+    | .ok () => pure .applied
+    | .error e => pure (.failed e)
+  read := fun bound => do
+    let r ← try getLeaseWith (some bound) leaseName ns
+      catch e => pure (.error s!"{e}")
+    match r with
+    | .ok l => pure (.lease l.holderIdentity l.renewTime)
+    | .error _ => pure .unreadable
+  sleep := fun ms => IO.sleep ms.toUInt32
+
+/-- Margin below the lease duration that heldUntil keeps (3 s of 15 s): see
+    StateMachine/LeaseGuard for the safety argument. -/
+private def leaseMarginMs : Nat := 3000
+
+private def newLeaseGuard (healthStatus : HealthStatus) (identity ns : String) : IO LeaseGuard.Guard :=
+  LeaseGuard.Guard.new
+    { identity, leaseMs := leaseDurationSeconds * 1000, marginMs := leaseMarginMs }
+    (fun why => do
+      -- refuse index traffic BEFORE anything else (and before the log line the
+      -- E2E timeline reads as "no request served after this")
+      Server.indexServingRef.set false
+      IO.eprintln s!"[flare-operator] LEASE FAIL-CLOSED: {why} -- LOST LEASE, index serving stopped, leader=false, exiting"
+      exitLostLease healthStatus identity ns)
+
+/-- Background tasks while leader: (1) the renewer — a bounded renew every
+    leaseDuration/3 from each attempt's START, a bounded read-back after an
+    ambiguous result; (2) the watchdog — independent of every API call, checks
+    the monotonic clock every 500 ms and fails closed at the local deadline. -/
+private def startLeaseGuard (g : LeaseGuard.Guard) (leaseName ns identity : String) : IO Unit := do
+  let api := realLeaseApi leaseName ns identity
+  IO.eprintln s!"[flare-operator] lease guard started: renew every {g.cfg.cadenceMs} ms (calls bounded to {g.cfg.capMs} ms), fail-closed deadline = send + {g.cfg.leaseMs - g.cfg.marginMs} ms, watchdog every {g.cfg.watchdogMs} ms"
+  let _ ← IO.asTask (prio := .dedicated) (LeaseGuard.watchdogLoop api g)
+  let _ ← IO.asTask (prio := .dedicated) (LeaseGuard.renewerLoop api g)
 
 /-- Main entry point. Two-phase leader election:
     Phase 1 (follower): Try to acquire the lease, completely passive.
@@ -3805,6 +3849,9 @@ def main (args : List String) : IO Unit := do
   startHealthServerBackground healthStatus { port := healthPort }
   IO.eprintln s!"[flare-operator] health check server started on port {healthPort} (leader=false)"
 
+  let guard ← newLeaseGuard healthStatus identity ns
+  leaseGuardRef.set (some guard)
+
   -- Pod labels survive container restarts: a crashed ex-leader would keep
   -- routing index traffic to itself while it is back in the follower loop.
   -- Reset to standby before ever trying for the lease.
@@ -3829,8 +3876,8 @@ def main (args : List String) : IO Unit := do
   healthStatus.setLeader true  -- We just acquired the lease
   IO.eprintln s!"[flare-operator] health status: leader=true"
 
-  -- Keep the lease fresh during long passes (the fences refuse an expired one)
-  startLeaseRenewer healthStatus leaseName ns identity
+  -- Renewer + fail-closed watchdog (the fences also require the local deadline)
+  startLeaseGuard guard leaseName ns identity
 
   -- Claim the index traffic: the Service selects role=leader. Loud on
   -- failure (a leader without the label serves nobody); the reconcile loop
@@ -4043,7 +4090,7 @@ def main (args : List String) : IO Unit := do
       let (leaseName, identity) ← historyLeaseRef.get
       if leaseName.isEmpty then return false
       match ← getLease leaseName ns with
-      | .ok lease => return lease.holderIdentity == identity && !lease.expired && lease.transitions == transitions
+      | .ok lease => return (← leaseValidNow lease identity) && lease.transitions == transitions
       | .error _ => return false,
     lock := disruptionLock }
   let webhookPort : UInt16 := (((← IO.getEnv "FLARE_WEBHOOK_PORT").bind (·.toNat?)).getD 9444).toUInt16
@@ -4158,6 +4205,14 @@ def main (args : List String) : IO Unit := do
       EvictionGuard.prepareStep guardEnv
     catch e =>
       IO.eprintln s!"[flare-operator] planned eviction step error: {e}"
+    -- TEST SEAM (FLARE_TEST_RECONCILE_PASS_DELAY_FILE): while the file exists, every pass
+    -- is stretched by the number of seconds it holds (a 15-18 s pass: the lease would lapse
+    -- under the old per-iteration renewal). Unset in production: one getEnv per pass.
+    if let some f ← IO.getEnv "FLARE_TEST_RECONCILE_PASS_DELAY_FILE" then
+      if (← System.FilePath.pathExists f) then
+        let secs := ((← IO.FS.readFile f).trim.toNat?).getD 16
+        IO.eprintln s!"[flare-operator] TEST SEAM: reconcile pass stretched by {secs} s (FLARE_TEST_RECONCILE_PASS_DELAY_FILE)"
+        IO.sleep (secs * 1000).toUInt32
     let endTime ← IO.monoMsNow
     let durationMs := endTime - startTime
     let durationSeconds := durationMs.toFloat / 1000.0

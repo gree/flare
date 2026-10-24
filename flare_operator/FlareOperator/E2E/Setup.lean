@@ -35,6 +35,9 @@ structure ClusterConfig where
   /-- Extra environment for the per-suite operator, as (name, value). Used
       by suites that need a test seam the production default leaves off. -/
   operatorEnv : List (String × String) := []
+  /-- Operator replicas (1 = a single leader; 2 = a leader and a standby, the index
+      Service then selects the `role=leader` pod like the chart's). -/
+  operatorReplicas : Nat := 1
   /-- Extra environment for every flared container (test seams such as
       FLARE_TEST_DISABLE_SNAPSHOT_BOOTSTRAP), as (name, value). -/
   flaredEnv : List (String × String) := []
@@ -311,7 +314,7 @@ metadata:
   labels:
     app: {name}
 spec:
-  replicas: 1
+  replicas: {cfg.operatorReplicas}
   selector:
     matchLabels:
       app: {name}
@@ -356,7 +359,7 @@ metadata:
   namespace: {ns}
 spec:
   selector:
-    app: {name}
+    app: {name}{if cfg.operatorReplicas > 1 then "\n    flare.gree.net/role: leader" else ""}
   ports:
     - port: {cfg.operatorPort}
       targetPort: flare-index

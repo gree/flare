@@ -34,6 +34,11 @@ open Std.Net (SocketAddress SocketAddressV4 IPv4Addr)
 -- Server State
 -- ===========================================================================
 
+/-- Whether this process may serve index traffic. The lease guard's fail-closed
+    path turns it off the instant the local lease deadline passes (before the
+    process exits): no request is read, parsed or answered after that. -/
+initialize indexServingRef : IO.Ref Bool ← IO.mkRef true
+
 /-- Registration gate (docs/design-authoritative-history.md): `some why` while a
     FIRST BUILD's history record is not written yet — `node add` is then
     answered with an error (no role, no map handed out) and flared retries.
@@ -140,6 +145,10 @@ def handleConnection (sock : Socket) (state : ServerState) : IO Unit := do
     | none =>
       running := false
     | some line =>
+     if !(← indexServingRef.get) then
+      -- fail-closed: the local lease deadline passed; answer nothing
+      running := false
+     else
       -- Parse: pure (String → FlareEvent)
       IO.eprintln s!"[DEBUG] Received command: {line.take 100}"
       let event := parseFlareCommand line
@@ -248,7 +257,8 @@ def handleConnection (sock : Socket) (state : ServerState) : IO Unit := do
           let preview := payload.take 500 |>.replace "\r\n" " | "
           IO.eprintln s!"[DEBUG] Sending response: {preview}"
         | _ => pure ()
-        sendResponse sock payload
+        -- fail-closed: not answered once the local lease deadline passed
+        if (← indexServingRef.get) then sendResponse sock payload else running := false
 
 -- ===========================================================================
 -- Server Entry Point
@@ -274,7 +284,8 @@ def startServer (port : UInt16) (state : ServerState) : IO Unit := do
         IO.eprintln s!"[flare-operator] accept error: {e}"
         acceptLoop fuel
       | .ok clientSocket =>
-        -- Spawn handler as async task
+        -- Spawn handler as async task (handleConnection answers nothing while
+        -- indexServingRef is off: the fail-closed lease deadline)
         let _ ← IO.asTask (prio := .default) do
           try
             handleConnection clientSocket state

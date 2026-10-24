@@ -1403,6 +1403,39 @@ docs/review-cross-cluster-2026-10-11.md):
   and aborts on a populated destination — §7.4). Wiping is destructive,
   needs an explicit approval, and is NOT exercised end to end.
 
+## The leader steps down by itself when its lease cannot be renewed {#lease-failclosed}
+
+The operator keeps a LOCAL lease deadline on the monotonic clock
+(`StateMachine/LeaseGuard`): `heldUntil` = the SEND point of the last positively
+confirmed hold + 15 s lease − 3 s margin. Confirmed = a renew/acquire write that
+returned success, or — after a timeout / lost response — a read-back that shows
+this pod as holder AND the exact `renewTime` that attempt wrote. An unreadable
+lease, this pod with an older `renewTime`, or an expired lease naming this pod
+extend nothing. A background renewer attempts every 5 s (each API call bounded to
+min(4 s, time left)); a watchdog independent of the API checks the clock every
+500 ms. When the deadline passes (or another holder is seen) the leader at once:
+stops answering index requests, reports `leader=false`, labels itself `standby`
+(best effort, ≤ 1 s) and exits (`LEASE FAIL-CLOSED: ... LOST LEASE`). The
+authority fences (history write, authority pass, broadcast, eviction commits)
+also require the local deadline.
+
+- Log: `LEASE FAIL-CLOSED: <why>`; the Deployment restarts the pod, which
+  returns as a standby. One such line with an API outage / network cut is the
+  design working; repeated lines without an outage: check API latency
+  (`lease guard started` / renewer attempts, `kubectl --request-timeout` errors)
+  and clock behaviour on the node.
+- Safety argument: a new leader can take the lease only after it LOOKS expired
+  on the API server (`renewTime + 15 s`, takeover CAS by resourceVersion). The
+  `renewTime` this pod wrote is taken after its send point, so server expiry ≥
+  send + 15 s, while this pod stops serving at send + 12 s (+ ≤ 0.5 s watchdog,
+  + ≤ 1 s step-down): before any new leader can hold. Assumptions: bounded
+  clock-RATE drift (the 3 s margin covers about 25 %) and bounded wall-clock
+  offset between the pods' clocks for the expiry judgement; our own deadline
+  uses the monotonic clock only.
+- E2E: `operator-lease-failclosed` (control with 16 s passes; stalled lease API
+  of the leader, timestamps). Test seams (never set in production):
+  `FLARE_TEST_LEASE_API_STALL_FILE`, `FLARE_TEST_RECONCILE_PASS_DELAY_FILE`.
+
 ## Known limits (do not be surprised by)
 
 - Selective network partition (pod alive, TCP to operator blocked) is

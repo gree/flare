@@ -602,11 +602,39 @@ structure LeaseInfo where
   /-- spec.leaseTransitions: the leadership GENERATION. Incremented by
       every takeover; the fencing token (see Main's version composition). -/
   transitions : Nat := 0
+  /-- spec.renewTime as stored (the lease guard's read-back compares it with
+      the exact value one renew attempt wrote). -/
+  renewTime : String := ""
   deriving Repr, BEq
 
+/-- TEST SEAM (FLARE_TEST_LEASE_API_STALL_FILE): while the file exists, every
+    lease API call of THIS pod hangs until its bound (`boundMs`) and then fails,
+    as a cut or stalled API path would. Unset in production: one getEnv per call. -/
+def leaseApiStalled (boundMs : Nat) : IO Bool := do
+  match ← IO.getEnv "FLARE_TEST_LEASE_API_STALL_FILE" with
+  | none => return false
+  | some f =>
+    if (← System.FilePath.pathExists f) then
+      IO.sleep boundMs.toUInt32
+      return true
+    else return false
+
+/-- A renewTime value that is unique per attempt: microsecond resolution (the
+    lease guard's read-back identifies an attempt by it). -/
+def leaseStamp : IO String := do
+  let r ← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%S.%6NZ"] }
+  return r.stdout.trim
+
 /-- Get lease info including expiry check.
-    Uses shell date arithmetic to determine if the lease has expired. -/
-def getLease (leaseName ns : String) : IO (Except String LeaseInfo) := do
+    Uses shell date arithmetic to determine if the lease has expired.
+    `boundMs`: none = the default 30 s wall; some b = bounded to b ms (the lease
+    renewer: --request-timeout and the process wall). -/
+def getLeaseWith (boundMs : Option Nat) (leaseName ns : String) : IO (Except String LeaseInfo) := do
+  if ← leaseApiStalled (boundMs.getD 30000) then
+    return .error "getLease failed: lease API stalled (FLARE_TEST_LEASE_API_STALL_FILE)"
+  let (killAfter, wall, req) := match boundMs with
+    | none => ("5", "30", "")
+    | some b => ("1", Kubectl.secondsArg b, s!" --request-timeout={b}ms")
   try
     -- ONE kubectl GET for every field (holder, duration, renewTime,
     -- resourceVersion): the previous three separate reads were not a
@@ -615,26 +643,31 @@ def getLease (leaseName ns : String) : IO (Except String LeaseInfo) := do
     -- optimistic-concurrency token a takeover must present (review P1-2).
     let result ← IO.Process.output {
       cmd := "timeout"
-      args := #["-k", "5", "30", "sh", "-c",
-        s!"OUT=$(kubectl get lease {leaseName} -n {ns} -o jsonpath='\{.spec.holderIdentity}\{\"|\"}\{.spec.leaseDurationSeconds}\{\"|\"}\{.spec.renewTime}\{\"|\"}\{.metadata.resourceVersion}\{\"|\"}\{.spec.leaseTransitions}') || exit 1; RENEW=$(printf %s \"$OUT\" | cut -d'|' -f3); RENEW_EPOCH=$(date -d \"$RENEW\" +%s 2>/dev/null || echo 0); NOW_EPOCH=$(date -u +%s); echo \"$OUT|$((NOW_EPOCH - RENEW_EPOCH))\""]
+      args := #["-k", killAfter, wall, "sh", "-c",
+        s!"OUT=$(kubectl{req} get lease {leaseName} -n {ns} -o jsonpath='\{.spec.holderIdentity}\{\"|\"}\{.spec.leaseDurationSeconds}\{\"|\"}\{.spec.renewTime}\{\"|\"}\{.metadata.resourceVersion}\{\"|\"}\{.spec.leaseTransitions}') || exit 1; RENEW=$(printf %s \"$OUT\" | cut -d'|' -f3); RENEW_EPOCH=$(date -d \"$RENEW\" +%s 2>/dev/null || echo 0); NOW_EPOCH=$(date -u +%s); echo \"$OUT|$((NOW_EPOCH - RENEW_EPOCH))\""]
     }
     if result.exitCode != 0 then
       return .error s!"getLease failed (exit {result.exitCode}): {result.stderr}"
     let parts := result.stdout.trim.splitOn "|"
     match parts with
-    | [holder, durStr, _renew, rv, transStr, ageStr] =>
+    | [holder, durStr, renew, rv, transStr, ageStr] =>
       let dur := durStr.trim.toNat?.getD 15
       let age := ageStr.trim.toNat?.getD 0
       return .ok { holderIdentity := holder.trim, leaseDurationSeconds := dur,
                    expired := age ≥ dur, resourceVersion := rv.trim,
-                   transitions := transStr.trim.toNat?.getD 0 }
+                   transitions := transStr.trim.toNat?.getD 0, renewTime := renew.trim }
     | _ => return .error s!"unexpected getLease output: {result.stdout}"
   catch e =>
     return .error s!"getLease error: {e}"
 
+/-- Get lease info with the default 30 s wall. -/
+def getLease (leaseName ns : String) : IO (Except String LeaseInfo) :=
+  getLeaseWith none leaseName ns
+
 /-- Create a new lease atomically. Fails with error if lease already exists.
     Uses kubectl create (NOT apply) for atomic create-or-fail semantics. -/
 def createLease (leaseName ns identity : String) (durationSec : Nat) : IO (Except String Unit) := do
+  if ← leaseApiStalled 30000 then return .error "createLease failed: lease API stalled (FLARE_TEST_LEASE_API_STALL_FILE)"
   try
     let nowResult ← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%S.000000Z"] }
     let now := nowResult.stdout.trim
@@ -652,17 +685,24 @@ def createLease (leaseName ns identity : String) (durationSec : Nat) : IO (Excep
 
 /-- Renew lease using JSON Patch with test-and-set semantics.
     The test op rejects the patch if holderIdentity changed (CAS). -/
-def renewLease (leaseName ns identity : String) : IO (Except String Unit) := do
+def renewLeaseStamped (boundMs : Option Nat) (leaseName ns identity stamp : String) : IO (Except String Unit) := do
+  if ← leaseApiStalled (boundMs.getD 30000) then
+    return .error "renewLease failed: lease API stalled (FLARE_TEST_LEASE_API_STALL_FILE)"
   try
-    let nowResult ← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%S.000000Z"] }
-    let now := nowResult.stdout.trim
-    let patch := s!"[\{\"op\":\"test\",\"path\":\"/spec/holderIdentity\",\"value\":\"{identity}\"},\{\"op\":\"replace\",\"path\":\"/spec/renewTime\",\"value\":\"{now}\"}]"
-    let result ← kubectl ["patch", "lease", leaseName, "-n", ns, "--type=json", "-p", patch]
+    let patch := s!"[\{\"op\":\"test\",\"path\":\"/spec/holderIdentity\",\"value\":\"{identity}\"},\{\"op\":\"replace\",\"path\":\"/spec/renewTime\",\"value\":\"{stamp}\"}]"
+    let args := ["patch", "lease", leaseName, "-n", ns, "--type=json", "-p", patch]
+    let result ← match boundMs with
+      | none => kubectl args
+      | some b => Kubectl.kubectlBounded b args
     match result with
     | .error e => return .error e
     | .ok _ => return .ok ()
   catch e =>
     return .error s!"renewLease error: {e}"
+
+/-- Renew with a fresh per-attempt stamp and the default 30 s wall. -/
+def renewLease (leaseName ns identity : String) : IO (Except String Unit) := do
+  renewLeaseStamped none leaseName ns identity (← leaseStamp)
 
 /-- Acquire an expired lease using JSON Patch with test-and-set.
 
@@ -675,6 +715,7 @@ def renewLease (leaseName ns identity : String) : IO (Except String Unit) := do
     review P1-2.) The holder test is kept as defense in depth. -/
 def acquireLease (leaseName ns newIdentity oldIdentity resourceVersion : String)
     (durationSec : Nat) (newTransitions : Nat := 0) : IO (Except String Unit) := do
+  if ← leaseApiStalled 30000 then return .error "acquireLease failed: lease API stalled (FLARE_TEST_LEASE_API_STALL_FILE)"
   try
     let nowResult ← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%S.000000Z"] }
     let now := nowResult.stdout.trim

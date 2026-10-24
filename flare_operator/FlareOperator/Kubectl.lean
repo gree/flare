@@ -61,6 +61,34 @@ def kubectlWall (wallSecs : Nat) (args : List String) : IO (Except String String
     noteFailure s!"kubectl error: {e} (args: {args.take 4})"
     return .error s!"kubectl error: {e}"
 
+/-- Seconds with millisecond precision for `timeout(1)`: "4.000". -/
+def secondsArg (ms : Nat) : String :=
+  let r := ms % 1000
+  s!"{ms / 1000}.{if r < 10 then "00" else if r < 100 then "0" else ""}{r}"
+
+/-- kubectl bounded to `boundMs` in BOTH ways: `--request-timeout` and a process
+    wall (SIGTERM at the bound, SIGKILL 1 s later). The lease renewer uses it so
+    no call can outlive its local lease deadline. -/
+def kubectlBounded (boundMs : Nat) (args : List String) : IO (Except String String) := do
+  try
+    let proc : IO.Process.SpawnArgs :=
+      { cmd := "timeout"
+        args := #["-k", "1", secondsArg boundMs, "kubectl", s!"--request-timeout={boundMs}ms"] ++ args.toArray }
+    let result ← IO.Process.output proc
+    if result.exitCode == 0 then
+      return .ok result.stdout
+    else if result.exitCode == 124 then
+      let m := s!"kubectl timed out after {boundMs}ms (args: {args.take 4})"
+      noteFailure m
+      return .error m
+    else
+      let m := s!"kubectl failed (exit {result.exitCode}): {result.stderr}"
+      noteFailure s!"{m.take 300} (args: {args.take 4})"
+      return .error m
+  catch e =>
+    noteFailure s!"kubectl error: {e} (args: {args.take 4})"
+    return .error s!"kubectl error: {e}"
+
 /-- Run kubectl with the default 30 s wall. -/
 def kubectl (args : List String) : IO (Except String String) := kubectlWall 30 args
 

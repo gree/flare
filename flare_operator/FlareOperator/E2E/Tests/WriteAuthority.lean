@@ -595,6 +595,7 @@ def soleLaggingRun (c : Ctx) : IO TestResult := do
   if let .error e ← opShell c "touch /tmp/holdadd" then
     stopAll names
     return .fail (notSetUp s!"could not arm the member-add hold in the operator pod: {e}")
+  let adoptedBefore := ((← kubectlLogsLabel s!"app={c.cfg.operatorName}" ns 10000000).splitOn "adopted as generation").length
   let k1 ← epochNow
   killPod c m1
   let ok1 ← waitForCondition "a pod other than the killed master holds the grant (failover 1)" 300 do
@@ -607,6 +608,15 @@ def soleLaggingRun (c : Ctx) : IO TestResult := do
   names := names ++ (← writersOnPods c "p2")
   let r := ((← c.pods).getD [] |>.map (·.name)).find? fun p => p != m1 && p != m2
   let some r := r | do stopAll names; return .fail (notSetUp "the third pod is not known")
+  -- The second kill must not hit the window between the promotion commit and the operator's adoption of
+  -- the new master's history (an unresolved promotion intent holds the partition: the product's safety
+  -- stop, not the property under test; same wait as two-failovers). The hold file keeps m1 out of the
+  -- record meanwhile. Count the adoption AFTER the first kill: the start-up adoption is in the log already.
+  let adopted ← waitForCondition "the operator adopted the new master's history (the promotion intent is resolved)" 180 do
+    return ((← kubectlLogsLabel s!"app={c.cfg.operatorName}" ns 10000000).splitOn "adopted as generation").length > adoptedBefore
+  if !adopted then
+    stopAll names
+    return .fail (notSetUp s!"the operator did not adopt {m2}'s history within 180 s of its promotion (the second failover would meet an unresolved promotion intent)")
   -- the window of the gap: the old master's copy m1 is Active (a data copy, same history) but NOT a member of the
   -- record; the only member r is a live proxy held by replica repair (unpromotable). Then the new master dies.
   let mut ready := false

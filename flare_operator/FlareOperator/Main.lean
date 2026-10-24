@@ -42,6 +42,7 @@ import FlareOperator.StateMachine.RebuildConcurrency
 import FlareOperator.StateMachine.CopyDiscardApproval
 import FlareOperator.StateMachine.PromotionEvidence
 import FlareOperator.StateMachine.LeaseGuard
+import FlareOperator.LeaseGuardApi
 import FlareOperator.StateMachine.AuthoritativeHistory
 import FlareOperator.EvictionGuard
 import FlareOperator.WriteAuthorityDriver
@@ -3746,25 +3747,6 @@ private def exitLostLease (healthStatus : HealthStatus) (identity ns : String) :
   (← IO.getStderr).flush
   IO.Process.exit 1
 
-/-- The lease guard's API: bounded kubectl calls, the monotonic clock, a
-    microsecond renewTime per attempt. -/
-private def realLeaseApi (leaseName ns identity : String) : LeaseGuard.Api where
-  now := IO.monoMsNow
-  stamp := leaseStamp
-  renew := fun stamp bound => do
-    let r ← try renewLeaseStamped (some bound) leaseName ns identity stamp
-      catch e => pure (.error s!"{e}")
-    match r with
-    | .ok () => pure .applied
-    | .error e => pure (.failed e)
-  read := fun bound => do
-    let r ← try getLeaseWith (some bound) leaseName ns
-      catch e => pure (.error s!"{e}")
-    match r with
-    | .ok l => pure (.lease l.holderIdentity l.renewTime)
-    | .error _ => pure .unreadable
-  sleep := fun ms => IO.sleep ms.toUInt32
-
 /-- Margin below the lease duration that heldUntil keeps (3 s of 15 s): see
     StateMachine/LeaseGuard for the safety argument. -/
 private def leaseMarginMs : Nat := 3000
@@ -3784,10 +3766,9 @@ private def newLeaseGuard (healthStatus : HealthStatus) (identity ns : String) :
     ambiguous result; (2) the watchdog — independent of every API call, checks
     the monotonic clock every 500 ms and fails closed at the local deadline. -/
 private def startLeaseGuard (g : LeaseGuard.Guard) (leaseName ns identity : String) : IO Unit := do
-  let api := realLeaseApi leaseName ns identity
+  let api := LeaseGuard.realLeaseApi leaseName ns identity
   IO.eprintln s!"[flare-operator] lease guard started: renew every {g.cfg.cadenceMs} ms (calls bounded to {g.cfg.capMs} ms), fail-closed deadline = send + {g.cfg.leaseMs - g.cfg.marginMs} ms, watchdog every {g.cfg.watchdogMs} ms"
-  let _ ← IO.asTask (prio := .dedicated) (LeaseGuard.watchdogLoop api g)
-  let _ ← IO.asTask (prio := .dedicated) (LeaseGuard.renewerLoop api g)
+  LeaseGuard.startTasks api g
 
 /-- Main entry point. Two-phase leader election:
     Phase 1 (follower): Try to acquire the lease, completely passive.

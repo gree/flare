@@ -33,3 +33,9 @@ lean_exe promotion_intent_store_check where
     (docs/analysis-rc67-matrix-failures-2026-10-15.md). Prints; asserts nothing. -/
 lean_exe ht10_replay where
   root := `FlareOperator.Repro.HistoryTracking10
+
+/-- Host probe of the real lease guard (renewer + watchdog) in OBSERVE mode:
+    creates / deletes ONE Lease (args: lease, namespace, identity, seconds).
+    Not run by CI. -/
+lean_exe lease_guard_probe where
+  root := `FlareOperator.LeaseGuardProbeMain

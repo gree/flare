@@ -7,10 +7,20 @@
   renew; when it passes without a newer confirmation the leader stops serving
   index traffic, drops health leader, labels itself standby and exits.
 
+  0. exact image: inside the LEADER pod (the operator image under test, not the
+     host / CI runner) record PATH, which timeout / kubectl, their versions, a
+     whole-second and a fractional `timeout` (rc, elapsed), and one REAL bounded
+     Lease patch with the renewer's argv (timeout -k 1 <whole s> kubectl patch
+     lease ... renewTime=<µs stamp>) on a scratch Lease, read back exactly.
+     Required: whole-second wall rc 124 in 0.9-1.6 s; the patch applied within
+     its 4 s wall; the read-back renewTime equals the stamp. The fractional
+     result is recorded only (the renewer uses whole seconds).
   1. control: no stall, reconcile passes stretched to 16 s (test seam
      FLARE_TEST_RECONCILE_PASS_DELAY_FILE) for 4 minutes: no step-down, no
      restart, same holder, same generation (a spurious fail-closed would be a
-     regression of the renewer).
+     regression of the renewer). Also from the leader's own log: the renewer
+     task started, no renew FAILED line, and at least 2 renews APPLIED inside one
+     stretched pass (the renewer, not the loop, keeps the lease across it).
   2. stall: the leader's lease API hangs (test seam FLARE_TEST_LEASE_API_STALL_FILE:
      while the file exists every lease API call of THAT pod hangs until its
      bound), reconcile passes stretched as in 1 (the stalled reconcile + stalled
@@ -143,6 +153,30 @@ private def waitLeader : IO (Option String) := do
     | .error _ => return false
   found.get
 
+/-- One exec in the leader pod; the whole stdout (or the error). -/
+private def probeScript (lease stamp : String) : String :=
+  "echo PATH=$PATH; echo timeout_bin=$(command -v timeout); echo kubectl_bin=$(command -v kubectl); " ++
+  "echo timeout_version=$(timeout --version 2>&1 | head -1); " ++
+  "echo kubectl_client=$(kubectl version --client 2>&1 | head -1); " ++
+  "s=$(date +%s%N); timeout -k 1 1 sleep 3; rc=$?; e=$(date +%s%N); echo whole_rc=$rc whole_ms=$(( (e-s)/1000000 )); " ++
+  "s=$(date +%s%N); timeout -k 1 0.300 sleep 2; rc=$?; e=$(date +%s%N); echo frac_rc=$rc frac_ms=$(( (e-s)/1000000 )); " ++
+  "echo stamp_fmt=$(date -u +%Y-%m-%dT%H:%M:%S.%6NZ); " ++
+  s!"s=$(date +%s%N); timeout -k 1 4 kubectl patch lease {lease} -n {ns} --type=json -p '[\{\"op\":\"test\",\"path\":\"/spec/holderIdentity\",\"value\":\"lease-probe\"},\{\"op\":\"replace\",\"path\":\"/spec/renewTime\",\"value\":\"{stamp}\"}]' >/dev/null 2>/tmp/probe-err; rc=$?; e=$(date +%s%N); echo patch_rc=$rc patch_ms=$(( (e-s)/1000000 )) patch_err=$(head -c 200 /tmp/probe-err | tr '\\n' ' '); " ++
+  s!"echo readback=$(timeout -k 1 4 kubectl get lease {lease} -n {ns} -o jsonpath='\{.spec.renewTime}')"
+
+/-- `key=value` of the probe output. -/
+private def field (out key : String) : String :=
+  match (out.splitOn "\n").find? (·.startsWith s!"{key}=") with
+  | some l => (l.drop (key.length + 1)).trim
+  | none => ""
+
+/-- `k=v` inside a line of several space-separated pairs. -/
+private def pair (out key : String) : String :=
+  let toks := (out.splitOn "\n").foldl (fun acc l => acc ++ l.splitOn " ") []
+  match toks.find? (·.startsWith s!"{key}=") with
+  | some t => t.drop (key.length + 1)
+  | none => ""
+
 def suite : TestSuite := {
   name := "operator-lease-failclosed"
   setup := do
@@ -152,6 +186,38 @@ def suite : TestSuite := {
   onFailure := dumpClusterDiagnostics ns s!"app={cfg.operatorName}"
   teardown := cleanupCluster cfg
   tests := [
+    { name := "(exact image) inside the leader pod: PATH, timeout / kubectl and versions, whole-second and fractional timeout, and a REAL bounded Lease patch with the renewer's argv read back exactly"
+      run := do
+        let some leader ← waitLeader | return .fail "no operator pod holds the lease with role=leader within 180 s"
+        let probe := s!"{cfg.name}-probe-lease"
+        let now ← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%S.000000Z"] }
+        let manifest := s!"apiVersion: coordination.k8s.io/v1\nkind: Lease\nmetadata:\n  name: {probe}\n  namespace: {ns}\nspec:\n  holderIdentity: lease-probe\n  leaseDurationSeconds: 15\n  renewTime: \"{now.stdout.trim}\"\n"
+        match ← kubectlApplyManifest manifest with
+        | .error e => return .fail s!"could not create the scratch Lease {probe}: {e}"
+        | .ok _ => pure ()
+        let st ← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%S.%6NZ"] }
+        let stamp := st.stdout.trim
+        let r ← execIn leader (probeScript probe stamp)
+        discard <| kubectl ["delete", "lease", probe, "-n", ns, "--ignore-not-found"]
+        match r with
+        | .error e => return .fail s!"the probe could not run in {leader}: {e}"
+        | .ok out =>
+          for l in out.splitOn "\n" do
+            if !l.trim.isEmpty then IO.eprintln s!"# [exact image {leader}] {l.trim}"
+          let wholeRc := pair out "whole_rc"
+          let wholeMs := (pair out "whole_ms").toNat?.getD 0
+          let patchRc := pair out "patch_rc"
+          let rb := field out "readback"
+          if field out "timeout_bin" == "" || field out "kubectl_bin" == "" then
+            return .fail s!"timeout or kubectl not on PATH in the operator image: {out.take 400}"
+          if wholeRc != "124" || wholeMs < 900 || wholeMs > 1600 then
+            return .fail s!"`timeout -k 1 1 sleep 3` in the operator image: rc {wholeRc}, {wholeMs} ms (expected 124 after ~1 s)"
+          if patchRc != "0" then
+            return .fail s!"the bounded Lease patch with the renewer's argv failed in the operator image: rc {patchRc} after {pair out "patch_ms"} ms: {out.take 600}"
+          if rb != stamp then
+            return .fail s!"the read-back renewTime '{rb}' is not the written stamp '{stamp}' (the guard's ambiguous-result confirmation compares exactly)"
+          return .pass },
+
     { name := "(control) 16 s reconcile passes for 4 minutes with a healthy lease API: no fail-closed step-down, no restart, same holder and generation"
       run := do
         let some leader ← waitLeader | return .fail "no operator pod holds the lease with role=leader within 180 s"
@@ -183,6 +249,18 @@ def suite : TestSuite := {
               if n.toNat?.getD 0 ≥ 15000 then slow := true
         if !slow then
           return .fail "no reconcile pass of 15 s or more was logged: the control did not exercise the long passes"
+        -- the leader's own renewer kept the lease across a stretched pass (not the loop)
+        let ll ← podLog leader false
+        if !(ll.any fun (_, l) => containsSubstr l "renewer: task started") then
+          return .fail s!"the leader {leader} never logged 'renewer: task started'"
+        if let some (_, l) := ll.find? (fun (_, l) => containsSubstr l "renewer: renew FAILED" || containsSubstr l "renewer: task DIED" || containsSubstr l "renewer: attempt RAISED") then
+          return .fail s!"the leader's renewer failed during the control: {l.take 300}"
+        let applied := (ll.filter fun (_, l) => containsSubstr l "renewer: renew applied").map (·.1)
+        let stretches := (ll.filter fun (_, l) => containsSubstr l "TEST SEAM: reconcile pass stretched").map (·.1)
+        let best := stretches.foldl (fun acc ts => max acc (applied.filter (fun t => t > ts && t < ts + 16000)).length) 0
+        IO.eprintln s!"# leader {leader}: {applied.length} renews applied, {stretches.length} stretched passes, at most {best} applied inside one stretched pass"
+        if best < 2 then
+          return .fail s!"at most {best} renew(s) APPLIED inside one stretched 16 s pass (need >= 2): the lease was not kept by the renewer across a long pass"
         discard <| execIn leader "rm -f /tmp/slow-pass"
         return .pass },
 

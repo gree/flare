@@ -22,6 +22,7 @@
   instants, so a renew can land after the takeover.
 -/
 import FlareOperator.StateMachine.LeaseGuard
+import FlareOperator.Kubectl
 
 namespace FlareOperator.LeaseGuardSim
 
@@ -210,6 +211,26 @@ def run (k : Knobs) : IO World := do
   while (← w.t.get) < k.horizon do advance w 100 wd
   return w
 
+/-- A minimal fake Api for the renewer-robustness checks: a virtual clock that
+    only `sleep` moves, a renew that follows `script`, and a captured log. -/
+def fakeApi (script : Nat → IO RenewOutcome) (nowFails : Bool := false) :
+    IO (Api × IO.Ref Nat × IO.Ref (Array String)) := do
+  let t ← IO.mkRef 1000
+  let n ← IO.mkRef 0
+  let logs ← IO.mkRef #[]
+  let api : Api := {
+    now := do
+      if nowFails then throw (IO.userError "clock exploded")
+      t.get
+    stamp := do return s!"stamp{← n.get}"
+    renew := fun _ _ => do n.modify (· + 1); script (← n.get)
+    read := fun _ => pure .unreadable
+    sleep := fun ms => do
+      t.modify (· + ms)
+      if (← t.get) ≥ 40000 then throw (IO.userError "horizon")
+    log := fun m => logs.modify (·.push m) }
+  return (api, n, logs)
+
 /-- no instant with the new leader holding and the old one serving -/
 def noViolation (w : World) : IO Bool := return (← w.violation.get).isNone
 
@@ -317,6 +338,48 @@ def results : IO (List (String × Bool)) := do
     (← noViolation wf) && (← noViolation ws))]
   out := out ++ [("lease guard: CONTROL — a 30 % slow clock exceeds the margin and the model DOES see an overlap (the model can fail)",
     (← wx.violation.get).isSome)]
+  -- f18: the renewer must survive whatever one attempt throws (c2a4c51: the exception ended the task, silently)
+  let (apiE, nE, logsE) ← fakeApi (fun n => if n == 1 then throw (IO.userError "boom") else pure .applied)
+  let gE ← Guard.new c (fun _ => pure ())
+  gE.confirm 1000
+  try renewerLoop apiE gE catch _ => pure ()
+  let lE ← logsE.get
+  out := out ++ [("lease guard (f18): an exception in one renewer attempt is logged and the renewer carries on (later attempts confirm)",
+    decide ((← nE.get) ≥ 5) && lE.any (fun l => (l.splitOn "RAISED").length > 1) &&
+    lE.any (fun l => (l.splitOn "renew applied").length > 1) && decide ((← gE.heldUntil.get) > 30000))]
+  -- f18: a renewer task that ends for any reason says so (and records why)
+  let (apiD, _, logsD) ← fakeApi (fun _ => pure .applied) (nowFails := true)
+  let gD ← Guard.new c (fun _ => pure ())
+  renewerTask apiD gD
+  let lD ← logsD.get
+  out := out ++ [("lease guard (f18): a renewer task that dies logs 'task DIED' with the cause and records it as the last failure",
+    lD.any (fun l => (l.splitOn "task DIED: clock exploded").length > 1) &&
+    ((← gD.lastFailure.get).splitOn "clock exploded").length > 1)]
+  -- f18: every failed attempt is logged with its reason, the read-back verdict, and the bound used
+  let (apiF, _, logsF) ← fakeApi (fun _ => pure (.failed "kubectl failed (exit 1): forbidden"))
+  let gF ← Guard.new c (fun _ => pure ())
+  gF.confirm 1000
+  try renewerLoop apiF gF catch _ => pure ()
+  let lF ← logsF.get
+  out := out ++ [("lease guard (f18): a failed attempt logs reason + read-back + verdict (one line per attempt) and the summary reaches the FAIL-CLOSED reason",
+    lF.any (fun l => (l.splitOn "forbidden").length > 1 && (l.splitOn "unreadable").length > 1 && (l.splitOn "nothing confirmed").length > 1) &&
+    decide ((← gF.lastFailure.get).length > 0))]
+  let firedWhy ← IO.mkRef ""
+  let gG ← Guard.new c (fun why => firedWhy.set why)
+  -- never confirmed (heldUntil 0): the fake clock (1000 ms) is past the deadline at once
+  gG.lastFailure.set "renew failed after 12 ms: forbidden"
+  let (apiG, _, _) ← fakeApi (fun _ => pure .applied)
+  let _ ← watchdogTick apiG gG
+  out := out ++ [("lease guard (f18): the FAIL-CLOSED line carries the renewer's last failure",
+    decide (((← firedWhy.get).splitOn "last renewer failure: renew failed after 12 ms: forbidden").length > 1))]
+  -- f18: the first attempt of a never-confirmed guard is not bounded to 1 ms (c2a4c51: 0 - now = 0 -> 1 ms)
+  out := out ++ [("lease guard (f18): a never-confirmed guard (heldUntil 0) gets the cap, not 1 ms, as its call bound",
+    callBound c 5000 0 == 4000)]
+  -- the bounded calls' process wall is whole seconds rounded DOWN (never past the bound, no fractional
+  -- timeout(1) argument), and a bound under 1 s starts no call
+  out := out ++ [("lease guard: the process wall is whole seconds rounded down; under 1 s no call is started",
+    Kubectl.wallSeconds 4000 == some 4 && Kubectl.wallSeconds 3999 == some 3 && Kubectl.wallSeconds 1000 == some 1 &&
+    Kubectl.wallSeconds 999 == none && Kubectl.wallSeconds 0 == none)]
   return out
 
 end FlareOperator.LeaseGuardSim

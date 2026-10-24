@@ -628,13 +628,16 @@ def leaseStamp : IO String := do
 /-- Get lease info including expiry check.
     Uses shell date arithmetic to determine if the lease has expired.
     `boundMs`: none = the default 30 s wall; some b = bounded to b ms (the lease
-    renewer: --request-timeout and the process wall). -/
+    renewer: a whole-second process wall rounded down, no --request-timeout). -/
 def getLeaseWith (boundMs : Option Nat) (leaseName ns : String) : IO (Except String LeaseInfo) := do
   if ← leaseApiStalled (boundMs.getD 30000) then
     return .error "getLease failed: lease API stalled (FLARE_TEST_LEASE_API_STALL_FILE)"
-  let (killAfter, wall, req) := match boundMs with
-    | none => ("5", "30", "")
-    | some b => ("1", Kubectl.secondsArg b, s!" --request-timeout={b}ms")
+  let (killAfter, wall, req) ← match boundMs with
+    | none => pure ("5", "30", "")
+    | some b =>
+      match Kubectl.wallSeconds b with
+      | none => return .error s!"getLease not started: less than 1 s left of its {b} ms bound"
+      | some w => pure ("1", toString w, "")
   try
     -- ONE kubectl GET for every field (holder, duration, renewTime,
     -- resourceVersion): the previous three separate reads were not a

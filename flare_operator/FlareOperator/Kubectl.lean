@@ -61,24 +61,30 @@ def kubectlWall (wallSecs : Nat) (args : List String) : IO (Except String String
     noteFailure s!"kubectl error: {e} (args: {args.take 4})"
     return .error s!"kubectl error: {e}"
 
-/-- Seconds with millisecond precision for `timeout(1)`: "4.000". -/
-def secondsArg (ms : Nat) : String :=
-  let r := ms % 1000
-  s!"{ms / 1000}.{if r < 10 then "00" else if r < 100 then "0" else ""}{r}"
+/-- The process wall for `timeout(1)` in WHOLE seconds, rounded DOWN so the call
+    never outlives `ms`; `none` when less than one second is left (the call is not
+    started). Whole seconds only: no dependence on the image's `timeout` accepting
+    fractional durations. -/
+def wallSeconds (ms : Nat) : Option Nat :=
+  if ms < 1000 then none else some (ms / 1000)
 
-/-- kubectl bounded to `boundMs` in BOTH ways: `--request-timeout` and a process
-    wall (SIGTERM at the bound, SIGKILL 1 s later). The lease renewer uses it so
-    no call can outlive its local lease deadline. -/
+/-- kubectl bounded to `boundMs` by a process wall in whole seconds, rounded down
+    (SIGTERM at the wall, SIGKILL 1 s later). The lease renewer uses it so no call can outlive its local lease
+    deadline. NO `--request-timeout`: the wall alone bounds the call, and a
+    per-request timeout kills kubectl's API-group discovery on a loaded API
+    server (see kubectlWall) — c2a4c51 passed both. -/
 def kubectlBounded (boundMs : Nat) (args : List String) : IO (Except String String) := do
+  let some wall := wallSeconds boundMs
+    | return .error s!"kubectl not started: less than 1 s left of its {boundMs} ms bound (args: {args.take 4})"
   try
     let proc : IO.Process.SpawnArgs :=
       { cmd := "timeout"
-        args := #["-k", "1", secondsArg boundMs, "kubectl", s!"--request-timeout={boundMs}ms"] ++ args.toArray }
+        args := #["-k", "1", toString wall, "kubectl"] ++ args.toArray }
     let result ← IO.Process.output proc
     if result.exitCode == 0 then
       return .ok result.stdout
     else if result.exitCode == 124 then
-      let m := s!"kubectl timed out after {boundMs}ms (args: {args.take 4})"
+      let m := s!"kubectl timed out after {wall}s (bound {boundMs} ms; args: {args.take 4})"
       noteFailure m
       return .error m
     else

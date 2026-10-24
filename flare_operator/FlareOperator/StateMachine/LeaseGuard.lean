@@ -69,9 +69,11 @@ def Config.cadenceMs (c : Config) : Nat := c.leaseMs / 3
 /-- The local deadline a confirmed write sent at `sendMs` buys. -/
 def deadlineOf (c : Config) (sendMs : Nat) : Nat := sendMs + c.leaseMs - c.marginMs
 
-/-- Bound of one renewer API call: min(cap, time left to the deadline), at least 1 ms. -/
+/-- Bound of one renewer API call: min(cap, time left to the deadline), at least 1 ms.
+    `heldUntil = 0` means "never confirmed yet" (no deadline to bound against):
+    the cap applies. (c2a4c51 computed `0 - now = 0` there, i.e. a 1 ms call.) -/
 def callBound (c : Config) (now heldUntil : Nat) : Nat :=
-  max 1 (min c.capMs (heldUntil - now))
+  if heldUntil == 0 then c.capMs else max 1 (min c.capMs (heldUntil - now))
 
 /-- Held locally: strictly before the deadline (0 = never confirmed). -/
 def holdsAt (now heldUntil : Nat) : Bool := now < heldUntil
@@ -114,16 +116,20 @@ structure Api where
   /-- read the lease, bounded by the given ms -/
   read : Nat → IO ReadOutcome
   sleep : Nat → IO Unit
+  /-- one line per renewer outcome (the guard must say why it is about to fire) -/
+  log : String → IO Unit := fun _ => pure ()
 
 structure Guard where
   cfg : Config
   heldUntil : IO.Ref Nat
   lost : IO.Ref Bool
   fired : IO.Ref (Option String)
+  /-- summary of the renewer's last failed attempt (shown in the FAIL-CLOSED line) -/
+  lastFailure : IO.Ref String
   onExpire : String → IO Unit
 
 def Guard.new (cfg : Config) (onExpire : String → IO Unit) : IO Guard :=
-  return { cfg, heldUntil := ← IO.mkRef 0, lost := ← IO.mkRef false, fired := ← IO.mkRef none, onExpire }
+  return { cfg, heldUntil := ← IO.mkRef 0, lost := ← IO.mkRef false, fired := ← IO.mkRef none, lastFailure := ← IO.mkRef "", onExpire }
 
 /-- A positively confirmed hold whose request was sent at `sendMs`. -/
 def Guard.confirm (g : Guard) (sendMs : Nat) : IO Unit :=
@@ -151,29 +157,52 @@ def watchdogTick (api : Api) (g : Guard) : IO Bool := do
   let hu ← g.heldUntil.get
   if (← g.lost.get) then g.fire "another holder was seen"
   else if !holdsAt now hu then
-    g.fire s!"no confirmed hold: now={now} ms >= heldUntil={hu} ms"
+    let lf ← g.lastFailure.get
+    g.fire s!"no confirmed hold: now={now} ms >= heldUntil={hu} ms; last renewer failure: {if lf.isEmpty then "none recorded" else lf}"
   return (← g.fired.get).isSome
 
 /-- One renewal attempt: send point first, then the stamp, then the bounded
-    renew; an ambiguous result is settled by a bounded read-back. -/
+    renew; an ambiguous result is settled by a bounded read-back. Logs exactly
+    one line (outcome, bounds, durations, deadline). -/
 def attempt (api : Api) (g : Guard) : IO Unit := do
   let send ← api.now
   let stamp ← api.stamp
   let b1 := callBound g.cfg send (← g.heldUntil.get)
-  match ← api.renew stamp b1 with
-  | .applied => g.confirm send
-  | .failed _ =>
-    let b2 := callBound g.cfg (← api.now) (← g.heldUntil.get)
-    match judgeReadBack g.cfg.identity stamp (← api.read b2) with
+  let r ← api.renew stamp b1
+  let t1 ← api.now
+  match r with
+  | .applied =>
+    g.confirm send
+    api.log s!"renewer: renew applied in {t1 - send} ms (bound {b1} ms), heldUntil={← g.heldUntil.get} ms, now={t1} ms"
+  | .failed why =>
+    let b2 := callBound g.cfg t1 (← g.heldUntil.get)
+    let rb ← api.read b2
+    let t2 ← api.now
+    let rbTxt := match rb with
+      | .unreadable => "read-back unreadable"
+      | .lease holder rt => s!"read-back holder={holder} renewTime={rt} (wrote {stamp})"
+    let v := judgeReadBack g.cfg.identity stamp rb
+    let vTxt := match v with
+      | .confirmed => "CONFIRMED (extends from this attempt's send point)"
+      | .lost => "LOST (another holder)"
+      | .nothing => "nothing confirmed"
+    g.lastFailure.set s!"renew failed after {t1 - send} ms (bound {b1} ms): {why.take 300}; {rbTxt}; {vTxt}"
+    api.log s!"renewer: renew FAILED after {t1 - send} ms (bound {b1} ms): {why.take 300}; {rbTxt} in {t2 - t1} ms (bound {b2} ms): {vTxt}; heldUntil={← g.heldUntil.get} ms, now={t2} ms"
+    match v with
     | .confirmed => g.confirm send
     | .lost => g.markLost "renew not applied and the lease names another holder"
     | .nothing => pure ()
 
-/-- Fixed cadence from each attempt's START; attempts never overlap (one task). -/
+/-- Fixed cadence from each attempt's START; attempts never overlap (one task).
+    Nothing an attempt throws ends the loop: it is logged, recorded as the last
+    failure, and the next attempt follows. -/
 partial def renewerLoop (api : Api) (g : Guard) : IO Unit := do
   if (← g.fired.get).isSome then return
   let start ← api.now
-  attempt api g
+  try attempt api g
+  catch e =>
+    g.lastFailure.set s!"renewer attempt raised: {e}"
+    api.log s!"renewer: attempt RAISED: {e}"
   let used := (← api.now) - start
   api.sleep (g.cfg.cadenceMs - min used g.cfg.cadenceMs)
   renewerLoop api g
@@ -183,5 +212,25 @@ partial def watchdogLoop (api : Api) (g : Guard) : IO Unit := do
   if ← watchdogTick api g then return
   api.sleep g.cfg.watchdogMs
   watchdogLoop api g
+
+/-- The renewer task: never ends silently. If it ends for any reason that is
+    logged and recorded as the last failure (the watchdog then fires at the
+    deadline, as designed). -/
+def renewerTask (api : Api) (g : Guard) : IO Unit := do
+  api.log s!"renewer: task started (cadence {g.cfg.cadenceMs} ms, cap {g.cfg.capMs} ms)"
+  try
+    renewerLoop api g
+    api.log "renewer: task ENDED (the guard has fired)"
+  catch e =>
+    g.lastFailure.set s!"renewer task DIED: {e}"
+    api.log s!"renewer: task DIED: {e} -- no further renewals; the watchdog fails closed at the deadline"
+
+/-- The watchdog task. If it dies the guard fails closed at once: a guard
+    nobody watches must not be trusted. -/
+def watchdogTask (api : Api) (g : Guard) : IO Unit := do
+  try watchdogLoop api g
+  catch e =>
+    api.log s!"watchdog: task DIED: {e} -- failing closed"
+    g.fire s!"watchdog task died: {e}"
 
 end FlareOperator.LeaseGuard

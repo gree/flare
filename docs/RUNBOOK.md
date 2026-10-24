@@ -407,6 +407,17 @@ waits for the ex-master. Writes to the partition fail meanwhile.
 To shorten the outage by hand, accepting the loss, set the variable lower
 and restart the operator.
 
+**Write authority ON: a returning copy that is not yet in the membership
+record (2026-10-24).** When the only record member cannot be promoted (it
+was demoted by replica repair, or its history is unknown) and the sole
+data-bearing copy is a same-history lagging copy that is not a member of
+the record, the operator promotes it by fencing the old master with the
+member's expired promise. Log: `PROMOTION NOT LOSS-FREE (write authority): ...
+the old master is fenced by member ...`. Same loss caveat as above (a write
+only the old master acknowledged is not in the copy). A copy with another
+history, a rejoining one, or one when a record member can be promoted is
+still refused (`abort: the candidate is not in the membership`).
+
 **A dead ex-slave that comes back (decision 2026-10-16).** A slave that
 died while Active keeps its partition in the persisted node map
 (`slaveOf=P` on its line in `<cluster>-node-map`). When it re-registers it

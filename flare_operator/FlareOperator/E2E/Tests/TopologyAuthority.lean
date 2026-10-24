@@ -676,7 +676,7 @@ def suite : TestSuite := {
                   | .ok _ => return .fail "topology check flapped"
                 return .pass },
 
-    { name := "lease unreadable: the stopped pass fails closed and does not send"
+    { name := "lease unreadable: the stopped pass fails closed and does not send; the lease guard fails closed, the restarted leader delivers the withheld map"
       run := do
         match ← survivorAndVictim with
         | none => return .fail "need two flared pods"
@@ -714,37 +714,29 @@ def suite : TestSuite := {
               -- Ready). Asserting the version is unchanged would fail on that
               -- recovery and, worse, contradicts the retry below, which
               -- REQUIRES the version to advance. (v0 = {v0}, v1 = {v1}.)
-              -- RETRY, in this process. A read failure does not cost the
-              -- operator its leadership — it recreates the lease on the next
-              -- tick — so the map it withheld must go out without waiting for
-              -- an unrelated change. Before the retry existed this was
-              -- terminal: the committed version had already advanced, so the
-              -- next pass found nothing to send and the node kept the old map.
-              let delivered ← waitForCondition "the withheld topology is retried by the same process" 180 do
+              -- RECOVERY. Since the fail-closed lease guard (StateMachine/LeaseGuard) the leader's lease
+              -- is renewed only by the guard, as a resourceVersion CAS: a DELETED Lease cannot be renewed
+              -- or recreated in the same process (that would let a pod that never lost its local deadline
+              -- start a new lease chain at once). The guard confirms nothing, fails closed at its deadline
+              -- and the process exits; the restarted process creates the lease in phase 1 and publishes the
+              -- committed map. Before the guard this test required an in-process retry naming the
+              -- withheld version (the loop recreated the lease on the next tick); that path no longer
+              -- exists. What is required now: the process that lost the lease logged LEASE FAIL-CLOSED,
+              -- and the withheld map reaches the survivor after the restart.
+              let delivered ← waitForCondition "the withheld topology reaches the survivor (after the fail-closed restart)" 180 do
                 match ← flaredStat survivorIp "node_map_version" with
                 | some v => return v ≥ held
                 | none => return false
-              let log2 ← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 400
               if !delivered then
                 let vNow ← flaredStat survivorIp "node_map_version"
-                return .fail s!"the withheld topology was never retried: survivor still at {vNow}, expected at least {held}"
-              -- The sending pass must name THIS suppression. The line is
-              -- logged whether or not the version also moved, so what it
-              -- proves is that the flag was set by the withheld pass and
-              -- consumed by the pass that published; it does not isolate
-              -- the flag as the only reason that pass sent (in a live
-              -- cluster the version often moves by itself). Recorded as a
-              -- residual in the register rather than papered over here.
-              -- The pending flag keeps the EARLIEST outstanding version and a
-              -- retry publishes the LATEST committed map (TopologyBroadcast:
-              -- pendingTopologyAfterAttempt). So the retry that covers v{held}
-              -- names some pending vP ≤ held and publishes some vQ ≥ held. P
-              -- is below held when an earlier send was already outstanding:
-              -- CI 36731888436, where this pass was the restarted process's
-              -- first, so its startup seed (v…306) was still pending when the
-              -- fence withheld v…307, and the retry published v…308.
-              if !(retryCovers log2 held) then
-                return .fail s!"the survivor caught up, but no retry line covers the suppressed v{held} (pending ≤ {held} ≤ publishing): the withheld map was not what the retry carried"
+                return .fail s!"the withheld topology never reached the survivor: still at {vNow}, expected at least {held}"
+              let prev ← match ← kubectl ["logs", "-n", cfg.«namespace», "-l", s!"app={cfg.operatorName}", "--previous", "--tail=400"] with
+                | .ok out => pure out
+                | .error _ => pure ""
+              if !containsSubstr prev "LEASE FAIL-CLOSED" then
+                return .fail "the process that lost the lease did not log LEASE FAIL-CLOSED (its previous container log has none): the lease loss was not failed closed"
+              if heldPassBroadcast prev held then
+                return .fail s!"the process that lost the lease broadcast v{held} after the read failure"
               let back ← waitForCondition "topology re-applied after the lease is recreated" 240 do
                 return (← topologyApplied).toOption.isSome
               if !back then

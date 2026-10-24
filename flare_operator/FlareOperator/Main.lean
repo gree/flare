@@ -41,6 +41,7 @@ import FlareOperator.StateMachine.SourceEligibility
 import FlareOperator.StateMachine.RebuildConcurrency
 import FlareOperator.StateMachine.CopyDiscardApproval
 import FlareOperator.StateMachine.PromotionEvidence
+import FlareOperator.StateMachine.LeaseRenewal
 import FlareOperator.StateMachine.AuthoritativeHistory
 import FlareOperator.EvictionGuard
 import FlareOperator.WriteAuthorityDriver
@@ -3701,6 +3702,49 @@ private def setRoleLabel (identity ns role : String) : IO Bool := do
     IO.eprintln s!"[flare-operator] WARNING: failed to label pod {identity} role={role}: {e}"
     return false
 
+/-- The LOST LEASE exit, shared by the reconcile loop and the lease renewer:
+    health not-leader, best-effort standby label, flush, END THE PROCESS (see
+    the long comment in the loop on why `throw` is not enough). -/
+private def exitLostLease (healthStatus : HealthStatus) (identity ns : String) : IO Unit := do
+  healthStatus.setLeader false  -- Update health status before exit
+  -- Best-effort step-down: stop attracting index traffic before the
+  -- replacement leader labels itself. If the API is unreachable this
+  -- fails too — the pod exits and the boot-time reset covers it.
+  let _ ← setRoleLabel identity ns "standby"
+  (← IO.getStderr).flush
+  IO.Process.exit 1
+
+/-- Background renewer while leader: renews every leaseDuration/3 so a long
+    reconcile pass cannot let the lease expire under the fences. Same CAS as
+    the loop (holder test). A refused renew is judged by LeaseRenewal.decide
+    after a re-read: another holder => the LOST LEASE exit; an API error is
+    not a loss (the next tick retries). -/
+private def startLeaseRenewer (healthStatus : HealthStatus) (leaseName ns identity : String) : IO Unit := do
+  let ms := FlareOperator.LeaseRenewal.renewIntervalMs leaseDurationSeconds
+  IO.eprintln s!"[flare-operator] lease renewer started: renewing '{leaseName}' every {ms} ms (lease {leaseDurationSeconds} s) while leader"
+  let _ ← IO.asTask (prio := .dedicated) do
+    while true do
+      IO.sleep ms.toUInt32
+      let renewed ← try
+          match ← renewLease leaseName ns identity with
+          | .ok () => pure (none : Option String)
+          | .error e => pure (some e)
+        catch e => pure (some s!"{e}")
+      match renewed with
+      | none => pure ()
+      | some err =>
+        let reread ← try
+            match ← getLease leaseName ns with
+            | .ok l => pure (FlareOperator.LeaseRenewal.LeaseRead.holder l.holderIdentity)
+            | .error _ => pure FlareOperator.LeaseRenewal.LeaseRead.unreadable
+          catch _ => pure FlareOperator.LeaseRenewal.LeaseRead.unreadable
+        match FlareOperator.LeaseRenewal.decide identity false reread with
+        | .lost =>
+          IO.eprintln s!"[flare-operator] lease renewer: renew refused ({err}) and the lease is held by another pod -- LOST LEASE, exiting"
+          exitLostLease healthStatus identity ns
+        | .continue_ =>
+          IO.eprintln s!"[flare-operator] lease renewer: renew refused ({err}); the lease still names this pod or cannot be read — retrying in {ms} ms (not a loss)"
+
 /-- Main entry point. Two-phase leader election:
     Phase 1 (follower): Try to acquire the lease, completely passive.
     Phase 2 (leader): Run TCP server + reconcile loop, renew lease each iteration. -/
@@ -3784,6 +3828,9 @@ def main (args : List String) : IO Unit := do
 
   healthStatus.setLeader true  -- We just acquired the lease
   IO.eprintln s!"[flare-operator] health status: leader=true"
+
+  -- Keep the lease fresh during long passes (the fences refuse an expired one)
+  startLeaseRenewer healthStatus leaseName ns identity
 
   -- Claim the index traffic: the Service selects role=leader. Loud on
   -- failure (a leader without the label serves nobody); the reconcile loop
@@ -4083,11 +4130,7 @@ def main (args : List String) : IO Unit := do
     let renewed ← tryAcquireOrRenew leaseName ns identity
     if !renewed then
       IO.eprintln s!"[flare-operator] LOST LEASE -- exiting"
-      healthStatus.setLeader false  -- Update health status before exit
-      -- Best-effort step-down: stop attracting index traffic before the
-      -- replacement leader labels itself. If the API is unreachable this
-      -- fails too — the pod exits and the boot-time reset covers it.
-      let _ ← setRoleLabel identity ns "standby"
+      exitLostLease healthStatus identity ns
       -- This has to END THE PROCESS, and `throw` did not. The generated C
       -- `main` runs `lean_finalize_task_manager()` before it reports an
       -- uncaught error, and that call waits for every outstanding task —
@@ -4097,9 +4140,8 @@ def main (args : List String) : IO Unit := do
       -- lease and ran no reconcile loop, for ever: with one replica a
       -- leaderless cluster, with two a silent loss of the standby. Found by
       -- the SAF-01 takeover test (CHECK-01), which forces exactly this path
-      -- and then requires recovery. `exit` terminates regardless of threads.
-      (← IO.getStderr).flush
-      IO.Process.exit 1
+      -- and then requires recovery. `exit` terminates regardless of threads
+      -- (exitLostLease).
     -- Self-healing label assert: a leader whose label patch failed (or was
     -- stripped externally) reclaims the index Service every tick.
     let _ ← setRoleLabel identity ns "leader"

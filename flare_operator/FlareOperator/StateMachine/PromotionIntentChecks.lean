@@ -87,6 +87,75 @@ def replacedView (b : Binding) : View :=
 def c7 := committedAt prepared 19
 def x7 := cancelledByLeader prepared
 
+
+/-! ### the FENCE member (a candidate that is not a record member: a sole same-history lagging copy) -/
+
+def bindF : Binding := { podUid := "uid-f1", bootId := "boot-f", copyId := "copy-f" }
+def fenceKey : String := "f1"
+def cF : ClockId := { node := "f1", boot := "boot-f" }
+def atF (t : Nat) : At := { clock := cF, t }
+/-- the candidate `r1` is NOT in the membership; `f1` is -/
+def membersF : Membership := { scope := scope0, members := ["m", "f1"] }
+def fenced0 : Intent :=
+  Intent.prepare ref7 1 (atS 20) (some { key := fenceKey, binding := bindF })
+/-- both acknowledged their prepare -/
+def fencedPrepared : Intent :=
+  match recordPrepared fenced0 ref7 1 (atR 0) with
+  | .applied i =>
+    match recordFencePrepared i ref7 1 fenceKey bindF (atF 0) with
+    | .applied j => j
+    | _ => i
+  | _ => fenced0
+def fencedOnlyCandidate : Intent :=
+  match recordPrepared fenced0 ref7 1 (atR 0) with | .applied i => i | _ => fenced0
+
+def fenceChecks : List (String × Bool) :=
+  [ ("fence (g): a record without a fence member is byte for byte the old 15-field form and round-trips; it has no fence_member field",
+    !((encode prepared).splitOn "\t").any (·.startsWith "fence_") && ((encode prepared).splitOn "\t").length == 15
+      && roundTrips prepared && roundTrips c7)
+  , ("fence (g): an intent with a fence member round-trips (prepared or not, committed, cancelled) and carries two more fields",
+    roundTrips fenced0 && roundTrips fencedPrepared && roundTrips fencedOnlyCandidate
+      && ((encode fencedPrepared).splitOn "\t").length == 17
+      && roundTrips (cancelledByLeader fencedPrepared)
+      && (let c := (commit fencedPrepared ref7 (.leader 1) membersF (atS 5)).next fencedPrepared
+          c.decision == .committed && roundTrips c))
+  , ("fence (g): a fence member with a strange key / identity round-trips (escaped)",
+    roundTrips { fenced0 with fenceMember := some { key := "p0.a b:1", binding := { podUid := "u:1", bootId := "b 1", copyId := "1:x%" } } })
+  , ("fence (g): the fence fields are strict (one of the two, a bad shape, reordered, a committed one whose fence was not prepared)",
+    (let e := encode fencedPrepared
+     let fs := e.splitOn "\t"
+     isMalformed (decode ("\t".intercalate (fs.take 15 ++ [fs[15]!]))) &&
+     isMalformed (decode (e.replace "fence_until=f1:boot-f:0" "fence_until=f1:0")) &&
+     isMalformed (decode (e.replace "fence_member=f1:uid-f1:boot-f:copy-f" "fence_member=f1:uid-f1:boot-f")) &&
+     isMalformed (decode ("\t".intercalate (fs.take 15 ++ [fs[16]!, fs[15]!]))) &&
+     isMalformed (decode (e ++ "\tfence_extra=1")) &&
+     (let c := (commit fencedPrepared ref7 (.leader 1) membersF (atS 5)).next fencedPrepared
+      isMalformed (decode ((encode c).replace "fence_until=f1:boot-f:0" "fence_until=-")))))
+  , ("fence: the commit needs the FENCE in the membership (the candidate need not be one); without a fence it needs the candidate",
+    (commit fencedPrepared ref7 (.leader 1) membersF (atS 5)) matches .applied _
+      && refusedWith (commit fencedPrepared ref7 (.leader 1) { membersF with members := ["m", "r1"] } (atS 5)) (mism .notMember)
+      && refusedWith (commit fencedPrepared ref7 (.leader 1) { membersF with members := ["m"] } (atS 5)) (mism .notMember)
+      && refusedWith (commit prepared ref7 (.leader 1) membersF (atS 5)) (mism .notMember))
+  , ("fence: the commit needs the fence prepared too (the candidate alone is not enough), the deadline, the fence token",
+    refusedWith (commit fencedOnlyCandidate ref7 (.leader 1) membersF (atS 5)) .notPrepared
+      && refusedWith (commit fenced0 ref7 (.leader 1) membersF (atS 5)) .notPrepared
+      && refusedWith (commit fencedPrepared ref7 (.leader 1) membersF (atS 20)) .expired
+      && refusedWith (commit fencedPrepared ref7 (.leader 2) membersF (atS 5)) .staleLeader)
+  , ("fence: the fence's prepare is recorded once, for exactly its key and incarnation, by the fence-holding leader, while pending",
+    refusedWith (recordFencePrepared fencedPrepared ref7 1 fenceKey bindF (atF 3)) .notPrepared
+      && refusedWith (recordFencePrepared fenced0 ref7 1 "other" bindF (atF 0)) .fenceMismatch
+      && refusedWith (recordFencePrepared fenced0 ref7 1 fenceKey { bindF with bootId := "boot-g" } (atF 0)) .fenceMismatch
+      && refusedWith (recordFencePrepared prepared ref7 1 fenceKey bindF (atF 0)) .fenceMismatch
+      && refusedWith (recordFencePrepared fenced0 ref7 2 fenceKey bindF (atF 0)) .staleLeader
+      && refusedWith (recordFencePrepared (cancelledByLeader fenced0) ref7 1 fenceKey bindF (atF 0)) .alreadyCancelled
+      && refusedWith (recordFencePrepared fenced0 (other fun r => { r with id := 8 }) 1 fenceKey bindF (atF 0)) (mism .staleIntent))
+  , ("fence: a committed fenced intent is terminal like any other (no cancel, no second commit)",
+    (let c := (commit fencedPrepared ref7 (.leader 1) membersF (atS 5)).next fencedPrepared
+     refusedWith (cancel c ref7 (.leader 1) (atS 5)) .alreadyCommitted
+       && refusedWith (cancel c ref7 .successor (atS 99)) .alreadyCommitted
+       && refusedWith (recordFencePrepared c ref7 1 fenceKey bindF (atF 3)) .alreadyCommitted))
+  ]
+
 def checks : List (String × Bool) :=
   let r2Clock : ClockId := { node := "r2", boot := "b1" }
   [
@@ -345,6 +414,6 @@ def checks : List (String × Bool) :=
      isErr .recordUnreadable (mayResume preparingView rr) &&
      isErr .recordUnreadable (mayPromote preparingView rr members0 99 0) &&
      (onRead preparingView rr members0 99 0).1 == preparingView))
-  ]
+  ] ++ fenceChecks
 
 end FlareOperator.PromotionIntentChecks

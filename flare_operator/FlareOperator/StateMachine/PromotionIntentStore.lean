@@ -115,6 +115,9 @@ def adopt (c : Client) (token : Nat) : IO Result :=
 def markPrepared (c : Client) (ref : Ref) (token : Nat) (oldUntil : At) : IO Result :=
   casLoop c (fun i => recordPrepared i ref token oldUntil) defaultFuel
 
+def markFencePrepared (c : Client) (ref : Ref) (token : Nat) (key : String) (b : Binding) (u : At) : IO Result :=
+  casLoop c (fun i => recordFencePrepared i ref token key b u) defaultFuel
+
 def commitIntent (c : Client) (ref : Ref) (actor : Actor) (members : Membership) (now : At) :
     IO Result :=
   casLoop c (fun i => commit i ref actor members now) defaultFuel

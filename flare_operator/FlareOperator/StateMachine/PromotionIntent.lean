@@ -23,6 +23,16 @@ inductive Decision where
   | pending | committed | cancelled
   deriving Repr, DecidableEq, BEq
 
+/-- The record member whose promise FENCES the old master when the candidate is not itself a member
+    (WriteAuthority: a sole same-history lagging copy). `binding` is the incarnation the fence was
+    prepared for; `promiseUntil` (its own clock) is recorded when it acknowledged the prepare, and a
+    commit needs it: the store never commits a fenced intent whose fence was not seen prepared. -/
+structure FenceMember where
+  key : String
+  binding : Binding
+  promiseUntil : Option At := none
+  deriving Repr, DecidableEq, BEq
+
 /-- The persisted record. `fence` is the highest operator-leader token the store
     has adopted for this intent; a CAS must carry exactly that token.
     `oldUntil` is the upper bound of ALL old-master authority (operator lease
@@ -42,6 +52,9 @@ structure Intent where
   oldUntil : Option At := none
   decision : Decision := .pending
   decidedBy : Option Nat := none
+  /-- `none`: the candidate itself is the successor whose promise fences the old master (the member
+      path). `some f`: the candidate is NOT a member; `f` (a record member) fences instead. -/
+  fenceMember : Option FenceMember := none
   deriving Repr, DecidableEq, BEq
 
 def Intent.ref (i : Intent) : Ref :=
@@ -64,6 +77,7 @@ inductive Refusal where
   | tooEarly           -- successor cancel before the deadline
   | notLeader          -- commit by a non-leader
   | clockMismatch      -- `now` is not on the clock the deadline was stamped on
+  | fenceMismatch      -- the fence member / its incarnation is not the intent's (or the intent has none)
   deriving Repr, DecidableEq, BEq
 
 /-- Result of a store CAS. `noop` = the same decision was already taken (the
@@ -80,9 +94,21 @@ def Outcome.next (o : Outcome) (before : Intent) : Intent :=
   | .applied i => i
   | _ => before
 
-def Intent.prepare (ref : Ref) (fence : Nat) (deadline : At) : Intent :=
+def Intent.prepare (ref : Ref) (fence : Nat) (deadline : At) (fenceMember : Option FenceMember := none) : Intent :=
   { scope := ref.scope, id := ref.id, successor := ref.successor, binding := ref.binding,
-    fence, deadline }
+    fence, deadline, fenceMember }
+
+/-- The node whose membership the commit needs: the fence when there is one, else the successor. -/
+def Intent.promiser (i : Intent) : String :=
+  match i.fenceMember with
+  | some f => f.key
+  | none => i.successor
+
+/-- A fenced intent whose fence was not yet seen prepared. -/
+def Intent.fenceUnprepared (i : Intent) : Bool :=
+  match i.fenceMember with
+  | some f => f.promiseUntil.isNone
+  | none => false
 
 /-- A new leader adopts the intent: its token must be strictly newer. The
     decision, if any, is carried over untouched. -/
@@ -104,6 +130,25 @@ def recordPrepared (i : Intent) (ref : Ref) (token : Nat) (oldUntil : At) : Outc
       | none => .applied { i with oldUntil := some oldUntil }
       | some _ => .refused .notPrepared  -- already recorded; a second ack is not accepted
 
+/-- Record that the FENCE member durably acknowledged the prepare (key and incarnation must be the
+    intent's own; once). -/
+def recordFencePrepared (i : Intent) (ref : Ref) (token : Nat) (key : String) (b : Binding) (u : At) : Outcome :=
+  match i.ref.check ref with
+  | some m => .refused (.mismatch m)
+  | none =>
+    if i.fence ≠ token then .refused .staleLeader
+    else match i.decision with
+    | .committed => .refused .alreadyCommitted
+    | .cancelled => .refused .alreadyCancelled
+    | .pending =>
+      match i.fenceMember with
+      | none => .refused .fenceMismatch
+      | some f =>
+        if f.key ≠ key || f.binding ≠ b then .refused .fenceMismatch
+        else match f.promiseUntil with
+        | none => .applied { i with fenceMember := some { f with promiseUntil := some u } }
+        | some _ => .refused .notPrepared
+
 /-- Promotion commit: leader only, exact ref, current fence, prepared, the
     successor still in the current membership of the same scope, strictly
     before the deadline on the store's clock (`now` must be on that clock). -/
@@ -119,8 +164,8 @@ def commit (i : Intent) (ref : Ref) (actor : Actor) (members : Membership) (now 
     | .cancelled => .refused .alreadyCancelled
     | .pending =>
       if i.fence ≠ token then .refused .staleLeader
-      else if i.oldUntil.isNone then .refused .notPrepared
-      else match members.check i.scope i.successor with
+      else if i.oldUntil.isNone || i.fenceUnprepared then .refused .notPrepared
+      else match members.check i.scope i.promiser with
       | some m => .refused (.mismatch m)
       | none =>
         match now.reached? i.deadline with
@@ -281,21 +326,30 @@ private def atStr (a : At) : String := s!"{escape a.clock.node}:{escape a.clock.
 private def optAtStr : Option At → String
   | none => "-" | some a => atStr a
 
+/-- The fence member's two extra fields (none for the member path: those records are byte for byte
+    what they always were, and an old record decodes unchanged). -/
+private def fenceFields (i : Intent) : List String :=
+  match i.fenceMember with
+  | none => []
+  | some f =>
+    [ s!"fence_member={escape f.key}:{escape f.binding.podUid}:{escape f.binding.bootId}:{escape f.binding.copyId}",
+      s!"fence_until={optAtStr f.promiseUntil}" ]
+
 def encode (i : Intent) : String :=
   String.intercalate "\t"
-    [ magic, s!"v={currentVersion}", s!"id={i.id}", s!"cluster={escape i.scope.cluster}",
+    ([ magic, s!"v={currentVersion}", s!"id={i.id}", s!"cluster={escape i.scope.cluster}",
       s!"partition={i.scope.partition}", s!"generation={i.scope.generation}",
       s!"successor={escape i.successor}", s!"pod={escape i.binding.podUid}",
       s!"boot={escape i.binding.bootId}", s!"copy={escape i.binding.copyId}",
       s!"fence={i.fence}", s!"deadline={atStr i.deadline}",
       s!"old_until={optAtStr i.oldUntil}", s!"decision={decisionStr i.decision}",
-      s!"decided_by={optStr i.decidedBy}" ]
+      s!"decided_by={optStr i.decidedBy}" ] ++ fenceFields i)
 
 /-- The record's own invariants (see decode). -/
 def Intent.wellFormed (i : Intent) : Bool :=
   match i.decision with
   | .pending => i.decidedBy.isNone
-  | .committed => i.oldUntil.isSome && i.decidedBy.isSome
+  | .committed => i.oldUntil.isSome && i.decidedBy.isSome && !i.fenceUnprepared
   | .cancelled => true
 
 private def field? (key : String) (s : String) : Option String :=
@@ -362,22 +416,44 @@ private def parseBody (id cl part gen succ pod boot copy fence dl ou dec db : St
          fence := st.1, deadline := st.2.1, oldUntil := st.2.2.1,
          decision := st.2.2.2.1, decidedBy := st.2.2.2.2 }
 
+/-- The fence member's two fields (`fence_member=key:pod:boot:copy`, `fence_until=at|-`). -/
+private def fenceMemberOf? (fm fu : String) : Option FenceMember := do
+  let body ← field? "fence_member" fm
+  match body.splitOn ":" with
+  | [k, p, b, c] =>
+    let k' ← unescape? k
+    let p' ← unescape? p
+    let b' ← unescape? b
+    let c' ← unescape? c
+    let u ← optAt? (← field? "fence_until" fu)
+    some { key := k', binding := { podUid := p', bootId := b', copyId := c' }, promiseUntil := u }
+  | _ => none
+
+private def finish (s : String) (i : Intent) : Except DecodeError Intent :=
+  if !i.wellFormed then .error (.malformed "invariant")
+  else if encode i ≠ s then .error (.malformed "non-canonical")
+  else .ok i
+
 /-- Strict decoder: anything that is not exactly an `encode` image of a
-    well-formed record is an error (never "absent"). -/
+    well-formed record is an error (never "absent"). A record with no fence member has the 15
+    fields it always had; one with a fence member has two more. -/
 def decode (s : String) : Except DecodeError Intent :=
-  match s.splitOn "\t" with
-  | [m, v, id, cl, part, gen, succ, pod, boot, copy, fence, dl, ou, dec, db] =>
+  let withHead (m v : String) (k : Nat → Except DecodeError Intent) : Except DecodeError Intent :=
     if m ≠ magic then .error (.malformed "magic")
     else match natField? "v" v with
     | none => .error (.malformed "version field")
-    | some vn =>
-      if vn ≠ currentVersion then .error (.unknownVersion vn)
-      else match parseBody id cl part gen succ pod boot copy fence dl ou dec db with
-        | none => .error (.malformed "field")
-        | some i =>
-          if !i.wellFormed then .error (.malformed "invariant")
-          else if encode i ≠ s then .error (.malformed "non-canonical")
-          else .ok i
+    | some vn => if vn ≠ currentVersion then .error (.unknownVersion vn) else k vn
+  match s.splitOn "\t" with
+  | [m, v, id, cl, part, gen, succ, pod, boot, copy, fence, dl, ou, dec, db] =>
+    withHead m v fun _ =>
+      match parseBody id cl part gen succ pod boot copy fence dl ou dec db with
+      | none => .error (.malformed "field")
+      | some i => finish s i
+  | [m, v, id, cl, part, gen, succ, pod, boot, copy, fence, dl, ou, dec, db, fm, fu] =>
+    withHead m v fun _ =>
+      match parseBody id cl part gen succ pod boot copy fence dl ou dec db, fenceMemberOf? fm fu with
+      | some i, some f => finish s { i with fenceMember := some f }
+      | _, _ => .error (.malformed "field")
   | _ => .error (.malformed "field count")
 
 /-- What a read of the store yielded. `unreachable` and `malformed` are NOT

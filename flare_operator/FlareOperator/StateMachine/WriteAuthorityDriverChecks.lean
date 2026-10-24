@@ -916,6 +916,220 @@ def tExpiredRetriedAtOnce : IO Bool := do
   let d2 ← w.decision (iname 0 2 2)
   return direct == .expired && dStill == some .pending && g == .proceed && d1 == some .cancelled && d2 == some .committed
 
+
+/-! ### fence-by-member promotion of the sole same-history lagging copy
+
+World: A the old master (alive, cut off from the OPERATOR only: it keeps asking its successor), B the only
+record member (the fence), C the candidate that is not a member. Rounds of A are simulated at every step;
+a round succeeds only when B is FOLLOWING and its floor is A's term (write_promise::promise). -/
+
+/-- like `World.round`, but says whether the master's grant was renewed (every successor promised) -/
+def World.roundOk (w : World) (m : String) (succs : List String) : IO Bool := do
+  let now ← w.clock.get
+  let mn ← w.node m
+  let mut all := true
+  for s in succs do
+    let sn ← w.node s
+    if sn.reachable && sn.state == "following" && sn.floorTerm == some mn.memTerm then
+      w.setNode s fun x => { x with promiseEnd := max x.promiseEnd (now + 6000 + 5000) }
+    else all := false
+  let ok := all && mn.mode == "replicated"
+  if ok then w.setNode m fun x => { x with grant := true }
+  return ok
+
+def sentIdx (w : World) (key : String) (prefix_ : String) : IO (Option Nat) := do
+  let l := (← w.sent.get)
+  return (l.enum.find? fun (_, (_, k, c)) => k == key && c.startsWith prefix_).map (·.1)
+
+def fenceCtx (w : World) := w.ctx 7
+
+/-- the record of A with the single member B, confirmed by A; A is then cut off from the operator -/
+def fenceWorld : IO World := do
+  let w ← World.new [A, B, C]
+  let _ ← ensurePartition (w.ctx 7) 0 (view1 A [B])
+  return w
+
+/-- (a) (f): the candidate C (not a member) is promoted only after the FENCE B's promise to A is over
+    on B's own clock (promise end + margin); at no instant do A's grant and C's authority overlap; the
+    floor of the next term is on B before C is told; B is released after the record moved, and a delayed
+    request of A (old term) is refused. Run for several phases of A's rounds. -/
+def tFenceSole (phase : Nat) : IO Bool := do
+  let w ← fenceWorld
+  let mut lastOk : Nat := 0
+  let mut commitAt : Option Nat := none
+  let mut overlap := false
+  let mut early := false
+  let mut t := 1000 + phase
+  -- A keeps renewing its grant every 500 ms for as long as its successor promises
+  while t ≤ 16000 do
+    w.setClock t
+    if ← w.roundOk A [B] then lastOk := t
+    let g ← gate (w.ctx 7) 0 C "uid" 8 none .soleLagging
+    let cn ← w.node C
+    if commitAt.isNone && (cn.state == "committed" || g == .proceed) then
+      commitAt := some t
+      -- never earlier than the last promise of B (+ margin): B's end = last round + ttl + margin
+      if t < lastOk + 6000 + 5000 then early := true
+    -- the instants A's grant (the last successful round + ttl) and C's authority (from the commit) overlap
+    if commitAt.isSome && t < lastOk + 6000 then overlap := true
+    t := t + 500
+  let nB ← w.node B
+  let nC ← w.node C
+  -- order on the wire: the floor of the new term reaches B before C is told
+  let iFloor ← sentIdx w B "authority floor 0 2 0"
+  let iCommit ← sentIdx w C "authority commit "
+  let dec ← w.decision (iname 0 2 1)
+  -- the record moves with C as the master: B is a member still; the release is driven from the intent
+  w.setClock 17000
+  let r ← ensurePartition (w.ctx 7) 0 (view1 C [B]) [C]
+  let nB1 ← w.node B
+  let r2 ← ensurePartition (w.ctx 7) 0 (view1 C [B]) [C]       -- pruneIndex: the floor is there, the record is at term 2: cancel
+  let nB2 ← w.node B
+  let r3 ← ensurePartition (w.ctx 7) 0 (view1 C [B]) [C]       -- confirmed: no more prepare on B, the index entry goes
+  let idx ← indexNow w
+  -- a delayed round of the old master (term 1) is refused by B: floor 2
+  w.setClock 18000
+  let late ← w.roundOk A [B]
+  let anyCancelToC := (← w.sent.get).any fun (_, k, c) => k == C && c.startsWith "authority cancel "
+  return commitAt.isSome && !early && !overlap
+    && (match iFloor, iCommit with | some f, some c => f < c | _, _ => false)
+    && dec == some .committed && nC.state != "following" && nB.state == "preparing"
+    && (match r with | some m => m.term == 2 && m.master == C && m.successors == [B] | none => false)
+    && nB1.floorTerm == some 2 && nB1.state == "preparing"          -- not released in the pass that moved the record
+    && nB2.state == "following" && nB2.floorTerm == some 2          -- released after the record AND its floor were at term 2
+    && (match r2, r3 with | some _, some _ => true | _, _ => false)
+    && idx.isEmpty && !late && !anyCancelToC
+
+/-- the commit message to C is never sent before the fence's promise end: examined at every ms around it -/
+def tFenceSoleAll : IO Bool := do
+  return (← tFenceSole 0) && (← tFenceSole 700) && (← tFenceSole 1300)
+
+def tFenceNeverEarly : IO Bool := do
+  let w ← fenceWorld
+  w.setClock 1000
+  let _ ← w.roundOk A [B]                      -- B promises to 12000
+  let _ ← gate (w.ctx 7) 0 C "uid" 8 none .soleLagging   -- creates the fence intent, prepares C and B
+  let nB ← w.node B
+  let mut ok := nB.state == "preparing" && nB.promiseEnd == 12000
+  for t in [11990:12000] do
+    w.setClock t
+    let g ← gate (w.ctx 7) 0 C "uid" 8 none .soleLagging
+    ok := ok && isHold g && (← w.decision (iname 0 2 1)) == some .pending && (← w.firstSent C "commit").isNone
+  w.setClock 12000
+  let g ← gate (w.ctx 7) 0 C "uid" 8 none .soleLagging
+  return ok && g == .proceed && (← w.firstSent C "commit") == some 12000 && (← w.decision (iname 0 2 1)) == some .committed
+
+/-- (b) without the typed route, a non-member candidate is refused: nothing is created, prepared or sent -/
+def tFenceRefused : IO Bool := do
+  let w ← fenceWorld
+  w.setClock 1000
+  let before := (← w.sent.get).length
+  let g ← gate (w.ctx 7) 0 C "uid" 8
+  let sentCand := (← w.sent.get).drop before |>.filter fun (_, k, c) => k == C && !c.startsWith "authority status"
+  let sentFence := (← w.sent.get).drop before |>.filter fun (_, k, c) => k == B && !c.startsWith "authority status"
+  return g == .hold "abort: the candidate is not in the membership" && sentCand.isEmpty && sentFence.isEmpty
+    && (← w.decision (iname 0 2 1)).isNone
+
+/-- (d) the record is not acknowledged by the master: wait, nothing prepared -/
+def tFenceNotAcked : IO Bool := do
+  let w ← World.new [A, B, C]
+  w.setNode A fun x => { x with reachable := false }
+  let _ ← ensurePartition (w.ctx 7) 0 (view1 A [B])          -- never confirmed
+  w.setClock 1000
+  let g ← gate (w.ctx 7) 0 C "uid" 8 none .soleLagging
+  return g == .hold "wait: the master has not confirmed this membership" && (← w.firstSent C "prepare").isNone
+    && (← w.firstSent B "prepare").isNone
+
+/-- (e) the fence's scope changes before the commit (copy swap / restart): both are cancelled, nothing
+    is committed, and the next attempt (the new incarnation of the fence) goes through later -/
+def tFenceScopeChange : IO Bool := do
+  let w ← fenceWorld
+  w.setClock 1000
+  let _ ← w.roundOk A [B]
+  let _ ← gate (w.ctx 7) 0 C "uid" 8 none .soleLagging
+  -- the fence B is swapped to another copy: it is FOLLOWING again (revalidation), promising at floor 1 again
+  w.setNode B fun x => { x with boot := "b2", copy := "c2", state := "following", intent := 0, pTerm := 0, pGen := 0 }
+  w.setClock 13000
+  let g1 ← gate (w.ctx 7) 0 C "uid" 8 none .soleLagging
+  let d1 ← w.decision (iname 0 2 1)
+  let nC1 ← w.node C
+  let commit1 ← w.firstSent C "commit"
+  -- a fresh attempt for the NEW incarnation of the fence is prepared (its promise to A, made while it was
+  -- following, still has to run out: the old end 12000 is past, but nothing else renewed it here)
+  let g2 ← gate (w.ctx 7) 0 C "uid" 8 none .soleLagging
+  let atts ← scanAttempts (w.ctx 7) 0 2
+  let fenceBoots : List (Nat × Decision × Option String) := match atts with
+    | .ok l => l.map fun (a : Attempt) => (a.n, a.intent.decision, a.intent.fenceMember.map (·.binding.bootId))
+    | .error _ => []
+  return d1 == some .cancelled && nC1.state != "committed" && commit1.isNone
+    && fenceBoots.length ≥ 1 && fenceBoots.head? == some (1, Decision.cancelled, some "b1")
+    && (match g2 with | .hold _ | .proceed => true)
+    -- C was told to cancel its old prepare; the old attempt (201) is never committed
+    && (← w.firstSent C "cancel").isSome
+    && !((← w.sent.get).any fun (_, k, c) => k == C && c.startsWith "authority commit 0 201 ")
+
+/-- the route goes away (the candidate's evidence is no longer "sole lagging"): a pending fenced attempt is
+    cancelled on both nodes, never committed -/
+def tFenceRouteGone : IO Bool := do
+  let w ← fenceWorld
+  w.setClock 1000
+  let _ ← w.roundOk A [B]
+  let _ ← gate (w.ctx 7) 0 C "uid" 8 none .soleLagging
+  w.setClock 13000
+  let g ← gate (w.ctx 7) 0 C "uid" 8 none .refuse
+  let nB ← w.node B
+  let nC ← w.node C
+  return isHold g && (← w.decision (iname 0 2 1)) == some .cancelled && nB.state == "following" && nC.state == "following"
+    && (← w.firstSent C "commit").isNone
+
+/-- restart safety: the commit CAS applied but the operator died before it told anybody. The next pass (even
+    before the record moves) puts the floor of the new term on the fence and does NOT release it; a new leader's gate
+    then tells the candidate, and only then. -/
+def tFenceRestart : IO Bool := do
+  let w ← fenceWorld
+  w.setClock 1000
+  let _ ← w.roundOk A [B]
+  let _ ← gate (w.ctx 7) 0 C "uid" 8 none .soleLagging       -- both prepared
+  w.setClock 12000
+  -- the commit CAS alone (the operator dies right after it)
+  let direct ← do
+    let c ← recClient (w.ctx 7) 0
+    let rec_ ← readRec c
+    let atts ← scanAttempts (w.ctx 7) 0 2
+    match rec_, atts with
+    | .ok (some (m, _)), .ok [a] => doCommit (w.ctx 7) 0 m a
+    | _, _ => pure (.notApplied "setup")
+  let nB0 ← w.node B
+  -- the next pass, a new leader, the record has NOT moved: the floor of term 2 goes onto the fence, no cancel
+  let _ ← ensurePartition (w.ctx 8 50000) 0 (view1 A [B]) [C]
+  let nB1 ← w.node B
+  let cancelB := (← w.sent.get).any fun (_, k, c) => k == B && c.startsWith "authority cancel "
+  let commitBefore ← w.firstSent C "commit"
+  let g ← gate (w.ctx 8 50000) 0 C "uid" 8 none .soleLagging
+  let commitAfter ← w.firstSent C "commit"
+  return direct == .committed && nB0.floorTerm == some 1 && nB0.state == "preparing"
+    && nB1.floorTerm == some 2 && nB1.state == "preparing" && !cancelB && commitBefore.isNone
+    && g == .proceed && commitAfter.isSome
+
+/-- after the commit the fence lost its prepare (a restart / copy swap, which may promise at the old term
+    again): the candidate is NOT told (it would be promoted while A may hold a grant) -/
+def tFenceLostAfterCommit : IO Bool := do
+  let w ← fenceWorld
+  w.setClock 1000
+  let _ ← w.roundOk A [B]
+  let _ ← gate (w.ctx 7) 0 C "uid" 8 none .soleLagging
+  w.setClock 12000
+  let _ ← do
+    let c ← recClient (w.ctx 7) 0
+    let rec_ ← readRec c
+    let atts ← scanAttempts (w.ctx 7) 0 2
+    match rec_, atts with
+    | .ok (some (m, _)), .ok [a] => doCommit (w.ctx 7) 0 m a
+    | _, _ => pure (.notApplied "setup")
+  w.setNode B fun x => { x with boot := "b2", copy := "c2", state := "following", intent := 0, pTerm := 0, pGen := 0 }
+  let g ← gate (w.ctx 7) 0 C "uid" 8 none .soleLagging
+  return (match g with | .hold why => why.startsWith "abort:" | _ => false) && (← w.firstSent C "commit").isNone
+
 def checks : IO (List (String × Bool)) := do
   return [
     ("driver: steady state — record, floor on the successor, membership confirmed by the master, idempotent", ← tSteady),
@@ -945,6 +1159,14 @@ def checks : IO (List (String × Bool)) := do
     ("driver: C' — a master that cannot be read is asked once per gate call; the commit lands inside the prepare window and the successor is promoted", ← tColdMasterGate),
     ("driver: C' — a resourceVersion conflict on the commit CAS is retried on the same attempt (committed, no second attempt)", ← tCommitConflictOnce),
     ("driver: C' — an expired attempt is refused (never committed), cancelled, and a fresh attempt goes through in the same call", ← tExpiredRetriedAtOnce),
-    ("driver: a committed intent is terminal — the leader's cancel is refused, the successor stays committed", ← tTerminal) ]
+    ("driver: a committed intent is terminal — the leader's cancel is refused, the successor stays committed", ← tTerminal),
+    ("fence (a)(f): the sole lagging non-member is promoted only after the fence's promise to the old master (still renewing) is over, no overlap of the old grant and the new authority, the fence's floor before the candidate is told, released after the record moved, a delayed old-term request refused (3 phases)", ← tFenceSoleAll),
+    ("fence (a): no commit message at any ms before the fence's promise end", ← tFenceNeverEarly),
+    ("fence (b): without the typed route a non-member is refused and nothing is sent", ← tFenceRefused),
+    ("fence (d): a record the master has not confirmed waits, nothing prepared", ← tFenceNotAcked),
+    ("fence (e): the fence's scope changes (copy swap / restart) before the commit: cancelled, never committed", ← tFenceScopeChange),
+    ("fence: the route going away cancels a pending fenced attempt on both nodes", ← tFenceRouteGone),
+    ("fence: restart-safe — the floor of the new term goes onto the fence of a committed intent even before the record moves; the candidate is told only then", ← tFenceRestart),
+    ("fence: the fence lost its prepare after the commit — the candidate is not told", ← tFenceLostAfterCommit) ]
 
 end FlareOperator.WriteAuthorityDriverChecks

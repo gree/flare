@@ -4,6 +4,7 @@
   status reply, and the gate's decision (exhaustive over a finite domain).
 -/
 import FlareOperator.StateMachine.WriteAuthority
+import FlareOperator.StateMachine.PromotionEvidence
 
 namespace FlareOperator.WriteAuthorityChecks
 
@@ -177,6 +178,132 @@ def tDecideSafety : Bool :=
     && (match a with | .sendCancel => iv == .cancelled | _ => true)
     && (if rv.isNone then (match a with | .commitCas | .proceed | .sendCommit => false | _ => true) else true)
 
+
+/-! ### fence-by-member promotion of the sole same-history lagging copy -/
+
+open FlareOperator.PromotionEvidence in
+def tRoute : Bool :=
+  let forb : Class := .forbidden "rejoining"
+  let unk : Class := .unknown "the last master's history was not recorded"
+  -- only "lagging (same history)", read this pass, with no promotable record member
+  nonMemberRoute (some .lagging) true [] == .soleLagging
+    && nonMemberRoute (some .lagging) true [unk, forb] == .soleLagging
+    -- (b) any other evidence of the candidate keeps today's abort
+    && nonMemberRoute (some forb) true [] == .refuse
+    && nonMemberRoute (some unk) true [] == .refuse
+    && nonMemberRoute (some .eligible) true [] == .refuse
+    && nonMemberRoute (some .legacy) true [] == .refuse
+    && nonMemberRoute (some .empty) true [] == .refuse
+    && nonMemberRoute none true [] == .refuse
+    -- (c) a record member that can be promoted: the non-member is never chosen
+    && nonMemberRoute (some .lagging) true [.eligible] == .refuse
+    && nonMemberRoute (some .lagging) true [unk, .lagging] == .refuse
+    && nonMemberRoute (some .lagging) true [.empty] == .refuse
+    && nonMemberRoute (some .lagging) true [.legacy, forb] == .refuse
+    -- evidence not read on this pass is no evidence
+    && nonMemberRoute (some .lagging) false [] == .refuse
+    -- the fence: the smallest readable member key, never the candidate
+    && chooseFence ["b:1", "a:1", "c:1"] ["c:1", "b:1"] "x:1" == some "b:1"
+    && chooseFence ["b:1", "a:1"] ["a:1", "b:1"] "a:1" == some "b:1"
+    && chooseFence ["b:1", "a:1"] [] "x:1" == none
+    && chooseFence [] ["a:1"] "x:1" == none
+
+def fv (member : Bool) (state : String) (intent remaining : Nat) (scopeOk floorReached : Bool) : Option FenceView :=
+  some { member, rep := some { state, intent, scopeOk, remainingMs := remaining, promotable := false }, floorReached }
+
+def tFenceDecide : Bool :=
+  let route := NonMemberRoute.soleLagging
+  let d := fun iv rv fvw avail acked => gateDecide false acked iv rv 1 route fvw avail
+  -- (b) without the route the non-member is refused, whatever else is in place
+  gateDecide false true (.pending true false) (rep "preparing" 1 0 false) 1 .refuse (fv true "preparing" 1 0 true false) true
+      == .abort "the candidate is not in the membership"
+    -- (d) the record is not acked: wait, nothing else
+    && d .none none none true false == .wait "the master has not confirmed this membership"
+    && d (.pending true false) (rep "preparing" 1 0 false) (fv true "preparing" 1 0 true false) true false
+        == .wait "the master has not confirmed this membership"
+    -- no readable member to be the fence: wait; one: create the intent (it names the fence)
+    && (match d .none none none false true with | .wait _ => true | _ => false)
+    && d .none none none true true == .createIntent
+    && d (.pending false false) none none true true == .sendPrepare
+    -- the commit: candidate AND fence prepare this intent, the fence in the membership, its promise expired
+    && d (.pending true false) (rep "preparing" 1 0 false) (fv true "preparing" 1 0 true false) true true == .commitCas
+    -- never earlier than the fence's promise end + margin
+    && (match d (.pending true false) (rep "preparing" 1 0 false) (fv true "preparing" 1 4000 true false) true true with | .wait _ => true | _ => false)
+    -- (e) the fence's scope changed (copy swap / restart: state following or another scope): cancel, no commit
+    && (match d (.pending true false) (rep "preparing" 1 0 false) (fv true "following" 0 0 true false) true true with | .cancelCas _ => true | _ => false)
+    && (match d (.pending true false) (rep "preparing" 1 0 false) (fv true "preparing" 1 0 false false) true true with | .cancelCas _ => true | _ => false)
+    && (match d (.pending true false) (rep "preparing" 2 0 false) (fv true "preparing" 1 0 true false) true true with | .cancelCas _ => true | _ => false)
+    -- the candidate's scope changed
+    && (match d (.pending true false) (rep "following" 0 0 false) (fv true "preparing" 1 0 true false) true true with | .cancelCas _ => true | _ => false)
+    -- the fence is not (any more) in the membership: cancel (the commit CAS would refuse it too)
+    && (match d (.pending true false) (rep "preparing" 1 0 false) (fv false "preparing" 1 0 true false) true true with | .cancelCas _ => true | _ => false)
+    -- unreadable: wait, never commit
+    && (match d (.pending true false) none (fv true "preparing" 1 0 true false) true true with | .wait _ => true | _ => false)
+    && (match d (.pending true false) (rep "preparing" 1 0 false) none true true with | .wait _ => true | _ => false)
+    && (match d (.pending true false) (rep "preparing" 1 0 false) (some { member := true, rep := none, floorReached := false }) true true with | .wait _ => true | _ => false)
+    && d (.pending true true) (rep "preparing" 1 0 false) (fv true "preparing" 1 0 true false) true true == .cancelCas "the prepare window passed without a commit"
+    -- cancelled: both are told again while either still prepares; a new attempt only when neither does
+    && d .cancelled (rep "preparing" 1 0 false) (fv true "following" 0 0 true false) true true == .sendCancel
+    && d .cancelled (rep "following" 0 0 false) (fv true "preparing" 1 0 true false) true true == .sendCancel
+    && d .cancelled (rep "following" 0 0 false) (fv true "following" 0 0 true false) true true == .createIntent
+    && (match d .cancelled (rep "following" 0 0 false) (some { member := true, rep := none, floorReached := false }) true true with | .wait _ => true | _ => false)
+    -- (f) committed: the commit goes to the candidate only after the fence's floor fences the old term
+    && d .committed (rep "preparing" 1 0 false) (fv true "preparing" 1 0 true false) true true == .pushFloor
+    && d .committed (rep "preparing" 1 0 false) (fv true "preparing" 1 0 true true) true true == .sendCommit
+    && (match d .committed (rep "preparing" 1 0 false) (fv true "following" 0 0 true true) true true with | .abort _ => true | _ => false)
+    && (match d .committed (rep "preparing" 1 0 false) (fv true "preparing" 2 0 true true) true true with | .abort _ => true | _ => false)
+    && (match d .committed (rep "preparing" 1 0 false) (some { member := true, rep := none, floorReached := true }) true true with | .wait _ => true | _ => false)
+    && d .committed (rep "committed" 1 0 true) (fv true "preparing" 1 0 true true) true true == .proceed
+    -- a committed fenced intent is carried through even when the route is gone (a committed intent is not undone)
+    && gateDecide false true .committed (rep "preparing" 1 0 false) 1 .refuse (fv true "preparing" 1 0 true true) false == .sendCommit
+    -- a fence-less committed intent of a non-member is still aborted
+    && gateDecide false true .committed (rep "preparing" 1 0 false) 1 .refuse none false == .abort "the candidate is not in the membership"
+
+def tFenceRelease : Bool :=
+  -- the fence is cancelled only when the record is at the new term AND its floor is
+  fenceRelease 3 4 (some (true, true)) == .keep "the record has not moved to the new term yet"
+    && fenceRelease 4 4 (some (true, false)) == .pushFloor
+    && fenceRelease 4 4 (some (true, true)) == .cancel
+    && fenceRelease 5 4 (some (true, true)) == .cancel
+    && fenceRelease 5 4 (some (false, true)) == .done
+    && fenceRelease 3 4 (some (false, false)) == .done
+    && fenceRelease 4 4 none == .keep "the fence is unreadable"
+
+/-- Exhaustive over a finite domain: the fence path commits / tells the candidate only under its conditions. -/
+def tFenceSafety : Bool :=
+  let ivs : List IntentView := [.none, .pending false false, .pending false true, .pending true false, .pending true true, .committed, .cancelled]
+  let states := ["following", "preparing", "committed", "promoted"]
+  let reps : List (Option Replica) :=
+    none :: (states.flatMap fun s => [0, 1, 2].flatMap fun i => [0, 5].flatMap fun r => [true, false].flatMap fun ok =>
+      [true, false].map fun p => some { state := s, intent := i, scopeOk := ok, remainingMs := r, promotable := p })
+  let fvs : List (Option FenceView) :=
+    none :: (reps.flatMap fun r => [true, false].flatMap fun m => [true, false].map fun f => some { member := m, rep := r, floorReached := f })
+  let all := [true, false].flatMap fun acked => [true, false].flatMap fun av => ivs.flatMap fun iv => reps.flatMap fun rv => fvs.map fun f => (acked, av, iv, rv, f)
+  all.all fun (acked, av, iv, rv, f) =>
+    let a := gateDecide false acked iv rv 1 .soleLagging f av
+    let holds : Option Replica → Bool := fun r => match r with | some x => x.holds 1 | none => false
+    let fenceOf : Option FenceView → Option Replica := fun x => x.bind (·.rep)
+    -- a commit CAS: pending and not expired, acked, the candidate and the fence both hold the prepare,
+    -- the fence a member whose promise to the old master is over
+    (match a with
+      | .commitCas =>
+        acked && iv == .pending true false && holds rv && holds (fenceOf f)
+          && (f.map (·.member)) == some true && ((fenceOf f).map (·.remainingMs)) == some 0
+      | _ => true)
+    -- the commit message to the candidate: only with the fence still preparing and its floor fencing the old term
+    && (match a with
+        | .sendCommit => acked && iv == .committed && holds (fenceOf f) && (f.map (·.floorReached)) == some true && rv.isSome
+        | _ => true)
+    && (match a with | .pushFloor => iv == .committed && holds (fenceOf f) && (f.map (·.floorReached)) == some false | _ => true)
+    -- nothing at all happens on an unconfirmed record
+    && (if !acked then (match a with | .wait _ | .abort _ => true | _ => false) else true)
+    -- a committed intent is never cancelled; unreadable never commits
+    && (match a with | .cancelCas _ => iv != .committed | _ => true)
+    && (if rv.isNone || (fenceOf f).isNone then (match a with | .commitCas | .sendCommit | .pushFloor => false | _ => true) else true)
+    && (if rv.isNone then (match a with | .proceed => false | _ => true) else true)
+    -- a new attempt only when no cancel is outstanding on either node
+    && (match a with | .createIntent => iv == .none || (iv == .cancelled && !holds rv && !holds (fenceOf f)) | _ => true)
+
 def checks : List (String × Bool) :=
   [ ("write authority: every number explicit and consistent, else OFF", tConfig),
     ("write authority: membership record round trip, strict decode", tCodec),
@@ -184,6 +311,10 @@ def checks : List (String × Bool) :=
     ("write authority: flared status parse (Unknown on a cut-short / missing / error reply), holds / floor", tStatus),
     ("write authority: command lines", tCmds),
     ("write authority: the gate's decision per state", tDecide),
-    ("write authority: the gate never commits / proceeds / cancels outside its conditions (exhaustive over the domain)", tDecideSafety) ]
+    ("write authority: the gate never commits / proceeds / cancels outside its conditions (exhaustive over the domain)", tDecideSafety),
+    ("fence: the route to a non-member is only 'sole same-history lagging copy' read this pass with no promotable member; the fence is the smallest readable member", tRoute),
+    ("fence: the gate's decision on the fence path (acked, commit only after the fence's promise expired, scope change cancels both, commit message only after the floor, committed carried through)", tFenceDecide),
+    ("fence: release after the record moved to the new term and the fence's floor fences it", tFenceRelease),
+    ("fence: the fence path never commits / tells the candidate / pushes the floor outside its conditions (exhaustive over the domain)", tFenceSafety) ]
 
 end FlareOperator.WriteAuthorityChecks

@@ -20,6 +20,12 @@
     write-authority-two-failovers : the master pod is killed twice in a row (the second as soon as
                            the first new master holds its grant): zero interval in which two
                            pods acknowledge locally, and the second failover completes
+    write-authority-sole-lagging : the master pod is killed twice; the copy that became Active after the
+                           first failover is NOT in the membership record (operator test seam
+                           FLARE_TEST_HOLD_MEMBER_ADD_FILE) and the only member is unpromotable: it is
+                           promoted by FENCING the old master with a record member's expired promise
+                           (logged NOT LOSS-FREE); no dual grant / acknowledgement, data check with
+                           the loss window reported
     write-authority-solo   : a 1-copy partition (no successor) keeps serving, also
                            with the operator absent
 -/
@@ -543,6 +549,155 @@ def twoFailoversSuite : TestSuite :=
     tests := [
       { name := "(two failovers in a row, authority ON) the master pod is killed, and the new master is killed as soon as it holds its grant: no interval in which two pods acknowledge locally, and the second failover completes (a pod other than the killed one holds a valid grant; the new master acknowledges)"
         run := twoFailoversRun { cfg, suite := "write-authority-two-failovers", test := "two-failovers" } }
+    ] }
+
+
+/-! ## the sole lagging copy that is not yet a member of the record -/
+
+/-- A shell line in the operator's pod (the test seam files live there). -/
+private def opShell (c : Ctx) (cmd : String) : IO (Except String String) := do
+  match (← getPodNames s!"app={c.cfg.operatorName}" c.cfg.«namespace»).head? with
+  | none => return .error "no operator pod"
+  | some pod => kubectl ["exec", "-n", c.cfg.«namespace», pod, "--", "sh", "-c", cmd]
+
+/-- The authoritative membership record of partition 0 (the ConfigMap's `data.record`). -/
+private def membersRecord (c : Ctx) : IO (Option String) := do
+  match ← kubectl ["get", "configmap", s!"{c.cfg.name}-authority-p0", "-n", c.cfg.«namespace», "-o", "jsonpath={.data.record}"] with
+  | .ok o => return some o.trim
+  | .error _ => return none
+
+/-- `pod` is a SUCCESSOR of the record (`succ=k1,k2` names node keys `pod.service...:port`). -/
+private def recordHasSuccessor (record pod : String) : Bool :=
+  (record.splitOn " ").any fun w => w.startsWith "succ=" && ((w.drop 5).splitOn ",").any (·.startsWith s!"{pod}.")
+
+private def recordMasterIs (record pod : String) : Bool :=
+  (record.splitOn " ").any fun w => w.startsWith "master=" && (w.drop 7).startsWith s!"{pod}."
+
+/-- seconds an acknowledgement before the second kill may still be missing: the grant ttl + the margin -/
+def soleWindowSec : Nat := 11
+
+def soleLaggingRun (c : Ctx) : IO TestResult := do
+  let ns := c.cfg.«namespace»
+  if !(← waitAuthority c.cfg 240) then return .fail (notSetUp "no master holds a write grant")
+  let some m1 ← grantedPod c.cfg | return .fail (notSetUp "the granted pod vanished")
+  let obs ← startObserver c.sample 1000
+  let ownObs ← startObserver (tfOwn c) 1000
+  let traceFollow ← startTraceFollow c ((← c.pods).getD [] |>.map (·.name))
+  let mut names ← writersOnPods c "p1"
+  let stopAll := fun (ns' : List String) => do
+    discard <| obs.finish
+    discard <| ownObs.finish
+    discard <| stopTraceFollow traceFollow
+    for n in ns' do discard <| c.stopWriter n
+  IO.sleep 15000
+  -- from here newly eligible successors are not added to the record (the operator's test seam): a copy
+  -- that becomes Active after failover 1 stays a non-member
+  if let .error e ← opShell c "touch /tmp/holdadd" then
+    stopAll names
+    return .fail (notSetUp s!"could not arm the member-add hold in the operator pod: {e}")
+  let k1 ← epochNow
+  killPod c m1
+  let ok1 ← waitForCondition "a pod other than the killed master holds the grant (failover 1)" 300 do
+    return (← grantedPod c.cfg).any (· != m1)
+  let some m2 ← grantedPod c.cfg | do stopAll names; return .fail (notSetUp "failover 1: no grant holder")
+  c.event s!"failover 1 done: {m1} -> {m2} (completed {ok1})"
+  if !ok1 || m2 == m1 then
+    stopAll names
+    return .fail "failover 1 did not complete (no other pod holds a grant within 300 s)"
+  names := names ++ (← writersOnPods c "p2")
+  let r := ((← c.pods).getD [] |>.map (·.name)).find? fun p => p != m1 && p != m2
+  let some r := r | do stopAll names; return .fail (notSetUp "the third pod is not known")
+  -- the window of the gap: the old master's copy m1 is Active (a data copy, same history) but NOT a member of the
+  -- record; the only member r is a live proxy held by replica repair (unpromotable). Then the new master dies.
+  let mut ready := false
+  let mut lastState := ""
+  for _ in [0:300] do
+    let view ← c.nodeView
+    let m1Active := view.any fun e => podOfFqdn e.fqdn == m1 && e.role == 1 && e.state == 0
+    let rProxy := view.any fun e => podOfFqdn e.fqdn == r && e.role == 2
+    let record := (← membersRecord c).getD ""
+    let m1Out := !recordHasSuccessor record m1 && recordMasterIs record m2
+    lastState := s!"{m1} active slave {m1Active}, {r} proxy {rProxy}, {m1} outside the record {m1Out}, record [{record}]"
+    if m1Active && rProxy && m1Out then ready := true; break
+    IO.sleep 1000
+  if !ready then
+    stopAll names
+    return .fail (notSetUp s!"the gap was not reached within 300 s of failover 1: {lastState}")
+  c.event s!"the gap: {lastState}"
+  let k2 ← epochNow
+  killPod c m2
+  let ok2 ← waitForCondition "a pod other than the second killed master holds the grant (failover 2: the sole lagging copy, fenced)" 300 do
+    return (← grantedPod c.cfg).any (· != m2)
+  let m3 := (← grantedPod c.cfg).getD "none"
+  c.event s!"failover 2: {m2} -> {m3} (completed {ok2})"
+  names := names ++ (← writersOnPods c "p3")
+  IO.sleep 20000
+  let opLog ← kubectlLogsLabel s!"app={c.cfg.operatorName}" ns 10000000
+  let fenced := containsSubstr opLog s!"PROMOTION NOT LOSS-FREE (write authority): {m1}."
+  let rec2 ← membersRecord c
+  c.art "report.txt" s!"masters {m1} -> {m2} -> {m3}; member {r}; kills at {k1} and {k2}; fence path logged: {fenced}; record at the end [{rec2.getD "?"}]"
+  let samples ← match ← obs.finish with
+    | .ok l => pure l
+    | .error e => do
+      discard <| ownObs.finish
+      discard <| stopTraceFollow traceFollow
+      for n in names do discard <| c.stopWriter n
+      return .fail (unobservable e)
+  let own ← match ← ownObs.finish with
+    | .ok l => pure (l.flatMap id)
+    | .error e => do
+      discard <| stopTraceFollow traceFollow
+      for n in names do discard <| c.stopWriter n
+      return .fail (unobservable s!"own-view observer: {e}")
+  let mut ws : List WriteRec := []
+  let mut complete := true
+  for n in names do
+    match ← c.stopWriter n with
+    | some wl => ws := ws ++ wl.ws; complete := complete && wl.complete
+    | none => complete := false
+  IO.sleep 1500
+  let traceLines ← stopTraceFollow traceFollow
+  let trace := traceIndex traceLines
+  let acks := ws.filter fun w => classify w.reply == .ack
+  let (_, unattributed) := ackOverlaps samples ws own trace
+  c.event s!"{acks.length} acks, {(acks.filter fun w => (traceApplier trace w).isSome).length} attributed by the write trace ({traceLines.length} trace lines), {unattributed.length} unattributed"
+  if !ok2 then return .fail s!"the second failover did not complete: no pod other than {m2} holds a grant within 300 s — the sole lagging copy {m1} outside the record was not promoted (see the operator log: fence path / gate); fence path logged: {fenced}"
+  if !fenced || m3 != m1 then
+    return .fail (notSetUp s!"the second failover went another way (the promoted/granted pod is {m3}, the fence path was logged: {fenced}): the sole-lagging path was not exercised")
+  if !complete then return .fail (unobservable "a writer log was not confirmed complete")
+  -- (i) no dual grant / dual acknowledgement: attributed by the write trace, none unattributed, no overlap of the
+  -- old and the new master's acknowledgements
+  if let some v := ackVerdict samples ws own trace then return .fail v
+  let after := acks.filter fun w => pathOf samples w == "local" && w.ip != "" &&
+    ((samples.filter fun (t, _, _) => t ≤ w.t).getLast?.bind fun (_, _, ips) => ips.lookup w.ip) == some m3
+  if after.isEmpty then
+    return .fail (unobservable s!"the new master {m3} never acknowledged a local write in the observed window")
+  -- (ii) data: every write acknowledged before (kill - ttl - margin) of either kill is on the final master;
+  -- an acknowledgement inside such a window that is missing is REPORTED (the loss tolerance is an open decision)
+  let some ip := ((← c.pods).getD [] |>.find? (·.name == m3)).map (·.ip) | return .fail (unobservable s!"no address of {m3}")
+  let some copy ← c.ownCopy ip | return .fail (unobservable s!"the copy of {m3} could not be read")
+  let required := fun (w : WriteRec) => w.t + soleWindowSec < k1 || (k1 ≤ w.t && w.t + soleWindowSec < k2)
+  let lostRequired := missingAcks (ws.filter required) copy
+  let lostWindow := missingAcks (ws.filter (!required ·)) copy
+  for w in lostWindow do
+    c.event s!"acknowledged write missing on {m3} inside a loss window (kill 1 at {k1}, kill 2 at {k2}): {w.key} acked at {w.t} (sent {w.t0}) by {w.ip}"
+  c.art "report.txt" s!"acks {acks.length}; missing outside the windows {lostRequired.length}; missing inside the windows {lostWindow.length} (reported, not a failure: open decision #13)"
+  if let some w := lostRequired.head? then
+    return .fail s!"DATA LOSS: {lostRequired.length} acknowledged write(s) are missing on the final master {m3} although acknowledged more than {soleWindowSec} s before a kill (e.g. {w.key} acked at {w.t}; kills at {k1} and {k2}); {lostWindow.length} more inside the loss windows"
+  return .pass
+
+def soleLaggingSuite : TestSuite :=
+  let cfg0 := { waCfg "wa-sole" true false with multiNode := false, partitions := 1, replicas := 3 }
+  let cfg := { cfg0 with extraFlaredConf := cfg0.extraFlaredConf ++ "\nwrite-authority-trace = true",
+                         operatorEnv := cfg0.operatorEnv ++ [("FLARE_TEST_HOLD_MEMBER_ADD_FILE", "/tmp/holdadd")] }
+  { name := "write-authority-sole-lagging"
+    setup := waSetup cfg
+    teardown := cleanupCluster cfg
+    onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
+    afterEach := fun i => saveFullLogs cfg.«namespace» s!"after-test-{i}"
+    tests := [
+      { name := "(sole lagging copy, authority ON) the master pod is killed; a copy that becomes Active afterwards is held out of the membership record (test seam) while the only member is unpromotable; the new master is killed: that copy is promoted by FENCING the old master with the member's expired promise (logged NOT LOSS-FREE), a pod other than the killed one holds a grant, and there is no dual grant / dual acknowledgement; every write acknowledged before a kill's loss window is on the final master (acknowledgements inside it that are missing are reported)"
+        run := soleLaggingRun { cfg, suite := "write-authority-sole-lagging", test := "sole-lagging" } }
     ] }
 
 def soloSuite : TestSuite :=

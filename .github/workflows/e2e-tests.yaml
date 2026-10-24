@@ -105,7 +105,7 @@ jobs:
             {"group":"node-ops","suites":"node-ops-drain,node-ops-hold"},
             {"group":"node-ops-faults","suites":"node-ops-stop,node-ops-partition"},
             {"group":"node-ops-control","suites":"node-ops-drain-control,node-ops-hold-control"},
-            {"group":"authority-wa","suites":"failover-wa,write-authority-operator-absent,write-authority-solo,write-authority-two-failovers"},
+            {"group":"authority-wa","suites":"failover-wa,write-authority-operator-absent,write-authority-solo,write-authority-two-failovers,write-authority-sole-lagging"},
             {"group":"node-ops-wa","suites":"node-ops-drain-wa,node-ops-hold-wa"},
             {"group":"node-ops-wa-faults","suites":"node-ops-stop-wa"},
             {"group":"node-ops-partition-wa","suites":"node-ops-partition-wa"},

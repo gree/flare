@@ -276,6 +276,9 @@ initialize leaderSinceMsRef : IO.Ref Nat ← IO.mkRef 0
 
 /-- SAF-09: the Lease already carries the persisted-map marker. -/
 initialize nodeMapMarkedRef : IO.Ref Bool ← IO.mkRef false
+/-- The leader's local, fail-closed lease deadline (StateMachine/LeaseGuard). Set in `main` before the
+    first acquire; its renewer task is the only Lease writer while leader (renew and the SAF-09 marker). -/
+initialize leaseGuardRef : IO.Ref (Option LeaseGuard.Guard) ← IO.mkRef none
 
 /-- SAF-09: the first-build approval was read back as absent (consumed). -/
 initialize approvalConsumedRef : IO.Ref Bool ← IO.mkRef false
@@ -386,10 +389,17 @@ private def nodeMapHistory (crName ns leaseName : String) : IO (NodeMapRecovery.
     the annotation was read back as absent, not that a removal was sent. -/
 private def markNodeMapPersisted (crName ns : String) (version : Nat) : IO Unit := do
   if !(← nodeMapMarkedRef.get) then
-    match ← kubectl ["annotate", "lease", s!"{crName}-operator-lease", "-n", ns, "--overwrite",
-        s!"flare.gree.net/node-map-persisted={version}"] with
-    | .ok _ => nodeMapMarkedRef.set true
-    | .error e => IO.eprintln s!"[flare-operator] warning: could not mark the Lease with the persisted node map ({e}); retried on the next persist"
+    match ← leaseGuardRef.get with
+    | some g =>
+      -- the lease guard's renewer task writes it (a CAS on its resourceVersion chain): another writer of
+      -- the Lease would refuse the renewer's next CAS. Marked once the renewer CONFIRMED a write.
+      if (← g.markerDone.get).isSome then nodeMapMarkedRef.set true
+      else g.requestMarker (toString version)
+    | none =>
+      match ← kubectl ["annotate", "lease", s!"{crName}-operator-lease", "-n", ns, "--overwrite",
+          s!"flare.gree.net/node-map-persisted={version}"] with
+      | .ok _ => nodeMapMarkedRef.set true
+      | .error e => IO.eprintln s!"[flare-operator] warning: could not mark the Lease with the persisted node map ({e}); retried on the next persist"
   if !(← approvalConsumedRef.get) then
     let readApproval : IO (Except String String) :=
       kubectl ["get", "flarecluster", crName, "-n", ns, "-o",
@@ -663,10 +673,6 @@ initialize historyObsAtRef : IO.Ref Nat ← IO.mkRef 0
 initialize historyCrRef : IO.Ref String ← IO.mkRef ""
 /-- (lease name, this pod's identity): every history write re-checks the lease. -/
 initialize historyLeaseRef : IO.Ref (String × String) ← IO.mkRef ("", "")
-
-/-- The leader's local, fail-closed lease deadline (StateMachine/LeaseGuard).
-    Set in `main` before the first acquire. -/
-initialize leaseGuardRef : IO.Ref (Option LeaseGuard.Guard) ← IO.mkRef none
 
 /-- Held per the LOCAL monotonic deadline (not lost, not fired, now < heldUntil).
     False when there is no guard: fail closed. -/

@@ -713,6 +713,21 @@ def renewLeaseStamped (boundMs : Option Nat) (leaseName ns identity stamp rv : S
   catch e =>
     return .error s!"renewLease error: {e}"
 
+/-- Annotate the Lease as a CAS on `rv` (kubectl --resource-version), bounded like the renew; returns
+    the produced resourceVersion (empty = error). Used by the lease guard's renewer task only. -/
+def annotateLeaseCas (boundMs : Nat) (leaseName ns rv kv : String) : IO (Except String String) := do
+  if ← leaseApiStalled boundMs then
+    return .error "annotateLease failed: lease API stalled (FLARE_TEST_LEASE_API_STALL_FILE)"
+  try
+    match ← Kubectl.kubectlBounded boundMs ["annotate", "lease", leaseName, "-n", ns, "--overwrite",
+        s!"--resource-version={rv}", kv, "-o", "jsonpath={.metadata.resourceVersion}"] with
+    | .error e => return .error e
+    | .ok out =>
+      if out.trim.isEmpty then return .error "annotateLease: no resourceVersion in the reply (unconfirmed)"
+      return .ok out.trim
+  catch e =>
+    return .error s!"annotateLease error: {e}"
+
 /-- Acquire an expired lease using JSON Patch with test-and-set.
 
     The precondition is the lease's metadata.resourceVersion from the SAME

@@ -174,6 +174,9 @@ structure Api where
   /-- read the lease, bounded by the given ms -/
   read : Nat → IO ReadOutcome
   sleep : Nat → IO Unit
+  /-- the SAF-09 marker on the same Lease (value, the resourceVersion CAS, bound): written by the
+      renewer task only, so the lease keeps ONE writer and one CAS chain -/
+  annotate : String → String → Nat → IO RenewOutcome := fun _ _ _ => pure (.failed "annotate not provided")
   /-- one line per renewer outcome (the guard must say why it is about to fire) -/
   log : String → IO Unit := fun _ => pure ()
 
@@ -187,10 +190,15 @@ structure Guard where
   /-- the resourceVersion of the lease state THIS incarnation last knew (its own
       confirmed write, its acquisition, or a read-back); "" = not known yet -/
   knownRv : IO.Ref String
+  /-- a marker value waiting to be written by the renewer task (`requestMarker`) -/
+  pendingMarker : IO.Ref (Option String)
+  /-- the marker value the renewer task wrote (confirmed by its resourceVersion) -/
+  markerDone : IO.Ref (Option String)
   onExpire : String → IO Unit
 
 def Guard.new (cfg : Config) (onExpire : String → IO Unit) : IO Guard :=
-  return { cfg, heldUntil := ← IO.mkRef 0, lost := ← IO.mkRef false, fired := ← IO.mkRef none, lastFailure := ← IO.mkRef "", knownRv := ← IO.mkRef "", onExpire }
+  return { cfg, heldUntil := ← IO.mkRef 0, lost := ← IO.mkRef false, fired := ← IO.mkRef none, lastFailure := ← IO.mkRef "", knownRv := ← IO.mkRef "", pendingMarker := ← IO.mkRef none,
+           markerDone := ← IO.mkRef none, onExpire }
 
 /-- This incarnation's own write (create / acquire / phase-1 renew) produced `rv`. -/
 def Guard.know (g : Guard) (rv : String) : IO Unit :=
@@ -269,13 +277,40 @@ def attempt (api : Api) (g : Guard) : IO Unit := do
     | .lost => g.markLost "renew not applied and the lease names another holder"
     | .nothing => pure ()
 
+/-- Ask the renewer task to write the marker (other code never writes the Lease while leader). -/
+def Guard.requestMarker (g : Guard) (v : String) : IO Unit := g.pendingMarker.set (some v)
+
+/-- The renewer task's marker write: only while the deadline holds and with a known resourceVersion,
+    as a CAS on it; the produced resourceVersion continues the chain. A failure (refused, ambiguous)
+    leaves it pending for the next cycle; an ambiguous landing costs at most one refused renew, which
+    the read-back recovers. -/
+def markerStep (api : Api) (g : Guard) : IO Unit := do
+  match ← g.pendingMarker.get with
+  | none => pure ()
+  | some v =>
+    let now ← api.now
+    let rv0 ← g.knownRv.get
+    if rv0.isEmpty || !holdsAt now (← g.heldUntil.get) then return
+    match ← api.annotate v rv0 (callBound g.cfg now (← g.heldUntil.get)) with
+    | .applied rv1 =>
+      if rv1.isEmpty then
+        api.log s!"marker: annotate replied without a resourceVersion (unconfirmed); retried"
+      else
+        g.know rv1
+        g.markerDone.set (some v)
+        if (← g.pendingMarker.get) == some v then g.pendingMarker.set none
+        api.log s!"marker: node-map-persisted={v} written by the renewer, rv {rv0} -> {rv1}"
+    | .failed why => api.log s!"marker: not written ({why.take 200}); retried after the next renew"
+
 /-- Fixed cadence from each attempt's START; attempts never overlap (one task).
     Nothing an attempt throws ends the loop: it is logged, recorded as the last
     failure, and the next attempt follows. -/
 partial def renewerLoop (api : Api) (g : Guard) : IO Unit := do
   if (← g.fired.get).isSome then return
   let start ← api.now
-  try attempt api g
+  try
+    attempt api g
+    markerStep api g
   catch e =>
     g.lastFailure.set s!"renewer attempt raised: {e}"
     api.log s!"renewer: attempt RAISED: {e}"

@@ -32,6 +32,12 @@ def realLeaseApi (leaseName ns identity : String) : Api where
       logLine s!"renewer: read-back error: {e.take 300}"
       pure .unreadable
   sleep := fun ms => IO.sleep ms.toUInt32
+  annotate := fun v rv bound => do
+    let r ← try annotateLeaseCas bound leaseName ns rv s!"flare.gree.net/node-map-persisted={v}"
+      catch e => pure (.error s!"{e}")
+    match r with
+    | .ok rv1 => pure (.applied rv1)
+    | .error e => pure (.failed e)
   log := logLine
 
 /-- Start the watchdog and the renewer as dedicated tasks. -/

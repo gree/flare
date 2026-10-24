@@ -355,7 +355,14 @@ def serverApi (identity : String) (lease : IO.Ref LeaseObj) (mode : IO.Ref Reply
     if !(← readable.get) then return .unreadable
     let o ← lease.get
     return .lease o.holder o.renewTime (toString o.rv)
-  sleep := fun ms => clock.modify (· + ms) }
+  sleep := fun ms => clock.modify (· + ms)
+  -- the SAF-09 marker: a metadata-only write, CAS on the resourceVersion (it moves the rv like any write)
+  annotate := fun _ rv _ => do
+    match applyPatch (← lease.get) [.test "/metadata/resourceVersion" rv] with
+    | none => return .failed "409 conflict"
+    | some o =>
+      lease.set o
+      return .applied (toString o.rv) }
 
 /-- no instant with the new leader holding and the old one serving -/
 def noViolation (w : World) : IO Bool := return (← w.violation.get).isNone
@@ -436,6 +443,45 @@ def casChecks : IO (List (String × Bool)) := do
   g5b.know ""
   out := out ++ [("lease CAS (8e): an 'applied' reply without a resourceVersion is NOT confirmed (unreadable read-back: no extension, knownRv kept); an empty resourceVersion is never adopted as known",
     (← g5.heldUntil.get) == deadlineOf g5.cfg 0 && (← g5.knownRv.get) == "5" && (← g5b.knownRv.get) == "")]
+  -- (8f) the SAF-09 marker written BY the renewer task (CAS on its chain) between two renews: no refused renew
+  let lease6 ← IO.mkRef ({ holder := "pod", renewTime := "s0", rv := 5, transitions := 1 } : LeaseObj)
+  let logs6 ← IO.mkRef (#[] : Array String)
+  let clock6 ← IO.mkRef 1000
+  let api6 := { serverApi "pod" lease6 (← IO.mkRef ReplyMode.normal) (← IO.mkRef true) clock6 (← IO.mkRef 0) with
+                log := fun m => logs6.modify (·.push m) }
+  let g6 ← Guard.new { identity := "pod" } (fun _ => pure ())
+  g6.know "5"
+  g6.confirm 0
+  attempt api6 g6
+  g6.requestMarker "42"
+  markerStep api6 g6
+  clock6.modify (· + 5000)
+  attempt api6 g6
+  let l6 ← logs6.get
+  out := out ++ [("lease CAS (8f): the SAF-09 marker written by the renewer task as a CAS on its chain between two renews -> both renews applied, none refused, the marker confirmed, rv 5 -> 6 -> 7 -> 8",
+    (← g6.markerDone.get) == some "42" && (← g6.pendingMarker.get).isNone && (← lease6.get).rv == 8 &&
+    !(l6.any fun m => (m.splitOn "FAILED").length > 1))]
+  -- (8g) CONTROL: the same marker written OUTSIDE the guard (the d5d217a annotate) refuses the next renew once;
+  --      the read-back adopts the rv (no extension) and the renew after it applies
+  let lease7 ← IO.mkRef ({ holder := "pod", renewTime := "s0", rv := 5, transitions := 1 } : LeaseObj)
+  let logs7 ← IO.mkRef (#[] : Array String)
+  let clock7 ← IO.mkRef 1000
+  let api7 := { serverApi "pod" lease7 (← IO.mkRef ReplyMode.normal) (← IO.mkRef true) clock7 (← IO.mkRef 0) with
+                log := fun m => logs7.modify (·.push m) }
+  let g7 ← Guard.new { identity := "pod" } (fun _ => pure ())
+  g7.know "5"
+  g7.confirm 0
+  attempt api7 g7
+  lease7.modify (fun o => { o with rv := o.rv + 1 })            -- an outside metadata write
+  let hu7 ← g7.heldUntil.get
+  clock7.modify (· + 5000)
+  attempt api7 g7
+  let refusedOnce := (← logs7.get).any fun m => (m.splitOn "FAILED").length > 1
+  let hu7b ← g7.heldUntil.get
+  clock7.modify (· + 5000)
+  attempt api7 g7
+  out := out ++ [("lease CAS (8g) CONTROL: a metadata write OUTSIDE the guard refuses the next renew once (no extension), the read-back adopts its rv and the following renew applies",
+    refusedOnce && hu7b == hu7 && (← g7.heldUntil.get) > hu7)]
   return out
 
 /-- (7) the same-identity restart race and its holder-only control. -/

@@ -79,12 +79,69 @@ def callBound (c : Config) (now heldUntil : Nat) : Nat :=
 def holdsAt (now heldUntil : Nat) : Bool := now < heldUntil
 
 inductive ReadOutcome where
-  | lease (holder renewTime : String)
+  /-- holder, renewTime as stored, metadata.resourceVersion -/
+  | lease (holder renewTime rv : String)
   | unreadable
   deriving Repr, BEq
 
+/-! ## The renew patch and what the API server does with it
+
+A JSON patch is applied by the API server to the object it is about to store
+(conflicts are retried against the fresh object, every `test` op is evaluated
+again), atomically: all ops or none. Killing the local kubectl never retracts a
+request the server already accepted, so a renew may LAND LATE — after this
+process gave up on it, after this process is gone, after another incarnation of
+the SAME identity (the pod name survives a container restart) renewed. The patch
+must therefore be unable to mutate any lease state but the one this incarnation
+last knew: it tests the resourceVersion of that state. Any later write by anyone
+(a new incarnation's renew, a takeover) changes the resourceVersion and the late
+patch is refused; it can never move renewTime backwards under a newer holder or
+renewal. -/
+
+inductive PatchOp where
+  | test (path value : String)
+  | replace (path value : String)
+  deriving Repr, BEq
+
+/-- The renew patch of one attempt: resourceVersion CAS (the state this incarnation
+    last knew), the holder test (defense in depth), then the attempt's stamp. -/
+def renewPatch (identity stamp rv : String) : List PatchOp :=
+  [.test "/metadata/resourceVersion" rv, .test "/spec/holderIdentity" identity,
+   .replace "/spec/renewTime" stamp]
+
+def PatchOp.json : PatchOp → String
+  | .test p v => s!"\{\"op\":\"test\",\"path\":\"{p}\",\"value\":\"{v}\"}"
+  | .replace p v => s!"\{\"op\":\"replace\",\"path\":\"{p}\",\"value\":\"{v}\"}"
+
+def patchJson (ops : List PatchOp) : String := "[" ++ ",".intercalate (ops.map PatchOp.json) ++ "]"
+
+/-- The lease as the API server stores it (the fields the patches touch). -/
+structure LeaseObj where
+  holder : String
+  renewTime : String
+  rv : Nat
+  transitions : Nat := 0
+  deriving Repr, BEq
+
+/-- The server's application of a test/replace patch: `none` when a test fails
+    (HTTP 422, nothing changes); otherwise the new object with the next
+    resourceVersion. -/
+def applyPatch (o : LeaseObj) (ops : List PatchOp) : Option LeaseObj :=
+  let step (acc : Option LeaseObj) (op : PatchOp) : Option LeaseObj :=
+    match acc, op with
+    | none, _ => none
+    | some x, .test "/metadata/resourceVersion" v => if toString x.rv == v then some x else none
+    | some x, .test "/spec/holderIdentity" v => if x.holder == v then some x else none
+    | some x, .test "/spec/renewTime" v => if x.renewTime == v then some x else none
+    | some _, .test _ _ => none
+    | some x, .replace "/spec/renewTime" v => some { x with renewTime := v }
+    | some x, .replace "/spec/holderIdentity" v => some { x with holder := v }
+    | some x, .replace _ _ => some x
+  (ops.foldl step (some o)).map fun x => { x with rv := o.rv + 1 }
+
 inductive RenewOutcome where
-  | applied
+  /-- applied; the new resourceVersion -/
+  | applied (rv : String)
   /-- refused, timed out, lost response, any error: the write may or may not have landed -/
   | failed (why : String)
   deriving Repr, BEq
@@ -101,7 +158,7 @@ inductive Verdict where
 /-- Judge a read-back after an ambiguous write that wrote `stamp`. -/
 def judgeReadBack (identity stamp : String) : ReadOutcome → Verdict
   | .unreadable => .nothing
-  | .lease holder renewTime =>
+  | .lease holder renewTime _ =>
     if holder == identity then (if renewTime == stamp then .confirmed else .nothing)
     else .lost
 
@@ -111,8 +168,9 @@ structure Api where
   now : IO Nat
   /-- a renewTime value unique to this attempt -/
   stamp : IO String
-  /-- renew patch (holder test) writing `stamp`, bounded by the given ms -/
-  renew : String → Nat → IO RenewOutcome
+  /-- the renew patch `renewPatch identity stamp rv` (resourceVersion CAS + holder
+      test) writing `stamp`, bounded by the given ms -/
+  renew : String → String → Nat → IO RenewOutcome
   /-- read the lease, bounded by the given ms -/
   read : Nat → IO ReadOutcome
   sleep : Nat → IO Unit
@@ -126,10 +184,17 @@ structure Guard where
   fired : IO.Ref (Option String)
   /-- summary of the renewer's last failed attempt (shown in the FAIL-CLOSED line) -/
   lastFailure : IO.Ref String
+  /-- the resourceVersion of the lease state THIS incarnation last knew (its own
+      confirmed write, its acquisition, or a read-back); "" = not known yet -/
+  knownRv : IO.Ref String
   onExpire : String → IO Unit
 
 def Guard.new (cfg : Config) (onExpire : String → IO Unit) : IO Guard :=
-  return { cfg, heldUntil := ← IO.mkRef 0, lost := ← IO.mkRef false, fired := ← IO.mkRef none, lastFailure := ← IO.mkRef "", onExpire }
+  return { cfg, heldUntil := ← IO.mkRef 0, lost := ← IO.mkRef false, fired := ← IO.mkRef none, lastFailure := ← IO.mkRef "", knownRv := ← IO.mkRef "", onExpire }
+
+/-- This incarnation's own write (create / acquire / phase-1 renew) produced `rv`. -/
+def Guard.know (g : Guard) (rv : String) : IO Unit :=
+  if rv.isEmpty then pure () else g.knownRv.set rv
 
 /-- A positively confirmed hold whose request was sent at `sendMs`. -/
 def Guard.confirm (g : Guard) (sendMs : Nat) : IO Unit :=
@@ -168,19 +233,25 @@ def attempt (api : Api) (g : Guard) : IO Unit := do
   let send ← api.now
   let stamp ← api.stamp
   let b1 := callBound g.cfg send (← g.heldUntil.get)
-  let r ← api.renew stamp b1
+  let rv0 ← g.knownRv.get
+  let r0 ← api.renew stamp rv0 b1
+  -- a reply without a resourceVersion is NOT an applied renew (fail closed): it is judged by the read-back
+  let r := match r0 with
+    | .applied rv1 => if rv1.isEmpty then RenewOutcome.failed "applied reply without a resourceVersion (treated as unconfirmed)" else r0
+    | other => other
   let t1 ← api.now
   match r with
-  | .applied =>
+  | .applied rv1 =>
+    g.knownRv.set rv1
     g.confirm send
-    api.log s!"renewer: renew applied in {t1 - send} ms (bound {b1} ms), heldUntil={← g.heldUntil.get} ms, now={t1} ms"
+    api.log s!"renewer: renew applied in {t1 - send} ms (bound {b1} ms), rv {rv0} -> {rv1}, stamp {stamp}, heldUntil={← g.heldUntil.get} ms, now={t1} ms"
   | .failed why =>
     let b2 := callBound g.cfg t1 (← g.heldUntil.get)
     let rb ← api.read b2
     let t2 ← api.now
     let rbTxt := match rb with
       | .unreadable => "read-back unreadable"
-      | .lease holder rt => s!"read-back holder={holder} renewTime={rt} (wrote {stamp})"
+      | .lease holder rt rv => s!"read-back holder={holder} renewTime={rt} rv={rv} (wrote {stamp} over rv {rv0})"
     let v := judgeReadBack g.cfg.identity stamp rb
     let vTxt := match v with
       | .confirmed => "CONFIRMED (extends from this attempt's send point)"
@@ -188,6 +259,11 @@ def attempt (api : Api) (g : Guard) : IO Unit := do
       | .nothing => "nothing confirmed"
     g.lastFailure.set s!"renew failed after {t1 - send} ms (bound {b1} ms): {why.take 300}; {rbTxt}; {vTxt}"
     api.log s!"renewer: renew FAILED after {t1 - send} ms (bound {b1} ms): {why.take 300}; {rbTxt} in {t2 - t1} ms (bound {b2} ms): {vTxt}; heldUntil={← g.heldUntil.get} ms, now={t2} ms"
+    -- a read-back naming this pod gives the CURRENT resourceVersion: the next attempt CASes on it (an
+    -- unconfirmed state is adopted, never trusted: it extends nothing; our next write replaces it)
+    match rb with
+    | .lease holder _ rv => if holder == g.cfg.identity then g.know rv
+    | .unreadable => pure ()
     match v with
     | .confirmed => g.confirm send
     | .lost => g.markLost "renew not applied and the lease names another holder"

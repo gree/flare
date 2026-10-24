@@ -680,9 +680,16 @@ private def localLeaseHeld : IO Bool := do
 private def leaseValidNow (l : LeaseInfo) (identity : String) : IO Bool := do
   return l.holderIdentity == identity && !l.expired && (← localLeaseHeld)
 
-/-- A positively confirmed write sent at `sendMs` (monotonic) extends the deadline. -/
-private def confirmLeaseHold (sendMs : Nat) : IO Unit := do
-  if let some g ← leaseGuardRef.get then g.confirm sendMs
+/-- A positively confirmed write sent at `sendMs` (monotonic) that left the lease at
+    resourceVersion `rv` extends the deadline; the renewer's next CAS is on `rv`. -/
+private def confirmLeaseHold (sendMs : Nat) (rv : String) : IO Unit := do
+  if rv.isEmpty then
+    -- no resourceVersion = no CAS chain to continue: nothing is confirmed (fail closed)
+    IO.eprintln "[flare-operator] lease guard: a lease write returned no resourceVersion: NOT confirmed"
+    return
+  if let some g ← leaseGuardRef.get then
+    g.know rv
+    g.confirm sendMs
 
 private def historyCm (crName : String) : String := s!"{crName}-history"
 
@@ -3691,20 +3698,22 @@ private def tryAcquireOrRenew (leaseName ns identity : String) : IO Bool := do
     -- Lease not found or transient error. Try to create.
     let send ← IO.monoMsNow
     match ← createLease leaseName ns identity leaseDurationSeconds with
-    | .ok () => confirmLeaseHold send; return true
+    | .ok rv => confirmLeaseHold send rv; return true
     | .error _ => return false
   | .ok lease =>
     if lease.holderIdentity == identity then
-      -- We hold it, renew (the send point is taken before the request)
+      -- We hold it (this pod's identity: a restart of the same pod, before its lease guard
+      -- runs). Renew with the resourceVersion CAS on the state just read, so a renew of
+      -- the previous incarnation that lands later is refused (send point before the request)
       let send ← IO.monoMsNow
-      match ← renewLease leaseName ns identity with
-      | .ok () => confirmLeaseHold send; return true
+      match ← renewLeaseStamped none leaseName ns identity (← leaseStamp) lease.resourceVersion with
+      | .ok rv => confirmLeaseHold send rv; return true
       | .error _ => return false
     else if lease.expired then
       -- Expired, try to take over
       let send ← IO.monoMsNow
       match ← acquireLease leaseName ns identity lease.holderIdentity lease.resourceVersion leaseDurationSeconds (lease.transitions + 1) with
-      | .ok () => confirmLeaseHold send; return true
+      | .ok rv => confirmLeaseHold send rv; return true
       | .error _ => return false
     else
       return false  -- another pod holds a valid lease
@@ -3908,8 +3917,9 @@ def main (args : List String) : IO Unit := do
         IO.eprintln s!"[flare-operator] FlareCluster {crName} could not be read ({e}); retrying — NOT treated as absent"
     if !crPresent then
       IO.sleep 5000
-      if !(← tryAcquireOrRenew leaseName ns identity) then
-        IO.eprintln "[flare-operator] LOST LEASE while waiting for the FlareCluster -- exiting"
+      -- the lease guard is the ONLY writer of the lease once it runs (one incarnation, one CAS chain)
+      if !(← localLeaseHeld) then
+        IO.eprintln "[flare-operator] LOST LEASE while waiting for the FlareCluster (the lease guard holds no confirmed lease) -- exiting"
         IO.Process.exit 1
   if waitingLogged then
     IO.eprintln s!"[flare-operator] FlareCluster {crName} appeared: examining its persisted map, history and first-build approval before taking control"
@@ -4154,10 +4164,11 @@ def main (args : List String) : IO Unit := do
 
   -- Reconcile loop with lease renewal
   while true do
-    -- Renew lease each iteration
-    let renewed ← tryAcquireOrRenew leaseName ns identity
+    -- The lease guard renews (the ONLY writer of the lease while leader: one CAS chain per
+    -- incarnation); each iteration only checks its local deadline
+    let renewed ← localLeaseHeld
     if !renewed then
-      IO.eprintln s!"[flare-operator] LOST LEASE -- exiting"
+      IO.eprintln s!"[flare-operator] LOST LEASE (the lease guard holds no confirmed lease) -- exiting"
       exitLostLease healthStatus identity ns
       -- This has to END THE PROCESS, and `throw` did not. The generated C
       -- `main` runs `lean_finalize_task_manager()` before it reports an

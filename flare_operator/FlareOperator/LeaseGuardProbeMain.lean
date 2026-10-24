@@ -23,16 +23,19 @@ def probeMain (lease ns identity : String) (seconds : Nat) : IO UInt32 := do
     IO.println m
     (← IO.getStdout).flush
   let mut created := false
+  let mut rv0 := ""
   match ← getLease lease ns with
   | .ok l =>
     if l.holderIdentity != identity then
       say s!"probe: lease {lease} exists in {ns} held by '{l.holderIdentity}', not '{identity}': not touching it"
       return 2
-    say s!"probe: lease {lease} exists and names {identity}: using it (it will NOT be deleted)"
+    rv0 := l.resourceVersion
+    say s!"probe: lease {lease} exists and names {identity}: using it at rv {rv0} (it will NOT be deleted)"
   | .error _ =>
     match ← createLease lease ns identity 15 with
-    | .ok () =>
+    | .ok rv =>
       created := true
+      rv0 := rv
       say s!"probe: created lease {lease} in {ns} held by {identity}"
     | .error e =>
       say s!"probe: cannot create lease: {e}"
@@ -64,6 +67,7 @@ def probeMain (lease ns identity : String) (seconds : Nat) : IO UInt32 := do
       g.lost.set false)
   gRef.set (some g)
   -- the acquire's confirmation (the operator's loop does this at the acquire)
+  g.know rv0
   g.confirm sendMs
   say s!"probe: guard armed, heldUntil={← g.heldUntil.get} ms; running {seconds} s"
   startTasks api g

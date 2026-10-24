@@ -17,17 +17,17 @@ def logLine (msg : String) : IO Unit :=
 def realLeaseApi (leaseName ns identity : String) : Api where
   now := IO.monoMsNow
   stamp := leaseStamp
-  renew := fun stamp bound => do
-    let r ← try renewLeaseStamped (some bound) leaseName ns identity stamp
+  renew := fun stamp rv bound => do
+    let r ← try renewLeaseStamped (some bound) leaseName ns identity stamp rv
       catch e => pure (.error s!"{e}")
     match r with
-    | .ok () => pure .applied
+    | .ok rv1 => pure (.applied rv1)
     | .error e => pure (.failed e)
   read := fun bound => do
     let r ← try getLeaseWith (some bound) leaseName ns
       catch e => pure (.error s!"{e}")
     match r with
-    | .ok l => pure (.lease l.holderIdentity l.renewTime)
+    | .ok l => pure (.lease l.holderIdentity l.renewTime l.resourceVersion)
     | .error e =>
       logLine s!"renewer: read-back error: {e.take 300}"
       pure .unreadable

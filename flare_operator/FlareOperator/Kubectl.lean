@@ -68,23 +68,30 @@ def kubectlWall (wallSecs : Nat) (args : List String) : IO (Except String String
 def wallSeconds (ms : Nat) : Option Nat :=
   if ms < 1000 then none else some (ms / 1000)
 
-/-- kubectl bounded to `boundMs` by a process wall in whole seconds, rounded down
-    (SIGTERM at the wall, SIGKILL 1 s later). The lease renewer uses it so no call can outlive its local lease
-    deadline. NO `--request-timeout`: the wall alone bounds the call, and a
-    per-request timeout kills kubectl's API-group discovery on a loaded API
-    server (see kubectlWall) — c2a4c51 passed both. -/
+/-- kubectl bounded to `boundMs`: `timeout -s KILL <whole seconds, rounded down>`.
+    GNU timeout runs the command in its own process group and, on expiry, sends
+    the signal to that group, so kubectl (and anything it spawned) is SIGKILLed at
+    the rounded-down wall — no TERM grace period (`-k 1` would let a TERM-ignoring
+    child live one more second past the bound). NO `--request-timeout`: a
+    per-request timeout broke kubectl's API-group discovery before (5b6cd9e).
+    What the wall does NOT bound: a request kubectl had already sent may still be
+    applied by the API server after the kill. For the lease renewer that is safe:
+    the renewTime it writes is stamped BEFORE the send, an unconfirmed attempt
+    never extends the local deadline (StateMachine/LeaseGuard), and a late renew
+    after a takeover is refused by the holder test; a late landing can only make a
+    successor wait longer, never let this pod serve past its deadline. -/
 def kubectlBounded (boundMs : Nat) (args : List String) : IO (Except String String) := do
   let some wall := wallSeconds boundMs
     | return .error s!"kubectl not started: less than 1 s left of its {boundMs} ms bound (args: {args.take 4})"
   try
     let proc : IO.Process.SpawnArgs :=
       { cmd := "timeout"
-        args := #["-k", "1", toString wall, "kubectl"] ++ args.toArray }
+        args := #["-s", "KILL", toString wall, "kubectl"] ++ args.toArray }
     let result ← IO.Process.output proc
     if result.exitCode == 0 then
       return .ok result.stdout
-    else if result.exitCode == 124 then
-      let m := s!"kubectl timed out after {wall}s (bound {boundMs} ms; args: {args.take 4})"
+    else if result.exitCode == 124 || result.exitCode == 137 then
+      let m := s!"kubectl killed at its {wall}s wall (bound {boundMs} ms; args: {args.take 4})"
       noteFailure m
       return .error m
     else

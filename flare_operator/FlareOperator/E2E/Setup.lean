@@ -35,6 +35,9 @@ structure ClusterConfig where
   /-- Extra environment for the per-suite operator, as (name, value). Used
       by suites that need a test seam the production default leaves off. -/
   operatorEnv : List (String × String) := []
+  /-- test seams that must survive a CONTAINER restart (same pod): a pod-level emptyDir mounted at
+      /seam in the operator container (not combinable with `evictionGuard`, which owns `volumes`) -/
+  operatorSeamDir : Bool := false
   /-- Operator replicas (1 = a single leader; 2 = a leader and a standby, the index
       Service then selects the `role=leader` pod like the chart's). -/
   operatorReplicas : Nat := 1
@@ -304,6 +307,10 @@ def operatorDeploymentYaml (cfg : ClusterConfig) : String :=
       s!"\n            - name: {k}\n              value: \"{v}\""))
   let name := cfg.operatorName
   let ns := cfg.«namespace»
+  let seamMount := if cfg.operatorSeamDir && !cfg.evictionGuard then
+      "\n          volumeMounts:\n            - name: seam\n              mountPath: /seam" else ""
+  let seamVolume := if cfg.operatorSeamDir && !cfg.evictionGuard then
+      "\n      volumes:\n        - name: seam\n          emptyDir: {}" else ""
   let guardSidecar := if !cfg.evictionGuard then "" else
     s!"\n        - name: webhook-tls\n          image: {cfg.tlsSidecarImage}\n          imagePullPolicy: IfNotPresent\n          args: [\"OPENSSL-LISTEN:9443,reuseaddr,fork,cert=/tls/tls.crt,key=/tls/tls.key,verify=0\", \"TCP:127.0.0.1:9444\"]\n          ports:\n            - containerPort: 9443\n              name: webhook\n          volumeMounts:\n            - name: webhook-tls\n              mountPath: /tls\n              readOnly: true\n      volumes:\n        - name: webhook-tls\n          secret:\n            secretName: {name}-webhook-tls"
   s!"apiVersion: apps/v1
@@ -350,7 +357,7 @@ spec:
             limits:
               cpu: 500m
               # ceiling, not a reservation - see operatorDeploymentYaml
-              memory: 1Gi{guardSidecar}
+              memory: 1Gi{seamMount}{guardSidecar}{seamVolume}
 ---
 apiVersion: v1
 kind: Service

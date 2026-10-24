@@ -12,9 +12,11 @@
      whole-second and a fractional `timeout` (rc, elapsed), and one REAL bounded
      Lease patch with the renewer's argv (timeout -k 1 <whole s> kubectl patch
      lease ... renewTime=<µs stamp>) on a scratch Lease, read back exactly.
-     Required: whole-second wall rc 124 in 0.9-1.6 s; the patch applied within
-     its 4 s wall; the read-back renewTime equals the stamp. The fractional
-     result is recorded only (the renewer uses whole seconds).
+     Required: `timeout -s KILL 1` (the renewer's argv) kills a TERM-ignoring
+     child (rc 137) and a TERM-ignoring grandchild under sh -c by the 1 s wall
+     (0.9-1.6 s, no late output); the patch applied within its 4 s wall; the
+     read-back renewTime equals the stamp. The fractional and `-k 1` results
+     are recorded only (the renewer uses neither).
   1. control: no stall, reconcile passes stretched to 16 s (test seam
      FLARE_TEST_RECONCILE_PASS_DELAY_FILE) for 4 minutes: no step-down, no
      restart, same holder, same generation (a spurious fail-closed would be a
@@ -36,11 +38,22 @@
          routes to the old pod (its address is absent from the Service's
          endpoints in every sample from 3 s on: the endpoints controller is
          asynchronous, the old pod has already stopped answering).
+  3. incarnation fencing (same pod, two incarnations): the standby's lease API is
+     stalled (it cannot take over); the leader's lease API is stalled, so its
+     renewer's next request never reaches the server — that request (the exact
+     `LeaseGuard.renewPatch` bytes: resourceVersion CAS on the state it knew,
+     holder test, a fresh renewTime) is held back by the test. The leader fails
+     closed and its container restarts in the SAME pod (same identity, fresh
+     /tmp). Once the new incarnation has renewed, the held request is released:
+     it must be REFUSED, and the lease keeps the new incarnation's holder,
+     renewTime (never moved back) and transitions. A control on a scratch Lease
+     shows the 477280c holder-only patch DOES move renewTime back on the real API.
 -/
 
 import FlareOperator.E2E.Framework
 import FlareOperator.E2E.Helpers
 import FlareOperator.E2E.Setup
+import FlareOperator.StateMachine.LeaseGuard
 
 namespace FlareOperator.E2E.Tests.LeaseFailClosed
 
@@ -57,7 +70,10 @@ private def cfg : ClusterConfig := {
   operatorName := "flare-operator"
   debugPod := "debug-lease-fc"
   operatorReplicas := 2
-  operatorEnv := [("FLARE_TEST_LEASE_API_STALL_FILE", "/tmp/lease-stall"),
+  -- the lease-API stall must survive the stalled leader's container restart (same pod, fresh /tmp):
+  -- otherwise its new incarnation re-acquires at once and the standby never gets the lease
+  operatorSeamDir := true
+  operatorEnv := [("FLARE_TEST_LEASE_API_STALL_FILE", "/seam/lease-stall"),
                   ("FLARE_TEST_RECONCILE_PASS_DELAY_FILE", "/tmp/slow-pass")]
 }
 
@@ -158,11 +174,13 @@ private def probeScript (lease stamp : String) : String :=
   "echo PATH=$PATH; echo timeout_bin=$(command -v timeout); echo kubectl_bin=$(command -v kubectl); " ++
   "echo timeout_version=$(timeout --version 2>&1 | head -1); " ++
   "echo kubectl_client=$(kubectl version --client 2>&1 | head -1); " ++
-  "s=$(date +%s%N); timeout -k 1 1 sleep 3; rc=$?; e=$(date +%s%N); echo whole_rc=$rc whole_ms=$(( (e-s)/1000000 )); " ++
+  "s=$(date +%s%N); timeout -s KILL 1 sh -c 'trap \"\" TERM; sleep 5'; rc=$?; e=$(date +%s%N); echo kill_rc=$rc kill_ms=$(( (e-s)/1000000 )); " ++
+  "s=$(date +%s%N); X=$(timeout -s KILL 1 sh -c 'Y=$(sh -c \"trap \\\"\\\" TERM; sleep 5; echo late\"); echo $Y'); rc=$?; e=$(date +%s%N); echo gc_rc=$rc gc_ms=$(( (e-s)/1000000 )) gc_out=[$X]; " ++
+  "s=$(date +%s%N); timeout -k 1 1 sh -c 'trap \"\" TERM; sleep 5'; rc=$?; e=$(date +%s%N); echo k1_rc=$rc k1_ms=$(( (e-s)/1000000 )); " ++
   "s=$(date +%s%N); timeout -k 1 0.300 sleep 2; rc=$?; e=$(date +%s%N); echo frac_rc=$rc frac_ms=$(( (e-s)/1000000 )); " ++
   "echo stamp_fmt=$(date -u +%Y-%m-%dT%H:%M:%S.%6NZ); " ++
-  s!"s=$(date +%s%N); timeout -k 1 4 kubectl patch lease {lease} -n {ns} --type=json -p '[\{\"op\":\"test\",\"path\":\"/spec/holderIdentity\",\"value\":\"lease-probe\"},\{\"op\":\"replace\",\"path\":\"/spec/renewTime\",\"value\":\"{stamp}\"}]' >/dev/null 2>/tmp/probe-err; rc=$?; e=$(date +%s%N); echo patch_rc=$rc patch_ms=$(( (e-s)/1000000 )) patch_err=$(head -c 200 /tmp/probe-err | tr '\\n' ' '); " ++
-  s!"echo readback=$(timeout -k 1 4 kubectl get lease {lease} -n {ns} -o jsonpath='\{.spec.renewTime}')"
+  s!"s=$(date +%s%N); timeout -s KILL 4 kubectl patch lease {lease} -n {ns} --type=json -p '[\{\"op\":\"test\",\"path\":\"/spec/holderIdentity\",\"value\":\"lease-probe\"},\{\"op\":\"replace\",\"path\":\"/spec/renewTime\",\"value\":\"{stamp}\"}]' >/dev/null 2>/tmp/probe-err; rc=$?; e=$(date +%s%N); echo patch_rc=$rc patch_ms=$(( (e-s)/1000000 )) patch_err=$(head -c 200 /tmp/probe-err | tr '\\n' ' '); " ++
+  s!"echo readback=$(timeout -s KILL 4 kubectl get lease {lease} -n {ns} -o jsonpath='\{.spec.renewTime}')"
 
 /-- `key=value` of the probe output. -/
 private def field (out key : String) : String :=
@@ -204,14 +222,18 @@ def suite : TestSuite := {
         | .ok out =>
           for l in out.splitOn "\n" do
             if !l.trim.isEmpty then IO.eprintln s!"# [exact image {leader}] {l.trim}"
-          let wholeRc := pair out "whole_rc"
-          let wholeMs := (pair out "whole_ms").toNat?.getD 0
+          let killRc := pair out "kill_rc"
+          let killMs := (pair out "kill_ms").toNat?.getD 0
+          let gcRc := pair out "gc_rc"
+          let gcMs := (pair out "gc_ms").toNat?.getD 0
           let patchRc := pair out "patch_rc"
           let rb := field out "readback"
           if field out "timeout_bin" == "" || field out "kubectl_bin" == "" then
             return .fail s!"timeout or kubectl not on PATH in the operator image: {out.take 400}"
-          if wholeRc != "124" || wholeMs < 900 || wholeMs > 1600 then
-            return .fail s!"`timeout -k 1 1 sleep 3` in the operator image: rc {wholeRc}, {wholeMs} ms (expected 124 after ~1 s)"
+          if killRc != "137" || killMs < 900 || killMs > 1600 then
+            return .fail s!"`timeout -s KILL 1` on a TERM-ignoring child in the operator image: rc {killRc}, {killMs} ms (expected 137 after ~1 s: KILL at the wall)"
+          if gcMs < 900 || gcMs > 1600 || (pair out "gc_out") != "[]" then
+            return .fail s!"`timeout -s KILL 1` did not kill a TERM-ignoring GRANDCHILD by the wall in the operator image: rc {gcRc}, {gcMs} ms, output {pair out "gc_out"} (the bounded lease read runs kubectl under sh)"
           if patchRc != "0" then
             return .fail s!"the bounded Lease patch with the renewer's argv failed in the operator image: rc {patchRc} after {pair out "patch_ms"} ms: {out.take 600}"
           if rb != stamp then
@@ -278,7 +300,7 @@ def suite : TestSuite := {
         | .ok _ => pure ()
         IO.sleep 20000  -- at least one stretched pass in flight
         let s0 ← wallMs
-        match ← execIn old "touch /tmp/lease-stall" with
+        match ← execIn old "touch /seam/lease-stall" with
         | .error e => return .fail s!"could not stall the lease API of {old}: {e}"
         | .ok _ => pure ()
         let s1 ← wallMs
@@ -327,8 +349,92 @@ def suite : TestSuite := {
           return .fail s!"the index Service still routed to the old leader {old} ({oldIp}) at {t}, {t - th} ms after the new leader held the lease: endpoints {eps}"
         let early := samples.filter fun (t, h, eps) => h == standby && t < th + 3000 && eps.contains oldIp
         IO.eprintln s!"# endpoint samples with the old pod while the new one held, inside the 3 s propagation allowance: {early.length}"
+        -- the stall survived the old pod's container restart (pod-level /seam): lift it so it comes back as a standby
+        discard <| execIn old "rm -f /seam/lease-stall"
         discard <| waitForCondition "the old pod is a standby again" 120 do
           return (← holder) == standby
+        return .pass },
+    { name := "(incarnation fencing) a renew of the killed incarnation, held back and released after the same pod restarted and renewed, is refused by the resourceVersion CAS; holder, renewTime and transitions stay the new incarnation's (control: 477280c's holder-only patch moves renewTime back)"
+      run := do
+        let some leader ← waitLeader | return .fail "no operator pod holds the lease with role=leader within 180 s"
+        let pods ← operatorPods
+        let some standby := pods.find? (· != leader) | return .fail s!"no standby among {pods}"
+        let stamp := fun (_ : Unit) => do
+          let r ← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%S.%6NZ"] }
+          return r.stdout.trim
+        -- control on a scratch Lease (the cluster's lease is not touched by it)
+        let probe := s!"{cfg.name}-fence-probe"
+        let now0 ← stamp ()
+        let mk := s!"apiVersion: coordination.k8s.io/v1\nkind: Lease\nmetadata:\n  name: {probe}\n  namespace: {ns}\nspec:\n  holderIdentity: {leader}\n  leaseDurationSeconds: 15\n  renewTime: \"{now0}\"\n"
+        match ← kubectlApplyManifest mk with
+        | .error e => return .fail s!"could not create the scratch Lease: {e}"
+        | .ok _ => pure ()
+        let pf := fun (path : String) => do
+          match ← kubectlGetJsonpath "lease" probe ns path with
+          | .ok v => return v.trim
+          | .error _ => return ""
+        let rvA ← pf "{.metadata.resourceVersion}"
+        let oldStamp ← stamp ()
+        let oldCas := LeaseGuard.patchJson (LeaseGuard.renewPatch leader oldStamp rvA)
+        let oldHolderOnly := LeaseGuard.patchJson [.test "/spec/holderIdentity" leader, .replace "/spec/renewTime" oldStamp]
+        IO.sleep 1100
+        let newStamp ← stamp ()
+        match ← kubectl ["patch", "lease", probe, "-n", ns, "--type=json", "-p", LeaseGuard.patchJson (LeaseGuard.renewPatch leader newStamp rvA)] with
+        | .error e => return .fail s!"control: the new incarnation's renew on the scratch Lease failed: {e}"
+        | .ok _ => pure ()
+        let casRes ← kubectl ["patch", "lease", probe, "-n", ns, "--type=json", "-p", oldCas]
+        let afterCas ← pf "{.spec.renewTime}"
+        let hoRes ← kubectl ["patch", "lease", probe, "-n", ns, "--type=json", "-p", oldHolderOnly]
+        let afterHo ← pf "{.spec.renewTime}"
+        discard <| kubectl ["delete", "lease", probe, "-n", ns, "--ignore-not-found"]
+        IO.eprintln s!"# control (scratch Lease): new renewTime {newStamp}; late rv-CAS patch {match casRes with | .ok _ => "APPLIED" | .error _ => "refused"} -> {afterCas}; late holder-only patch (477280c) {match hoRes with | .ok _ => "APPLIED" | .error _ => "refused"} -> {afterHo} (old stamp {oldStamp})"
+        if casRes.isOk || afterCas != newStamp then
+          return .fail s!"control: the late rv-CAS patch was not refused on the real API (renewTime now {afterCas}, new {newStamp})"
+        if !(hoRes.isOk && afterHo == oldStamp) then
+          return .fail s!"control: the holder-only patch did not move renewTime back on the real API ({afterHo}); the control did not reproduce the 477280c hazard"
+        -- the real lease: the standby cannot take over; the leader's renewer is cut from the server
+        match ← execIn standby "touch /seam/lease-stall" with
+        | .error e => return .fail s!"could not stall the standby's lease API: {e}"
+        | .ok _ => pure ()
+        let r0 ← restarts leader
+        match ← execIn leader "touch /seam/lease-stall" with
+        | .error e => return .fail s!"could not stall the leader's lease API: {e}"
+        | .ok _ => pure ()
+        IO.sleep 500
+        let rvOld ← leaseField "{.metadata.resourceVersion}"
+        let t0 ← transitions
+        let heldStamp ← stamp ()
+        let held := LeaseGuard.patchJson (LeaseGuard.renewPatch leader heldStamp rvOld)
+        IO.eprintln s!"# the old incarnation's next renew is held back: CAS on rv {rvOld}, stamp {heldStamp} (holder {leader}, transitions {t0})"
+        -- the old incarnation fails closed, the container restarts in the same pod, the new incarnation renews
+        let restarted ← waitForCondition s!"{leader}'s container restarted" 120 do
+          return (← restarts leader) > r0
+        if !restarted then
+          discard <| execIn standby "rm -f /seam/lease-stall"
+          discard <| execIn leader "rm -f /seam/lease-stall"
+          return .fail s!"{leader} did not restart within 120 s of its lease API stall"
+        -- the new incarnation (same pod, same identity) gets its lease API back; the standby stays stalled
+        discard <| execIn leader "rm -f /seam/lease-stall"
+        let renewed ← waitForCondition "the new incarnation renewed (holder unchanged, resourceVersion moved)" 120 do
+          return (← holder) == leader && (← leaseField "{.metadata.resourceVersion}") != rvOld &&
+            ((← podLog leader false).any fun (_, l) => containsSubstr l "renewer: renew applied")
+        if !renewed then
+          discard <| execIn standby "rm -f /seam/lease-stall"
+          return .fail s!"the new incarnation of {leader} did not renew within 120 s (holder {← holder})"
+        let rtNew ← leaseField "{.spec.renewTime}"
+        -- release the old incarnation's request
+        let res ← kubectl ["patch", "lease", leaseName, "-n", ns, "--type=json", "-p", held]
+        let rtAfter ← leaseField "{.spec.renewTime}"
+        let hAfter ← holder
+        let tAfter ← transitions
+        discard <| execIn standby "rm -f /seam/lease-stall"
+        IO.eprintln s!"# released the held request: {match res with | .ok _ => "APPLIED" | .error e => s!"refused ({e.take 160})"}; lease holder {hAfter}, renewTime {rtNew} -> {rtAfter}, transitions {t0} -> {tAfter}"
+        if res.isOk then
+          return .fail s!"the old incarnation's late renew was APPLIED to the new incarnation's lease (renewTime {rtNew} -> {rtAfter}): not fenced"
+        if hAfter != leader || tAfter != t0 then
+          return .fail s!"the lease changed hands or generation during the test: holder {hAfter}, transitions {t0} -> {tAfter}"
+        if rtAfter == heldStamp || rtAfter < rtNew then
+          return .fail s!"renewTime moved back: {rtNew} -> {rtAfter} (held stamp {heldStamp})"
         return .pass }
   ] }
 

@@ -81,12 +81,18 @@ def leaseMs : Nat := 15000
 
 def stampTime (s : String) : Nat := ((s.splitOn ":").head!).toNat!
 
-/-- apply a renew patch: the holder test -/
-def applyRenew (w : World) (st : String) : IO Unit := do
-  if (← w.holder.get) == "old" then
-    w.stamp.set st
-    w.stampAt.set (stampTime st)
-    w.rv.modify (· + 1)
+/-- apply a renew patch exactly as the server would: the REAL ops (`renewPatch`: resourceVersion
+    CAS, holder test, renewTime) through `applyPatch`. Returns the new resourceVersion, or none
+    when a test failed (nothing changed). -/
+def applyRenew (w : World) (st rv : String) : IO (Option String) := do
+  let o : LeaseObj := { holder := ← w.holder.get, renewTime := ← w.stamp.get, rv := ← w.rv.get }
+  match applyPatch o (renewPatch "old" st rv) with
+  | some o' =>
+    w.stamp.set o'.renewTime
+    w.stampAt.set (stampTime o'.renewTime)
+    w.rv.set o'.rv
+    return some (toString o'.rv)
+  | none => return none
 
 def step (w : World) (dt : Nat) : IO Unit := do
   let now := (← w.t.get) + dt
@@ -111,16 +117,6 @@ def step (w : World) (dt : Nat) : IO Unit := do
   -- the step-down completes `stepDownMs` after the guard fired
   if let some s := ← w.stopAt.get then
     if now ≥ s then w.serving.set false
-  -- the reconcile loop's own renew (a second renewer feeding the same deadline)
-  if w.k.withLoop && now ≥ (← w.lastLoop.get) + 5000 && now < w.k.loopBlockedFrom then
-    w.lastLoop.set now
-    if let some g := ← w.guard.get then
-      let send := (now * w.k.ratePermille) / 1000
-      let st := s!"{now}:L{← w.ctr.get}"
-      w.ctr.modify (· + 1)
-      w.events.modify (· ++ [(now + 30, do
-        applyRenew w st
-        if (← w.holder.get) == "old" then g.confirm send)])
   -- the property
   if (← w.newHoldsAt.get).isSome && (← w.serving.get) && (← w.violation.get).isNone then
     w.violation.set (some now)
@@ -151,7 +147,8 @@ def run (k : Knobs) : IO World := do
     w.firedAt.set (some (← w.t.get))
     w.stopAt.set (some ((← w.t.get) + k.stepDownMs)))
   w.guard.set (some g)
-  -- the initial acquisition at t = 0 was a confirmed write sent at 0
+  -- the initial acquisition at t = 0 was a confirmed write sent at 0, leaving rv 1
+  g.know "1"
   g.confirm 0
   let wdRef ← IO.mkRef (pure () : IO Unit)
   let api : Api := {
@@ -160,24 +157,31 @@ def run (k : Knobs) : IO World := do
       let n ← w.ctr.get
       w.ctr.set (n + 1)
       return s!"{← w.t.get}:{n}"
-    renew := fun st bound => do
+    renew := fun st rv bound => do
       let ts ← w.t.get
       w.renewals.modify (· + 1)
       let wd ← wdRef.get
+      let res ← IO.mkRef (none : Option (Option String))
+      let act : IO Unit := do res.set (some (← applyRenew w st rv))
+      let answer : IO RenewOutcome := do
+        match ← res.get with
+        | some (some rv1) => return .applied rv1
+        | some none => return .failed "test failed (422)"
+        | none => return .failed "not applied yet"
       match k.renewB ts with
       | .ok lat =>
-        w.events.modify (· ++ [(ts + lat / 2, applyRenew w st)])
+        w.events.modify (· ++ [(ts + lat / 2, act)])
         if lat ≤ bound then
           advance w lat wd
-          return .applied
+          answer
         else
           advance w bound wd
           return .failed "timeout"
       | .slow a r =>
-        w.events.modify (· ++ [(ts + a, applyRenew w st)])
+        w.events.modify (· ++ [(ts + a, act)])
         let d := min r bound
         advance w d wd
-        if r ≤ bound then return .applied else return .failed "timeout"
+        if r ≤ bound then answer else return .failed "timeout"
       | .refused lat =>
         advance w (min lat bound) wd
         return .failed "refused"
@@ -190,7 +194,7 @@ def run (k : Knobs) : IO World := do
       | .ok lat =>
         if lat ≤ bound then
           advance w lat wd
-          return .lease (← w.holder.get) (← w.stamp.get)
+          return .lease (← w.holder.get) (← w.stamp.get) (toString (← w.rv.get))
         else
           advance w bound wd
           return .unreadable
@@ -223,7 +227,7 @@ def fakeApi (script : Nat → IO RenewOutcome) (nowFails : Bool := false) :
       if nowFails then throw (IO.userError "clock exploded")
       t.get
     stamp := do return s!"stamp{← n.get}"
-    renew := fun _ _ => do n.modify (· + 1); script (← n.get)
+    renew := fun _ _ _ => do n.modify (· + 1); script (← n.get)
     read := fun _ => pure .unreadable
     sleep := fun ms => do
       t.modify (· + ms)
@@ -231,8 +235,228 @@ def fakeApi (script : Nat → IO RenewOutcome) (nowFails : Bool := false) :
     log := fun m => logs.modify (·.push m) }
   return (api, n, logs)
 
+/-! ## (7) the same-identity restart race
+
+One pod identity, two incarnations. P1 holds (rv 1, renewTime 0, confirmed send 0), sends a renew at 1000
+whose response is lost (killed by its wall) and which the server applies at `landAt`; P1's watchdog fires at
+12000 and it has stopped serving at 13000. P2 (same identity: a container restart) starts at `restartAt`:
+it reads the lease and, holding it by name, renews with a CAS on the resourceVersion it read (Main's phase
+1), then every 5 s on its own chain (the guard). A third pod reads the lease every 10 ms and takes it over
+(resourceVersion CAS, transitions + 1) once renewTime + 15 s has passed. `fenced = false` replays 477280c:
+both incarnations send the holder-only patch. -/
+
+structure RaceResult where
+  overlap : Bool
+  oldRefused : Bool
+  renewTimeMonotone : Bool
+  transitionsValid : Bool
+
+def holderOnlyPatch (identity stamp : String) : List PatchOp :=
+  [.test "/spec/holderIdentity" identity, .replace "/spec/renewTime" stamp]
+
+def restartRace (fenced : Bool) (landAt restartAt : Nat) : IO RaceResult := do
+  let lease ← IO.mkRef ({ holder := "pod", renewTime := "0", rv := 1, transitions := 1 } : LeaseObj)
+  let patchOf := fun (stamp rv : String) => if fenced then renewPatch "pod" stamp rv else holderOnlyPatch "pod" stamp
+  let p1Patch := patchOf "1000" "1"
+  let p1Done ← IO.mkRef false
+  let oldRefused ← IO.mkRef false
+  -- P2's state
+  let p2Started ← IO.mkRef false
+  let p2Rv ← IO.mkRef ""
+  let p2Until ← IO.mkRef 0
+  let p2Stop ← IO.mkRef (none : Option Nat)
+  let p2Next ← IO.mkRef 0
+  let p2Max ← IO.mkRef 0          -- the newest stamp P2 got applied
+  let monotone ← IO.mkRef true
+  let thirdAt ← IO.mkRef (none : Option Nat)
+  let overlap ← IO.mkRef false
+  let mut t := 0
+  while t ≤ 80000 do
+    -- P1's late patch reaches the server
+    if t ≥ landAt && !(← p1Done.get) then
+      p1Done.set true
+      match applyPatch (← lease.get) p1Patch with
+      | some o => lease.set o
+      | none => oldRefused.set true
+    -- P2: start (phase 1 renew on the rv just read), then its 5 s cadence on its own chain
+    if t ≥ restartAt && !(← p2Started.get) then
+      p2Started.set true
+      let cur ← lease.get
+      if cur.holder == "pod" then
+        match applyPatch cur (patchOf (toString t) (toString cur.rv)) with
+        | some o =>
+          lease.set o
+          p2Rv.set (toString o.rv)
+          p2Until.set (t + 12000)
+          p2Max.set t
+        | none => pure ()
+      p2Next.set (t + 5000)
+    if (← p2Started.get) && (← p2Stop.get).isNone && t ≥ (← p2Next.get) then
+      p2Next.set (t + 5000)
+      let cur ← lease.get
+      match applyPatch cur (patchOf (toString t) (← p2Rv.get)) with
+      | some o =>
+        lease.set o
+        p2Rv.set (toString o.rv)
+        p2Until.set (t + 12000)
+        p2Max.set t
+      | none =>
+        -- read-back: another holder = definite loss (stop now); ours = adopt the rv, extend nothing
+        if cur.holder != "pod" then p2Stop.set (some (t + 1000)) else p2Rv.set (toString cur.rv)
+    if (← p2Started.get) && (← p2Stop.get).isNone && t ≥ (← p2Until.get) then p2Stop.set (some (t + 1000))
+    -- once P2 has renewed, the lease's renewTime never goes below P2's newest applied stamp while P2 holds it
+    let cur ← lease.get
+    if cur.holder == "pod" && (← p2Max.get) > 0 && stampTime cur.renewTime < (← p2Max.get) then monotone.set false
+    -- the third pod
+    if (← thirdAt.get).isNone && cur.holder == "pod" && t ≥ stampTime cur.renewTime + 15000 then
+      lease.set { cur with holder := "third", renewTime := toString t, rv := cur.rv + 1, transitions := cur.transitions + 1 }
+      thirdAt.set (some t)
+    -- serving: P1 until 13000; P2 from its start while not stopped (and only once it renewed)
+    let p1Serving := t < 13000
+    let p2Serving := (← p2Started.get) && (← p2Max.get) > 0 && match ← p2Stop.get with
+      | some s => t < s
+      | none => true
+    if (← thirdAt.get).isSome && (p1Serving || p2Serving) then overlap.set true
+    t := t + 10
+  let fin ← lease.get
+  return { overlap := ← overlap.get, oldRefused := ← oldRefused.get, renewTimeMonotone := ← monotone.get,
+           transitionsValid := fin.transitions == (if (← thirdAt.get).isSome then 2 else 1) }
+
+/-! ## A server for `attempt`: the real patch ops through `applyPatch`
+
+`renew` applies `renewPatch identity stamp rv` (exactly what Bridge sends) to the stored object; `mode`
+picks the reply: answer normally, apply but lose the reply (ambiguous), or not apply and time out. -/
+
+inductive ReplyMode where
+  | normal
+  | appliedReplyLost
+  | timeoutNotApplied
+  | appliedNoRv
+  deriving BEq
+
+def serverApi (identity : String) (lease : IO.Ref LeaseObj) (mode : IO.Ref ReplyMode)
+    (readable : IO.Ref Bool) (clock : IO.Ref Nat) (stampN : IO.Ref Nat) : Api := {
+  now := clock.get
+  stamp := do
+    stampN.modify (· + 1)
+    return s!"{← clock.get}:{← stampN.get}"
+  renew := fun stamp rv _ => do
+    let m ← mode.get
+    if m == .timeoutNotApplied then return .failed "timeout"
+    match applyPatch (← lease.get) (renewPatch identity stamp rv) with
+    | none => return .failed "422 test failed"
+    | some o =>
+      lease.set o
+      match m with
+      | .appliedReplyLost => return .failed "reply lost"
+      | .appliedNoRv => return .applied ""
+      | _ => return .applied (toString o.rv)
+  read := fun _ => do
+    if !(← readable.get) then return .unreadable
+    let o ← lease.get
+    return .lease o.holder o.renewTime (toString o.rv)
+  sleep := fun ms => clock.modify (· + ms) }
+
 /-- no instant with the new leader holding and the old one serving -/
 def noViolation (w : World) : IO Bool := return (← w.violation.get).isNone
+
+/-- (8) the renew CAS through the REAL renewPatch / applyPatch and the REAL `attempt` (same holder identity). -/
+def casChecks : IO (List (String × Bool)) := do
+  let mut out : List (String × Bool) := []
+  -- (8) the renew CAS through the REAL renewPatch/applyPatch and the REAL attempt, same holder identity
+  -- (8a) forward order: the old incarnation's patch captured rv N, the new one applies N -> N+1 with a later stamp,
+  --      then the old patch is released: refused, new stamp and rv unchanged
+  let l8 : LeaseObj := { holder := "pod", renewTime := "s0", rv := 5, transitions := 1 }
+  let oldP := renewPatch "pod" "s-old" "5"
+  let newP := renewPatch "pod" "s-new" "5"
+  let a8 := applyPatch l8 newP
+  let b8 := a8.bind (fun o => applyPatch o oldP)
+  out := out ++ [("lease CAS (8a): same holder, old patch captured rv N and delayed; the new incarnation applies N -> N+1 with a later stamp; the released old patch is REFUSED (renewTime and rv stay the new ones, transitions unchanged)",
+    a8 == some { l8 with renewTime := "s-new", rv := 6 } && b8.isNone &&
+    (a8.map (·.transitions)) == some 1)]
+  -- (8b) reverse order: the old patch wins first (N -> N+1, old stamp); the new incarnation's CAS on N is refused;
+  --      its read-back extends nothing but adopts N+1; its next attempt applies
+  let lease ← IO.mkRef l8
+  let mode ← IO.mkRef ReplyMode.normal
+  let readable8 ← IO.mkRef true
+  let clock ← IO.mkRef 1000
+  let sn ← IO.mkRef 0
+  let api := serverApi "pod" lease mode readable8 clock sn
+  let g ← Guard.new { identity := "pod" } (fun _ => pure ())
+  g.know "5"
+  g.confirm 0
+  lease.modify (fun o => (applyPatch o oldP).getD o)          -- the old incarnation's patch lands first
+  let hu0 ← g.heldUntil.get
+  attempt api g                                                -- CAS on 5: refused
+  let afterRefused ← lease.get
+  let hu1 ← g.heldUntil.get
+  let known1 ← g.knownRv.get
+  clock.modify (· + 5000)
+  attempt api g                                                -- CAS on the adopted 6: applies
+  let afterRetry ← lease.get
+  out := out ++ [("lease CAS (8b): reverse order — the old patch applied first; the new incarnation's CAS on N is refused, its read-back (our holder, not our stamp) extends NOTHING and adopts N+1; the next attempt applies over it",
+    afterRefused.renewTime == "s-old" && afterRefused.rv == 6 && hu1 == hu0 && known1 == "6" &&
+    afterRetry.rv == 7 && afterRetry.renewTime != "s-old" && (← g.heldUntil.get) > hu1)]
+  -- (8c) ambiguous: applied but the reply lost -> the read-back shows OUR stamp -> confirmed from this send point,
+  --      knownRv advances; the following attempt CASes on it and applies
+  let lease3 ← IO.mkRef ({ holder := "pod", renewTime := "s0", rv := 5, transitions := 1 } : LeaseObj)
+  let mode3 ← IO.mkRef ReplyMode.appliedReplyLost
+  let clock3 ← IO.mkRef 1000
+  let api3 := serverApi "pod" lease3 mode3 readable8 clock3 (← IO.mkRef 0)
+  let g3 ← Guard.new { identity := "pod" } (fun _ => pure ())
+  g3.know "5"
+  g3.confirm 0
+  attempt api3 g3
+  let hu3 ← g3.heldUntil.get
+  let k3 ← g3.knownRv.get
+  mode3.set .normal
+  clock3.modify (· + 5000)
+  attempt api3 g3
+  out := out ++ [("lease CAS (8c): applied with the reply lost -> read-back shows this attempt's stamp: confirmed from its send point, knownRv advances to the applied rv, the next CAS applies",
+    hu3 == deadlineOf g3.cfg 1000 && k3 == "6" && (← lease3.get).rv == 7 && (← g3.knownRv.get) == "7")]
+  -- (8d) ambiguous and nothing learned: timeout without applying + an unreadable read-back -> no extension, knownRv kept
+  let lease4 ← IO.mkRef ({ holder := "pod", renewTime := "s0", rv := 5, transitions := 1 } : LeaseObj)
+  let unread ← IO.mkRef false
+  let api4 := serverApi "pod" lease4 (← IO.mkRef ReplyMode.timeoutNotApplied) unread (← IO.mkRef 1000) (← IO.mkRef 0)
+  let g4 ← Guard.new { identity := "pod" } (fun _ => pure ())
+  g4.know "5"
+  g4.confirm 0
+  attempt api4 g4
+  out := out ++ [("lease CAS (8d): timeout without applying and an unreadable read-back -> no extension, knownRv unchanged, the lease untouched",
+    (← g4.heldUntil.get) == deadlineOf g4.cfg 0 && (← g4.knownRv.get) == "5" && (← lease4.get).rv == 5)]
+  -- (8e) a reply claiming success WITHOUT a resourceVersion is not an applied renew: judged by the read-back only
+  let lease5 ← IO.mkRef ({ holder := "pod", renewTime := "s0", rv := 5, transitions := 1 } : LeaseObj)
+  let unread5 ← IO.mkRef false
+  let api5 := serverApi "pod" lease5 (← IO.mkRef ReplyMode.appliedNoRv) unread5 (← IO.mkRef 1000) (← IO.mkRef 0)
+  let g5 ← Guard.new { identity := "pod" } (fun _ => pure ())
+  g5.know "5"
+  g5.confirm 0
+  attempt api5 g5
+  let g5b ← Guard.new { identity := "pod" } (fun _ => pure ())
+  g5b.know ""
+  out := out ++ [("lease CAS (8e): an 'applied' reply without a resourceVersion is NOT confirmed (unreadable read-back: no extension, knownRv kept); an empty resourceVersion is never adopted as known",
+    (← g5.heldUntil.get) == deadlineOf g5.cfg 0 && (← g5.knownRv.get) == "5" && (← g5b.knownRv.get) == "")]
+  return out
+
+/-- (7) the same-identity restart race and its holder-only control. -/
+def raceChecks : IO (List (String × Bool)) := do
+  let mut out : List (String × Bool) := []
+  -- (7) incarnation fencing: a renew of the killed incarnation lands after the SAME pod restarted and renewed
+  let mut fencedOk := true
+  let mut oldRefusedSeen := false
+  let mut unfencedOverlap := false
+  for restartAt in [13000, 14000, 16000, 20000, 30000] do
+    for landAt in (List.range 120).map (fun i => 1000 + i * 500) do
+      let r ← restartRace true landAt restartAt
+      fencedOk := fencedOk && !r.overlap && r.renewTimeMonotone && r.transitionsValid
+      if r.oldRefused then oldRefusedSeen := true
+      let u ← restartRace false landAt restartAt
+      if u.overlap then unfencedOverlap := true
+  out := out ++ [("lease guard (7): a renew of the KILLED incarnation (response lost) released after the same pod restarted and the new incarnation renewed -> refused by the resourceVersion CAS; renewTime never moves back, transitions unchanged, no instant where a third pod holds while an incarnation serves (landing 1-60.5 s after the send x restart 13-30 s)",
+    fencedOk && oldRefusedSeen)]
+  out := out ++ [("lease guard (7) CONTROL: the same race with the holder-only patch of 477280c DOES produce an overlap (a third pod takes the regressed lease while the new incarnation serves): the model can fail",
+    unfencedOverlap)]
+  return out
 
 /-- the whole check list: (name, ok) -/
 def results : IO (List (String × Bool)) := do
@@ -248,13 +472,13 @@ def results : IO (List (String × Bool)) := do
     ("lease guard: holds strictly before the deadline", holdsAt 11999 12000 && !holdsAt 12000 12000),
     ("lease guard: never confirmed (0) holds nothing", !holdsAt 0 0),
     ("lease guard: read-back with our holder and OUR stamp confirms",
-      judgeReadBack "p" "s1" (.lease "p" "s1") == .confirmed),
+      judgeReadBack "p" "s1" (.lease "p" "s1" "7") == .confirmed),
     ("lease guard: read-back with our holder and an OLDER stamp extends nothing",
-      judgeReadBack "p" "s2" (.lease "p" "s1") == .nothing),
+      judgeReadBack "p" "s2" (.lease "p" "s1" "7") == .nothing),
     ("lease guard: read-back with another holder is a definite loss",
-      judgeReadBack "p" "s1" (.lease "q" "s1") == .lost),
+      judgeReadBack "p" "s1" (.lease "q" "s1" "7") == .lost),
     ("lease guard: read-back with an empty holder is a definite loss",
-      judgeReadBack "p" "s1" (.lease "" "s1") == .lost),
+      judgeReadBack "p" "s1" (.lease "" "s1" "7") == .lost),
     ("lease guard: an unreadable lease extends nothing", judgeReadBack "p" "s1" .unreadable == .nothing)]
   -- duplicate confirmations: max of the send points, never decreasing
   let g ← Guard.new c (fun _ => pure ())
@@ -319,15 +543,8 @@ def results : IO (List (String × Bool)) := do
   let w5 ← run { renewB := fun t => if t ≥ 20000 then .slow 12000 1000000 else .ok 50, horizon := 80000 }
   out := out ++ [("lease guard (5b): a renew sent before the takeover lands after it -> refused by the holder test; the lease stays with the new leader, old not serving",
     (← noViolation w5) && (← w5.holder.get) == "new" && !(← w5.serving.get))]
-  -- (6) loop renew + background renewer: duplicates and interleavings
-  let w6 ← run { withLoop := true, horizon := 300000 }
-  out := out ++ [("lease guard (6): reconcile-loop renew and background renewer both running for 300 s -> no spurious step-down",
-    (← w6.firedAt.get).isNone && (← w6.serving.get))]
-  let w6b ← run { withLoop := true, loopBlockedFrom := 20000,
-                  renewB := fun t => if t ≥ 20000 then .hang 20000 else .ok 50,
-                  readB := fun t => if t ≥ 20000 then .hang 20000 else .ok 50 }
-  out := out ++ [("lease guard (6b): both renewers stall from 20 s -> fail-closed before the new leader holds",
-    (← noViolation w6b) && (← w6b.firedAt.get).isSome && (← w6b.newHoldsAt.get).isSome)]
+  out := out ++ (← casChecks)
+  out := out ++ (← raceChecks)
   -- clock-rate skew: slow (900 permille) and fast clocks stay inside the margin; a 25 %-slow clock is the control that breaks it
   let stall : Nat → RB := fun t => if t ≥ 20000 then .refused 100 else .ok 50
   let stallR : Nat → RD := fun t => if t ≥ 20000 then .unreadable 100 else .ok 50
@@ -339,7 +556,7 @@ def results : IO (List (String × Bool)) := do
   out := out ++ [("lease guard: CONTROL — a 30 % slow clock exceeds the margin and the model DOES see an overlap (the model can fail)",
     (← wx.violation.get).isSome)]
   -- f18: the renewer must survive whatever one attempt throws (c2a4c51: the exception ended the task, silently)
-  let (apiE, nE, logsE) ← fakeApi (fun n => if n == 1 then throw (IO.userError "boom") else pure .applied)
+  let (apiE, nE, logsE) ← fakeApi (fun n => if n == 1 then throw (IO.userError "boom") else pure (.applied "2"))
   let gE ← Guard.new c (fun _ => pure ())
   gE.confirm 1000
   try renewerLoop apiE gE catch _ => pure ()
@@ -348,7 +565,7 @@ def results : IO (List (String × Bool)) := do
     decide ((← nE.get) ≥ 5) && lE.any (fun l => (l.splitOn "RAISED").length > 1) &&
     lE.any (fun l => (l.splitOn "renew applied").length > 1) && decide ((← gE.heldUntil.get) > 30000))]
   -- f18: a renewer task that ends for any reason says so (and records why)
-  let (apiD, _, logsD) ← fakeApi (fun _ => pure .applied) (nowFails := true)
+  let (apiD, _, logsD) ← fakeApi (fun _ => pure (.applied "2")) (nowFails := true)
   let gD ← Guard.new c (fun _ => pure ())
   renewerTask apiD gD
   let lD ← logsD.get
@@ -368,7 +585,7 @@ def results : IO (List (String × Bool)) := do
   let gG ← Guard.new c (fun why => firedWhy.set why)
   -- never confirmed (heldUntil 0): the fake clock (1000 ms) is past the deadline at once
   gG.lastFailure.set "renew failed after 12 ms: forbidden"
-  let (apiG, _, _) ← fakeApi (fun _ => pure .applied)
+  let (apiG, _, _) ← fakeApi (fun _ => pure (.applied "2"))
   let _ ← watchdogTick apiG gG
   out := out ++ [("lease guard (f18): the FAIL-CLOSED line carries the renewer's last failure",
     decide (((← firedWhy.get).splitOn "last renewer failure: renew failed after 12 ms: forbidden").length > 1))]

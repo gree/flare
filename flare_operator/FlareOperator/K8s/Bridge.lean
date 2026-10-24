@@ -15,6 +15,7 @@
 import FlareOperator.K8s.FlareCluster
 import FlareOperator.K8s.Retry
 import FlareOperator.Kubectl
+import FlareOperator.StateMachine.LeaseGuard
 import Lean.Data.Json
 import FlareOperator.StateMachine.ReplicaRepair
 
@@ -628,7 +629,7 @@ def leaseStamp : IO String := do
 /-- Get lease info including expiry check.
     Uses shell date arithmetic to determine if the lease has expired.
     `boundMs`: none = the default 30 s wall; some b = bounded to b ms (the lease
-    renewer: a whole-second process wall rounded down, no --request-timeout). -/
+    renewer: SIGKILL of the process group at a whole-second wall rounded down, no --request-timeout). -/
 def getLeaseWith (boundMs : Option Nat) (leaseName ns : String) : IO (Except String LeaseInfo) := do
   if ← leaseApiStalled (boundMs.getD 30000) then
     return .error "getLease failed: lease API stalled (FLARE_TEST_LEASE_API_STALL_FILE)"
@@ -637,7 +638,7 @@ def getLeaseWith (boundMs : Option Nat) (leaseName ns : String) : IO (Except Str
     | some b =>
       match Kubectl.wallSeconds b with
       | none => return .error s!"getLease not started: less than 1 s left of its {b} ms bound"
-      | some w => pure ("1", toString w, "")
+      | some w => pure ("KILL", toString w, "")
   try
     -- ONE kubectl GET for every field (holder, duration, renewTime,
     -- resourceVersion): the previous three separate reads were not a
@@ -646,7 +647,9 @@ def getLeaseWith (boundMs : Option Nat) (leaseName ns : String) : IO (Except Str
     -- optimistic-concurrency token a takeover must present (review P1-2).
     let result ← IO.Process.output {
       cmd := "timeout"
-      args := #["-k", killAfter, wall, "sh", "-c",
+      -- bounded (renewer): `-s KILL <wall>` kills the whole process group (sh and its kubectl) at the
+      -- rounded-down wall; unbounded: TERM at 30 s, KILL 5 s later, as before
+      args := (if killAfter == "KILL" then #["-s", "KILL", wall] else #["-k", killAfter, wall]) ++ #["sh", "-c",
         s!"OUT=$(kubectl{req} get lease {leaseName} -n {ns} -o jsonpath='\{.spec.holderIdentity}\{\"|\"}\{.spec.leaseDurationSeconds}\{\"|\"}\{.spec.renewTime}\{\"|\"}\{.metadata.resourceVersion}\{\"|\"}\{.spec.leaseTransitions}') || exit 1; RENEW=$(printf %s \"$OUT\" | cut -d'|' -f3); RENEW_EPOCH=$(date -d \"$RENEW\" +%s 2>/dev/null || echo 0); NOW_EPOCH=$(date -u +%s); echo \"$OUT|$((NOW_EPOCH - RENEW_EPOCH))\""]
     }
     if result.exitCode != 0 then
@@ -669,7 +672,7 @@ def getLease (leaseName ns : String) : IO (Except String LeaseInfo) :=
 
 /-- Create a new lease atomically. Fails with error if lease already exists.
     Uses kubectl create (NOT apply) for atomic create-or-fail semantics. -/
-def createLease (leaseName ns identity : String) (durationSec : Nat) : IO (Except String Unit) := do
+def createLease (leaseName ns identity : String) (durationSec : Nat) : IO (Except String String) := do
   if ← leaseApiStalled 30000 then return .error "createLease failed: lease API stalled (FLARE_TEST_LEASE_API_STALL_FILE)"
   try
     let nowResult ← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%S.000000Z"] }
@@ -677,35 +680,38 @@ def createLease (leaseName ns identity : String) (durationSec : Nat) : IO (Excep
     let result ← IO.Process.output {
       cmd := "timeout"
       args := #["-k", "5", "30", "sh", "-c",
-        s!"echo 'apiVersion: coordination.k8s.io/v1\nkind: Lease\nmetadata:\n  name: {leaseName}\n  namespace: {ns}\nspec:\n  holderIdentity: {identity}\n  leaseDurationSeconds: {durationSec}\n  leaseTransitions: 1\n  acquireTime: \"{now}\"\n  renewTime: \"{now}\"' | kubectl create -f -"]
+        s!"echo 'apiVersion: coordination.k8s.io/v1\nkind: Lease\nmetadata:\n  name: {leaseName}\n  namespace: {ns}\nspec:\n  holderIdentity: {identity}\n  leaseDurationSeconds: {durationSec}\n  leaseTransitions: 1\n  acquireTime: \"{now}\"\n  renewTime: \"{now}\"' | kubectl create -f - -o jsonpath='\{.metadata.resourceVersion}'"]
     }
     if result.exitCode == 0 then
-      return .ok ()
+      let rv := result.stdout.trim
+      if rv.isEmpty then return .error "createLease: created, but no resourceVersion returned (not trusted)"
+      return .ok rv
     else
       return .error s!"createLease failed (exit {result.exitCode}): {result.stderr}"
   catch e =>
     return .error s!"createLease error: {e}"
 
-/-- Renew lease using JSON Patch with test-and-set semantics.
-    The test op rejects the patch if holderIdentity changed (CAS). -/
-def renewLeaseStamped (boundMs : Option Nat) (leaseName ns identity stamp : String) : IO (Except String Unit) := do
+/-- Renew: the JSON patch `LeaseGuard.renewPatch` — resourceVersion CAS on the state this
+    incarnation last knew (`rv`), holder test, this attempt's renewTime stamp. A late landing
+    (the request outlived its sender) can never touch a state written after `rv` (another
+    incarnation's renewal, a takeover). Returns the new resourceVersion. -/
+def renewLeaseStamped (boundMs : Option Nat) (leaseName ns identity stamp rv : String) : IO (Except String String) := do
   if ← leaseApiStalled (boundMs.getD 30000) then
     return .error "renewLease failed: lease API stalled (FLARE_TEST_LEASE_API_STALL_FILE)"
   try
-    let patch := s!"[\{\"op\":\"test\",\"path\":\"/spec/holderIdentity\",\"value\":\"{identity}\"},\{\"op\":\"replace\",\"path\":\"/spec/renewTime\",\"value\":\"{stamp}\"}]"
-    let args := ["patch", "lease", leaseName, "-n", ns, "--type=json", "-p", patch]
+    let patch := FlareOperator.LeaseGuard.patchJson (FlareOperator.LeaseGuard.renewPatch identity stamp rv)
+    let args := ["patch", "lease", leaseName, "-n", ns, "--type=json", "-p", patch, "-o", "jsonpath={.metadata.resourceVersion}"]
     let result ← match boundMs with
       | none => kubectl args
       | some b => Kubectl.kubectlBounded b args
     match result with
     | .error e => return .error e
-    | .ok _ => return .ok ()
+    | .ok out =>
+      -- a renew is applied only with the resourceVersion it produced (the next CAS); none = unconfirmed
+      if out.trim.isEmpty then return .error "renewLease: no resourceVersion in the reply (unconfirmed)"
+      return .ok out.trim
   catch e =>
     return .error s!"renewLease error: {e}"
-
-/-- Renew with a fresh per-attempt stamp and the default 30 s wall. -/
-def renewLease (leaseName ns identity : String) : IO (Except String Unit) := do
-  renewLeaseStamped none leaseName ns identity (← leaseStamp)
 
 /-- Acquire an expired lease using JSON Patch with test-and-set.
 
@@ -717,7 +723,7 @@ def renewLease (leaseName ns identity : String) : IO (Except String Unit) := do
     the old test passed even after the holder had just renewed — external
     review P1-2.) The holder test is kept as defense in depth. -/
 def acquireLease (leaseName ns newIdentity oldIdentity resourceVersion : String)
-    (durationSec : Nat) (newTransitions : Nat := 0) : IO (Except String Unit) := do
+    (durationSec : Nat) (newTransitions : Nat := 0) : IO (Except String String) := do
   if ← leaseApiStalled 30000 then return .error "acquireLease failed: lease API stalled (FLARE_TEST_LEASE_API_STALL_FILE)"
   try
     let nowResult ← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%S.000000Z"] }
@@ -726,10 +732,12 @@ def acquireLease (leaseName ns newIdentity oldIdentity resourceVersion : String)
     -- bumped on every takeover, never on renewal. "add" upserts, so leases
     -- created before this field existed are handled too.
     let patch := s!"[\{\"op\":\"test\",\"path\":\"/metadata/resourceVersion\",\"value\":\"{resourceVersion}\"},\{\"op\":\"test\",\"path\":\"/spec/holderIdentity\",\"value\":\"{oldIdentity}\"},\{\"op\":\"replace\",\"path\":\"/spec/holderIdentity\",\"value\":\"{newIdentity}\"},\{\"op\":\"replace\",\"path\":\"/spec/renewTime\",\"value\":\"{now}\"},\{\"op\":\"replace\",\"path\":\"/spec/acquireTime\",\"value\":\"{now}\"},\{\"op\":\"replace\",\"path\":\"/spec/leaseDurationSeconds\",\"value\":{durationSec}},\{\"op\":\"add\",\"path\":\"/spec/leaseTransitions\",\"value\":{newTransitions}}]"
-    let result ← kubectl ["patch", "lease", leaseName, "-n", ns, "--type=json", "-p", patch]
+    let result ← kubectl ["patch", "lease", leaseName, "-n", ns, "--type=json", "-p", patch, "-o", "jsonpath={.metadata.resourceVersion}"]
     match result with
     | .error e => return .error e
-    | .ok _ => return .ok ()
+    | .ok out =>
+      if out.trim.isEmpty then return .error "acquireLease: no resourceVersion in the reply (unconfirmed)"
+      return .ok out.trim
   catch e =>
     return .error s!"acquireLease error: {e}"
 

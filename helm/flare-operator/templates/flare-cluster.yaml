@@ -444,6 +444,7 @@ spec:
           startupProbe:
             tcpSocket:
               port: {{ $c.flarePort }}
+            initialDelaySeconds: {{ int (default 0 $probes.startup.initialDelaySeconds) }}
             periodSeconds: {{ $probes.startup.periodSeconds }}
             failureThreshold: {{ $probes.startup.failureThreshold }}
           livenessProbe:

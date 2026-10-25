@@ -50,7 +50,8 @@ class MemoryConfigTest(unittest.TestCase):
         probe = sts.split("startupProbe:")[1].split("livenessProbe:")[0]
         self.assertIn("tcpSocket:", probe)
         self.assertIn("periodSeconds: 5", probe)
-        self.assertIn("failureThreshold: 18", probe)       # 90 s from container start >= 30 s index wait + startup
+        self.assertIn("failureThreshold: 18", probe)       # earliest kill (18 - 1) x 5 = 85 s from container start >= 52 s
+        self.assertIn("initialDelaySeconds: 0", probe)     # rendered exactly as the validation counts it
         self.assertIn("livenessProbe:", sts)
         self.assertLess(sts.index("startupProbe:"), sts.index("livenessProbe:"))
 
@@ -82,6 +83,22 @@ class MemoryConfigTest(unittest.TestCase):
         # exactly at the minimum renders: (12 - 1) x 5 = 55, initialDelay 0 / period 4, threshold 14 -> 52
         self.flared_statefulset(self.render("cluster.probes.startup.periodSeconds=4",
                                             "cluster.probes.startup.failureThreshold=14"))
+
+    def test_startup_probe_initial_delay_is_rendered_and_counted(self):
+        # the validation adds initialDelaySeconds, so the manifest must carry it: 10 + (10 - 1) x 5 = 55 >= 52
+        sts = self.flared_statefulset(self.render("cluster.probes.startup.initialDelaySeconds=10",
+                                                  "cluster.probes.startup.failureThreshold=10"))
+        probe = sts.split("startupProbe:")[1].split("livenessProbe:")[0]
+        self.assertIn("initialDelaySeconds: 10", probe)
+        self.assertIn("failureThreshold: 10", probe)
+        self.assertIn("periodSeconds: 5", probe)
+        # 5 + (10 - 1) x 5 = 50 < 52: refused even though initialDelay counts
+        args = ["helm", "template", "t", str(ROOT / "helm/flare-operator"), "--set", "cluster.enabled=true",
+                "--set", "cluster.probes.startup.initialDelaySeconds=5",
+                "--set", "cluster.probes.startup.failureThreshold=10"]
+        r = subprocess.run(args, capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("earliest 50 s", r.stderr)
 
     def test_too_short_startup_probe_is_refused(self):
         for settings in [("cluster.probes.startup.failureThreshold=11",),            # (11 - 1) x 5 = 50 < 52

@@ -581,6 +581,26 @@ namespace test_cluster
 		cppcut_assert_equal(0U, cluster::index_startup_retry_sleep_ms(0, 0));					// disabled: the connect retries only
 	}
 
+	// the capped index wait (from entry to startup_node) plus one connect attempt leaves a substantial part of
+	// the default startupProbe budget (from container start: period 5 s x failureThreshold 18) for the time
+	// before startup_node; longer configured waits are capped in K8s builds
+	void test_index_startup_wait_fits_the_startup_probe_budget()
+	{
+		cppcut_assert_equal(90000U, cluster::default_startup_probe_budget_ms);
+		cppcut_assert_equal(30000U, cluster::max_index_startup_wait_ms);
+		cut_assert_true(cluster::max_index_startup_wait_ms + cluster::index_connect_attempt_ms < cluster::default_startup_probe_budget_ms);
+		cut_assert_true(cluster::startup_allowance_before_node_ms >= 50000U);
+		bool clamped = true;
+		cppcut_assert_equal(30000U, cluster::effective_index_startup_wait_ms(30000, true, clamped));				// the K8s default
+		cut_assert_false(clamped);
+		cppcut_assert_equal(cluster::max_index_startup_wait_ms, cluster::effective_index_startup_wait_ms(60000, true, clamped));
+		cut_assert_true(clamped);
+		cppcut_assert_equal(60000U, cluster::effective_index_startup_wait_ms(60000, false, clamped));				// legacy flarei: not capped
+		cut_assert_false(clamped);
+		cppcut_assert_equal(0U, cluster::effective_index_startup_wait_ms(0, true, clamped));
+		cppcut_assert_equal(0U, cluster::effective_index_startup_wait_ms(-5, true, clamped));
+	}
+
 	static struct timespec ts(time_t s, long ns) { struct timespec t; t.tv_sec = s; t.tv_nsec = ns; return t; }
 
 	// the elapsed time startup_node measures between two CLOCK_MONOTONIC readings

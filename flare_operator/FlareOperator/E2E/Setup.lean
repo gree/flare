@@ -498,6 +498,13 @@ spec:
           volumeMounts:
             - name: flared-config
               mountPath: /etc/flared{pvcMount}
+          # as in the helm chart: liveness is gated until flared listens (it waits up to 30 s for the
+          # index from entry to startup_node; this budget counts from container start)
+          startupProbe:
+            tcpSocket:
+              port: {cfg.flarePort}
+            periodSeconds: 5
+            failureThreshold: 18
           livenessProbe:
             tcpSocket:
               port: {cfg.flarePort}

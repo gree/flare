@@ -41,6 +41,25 @@ class MemoryConfigTest(unittest.TestCase):
         self.assertIn('flare_operator_node_role{role="slave",state="active"} == 1', text)
         self.assertEqual(text.count("runbook: docs/RUNBOOK.md#replica-follow"), 2)
 
+    def flared_statefulset(self, text):
+        return next(doc for doc in text.split("\n---")
+                    if "kind: StatefulSet" in doc and "startupProbe:" in doc)
+
+    def test_flared_startup_probe_gates_liveness_by_default(self):
+        sts = self.flared_statefulset(self.render())
+        probe = sts.split("startupProbe:")[1].split("livenessProbe:")[0]
+        self.assertIn("tcpSocket:", probe)
+        self.assertIn("periodSeconds: 5", probe)
+        self.assertIn("failureThreshold: 18", probe)       # 90 s from container start >= 30 s index wait + startup
+        self.assertIn("livenessProbe:", sts)
+        self.assertLess(sts.index("startupProbe:"), sts.index("livenessProbe:"))
+
+    def test_flared_startup_probe_override(self):
+        sts = self.flared_statefulset(self.render("cluster.probes.startup.failureThreshold=24"))
+        probe = sts.split("startupProbe:")[1].split("livenessProbe:")[0]
+        self.assertIn("failureThreshold: 24", probe)
+        self.assertIn("periodSeconds: 5", probe)
+
     def test_initial_config_and_cr_both_have_memory_settings(self):
         text = self.render("cluster.rocksdb.blockCacheSizeMb=64",
                            "cluster.rocksdb.writeBufferSizeMb=16",

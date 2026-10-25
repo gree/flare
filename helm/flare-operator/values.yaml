@@ -199,6 +199,9 @@ cluster:
   #    initialDelaySeconds: 10
   #    periodSeconds: 5
   #    failureThreshold: 6
+  #  startup:               # gates liveness until flared listens (it waits up to 30 s for the index)
+  #    periodSeconds: 5
+  #    failureThreshold: 18
 
   # RocksDB backend tuning. Keys map 1:1 to the FlareCluster CRD's spec.rocksdb
   # (walSizeLimitMb, walTtlSeconds, syncWrites, walMaxBatchBytes, ...); only the

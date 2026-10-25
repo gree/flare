@@ -280,6 +280,19 @@ uint64_t cluster::monotonic_elapsed_ms(const struct timespec& t0, const struct t
 	return n1 > n0 ? (n1 - n0) / 1000000ULL : 0;
 }
 
+uint32_t cluster::effective_index_startup_wait_ms(int configured, bool k8s, bool& clamped) {
+	clamped = false;
+	if (configured <= 0) {
+		return 0;
+	}
+	const uint32_t v = static_cast<uint32_t>(configured);
+	if (k8s && v > cluster::max_index_startup_wait_ms) {
+		clamped = true;
+		return cluster::max_index_startup_wait_ms;
+	}
+	return v;
+}
+
 uint32_t cluster::index_startup_retry_sleep_ms(uint64_t elapsed_ms, uint32_t wait_ms) {
 	if (elapsed_ms >= wait_ms) {
 		return 0;

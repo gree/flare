@@ -32,8 +32,9 @@
        rather than tuned globally, because tightening them costs an exec
        probe per pod per period and the right trade-off differs per cluster.
        See docs/STPA-node-state.md gap G4. */}}
-{{- $probes := dict "liveness" (dict "initialDelaySeconds" 10 "periodSeconds" 5 "failureThreshold" 6) "readiness" (dict "initialDelaySeconds" 5 "periodSeconds" 5 "timeoutSeconds" 4 "failureThreshold" 3) }}
+{{- $probes := dict "liveness" (dict "initialDelaySeconds" 10 "periodSeconds" 5 "failureThreshold" 6) "readiness" (dict "initialDelaySeconds" 5 "periodSeconds" 5 "timeoutSeconds" 4 "failureThreshold" 3) "startup" (dict "periodSeconds" 5 "failureThreshold" 18) }}
 {{- if $c.probes }}
+{{- if $c.probes.startup }}{{- $probes = merge (dict "startup" $c.probes.startup) $probes }}{{- end }}
 {{- if $c.probes.liveness }}{{- $probes = merge (dict "liveness" $c.probes.liveness) $probes }}{{- end }}
 {{- if $c.probes.readiness }}{{- $probes = merge (dict "readiness" $c.probes.readiness) $probes }}{{- end }}
 {{- end }}
@@ -426,6 +427,16 @@ spec:
             - name: data
               mountPath: /data
             {{- end }}
+          # flared listens only after it registered with the operator's index; a new cluster's operator
+          # leads (and serves the index) only after it observed its Lease absent for lease + margin, and
+          # flared waits for it (index-startup-wait-msec, at most 30 s from entry to startup_node). The
+          # startupProbe gives the process period x failureThreshold (default 90 s) FROM CONTAINER START to
+          # listen; liveness does not run before it succeeded.
+          startupProbe:
+            tcpSocket:
+              port: {{ $c.flarePort }}
+            periodSeconds: {{ $probes.startup.periodSeconds }}
+            failureThreshold: {{ $probes.startup.failureThreshold }}
           livenessProbe:
             tcpSocket:
               port: {{ $c.flarePort }}

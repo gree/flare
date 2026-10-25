@@ -429,6 +429,23 @@ public:
 	    unsigned nanoseconds first, so a nanosecond borrow needs no signed arithmetic; 0 if `t1` is not
 	    after `t0` (never a wrap to a huge value). */
 	static uint64_t monotonic_elapsed_ms(const struct timespec& t0, const struct timespec& t1);
+	/** Intervals (K8s operator builds). flared listens only after startup_node registered it, so until
+	    then every TCP probe fails. FROM CONTAINER START: the default startupProbe of the helm chart and the
+	    E2E StatefulSet (tcpSocket on the flared port, period 5 s, failureThreshold 18) gives the process
+	    `default_startup_probe_budget_ms` to listen; the liveness probe does not run before the startupProbe
+	    succeeded. FROM ENTRY TO startup_node: the index wait lasts at most `max_index_startup_wait_ms`, then
+	    one more connect attempt (`index_connect_attempt_ms`). What is left of the startup budget,
+	    `startup_allowance_before_node_ms`, is the time the process may spend before startup_node (config,
+	    storage-independent setup); a chart override that shortens the startupProbe shortens it too. */
+	static const uint32_t default_startup_probe_budget_ms = 18 * 5000;
+	static const uint32_t max_index_startup_wait_ms = 30000;
+	static const uint32_t index_connect_attempt_ms = 1500;
+	static const uint32_t startup_allowance_before_node_ms =
+		default_startup_probe_budget_ms - max_index_startup_wait_ms - index_connect_attempt_ms;
+	/** the configured wait as used: negative -> 0; in a K8s operator build at most
+	    max_index_startup_wait_ms (a longer wait would be cut by the liveness kill anyway); `clamped`
+	    tells whether the configured value was lowered. */
+	static uint32_t effective_index_startup_wait_ms(int configured, bool k8s, bool& clamped);
 	int get_noreply_window_limit() { return this->_noreply_window_limit; }
 
 	inline string to_node_key(string server_name, int server_port) {

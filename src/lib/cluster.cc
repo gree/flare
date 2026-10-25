@@ -325,43 +325,46 @@ int cluster::startup_node(const vector<index_server>& index_servers, uint32_t pr
 	log_notice("setting up cluster node... (type=%d, index_server_name=%s, index_server_port=%d)", this->_type, this->_index_servers[0].index_server_name.c_str(), this->_index_servers[0].index_server_port);
 
 	// Bounded wait for the index server at startup: in K8s operator mode a new cluster's operator
-	// leads only after it observed its Lease absent for lease + margin (operator LeaseAbsence), and
-	// its index server starts only then. Without the wait this process exited after the short connect
-	// retries and the pod crash-looped. The wait applies to this first registration only (later
-	// reconnections keep their short retries); this process does not listen yet, so the wait must stay
-	// below the liveness window (default 30 s < initialDelay 10 s + 6 x 5 s). At the deadline it gives up
-	// exactly as before: -1, the process exits and kubelet restarts it.
+	// leads only after it observed its Lease absent for lease + margin (operator LeaseAbsence), its index
+	// server starts only then, and for a moment after it starts it may refuse a registration ("registration
+	// closed": its first-build history record is not written yet). Both a failed connect and a refused
+	// `node add` are retried within the startup budget (the same retry a container restart would make,
+	// without the restart). The wait applies to this first registration only (later reconnections keep
+	// their short retries). This process does not listen yet: the startupProbe budget, counted from
+	// container start, covers the wait (src/lib/cluster.h min_startup_probe_budget_ms). At the deadline it
+	// gives up exactly as before: -1, the process exits and kubelet restarts it.
 	struct timespec t0;
 	clock_gettime(CLOCK_MONOTONIC, &t0);
-	shared_connection c = this->_open_index();
 	uint64_t waited_ms = 0;
-	while (!c) {
+	shared_connection c;
+	vector<node> v;		// the node map the registration reply carries (applied below)
+	for (;;) {
+		c = this->_open_index();
+		const char* what = "index server not reachable yet";
+		if (c) {
+			op_node_add* p_na = new op_node_add(c, this);
+			v.clear();
+			const int r = p_na->run_client(v);
+			delete p_na;
+			if (r >= 0) {
+				break;
+			}
+			what = "node add refused or failed (the operator may not accept registrations yet)";
+			c = shared_connection();
+		}
 		struct timespec t1;
 		clock_gettime(CLOCK_MONOTONIC, &t1);
 		waited_ms = cluster::monotonic_elapsed_ms(t0, t1);
 		const uint32_t s = cluster::index_startup_retry_sleep_ms(waited_ms, this->_index_startup_wait_ms);
 		if (s == 0) {
-			break;
+			log_err("failed to connect to index server or to register with it: %s (gave up after %llu ms of a %u ms startup wait)",
+				what, static_cast<unsigned long long>(waited_ms), this->_index_startup_wait_ms);
+			return -1;
 		}
-		log_notice("index server not reachable yet (waited %llu of %u ms; the operator may still be acquiring its lease): retrying in %u ms",
-			static_cast<unsigned long long>(waited_ms), this->_index_startup_wait_ms, s);
+		log_notice("%s (waited %llu of %u ms; the operator may still be acquiring its lease): retrying in %u ms",
+			what, static_cast<unsigned long long>(waited_ms), this->_index_startup_wait_ms, s);
 		usleep(s * 1000);
-		c = this->_open_index();
 	}
-	if (!c) {
-		log_err("failed to connect to index server (gave up after %llu ms of a %u ms startup wait)",
-			static_cast<unsigned long long>(waited_ms), this->_index_startup_wait_ms);
-		return -1;
-	}
-
-	op_node_add* p_na = new op_node_add(c, this);
-	vector<node> v;
-	if (p_na->run_client(v) < 0) {
-		log_err("failed to add node to index server", 0);
-		delete p_na;
-		return -1;
-	}
-	delete p_na;
 
 	// get meta data from index server
 	key_resolver::type key_resolver_type;

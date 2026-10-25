@@ -42,6 +42,7 @@ import FlareOperator.StateMachine.RebuildConcurrency
 import FlareOperator.StateMachine.CopyDiscardApproval
 import FlareOperator.StateMachine.PromotionEvidence
 import FlareOperator.StateMachine.LeaseGuard
+import FlareOperator.StateMachine.LeaseAbsence
 import FlareOperator.LeaseGuardApi
 import FlareOperator.StateMachine.AuthoritativeHistory
 import FlareOperator.EvictionGuard
@@ -3696,17 +3697,52 @@ private def getHostname : IO String := do
   let result ← IO.Process.output { cmd := "hostname", args := #[] }
   return result.stdout.trim
 
-/-- Try to acquire or renew the leader lease.
-    Returns true if this instance is (or became) the leader. -/
+/-- Margin below the lease duration that heldUntil keeps (3 s of 15 s): see
+    StateMachine/LeaseGuard for the safety argument. -/
+private def leaseMarginMs : Nat := 3000
+
+/-- The start (monotonic ms, reply received) of the current uninterrupted run of NotFound readings
+    of the leader Lease by this pod in phase 1 (StateMachine/LeaseAbsence); none = not observing. -/
+initialize leaseAbsentSinceRef : IO.Ref (Option Nat) ← IO.mkRef none
+
+/-- Try to acquire or renew the leader lease (phase 1: before this pod's lease guard runs).
+    Returns true if this instance is (or became) the leader. A missing Lease is created only
+    after it was observed absent (NotFound, nothing else) without interruption for
+    lease + margin; an unreadable Lease never counts as absent (fail closed). -/
 private def tryAcquireOrRenew (leaseName ns identity : String) : IO Bool := do
   match ← getLease leaseName ns with
-  | .error _ =>
-    -- Lease not found or transient error. Try to create.
-    let send ← IO.monoMsNow
-    match ← createLease leaseName ns identity leaseDurationSeconds with
-    | .ok rv => confirmLeaseHold send rv; return true
-    | .error _ => return false
+  | .error e =>
+    let now ← IO.monoMsNow
+    let reading := LeaseAbsence.classifyReadError e
+    let before ← leaseAbsentSinceRef.get
+    let since := LeaseAbsence.observe before reading now
+    leaseAbsentSinceRef.set since
+    let required := LeaseAbsence.requiredMs (leaseDurationSeconds * 1000) leaseMarginMs
+    match reading with
+    | .absent =>
+      if before.isNone then
+        IO.eprintln s!"[flare-operator] lease absence: '{leaseName}' is NotFound; observing — it is created only after {required} ms of uninterrupted absence (a deleted Lease's last leader may still serve until its local deadline)"
+      if !LeaseAbsence.mayCreate since now required then return false
+      IO.eprintln s!"[flare-operator] lease absence: '{leaseName}' absent for {now - since.getD now} ms (>= {required}): creating it"
+      let send ← IO.monoMsNow
+      match ← createLease leaseName ns identity leaseDurationSeconds with
+      | .ok rv =>
+        leaseAbsentSinceRef.set none
+        confirmLeaseHold send rv
+        return true
+      | .error ce =>
+        -- AlreadyExists (another pod won the atomic create) or an ambiguous failure: start over
+        leaseAbsentSinceRef.set none
+        IO.eprintln s!"[flare-operator] lease absence: create of '{leaseName}' failed ({ce.take 200}); the absence observation restarts"
+        return false
+    | _ =>
+      if before.isSome then
+        IO.eprintln s!"[flare-operator] lease absence: '{leaseName}' unreadable ({e.take 200}); the absence observation is RESET (an unreadable Lease is never treated as absent)"
+      return false
   | .ok lease =>
+    if (← leaseAbsentSinceRef.get).isSome then
+      IO.eprintln s!"[flare-operator] lease absence: '{leaseName}' is present again (holder '{lease.holderIdentity}', rv {lease.resourceVersion}); the absence observation is reset"
+    leaseAbsentSinceRef.set none
     if lease.holderIdentity == identity then
       -- We hold it (this pod's identity: a restart of the same pod, before its lease guard
       -- runs). Renew with the resourceVersion CAS on the state just read, so a renew of
@@ -3716,7 +3752,7 @@ private def tryAcquireOrRenew (leaseName ns identity : String) : IO Bool := do
       | .ok rv => confirmLeaseHold send rv; return true
       | .error _ => return false
     else if lease.expired then
-      -- Expired, try to take over
+      -- Expired, try to take over (resourceVersion CAS; unchanged)
       let send ← IO.monoMsNow
       match ← acquireLease leaseName ns identity lease.holderIdentity lease.resourceVersion leaseDurationSeconds (lease.transitions + 1) with
       | .ok rv => confirmLeaseHold send rv; return true
@@ -3761,10 +3797,6 @@ private def exitLostLease (healthStatus : HealthStatus) (identity ns : String) :
     waited := waited + 50
   (← IO.getStderr).flush
   IO.Process.exit 1
-
-/-- Margin below the lease duration that heldUntil keeps (3 s of 15 s): see
-    StateMachine/LeaseGuard for the safety argument. -/
-private def leaseMarginMs : Nat := 3000
 
 private def newLeaseGuard (healthStatus : HealthStatus) (identity ns : String) : IO LeaseGuard.Guard :=
   LeaseGuard.Guard.new

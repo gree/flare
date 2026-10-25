@@ -48,6 +48,14 @@
      it must be REFUSED, and the lease keeps the new incarnation's holder,
      renewTime (never moved back) and transitions. A control on a scratch Lease
      shows the 477280c holder-only patch DOES move renewTime back on the real API.
+  5. Lease deleted (StateMachine/LeaseAbsence): the Lease is created again only
+     after >= 18 s of observed absence, after the old leader's LEASE FAIL-CLOSED,
+     and the old leader served no index request after that creation.
+  6. Lease deleted while the standby's lease API is stalled: the standby never
+     creates it (an unreadable Lease is not an absence); the old leader's
+     restarted incarnation creates it after the absence wait.
+  Test 0 also checks the first start: the first leader created the Lease only
+  after >= 18 s of absence.
 -/
 
 import FlareOperator.E2E.Framework
@@ -238,6 +246,18 @@ def suite : TestSuite := {
             return .fail s!"the bounded Lease patch with the renewer's argv failed in the operator image: rc {patchRc} after {pair out "patch_ms"} ms: {out.take 600}"
           if rb != stamp then
             return .fail s!"the read-back renewTime '{rb}' is not the written stamp '{stamp}' (the guard's ambiguous-result confirmation compares exactly)"
+          -- first start: the Lease did not exist; whoever created it waited lease + margin of absence
+          let mut created : Option String := none
+          for pod in ← operatorPods do
+            for prevC in [false, true] do
+              for (_, l) in ← podLog pod prevC do
+                if containsSubstr l "lease absence:" && containsSubstr l ": creating it" then created := some l
+          match created with
+          | none => return .fail "first start: no operator logged creating the Lease after an observed absence"
+          | some l =>
+            let n := (((l.splitOn "absent for ").getD 1 "").takeWhile Char.isDigit).toNat?.getD 0
+            IO.eprintln s!"# first start: {l.take 200}"
+            if n < 18000 then return .fail s!"first start: the Lease was created after only {n} ms of absence (< 18000): {l.take 200}"
           return .pass },
 
     { name := "(control) 16 s reconcile passes for 4 minutes with a healthy lease API: no fail-closed step-down, no restart, same holder and generation"
@@ -435,6 +455,76 @@ def suite : TestSuite := {
           return .fail s!"the lease changed hands or generation during the test: holder {hAfter}, transitions {t0} -> {tAfter}"
         if rtAfter == heldStamp || rtAfter < rtNew then
           return .fail s!"renewTime moved back: {rtNew} -> {rtAfter} (held stamp {heldStamp})"
+        return .pass },
+    { name := "(lease deleted) the Lease is created again only after >= 18 s of observed absence, after the old leader failed closed, and the old leader served nothing after the creation"
+      run := do
+        let some old ← waitLeader | return .fail "no operator pod holds the lease with role=leader within 180 s"
+        let pods ← operatorPods
+        let some standby := pods.find? (· != old) | return .fail s!"no standby among {pods}"
+        let r0 ← restarts old
+        let d ← wallMs
+        match ← kubectl ["delete", "lease", leaseName, "-n", ns] with
+        | .error e => return .fail s!"could not delete the Lease: {e}"
+        | .ok _ => pure ()
+        IO.eprintln s!"# lease deleted at {d} (holder was {old}, standby {standby})"
+        let back ← waitForCondition "the Lease exists again with a holder" 240 do
+          return !(← holder).isEmpty
+        if !back then return .fail "the Lease was not created again within 240 s of its deletion"
+        let h ← holder
+        let restarted ← waitForCondition s!"{old}'s container restarted (fail-closed exit)" 120 do
+          return (← restarts old) > r0
+        if !restarted then return .fail s!"the old leader {old} did not fail closed and restart after the deletion"
+        let oldPrev ← podLog old true
+        let some (tf, _) := oldPrev.find? (fun (t, l) => t ≥ d && containsSubstr l "LEASE FAIL-CLOSED")
+          | return .fail s!"the old leader {old} logged no LEASE FAIL-CLOSED after the deletion"
+        -- the creator's own log: the creation line and how long it observed the absence
+        let creatorLog ← podLog h false
+        let some (tc, cl) := creatorLog.find? (fun (t, l) => t ≥ d && containsSubstr l "lease absence:" && containsSubstr l ": creating it")
+          | return .fail s!"the new holder {h} logged no creation after an observed absence"
+        let n := (((cl.splitOn "absent for ").getD 1 "").takeWhile Char.isDigit).toNat?.getD 0
+        let served := oldPrev.filter fun (_, l) => containsSubstr l "[DEBUG] Received command"
+        let lastServed := (served.map (·.1)).foldl max 0
+        IO.eprintln s!"# deletion {d}; old {old} fail-closed {tf} (+{tf - d} ms), last served index request {lastServed}; new holder {h} created at {tc} (+{tc - d} ms) after {n} ms of observed absence"
+        if n < 18000 then return .fail s!"{h} created the Lease after only {n} ms of observed absence"
+        if tc + 500 < d + 18000 then return .fail s!"{h} created the Lease {tc - d} ms after the deletion (< 18 s)"
+        if tc ≤ tf then return .fail s!"{h} created the Lease at {tc}, not after the old leader's fail-closed {tf}: a window with two leaders"
+        if lastServed > tc then return .fail s!"the old leader received an index request at {lastServed}, after the new Lease existed ({tc})"
+        let _ ← waitLeader
+        return .pass },
+
+    { name := "(lease deleted, standby's lease API unreadable) an unreadable Lease is not an absence: the stalled standby never creates it; the old leader's restarted incarnation creates it after the absence wait"
+      run := do
+        let some old ← waitLeader | return .fail "no operator pod holds the lease with role=leader within 180 s"
+        let pods ← operatorPods
+        let some standby := pods.find? (· != old) | return .fail s!"no standby among {pods}"
+        match ← execIn standby "touch /seam/lease-stall" with
+        | .error e => return .fail s!"could not stall the standby's lease API: {e}"
+        | .ok _ => pure ()
+        let d ← wallMs
+        match ← kubectl ["delete", "lease", leaseName, "-n", ns] with
+        | .error e =>
+          discard <| execIn standby "rm -f /seam/lease-stall"
+          return .fail s!"could not delete the Lease: {e}"
+        | .ok _ => pure ()
+        let back ← waitForCondition "the Lease exists again with a holder" 240 do
+          return !(← holder).isEmpty
+        let h ← holder
+        let sLog ← podLog standby false
+        discard <| execIn standby "rm -f /seam/lease-stall"
+        if !back then return .fail "the Lease was not created again within 240 s"
+        let created := sLog.filter fun (t, l) => t ≥ d && containsSubstr l ": creating it"
+        let observed := sLog.filter fun (t, l) => t ≥ d && containsSubstr l "is NotFound; observing"
+        IO.eprintln s!"# deletion {d} with the standby {standby} stalled: new holder {h}; standby create lines {created.length}, absence-observation lines {observed.length}"
+        if h == standby then return .fail s!"the stalled standby {standby} created the Lease"
+        if !created.isEmpty then return .fail s!"the stalled standby logged a create: {(created.head?.map (·.2)).getD ""}"
+        if !observed.isEmpty then return .fail s!"the stalled standby started an absence observation from unreadable readings"
+        if h != old then return .fail s!"unexpected holder {h} (expected the old leader's restarted incarnation {old})"
+        let hLog ← podLog h false
+        let some (tc, cl) := hLog.find? (fun (t, l) => t ≥ d && containsSubstr l ": creating it")
+          | return .fail s!"{h} logged no creation after an observed absence"
+        let n := (((cl.splitOn "absent for ").getD 1 "").takeWhile Char.isDigit).toNat?.getD 0
+        if n < 18000 || tc + 500 < d + 18000 then return .fail s!"{h} created the Lease after {n} ms of absence, {tc - d} ms after the deletion"
+        let _ ← waitLeader
         return .pass }
   ] }
 

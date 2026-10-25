@@ -23,6 +23,7 @@
 -/
 import FlareOperator.StateMachine.LeaseGuard
 import FlareOperator.Kubectl
+import FlareOperator.StateMachine.LeaseAbsence
 
 namespace FlareOperator.LeaseGuardSim
 
@@ -504,6 +505,133 @@ def raceChecks : IO (List (String × Bool)) := do
     unfencedOverlap)]
   return out
 
+/-! ## (9) a deleted Lease: create only after an uninterrupted absence (StateMachine/LeaseAbsence)
+
+Real time in ms. The Lease is deleted at `del`. The old leader's last confirmed renew was sent
+`sinceSend` before that; on its own clock (`rateOld` permille) it fires at send + lease − margin
+(+ one watchdog period) and stops serving 1000 ms later. Each standby polls every 5 s of its own
+clock (`rateS` permille) from its `offset`, applies `observe` / `mayCreate` with the received time
+on its clock, and creates atomically (one winner, the other gets AlreadyExists and resets). A
+reading inside an `errors` window is unreadable. `oldLeader = false`: a first start (no Lease ever). -/
+
+structure AbsenceResult where
+  overlap : Bool
+  createdAt : Option Nat
+  creators : Nat
+  /-- the creator's last unreadable reading before its create (real ms), if any -/
+  lastErrorBeforeCreate : Option Nat
+
+def absenceRace (required : Nat) (oldLeader : Bool) (sinceSend : Nat) (rateOld : Nat)
+    (standbys : List (Nat × Nat)) (errors : List (Nat × Nat)) (del : Nat := 20000) (horizon : Nat := 90000) :
+    IO AbsenceResult := do
+  let leaseMs := 15000
+  let marginMs := 3000
+  -- the old leader's stop (real ms): its local deadline, the watchdog period, the step-down
+  let send := del - sinceSend
+  let localDeadline := (send * rateOld) / 1000 + (leaseMs - marginMs) + 500
+  let fireReal := (localDeadline * 1000 + rateOld - 1) / rateOld
+  let stopReal := if oldLeader then fireReal + 1000 else 0
+  let present ← IO.mkRef (oldLeader : Bool)       -- before `del` (first start: never existed)
+  let createdAt ← IO.mkRef (none : Option Nat)
+  let creators ← IO.mkRef 0
+  let lastErr ← IO.mkRef (none : Option Nat)
+  let states ← IO.mkRef ((standbys.map fun _ => (none : Option Nat)) : List (Option Nat))
+  let nextPoll ← IO.mkRef (standbys.map (·.2))   -- local ms of each standby's next poll
+  let errSeen ← IO.mkRef ((standbys.map fun _ => (none : Option Nat)) : List (Option Nat))
+  let mut t := 0
+  while t ≤ horizon do
+    if oldLeader && t == del then present.set false
+    let mut i := 0
+    for (rateS, _) in standbys do
+      let localT := (t * rateS) / 1000
+      let np ← nextPoll.get
+      if localT ≥ np.getD i 0 then
+        nextPoll.modify fun l => l.set i (localT + 5000)
+        let inErr := errors.any fun (a, b) => a ≤ t && t < b
+        let isPresent ← present.get
+        let reading : LeaseAbsence.Reading :=
+          if inErr then .unreadable else if isPresent then .present else .absent
+        if inErr then errSeen.modify fun l => l.set i (some t)
+        let prev := (← states.get).getD i none
+        let since := LeaseAbsence.observe prev reading localT
+        states.modify fun l => l.set i since
+        if LeaseAbsence.mayCreate since localT required then
+          if !(← present.get) then
+            present.set true
+            createdAt.set (some t)
+            creators.modify (· + 1)
+            let es ← errSeen.get
+            lastErr.set (es.getD i none)
+          states.modify fun l => l.set i none
+      i := i + 1
+    t := t + 10
+  let c ← createdAt.get
+  let overlap := oldLeader && match c with
+    | some ct => ct < stopReal
+    | none => false
+  return { overlap, createdAt := c, creators := ← creators.get, lastErrorBeforeCreate := ← lastErr.get }
+
+/-- (9) the deleted-Lease checks. -/
+def absenceChecks : IO (List (String × Bool)) := do
+  let mut out : List (String × Bool) := []
+  let req := LeaseAbsence.requiredMs 15000 3000
+  -- pure pieces
+  out := out ++ [
+    ("lease absence: only the API server's NotFound is an absence; Forbidden, timeouts and a stalled API are unreadable",
+      LeaseAbsence.classifyReadError "getLease failed (exit 1): Error from server (NotFound): leases.coordination.k8s.io \"x\" not found" == .absent &&
+      LeaseAbsence.classifyReadError "getLease failed (exit 1): Error from server (Forbidden): leases is forbidden" == .unreadable &&
+      LeaseAbsence.classifyReadError "kubectl killed at its 4s wall" == .unreadable &&
+      LeaseAbsence.classifyReadError "getLease failed: lease API stalled (FLARE_TEST_LEASE_API_STALL_FILE)" == .unreadable),
+    ("lease absence: an unreadable or present reading RESETS the observation; only absence starts or continues it",
+      LeaseAbsence.observe (some 100) .unreadable 9000 == none && LeaseAbsence.observe (some 100) .present 9000 == none &&
+      LeaseAbsence.observe none .absent 500 == some 500 && LeaseAbsence.observe (some 100) .absent 9000 == some 100),
+    ("lease absence: create only after lease + margin (18000 ms) of uninterrupted absence",
+      req == 18000 && !LeaseAbsence.mayCreate (some 1000) 18999 req && LeaseAbsence.mayCreate (some 1000) 19000 req &&
+      !LeaseAbsence.mayCreate none 99999 req)]
+  -- deletion while the old leader is inside its local deadline: no create before it stopped, any clock rates
+  let mut ok := true
+  let mut createdAll := true
+  for rateOld in [900, 1000, 1100] do
+    for rateS in [900, 1000, 1100] do
+      for sinceSend in [0, 2500, 4990] do
+        for off in [0, 1250, 2500, 4990] do
+          let r ← absenceRace req true sinceSend rateOld [(rateS, off)] []
+          ok := ok && !r.overlap
+          createdAll := createdAll && r.createdAt.isSome
+  out := out ++ [("lease absence (9a): the Lease deleted while its leader is inside its local deadline -> a standby creates it only after that leader stopped serving (clock rates 0.9-1.1 on both sides, last renew 0-5 s before the deletion, any poll phase), and it does create it",
+    ok && createdAll)]
+  -- two standbys observe the same absence: exactly one creates (atomic create), still after the old leader stopped
+  let mut two := true
+  for off2 in [0, 10, 2500] do
+    let r ← absenceRace req true 0 1000 [(1000, 0), (1000, off2)] []
+    two := two && !r.overlap && r.creators == 1
+  out := out ++ [("lease absence (9b): two standbys observing the same absence -> exactly one create succeeds (the other gets AlreadyExists and resets), after the old leader stopped",
+    two)]
+  -- read errors during the absence: the observation restarts after each, so the create is >= required after the last error
+  let r3 ← absenceRace req true 0 1000 [(1000, 0)] [(30000, 31000), (40000, 41000)]
+  out := out ++ [("lease absence (9c): unreadable readings (Forbidden / timeout / stall) during the absence reset the observation: no create until a full uninterrupted absence after the last unreadable one",
+    !r3.overlap && (match r3.createdAt, r3.lastErrorBeforeCreate with
+      | some c, some e => c ≥ e + req
+      | _, _ => false))]
+  -- an API that never becomes readable: never created
+  let r4 ← absenceRace req true 0 1000 [(1000, 0)] [(20000, 90001)]
+  out := out ++ [("lease absence (9d): the Lease unreadable from the deletion on -> never created (fail closed)", r4.createdAt.isNone)]
+  -- first start: no Lease ever existed -> created after the required absence (liveness), by one pod
+  let r5 ← absenceRace req false 0 1000 [(1000, 0), (1000, 2500)] []
+  out := out ++ [("lease absence (9e): first start (no Lease ever) -> created once, after lease + margin of absence (liveness kept)",
+    r5.creators == 1 && (match r5.createdAt with | some c => c ≥ req && c ≤ req + 5000 + 10 | none => false))]
+  -- controls: the previous immediate create, and a bare lease duration, DO overlap somewhere in the grid
+  let mut immediate := false
+  let mut bare := false
+  for rateOld in [900, 1000, 1100] do
+    for rateS in [900, 1000, 1100] do
+      for off in [0, 1250, 2500, 4990] do
+        if (← absenceRace 0 true 0 rateOld [(rateS, off)] []).overlap then immediate := true
+        if (← absenceRace 15000 true 0 rateOld [(rateS, off)] []).overlap then bare := true
+  out := out ++ [("lease absence (9f) CONTROL: creating at once (the code before) and after only the bare lease duration (15 s) both overlap with the old leader in this grid: the model can fail and the margin is needed",
+    immediate && bare)]
+  return out
+
 /-- the whole check list: (name, ok) -/
 def results : IO (List (String × Bool)) := do
   let mut out : List (String × Bool) := []
@@ -591,6 +719,7 @@ def results : IO (List (String × Bool)) := do
     (← noViolation w5) && (← w5.holder.get) == "new" && !(← w5.serving.get))]
   out := out ++ (← casChecks)
   out := out ++ (← raceChecks)
+  out := out ++ (← absenceChecks)
   -- clock-rate skew: slow (900 permille) and fast clocks stay inside the margin; a 25 %-slow clock is the control that breaks it
   let stall : Nat → RB := fun t => if t ≥ 20000 then .refused 100 else .ok 50
   let stallR : Nat → RD := fun t => if t ≥ 20000 then .unreadable 100 else .ok 50

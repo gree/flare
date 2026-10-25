@@ -430,18 +430,24 @@ public:
 	    after `t0` (never a wrap to a huge value). */
 	static uint64_t monotonic_elapsed_ms(const struct timespec& t0, const struct timespec& t1);
 	/** Intervals (K8s operator builds). flared listens only after startup_node registered it, so until
-	    then every TCP probe fails. FROM CONTAINER START: the default startupProbe of the helm chart and the
-	    E2E StatefulSet (tcpSocket on the flared port, period 5 s, failureThreshold 18) gives the process
-	    `default_startup_probe_budget_ms` to listen; the liveness probe does not run before the startupProbe
-	    succeeded. FROM ENTRY TO startup_node: the index wait lasts at most `max_index_startup_wait_ms`, then
-	    one more connect attempt (`index_connect_attempt_ms`). What is left of the startup budget,
-	    `startup_allowance_before_node_ms`, is the time the process may spend before startup_node (config,
-	    storage-independent setup); a chart override that shortens the startupProbe shortens it too. */
-	static const uint32_t default_startup_probe_budget_ms = 18 * 5000;
+	    then every TCP probe fails.
+	    FROM ENTRY TO startup_node: the index wait lasts at most `max_index_startup_wait_ms`, then one more
+	    connect attempt (at most `index_connect_attempt_ms`, rounded up).
+	    FROM CONTAINER START: the process may spend `startup_pre_node_allowance_ms` before startup_node (an
+	    ASSUMPTION, not measured: config, logging, thread pools; storage opens after startup_node), so it
+	    listens at most `min_startup_probe_budget_ms` after the start. The startupProbe (helm chart and E2E
+	    StatefulSet: tcpSocket on the flared port; liveness does not run before it succeeded) kills the
+	    container at the earliest initialDelay + (failureThreshold - 1) x period after the start (the first
+	    probe fires at initialDelay, the kill comes with the failureThreshold-th consecutive failure);
+	    failureThreshold x period overstates it by one period. The chart refuses a startupProbe whose
+	    earliest kill is below `min_startup_probe_budget_ms` (scripts/tests/test_helm_memory.py reads these
+	    constants). The default (period 5 s, failureThreshold 18) kills at the earliest after 85 s. */
 	static const uint32_t max_index_startup_wait_ms = 30000;
-	static const uint32_t index_connect_attempt_ms = 1500;
-	static const uint32_t startup_allowance_before_node_ms =
-		default_startup_probe_budget_ms - max_index_startup_wait_ms - index_connect_attempt_ms;
+	static const uint32_t index_connect_attempt_ms = 2000;
+	static const uint32_t startup_pre_node_allowance_ms = 20000;
+	static const uint32_t min_startup_probe_budget_ms =
+		max_index_startup_wait_ms + index_connect_attempt_ms + startup_pre_node_allowance_ms;
+	static const uint32_t default_startup_probe_earliest_kill_ms = (18 - 1) * 5000;
 	/** the configured wait as used: negative -> 0; in a K8s operator build at most
 	    max_index_startup_wait_ms (a longer wait would be cut by the liveness kill anyway); `clamped`
 	    tells whether the configured value was lowered. */

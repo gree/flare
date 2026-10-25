@@ -586,10 +586,10 @@ namespace test_cluster
 	// before startup_node; longer configured waits are capped in K8s builds
 	void test_index_startup_wait_fits_the_startup_probe_budget()
 	{
-		cppcut_assert_equal(90000U, cluster::default_startup_probe_budget_ms);
 		cppcut_assert_equal(30000U, cluster::max_index_startup_wait_ms);
-		cut_assert_true(cluster::max_index_startup_wait_ms + cluster::index_connect_attempt_ms < cluster::default_startup_probe_budget_ms);
-		cut_assert_true(cluster::startup_allowance_before_node_ms >= 50000U);
+		cppcut_assert_equal(52000U, cluster::min_startup_probe_budget_ms);		// the chart refuses a startupProbe below this
+		cppcut_assert_equal(85000U, cluster::default_startup_probe_earliest_kill_ms);	// (18 - 1) x 5 s, not 18 x 5 s
+		cut_assert_true(cluster::default_startup_probe_earliest_kill_ms >= cluster::min_startup_probe_budget_ms);
 		bool clamped = true;
 		cppcut_assert_equal(30000U, cluster::effective_index_startup_wait_ms(30000, true, clamped));				// the K8s default
 		cut_assert_false(clamped);

@@ -317,8 +317,8 @@ int flared::startup(int argc, char **argv) {
 		bool clamped = false;
 		const uint32_t w = cluster::effective_index_startup_wait_ms(ini_option_object().get_index_startup_wait_msec(), k8s, clamped);
 		if (clamped) {
-			log_warning("index-startup-wait-msec %d is longer than this build allows (%u ms from entry to startup_node; the default startupProbe gives %u ms from container start to listen); using %u ms",
-				ini_option_object().get_index_startup_wait_msec(), cluster::max_index_startup_wait_ms, cluster::default_startup_probe_budget_ms, w);
+			log_warning("index-startup-wait-msec %d is longer than this build allows (%u ms from entry to startup_node; the chart's startupProbe must allow %u ms from container start); using %u ms",
+				ini_option_object().get_index_startup_wait_msec(), cluster::max_index_startup_wait_ms, cluster::min_startup_probe_budget_ms, w);
 		}
 		this->_cluster->set_index_startup_wait_ms(w);
 	}

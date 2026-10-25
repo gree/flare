@@ -38,6 +38,15 @@
 {{- if $c.probes.liveness }}{{- $probes = merge (dict "liveness" $c.probes.liveness) $probes }}{{- end }}
 {{- if $c.probes.readiness }}{{- $probes = merge (dict "readiness" $c.probes.readiness) $probes }}{{- end }}
 {{- end }}
+{{- /* flared listens only after it registered with the index and may wait up to 30 s for a new operator's
+       index (src/lib/cluster.h). The startupProbe kills at the earliest initialDelay + (failureThreshold - 1)
+       x period after the container start; refuse a probe that could kill before 30 s wait + 2 s connect
+       + 20 s before startup_node = 52 s (min_startup_probe_budget_ms). */}}
+{{- $sp := $probes.startup }}
+{{- $spEarliest := add (int (default 0 $sp.initialDelaySeconds)) (mul (sub (int $sp.failureThreshold) 1) (int $sp.periodSeconds)) }}
+{{- if lt (int $spEarliest) 52 }}
+{{- fail (printf "cluster.probes.startup kills flared at the earliest %d s after the container start (initialDelaySeconds + (failureThreshold - 1) x periodSeconds); it must allow at least 52 s: flared may wait 30 s for the operator's index before it listens (src/lib/cluster.h min_startup_probe_budget_ms)" (int $spEarliest)) }}
+{{- end }}
 {{- $dataDir := ternary "/data/flare" "/tmp/flare" $useDataVol }}
 {{- /* backup-bootstrap: on a pod that boots with an EMPTY data dir, seed it
        from the object-storage backup before flared starts. This is the
@@ -430,8 +439,8 @@ spec:
           # flared listens only after it registered with the operator's index; a new cluster's operator
           # leads (and serves the index) only after it observed its Lease absent for lease + margin, and
           # flared waits for it (index-startup-wait-msec, at most 30 s from entry to startup_node). The
-          # startupProbe gives the process period x failureThreshold (default 90 s) FROM CONTAINER START to
-          # listen; liveness does not run before it succeeded.
+          # startupProbe kills at the earliest initialDelay + (failureThreshold - 1) x period FROM CONTAINER
+          # START (default 85 s; the chart refuses less than 52 s); liveness does not run before it succeeded.
           startupProbe:
             tcpSocket:
               port: {{ $c.flarePort }}

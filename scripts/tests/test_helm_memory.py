@@ -60,6 +60,42 @@ class MemoryConfigTest(unittest.TestCase):
         self.assertIn("failureThreshold: 24", probe)
         self.assertIn("periodSeconds: 5", probe)
 
+    def cluster_constant(self, name):
+        import re
+        text = (ROOT / "src/lib/cluster.h").read_text()
+        expr = re.search(r"static const uint32_t " + name + r"\s*=\s*([^;]+);", text, re.S).group(1)
+        names = {n: self.cluster_constant(n) for n in re.findall(r"[a-z_]+_ms", expr)}
+        for n, v in names.items():
+            expr = expr.replace(n, str(v))
+        return int(eval(expr.replace("\n", " "), {"__builtins__": {}}))
+
+    def earliest_kill_s(self, initial, period, threshold):
+        return initial + (threshold - 1) * period
+
+    def test_startup_probe_minimum_matches_flared(self):
+        required_s = self.cluster_constant("min_startup_probe_budget_ms") / 1000
+        self.assertEqual(required_s, 52)
+        self.assertEqual(self.cluster_constant("default_startup_probe_earliest_kill_ms"), 85000)
+        # the default renders (85 s >= 52 s)
+        self.assertGreaterEqual(self.earliest_kill_s(0, 5, 18), required_s)
+        self.flared_statefulset(self.render())
+        # exactly at the minimum renders: (12 - 1) x 5 = 55, initialDelay 0 / period 4, threshold 14 -> 52
+        self.flared_statefulset(self.render("cluster.probes.startup.periodSeconds=4",
+                                            "cluster.probes.startup.failureThreshold=14"))
+
+    def test_too_short_startup_probe_is_refused(self):
+        for settings in [("cluster.probes.startup.failureThreshold=11",),            # (11 - 1) x 5 = 50 < 52
+                         ("cluster.probes.startup.periodSeconds=4",
+                          "cluster.probes.startup.failureThreshold=13"),             # 48 < 52
+                         ("cluster.probes.startup.periodSeconds=1",
+                          "cluster.probes.startup.failureThreshold=52")]:            # 51 < 52 (x period would say 52)
+            args = ["helm", "template", "t", str(ROOT / "helm/flare-operator"), "--set", "cluster.enabled=true"]
+            for st in settings:
+                args.extend(["--set", st])
+            r = subprocess.run(args, capture_output=True, text=True)
+            self.assertNotEqual(r.returncode, 0, settings)
+            self.assertIn("must allow at least 52 s", r.stderr, settings)
+
     def test_initial_config_and_cr_both_have_memory_settings(self):
         text = self.render("cluster.rocksdb.blockCacheSizeMb=64",
                            "cluster.rocksdb.writeBufferSizeMb=16",

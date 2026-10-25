@@ -864,8 +864,32 @@ def deployCluster (cfg : ClusterConfig) : IO Unit := do
     let _ ← kubectl ["describe", "deployment", cfg.operatorName, "-n", cfg.«namespace»]
     throw (IO.userError "Operator deployment failed")
 
-  IO.eprintln s!"# Operator ready, waiting 10s for first reconcile cycle..."
-  IO.sleep 10000
+  -- Wait until the operator LEADS: the Lease names a holder, that pod is Ready and carries
+  -- role=leader (set by the leader loop itself). Not a fixed sleep: a new cluster's operator
+  -- leads only after it observed its Lease absent for lease + margin (operator LeaseAbsence,
+  -- about 18-23 s), and flared pods deployed before that sampled a cluster without an index.
+  -- A timeout is an explicit setup failure.
+  IO.eprintln s!"# Operator deployment ready; waiting until it holds the Lease and leads (holder Ready, role=leader)..."
+  let leaseName := s!"{cfg.name}-operator-lease"
+  let leaderRef ← IO.mkRef ""
+  let leads ← waitForCondition s!"the operator holds {leaseName} and leads (holder pod Ready with role=leader)" 120 do
+    match ← kubectlGetJsonpath "lease" leaseName cfg.«namespace» "{.spec.holderIdentity}" with
+    | .error _ => return false
+    | .ok h =>
+      let holder := h.trim
+      if holder.isEmpty then return false
+      match ← kubectl ["get", "pod", holder, "-n", cfg.«namespace», "-o",
+          "jsonpath={.metadata.labels.flare\\.gree\\.net/role}|{.status.conditions[?(@.type==\"Ready\")].status}"] with
+      | .ok v =>
+        leaderRef.set holder
+        return v.trim == "leader|True"
+      | .error _ => return false
+  if !leads then
+    IO.eprintln s!"# ERROR: no operator pod holds {leaseName} and leads within 120 s (last holder seen: '{← leaderRef.get}')"
+    dumpOperatorLogs cfg
+    let _ ← kubectl ["get", "lease", leaseName, "-n", cfg.«namespace», "-o", "yaml"]
+    throw (IO.userError s!"the operator did not lead within 120 s ({leaseName})")
+  IO.eprintln s!"# Operator leads: {← leaderRef.get} holds {leaseName}"
 
   -- Verify ConfigMap is STILL there before deploying StatefulSet.  Flared
   -- pods mount {cfg.name}-config/extra.conf at startup; if the ConfigMap

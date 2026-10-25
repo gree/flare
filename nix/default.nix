@@ -68,7 +68,7 @@ stdenv.mkDerivation {
     grep -E 'test_switch_off_refuses_an_incoming_push_before_anything_else|test_switch_on_does_not_refuse_by_the_switch' test/run-tests.sh.log || echo "snapshot push switch tests NOT found in the cutter log"
     grep -E 'test_proxy_enqueue_is_not_handed_to_a_reused_thread|test_typed_enqueue_is_not_handed_to_a_reused_thread|test_broadcast_is_not_handed_to_a_reused_thread|test_broadcast_to_a_prior_node_is_not_handed_to_a_reused_thread' test/run-tests.sh.log || echo "in-cluster reuse tests NOT found in the cutter log"
     # flared's bounded wait for the index server at startup (b798daf / 7257340 / eb6fab3 / 703ea59), by name
-    grep -E 'test_index_startup_retry_sleep_is_bounded_by_the_budget|test_monotonic_elapsed_ms_normalizes_the_nanosecond_borrow|test_startup_wait_stays_monotonic_and_within_the_budget|test_index_startup_wait_fits_the_startup_probe_budget' test/run-tests.sh.log || echo "index startup wait tests NOT found in the cutter log"
+    grep -E 'test_index_startup_retry_sleep_is_bounded_by_the_budget|test_monotonic_elapsed_ms_normalizes_the_nanosecond_borrow|test_startup_wait_stays_monotonic_and_within_the_budget|test_index_startup_wait_fits_the_startup_probe_budget|test_startup_node_gives_up_by_its_budget_on_a_silent_index|test_startup_node_gives_up_by_its_budget_without_an_index|test_startup_remaining_and_connect_bound' test/run-tests.sh.log || echo "index startup wait tests NOT found in the cutter log"
     # how many test_cluster tests ran, and any module the runner could not load (a module that fails to
     # load is skipped without failing the run)
     echo "test_cluster tests in the cutter log: $(grep -cE 'test_cluster::' test/run-tests.sh.log)"

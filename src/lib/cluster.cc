@@ -90,6 +90,7 @@ cluster::cluster(thread_pool* req_tp, thread_pool* other_tp, string server_name,
 		_coordinator(NULL),
 		_noreply_window_limit(0),
 		_index_startup_wait_ms(0),
+		_startup_connect_timeout_ms(0),
 		_proxy_concurrency(0),
 		_reconstruction_interval(0),
 		_reconstruction_bwlimit(0),
@@ -300,6 +301,14 @@ uint32_t cluster::effective_index_startup_wait_ms(int configured, bool k8s, bool
 	return v;
 }
 
+uint32_t cluster::index_startup_remaining_ms(uint64_t elapsed_ms, uint32_t wait_ms) {
+	return elapsed_ms >= wait_ms ? 0 : static_cast<uint32_t>(wait_ms - elapsed_ms);
+}
+
+int cluster::index_startup_connect_timeout_ms(uint32_t remaining_ms) {
+	return static_cast<int>(remaining_ms < 1000 ? remaining_ms : 1000);
+}
+
 uint32_t cluster::index_startup_retry_sleep_ms(uint64_t elapsed_ms, uint32_t wait_ms) {
 	if (elapsed_ms >= wait_ms) {
 		return 0;
@@ -333,14 +342,38 @@ int cluster::startup_node(const vector<index_server>& index_servers, uint32_t pr
 	// their short retries). This process does not listen yet: the startupProbe budget, counted from
 	// container start, covers the wait (src/lib/cluster.h min_startup_probe_budget_ms). At the deadline it
 	// gives up exactly as before: -1, the process exits and kubelet restarts it.
+	// ONE absolute deadline (t0 + budget) bounds every step, not only the sleeps between attempts: each
+	// connect is a single attempt bounded by min(1 s, time left); the registration request and its whole
+	// multi-line reply, and the meta data exchange after it, are bounded by the connection's absolute read /
+	// write deadline set to the time left (an index that accepts the connection and then stalls cannot hold
+	// this process past its budget). With a budget of 0 (legacy flarei builds) nothing changes.
 	struct timespec t0;
 	clock_gettime(CLOCK_MONOTONIC, &t0);
+	const bool bounded = this->_index_startup_wait_ms > 0;
 	uint64_t waited_ms = 0;
 	shared_connection c;
 	vector<node> v;		// the node map the registration reply carries (applied below)
 	for (;;) {
-		c = this->_open_index();
+		uint32_t left = 0;
+		if (bounded) {
+			struct timespec tn;
+			clock_gettime(CLOCK_MONOTONIC, &tn);
+			left = cluster::index_startup_remaining_ms(cluster::monotonic_elapsed_ms(t0, tn), this->_index_startup_wait_ms);
+			this->_startup_connect_timeout_ms = cluster::index_startup_connect_timeout_ms(left);
+		}
+		c = (bounded && left == 0) ? shared_connection() : this->_open_index();
+		this->_startup_connect_timeout_ms = 0;
 		const char* what = "index server not reachable yet";
+		if (c && bounded) {
+			struct timespec tn;
+			clock_gettime(CLOCK_MONOTONIC, &tn);
+			left = cluster::index_startup_remaining_ms(cluster::monotonic_elapsed_ms(t0, tn), this->_index_startup_wait_ms);
+			shared_connection_tcp ct = boost::dynamic_pointer_cast<connection_tcp>(c);
+			if (ct) {
+				ct->set_deadline_from_now(static_cast<int>(left));
+				ct->set_write_deadline_from_now(static_cast<int>(left));
+			}
+		}
 		if (c) {
 			op_node_add* p_na = new op_node_add(c, this);
 			v.clear();
@@ -374,7 +407,8 @@ int cluster::startup_node(const vector<index_server>& index_servers, uint32_t pr
 	int key_resolver_modular_virtual = cluster::default_key_resolver_modular_virtual;
 	op_meta* p_m = new op_meta(c, this);
 	if (p_m->run_client(partition_size, key_hash_algorithm, key_resolver_type, key_resolver_modular_hint, key_resolver_modular_virtual) < 0) {
-		log_err("failed to get meta data from index server", 0);
+		// still within the startup deadline set on the connection above
+		log_err("failed to get meta data from index server (within the %u ms startup deadline)", this->_index_startup_wait_ms);
 		delete p_m;
 		return -1;
 	}
@@ -3462,6 +3496,11 @@ shared_connection cluster::_open_index_single_server() {
 	// with minimal latency. If it's not reachable, K8s will restart the pod.
 	ctp->set_connect_retry_limit(2);
 #endif
+	if (this->_startup_connect_timeout_ms > 0) {
+		// startup_node's bounded loop: one bounded attempt per call, the loop retries
+		ctp->set_connect_retry_limit(0);
+		ctp->set_connect_timeout_ms(this->_startup_connect_timeout_ms);
+	}
 	if (ctp && ctp->open() == 0) {
 		return ctp;
 	}

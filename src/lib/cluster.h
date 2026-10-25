@@ -227,6 +227,9 @@ protected:
 	// how long startup_node keeps retrying the index server (K8s operator mode: a new
 	// cluster's operator may still be waiting to lead); 0 = the connect retries only
 	uint32_t								_index_startup_wait_ms;
+	// startup_node only: the per-attempt connect bound (ms, 0 = the connection's defaults) and a single
+	// connect attempt per call, so a connect never outlives the startup deadline
+	int										_startup_connect_timeout_ms;
 
 	// [node]
 	vector<index_server>	_index_servers;
@@ -425,14 +428,21 @@ public:
 	/** startup_node's bounded wait for the index server: how long to sleep before the next attempt
 	    after `elapsed_ms` of failed attempts with a budget of `wait_ms` (0 = give up now). */
 	static uint32_t index_startup_retry_sleep_ms(uint64_t elapsed_ms, uint32_t wait_ms);
+	/** the time left of the startup budget at `elapsed_ms` (0 when spent); with a budget of 0 there is no
+	    deadline and the result is 0 too (callers check the budget first) */
+	static uint32_t index_startup_remaining_ms(uint64_t elapsed_ms, uint32_t wait_ms);
+	/** the bound of one connect attempt in the startup loop: at most 1 s, never past the deadline */
+	static int index_startup_connect_timeout_ms(uint32_t remaining_ms);
 	/** whole milliseconds from `t0` to `t1` (CLOCK_MONOTONIC readings): each reading is normalized to
 	    unsigned nanoseconds first, so a nanosecond borrow needs no signed arithmetic; 0 if `t1` is not
 	    after `t0` (never a wrap to a huge value). */
 	static uint64_t monotonic_elapsed_ms(const struct timespec& t0, const struct timespec& t1);
 	/** Intervals (K8s operator builds). flared listens only after startup_node registered it, so until
 	    then every TCP probe fails.
-	    FROM ENTRY TO startup_node: the index wait lasts at most `max_index_startup_wait_ms`, then one more
-	    connect attempt (at most `index_connect_attempt_ms`, rounded up).
+	    FROM ENTRY TO startup_node: everything up to the registration and the meta data exchange (each
+	    connect attempt, the node add request and its whole reply, the meta reply, the sleeps) ends by ONE
+	    absolute deadline `max_index_startup_wait_ms` after the entry; `index_connect_attempt_ms` is kept as
+	    slack for the scheduling and the exit after the deadline.
 	    FROM CONTAINER START: the process may spend `startup_pre_node_allowance_ms` before startup_node (an
 	    ASSUMPTION, not measured: config, logging, thread pools; storage opens after startup_node), so it
 	    listens at most `min_startup_probe_budget_ms` after the start. The startupProbe (helm chart and E2E

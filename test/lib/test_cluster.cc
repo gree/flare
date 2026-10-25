@@ -29,6 +29,9 @@
 #include <pthread.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 #include <app.h>
 #include <cluster.h>
@@ -599,6 +602,108 @@ namespace test_cluster
 		cut_assert_false(clamped);
 		cppcut_assert_equal(0U, cluster::effective_index_startup_wait_ms(0, true, clamped));
 		cppcut_assert_equal(0U, cluster::effective_index_startup_wait_ms(-5, true, clamped));
+	}
+
+	// a TCP server that accepts every connection and never answers (a connected but stalled index)
+	struct silent_server {
+		int fd;
+		int port;
+		volatile bool stop;
+		int accepted;
+		std::vector<int> conns;
+		pthread_t th;
+		silent_server(): fd(-1), port(0), stop(false), accepted(0) {
+			fd = socket(AF_INET, SOCK_STREAM, 0);
+			int one = 1;
+			setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+			struct sockaddr_in a;
+			memset(&a, 0, sizeof(a));
+			a.sin_family = AF_INET;
+			a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+			a.sin_port = 0;
+			bind(fd, (struct sockaddr*)&a, sizeof(a));
+			listen(fd, 16);
+			socklen_t l = sizeof(a);
+			getsockname(fd, (struct sockaddr*)&a, &l);
+			port = ntohs(a.sin_port);
+			pthread_create(&th, NULL, run, this);
+		}
+		static void* run(void* p) {
+			silent_server* s = static_cast<silent_server*>(p);
+			while (!s->stop) {
+				struct timeval tv = {0, 100000};
+				fd_set r;
+				FD_ZERO(&r);
+				FD_SET(s->fd, &r);
+				if (select(s->fd + 1, &r, NULL, NULL, &tv) > 0) {
+					int c = accept(s->fd, NULL, NULL);
+					if (c >= 0) { s->conns.push_back(c); s->accepted++; }		// held open, never answered
+				}
+			}
+			return NULL;
+		}
+		~silent_server() {
+			stop = true;
+			pthread_join(th, NULL);
+			for (size_t i = 0; i < conns.size(); i++) close(conns[i]);
+			close(fd);
+		}
+	};
+
+	static uint64_t mono_ms() { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000; }
+
+	// review of bf1583d: an index that ACCEPTS the connection and never answers must not hold startup_node
+	// past its budget (the node add reply is read under the same absolute deadline as the connects)
+	void test_startup_node_gives_up_by_its_budget_on_a_silent_index()
+	{
+		silent_server srv;
+		cluster_test cl(".");
+		cl.set_index_startup_wait_ms(2000);
+		vector<cluster::index_server> v;
+		cluster::index_server is;
+		is.index_server_name = "127.0.0.1";
+		is.index_server_port = srv.port;
+		v.push_back(is);
+		const uint64_t t0 = mono_ms();
+		const int r = cl.startup_node(v, 0);
+		const uint64_t took = mono_ms() - t0;
+		cppcut_assert_equal(-1, r);
+		cut_assert_true(srv.accepted >= 1);						// it really connected and waited for a reply
+		cut_assert_true(took >= 1900);
+		cut_assert_true(took <= 2000 + 1500);					// within the budget plus the scheduling slack
+	}
+
+	// a refused connect (no listener) is bounded the same way
+	void test_startup_node_gives_up_by_its_budget_without_an_index()
+	{
+		int port = 0;
+		{
+			silent_server probe;		// take a free port, then close it
+			port = probe.port;
+		}
+		cluster_test cl(".");
+		cl.set_index_startup_wait_ms(2000);
+		vector<cluster::index_server> v;
+		cluster::index_server is;
+		is.index_server_name = "127.0.0.1";
+		is.index_server_port = port;
+		v.push_back(is);
+		const uint64_t t0 = mono_ms();
+		cppcut_assert_equal(-1, cl.startup_node(v, 0));
+		const uint64_t took = mono_ms() - t0;
+		cut_assert_true(took >= 1900);
+		cut_assert_true(took <= 2000 + 1500);
+	}
+
+	// the helpers the loop uses: the time left and a connect bound that never exceeds it
+	void test_startup_remaining_and_connect_bound()
+	{
+		cppcut_assert_equal(30000U, cluster::index_startup_remaining_ms(0, 30000));
+		cppcut_assert_equal(500U, cluster::index_startup_remaining_ms(29500, 30000));
+		cppcut_assert_equal(0U, cluster::index_startup_remaining_ms(31000, 30000));
+		cppcut_assert_equal(1000, cluster::index_startup_connect_timeout_ms(30000));
+		cppcut_assert_equal(500, cluster::index_startup_connect_timeout_ms(500));
+		cppcut_assert_equal(0, cluster::index_startup_connect_timeout_ms(0));
 	}
 
 	static struct timespec ts(time_t s, long ns) { struct timespec t; t.tv_sec = s; t.tv_nsec = ns; return t; }

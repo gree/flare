@@ -69,6 +69,10 @@ stdenv.mkDerivation {
     grep -E 'test_proxy_enqueue_is_not_handed_to_a_reused_thread|test_typed_enqueue_is_not_handed_to_a_reused_thread|test_broadcast_is_not_handed_to_a_reused_thread|test_broadcast_to_a_prior_node_is_not_handed_to_a_reused_thread' test/run-tests.sh.log || echo "in-cluster reuse tests NOT found in the cutter log"
     # flared's bounded wait for the index server at startup (b798daf / 7257340 / eb6fab3 / 703ea59), by name
     grep -E 'test_index_startup_retry_sleep_is_bounded_by_the_budget|test_monotonic_elapsed_ms_normalizes_the_nanosecond_borrow|test_startup_wait_stays_monotonic_and_within_the_budget|test_index_startup_wait_fits_the_startup_probe_budget' test/run-tests.sh.log || echo "index startup wait tests NOT found in the cutter log"
+    # how many test_cluster tests ran, and any module the runner could not load (a module that fails to
+    # load is skipped without failing the run)
+    echo "test_cluster tests in the cutter log: $(grep -cE 'test_cluster::' test/run-tests.sh.log)"
+    grep -iE 'undefined symbol|failed to load|cannot open shared|dlopen' test/run-tests.sh.log || echo "no module load errors in the cutter log"
     # T24: the identity/size probe retries with a fresh lookup (round 8)
     grep -E 'test_probe_reaches_a_source_that_answers_only_on_a_later_attempt|test_probe_of_an_unreachable_source_is_unanswered_and_bounded' test/run-tests.sh.log || echo "probe retry tests NOT found in the cutter log"
     grep -E 'test_write_progress_timeout_ends_a_write_to_a_peer_that_stopped_reading|test_write_deadline_ends_a_write_even_with_a_longer_progress_timeout|test_write_bounds_do_not_end_a_write_the_peer_reads|test_capture_capacity_refuses_unknowns_and_short_space' test/run-tests.sh.log || echo "capture guard tests NOT found in the cutter log"

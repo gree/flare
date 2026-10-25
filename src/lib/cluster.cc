@@ -271,6 +271,13 @@ int cluster::startup_index(coordinator* coord, key_resolver::type key_resolver_t
 	return 0;
 }
 
+// out-of-class definitions of the startup-wait constants (odr-used, e.g. bound to const references)
+const uint32_t cluster::max_index_startup_wait_ms;
+const uint32_t cluster::index_connect_attempt_ms;
+const uint32_t cluster::startup_pre_node_allowance_ms;
+const uint32_t cluster::min_startup_probe_budget_ms;
+const uint32_t cluster::default_startup_probe_earliest_kill_ms;
+
 uint64_t cluster::monotonic_elapsed_ms(const struct timespec& t0, const struct timespec& t1) {
 	if (t0.tv_sec < 0 || t1.tv_sec < 0 || t0.tv_nsec < 0 || t1.tv_nsec < 0) {
 		return 0;

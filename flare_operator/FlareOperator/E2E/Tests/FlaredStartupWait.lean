@@ -16,6 +16,13 @@
      container exits on its own (exit code not 137) and ran well under the
      startupProbe's earliest kill (85 s from container start): the restart comes
      from the deadline, not from a probe.
+  3. silent index (review of bf1583d): the operator scaled to 0 and a pod that
+     ACCEPTS every connection on the index port and never answers takes its
+     place behind the operator Service (socat). A new flared connects, gets no
+     reply to its node add, and still gives up by itself within its budget
+     (X in [30 s, 33.5 s], exit code not 137, ran below 80 s, under the
+     startupProbe's earliest kill at 85 s); it never logs the meta data (no
+     partial registration).
 -/
 
 import FlareOperator.E2E.Framework
@@ -138,6 +145,56 @@ def suite : TestSuite := {
         | none => return .fail "the previous container did not log 'gave up after ... ms of a ... ms startup wait'"
         | some ms =>
           if ms < 30000 || ms > 33500 then return .fail s!"flared gave up after {ms} ms, not at its 30 s budget (+ one connect attempt)"
+        if code == "137" then return .fail "the container was killed (137), not exited by its own deadline"
+        match ran with
+        | none => return .fail "no start/finish time of the terminated container"
+        | some r =>
+          if r < 30 || r ≥ 80 then return .fail s!"the terminated container ran {r} s: expected about the 30 s budget plus startup, below the startupProbe's earliest kill (85 s)"
+        return .pass },
+    { name := "(silent index) a connected index that never answers cannot hold flared past its budget: it gives up by itself within 30-33.5 s, exits (not 137) before the startupProbe's earliest kill, with no partial registration"
+      run := do
+        discard <| kubectl ["scale", s!"deployment/{cfg.operatorName}", "-n", ns, "--replicas=0"]
+        let gone ← waitForCondition "no operator pod" 120 do
+          return (← getPodNames s!"app={cfg.operatorName}" ns).isEmpty
+        if !gone then return .fail "the operator pods did not go away after scaling to 0"
+        let silent := s!"apiVersion: v1\nkind: Pod\nmetadata:\n  name: silent-index\n  namespace: {ns}\n  labels:\n    app: {cfg.operatorName}\n    flare.gree.net/role: leader\nspec:\n  containers:\n    - name: silent\n      image: alpine/socat:1.8.0.0\n      imagePullPolicy: IfNotPresent\n      args: [\"TCP-LISTEN:{cfg.operatorPort},fork,reuseaddr\", \"EXEC:sleep 3600\"]\n      ports:\n        - containerPort: {cfg.operatorPort}\n          name: flare-index\n"
+        match ← kubectlApplyManifest silent with
+        | .error e => return .fail s!"could not create the silent index pod: {e}"
+        | .ok _ => pure ()
+        let up ← kubectlWaitReady "pod/silent-index" ns 180
+        if !up then
+          discard <| kubectl ["delete", "pod", "silent-index", "-n", ns, "--ignore-not-found"]
+          return .fail "PRECONDITION NOT MET: the silent index pod did not become Ready"
+        let r0 ← restartCount
+        discard <| kubectl ["delete", "pod", pod, "-n", ns, "--wait=true"]
+        let started ← waitForCondition s!"the new {pod} container started" 120 do
+          return !(← containerId).isEmpty
+        let exited ← if started then waitForCondition s!"{pod}'s flared gave up on the silent index and exited" 150 do
+            return (← restartCount) ≥ 1
+          else pure false
+        let prev ← match ← kubectl ["logs", pod, "-n", ns, "--previous", "--tail=3000"] with
+          | .ok v => pure v
+          | .error _ => pure ""
+        let code := (← jp "{.status.containerStatuses[0].lastState.terminated.exitCode}")
+        let st := epochS (← jp "{.status.containerStatuses[0].lastState.terminated.startedAt}")
+        let fi := epochS (← jp "{.status.containerStatuses[0].lastState.terminated.finishedAt}")
+        let ran := match st, fi with
+          | some a, some b => some (b - a)
+          | _, _ => none
+        let refused := (prev.splitOn "node add refused or failed").length - 1
+        let g := gaveUpMs prev
+        let registered := containsSubstr prev "meta data from index server"
+        IO.eprintln s!"# silent index: exited {exited} (restartCount before {r0}); previous container: node-add failures {refused}, gave up after {g} ms, meta data logged {registered}; exitCode {code}, ran {ran} s"
+        discard <| kubectl ["delete", "pod", "silent-index", "-n", ns, "--ignore-not-found"]
+        discard <| kubectl ["scale", s!"deployment/{cfg.operatorName}", "-n", ns, "--replicas=1"]
+        if !started then return .fail s!"the new {pod} container did not start"
+        if !exited then return .fail s!"{pod}'s flared did not exit within 150 s against a silent index: it is held past its budget"
+        if refused == 0 then return .fail "PRECONDITION NOT MET: flared never reached the node add against the silent index (no connected-but-silent attempt)"
+        if registered then return .fail "flared logged the meta data: a partial registration against a silent index"
+        match g with
+        | none => return .fail "the previous container did not log 'gave up after ... ms'"
+        | some ms =>
+          if ms < 30000 || ms > 33500 then return .fail s!"flared gave up after {ms} ms against a silent index: not within its 30 s budget (+ slack)"
         if code == "137" then return .fail "the container was killed (137), not exited by its own deadline"
         match ran with
         | none => return .fail "no start/finish time of the terminated container"

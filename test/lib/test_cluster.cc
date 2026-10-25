@@ -568,6 +568,18 @@ namespace test_cluster
 		cppcut_assert_equal(0, f.cl.reconstruct_node(v, f.cl.get_node_map_version() + 10));
 		cut_assert_true(f.cl.is_promotion_refused());		// the old allowance is gone
 	}
+
+	// startup_node's bounded wait for the index server: retry in steps of at most 1 s until the budget is
+	// spent, never past it; a budget of 0 gives up at once (the previous behaviour)
+	void test_index_startup_retry_sleep_is_bounded_by_the_budget()
+	{
+		cppcut_assert_equal(1000U, cluster::index_startup_retry_sleep_ms(0, 30000));
+		cppcut_assert_equal(1000U, cluster::index_startup_retry_sleep_ms(28500, 30000));
+		cppcut_assert_equal(400U, cluster::index_startup_retry_sleep_ms(29600, 30000));		// never past the deadline
+		cppcut_assert_equal(0U, cluster::index_startup_retry_sleep_ms(30000, 30000));			// deadline reached: give up
+		cppcut_assert_equal(0U, cluster::index_startup_retry_sleep_ms(31000, 30000));
+		cppcut_assert_equal(0U, cluster::index_startup_retry_sleep_ms(0, 0));					// disabled: the connect retries only
+	}
 }
 
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 noexpandtab autoindent

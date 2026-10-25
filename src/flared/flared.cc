@@ -308,6 +308,7 @@ int flared::startup(int argc, char **argv) {
 	this->_cluster->set_max_total_thread_queue(ini_option_object().get_max_total_thread_queue());
 	this->_cluster->set_read_unavailable_error(ini_option_object().is_read_unavailable_error());
 	this->_cluster->set_noreply_window_limit(ini_option_object().get_noreply_window_limit());
+	this->_cluster->set_index_startup_wait_ms(static_cast<uint32_t>(ini_option_object().get_index_startup_wait_msec() > 0 ? ini_option_object().get_index_startup_wait_msec() : 0));
 	this->_cluster->add_proxy_event_listener(this->_cluster_replication);
 #ifdef ENABLE_K8S_OPERATOR
 	// In K8s operator mode, override the index server address from environment

@@ -224,6 +224,9 @@ protected:
 #endif
 	coordinator*					_coordinator;
 	int										_noreply_window_limit;
+	// how long startup_node keeps retrying the index server (K8s operator mode: a new
+	// cluster's operator may still be waiting to lead); 0 = the connect retries only
+	uint32_t								_index_startup_wait_ms;
 
 	// [node]
 	vector<index_server>	_index_servers;
@@ -417,6 +420,11 @@ public:
 	bool is_mysql_replication() { return this->_mysql_replication; };
 #endif
 	int set_noreply_window_limit(int noreply_window_limit) { this->_noreply_window_limit = noreply_window_limit; return 0; };
+	int set_index_startup_wait_ms(uint32_t ms) { this->_index_startup_wait_ms = ms; return 0; }
+	uint32_t get_index_startup_wait_ms() { return this->_index_startup_wait_ms; }
+	/** startup_node's bounded wait for the index server: how long to sleep before the next attempt
+	    after `elapsed_ms` of failed attempts with a budget of `wait_ms` (0 = give up now). */
+	static uint32_t index_startup_retry_sleep_ms(uint64_t elapsed_ms, uint32_t wait_ms);
 	int get_noreply_window_limit() { return this->_noreply_window_limit; }
 
 	inline string to_node_key(string server_name, int server_port) {

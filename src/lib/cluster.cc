@@ -89,6 +89,7 @@ cluster::cluster(thread_pool* req_tp, thread_pool* other_tp, string server_name,
 #endif
 		_coordinator(NULL),
 		_noreply_window_limit(0),
+		_index_startup_wait_ms(0),
 		_proxy_concurrency(0),
 		_reconstruction_interval(0),
 		_reconstruction_bwlimit(0),
@@ -270,6 +271,14 @@ int cluster::startup_index(coordinator* coord, key_resolver::type key_resolver_t
 	return 0;
 }
 
+uint32_t cluster::index_startup_retry_sleep_ms(uint64_t elapsed_ms, uint32_t wait_ms) {
+	if (elapsed_ms >= wait_ms) {
+		return 0;
+	}
+	const uint64_t left = wait_ms - elapsed_ms;
+	return static_cast<uint32_t>(left < 1000 ? left : 1000);
+}
+
 /**
  *	startup proc for node process
  */
@@ -286,9 +295,33 @@ int cluster::startup_node(const vector<index_server>& index_servers, uint32_t pr
 
 	log_notice("setting up cluster node... (type=%d, index_server_name=%s, index_server_port=%d)", this->_type, this->_index_servers[0].index_server_name.c_str(), this->_index_servers[0].index_server_port);
 
+	// Bounded wait for the index server at startup: in K8s operator mode a new cluster's operator
+	// leads only after it observed its Lease absent for lease + margin (operator LeaseAbsence), and
+	// its index server starts only then. Without the wait this process exited after the short connect
+	// retries and the pod crash-looped. The wait applies to this first registration only (later
+	// reconnections keep their short retries); this process does not listen yet, so the wait must stay
+	// below the liveness window (default 30 s < initialDelay 10 s + 6 x 5 s). At the deadline it gives up
+	// exactly as before: -1, the process exits and kubelet restarts it.
+	struct timespec t0;
+	clock_gettime(CLOCK_MONOTONIC, &t0);
 	shared_connection c = this->_open_index();
+	uint64_t waited_ms = 0;
+	while (!c) {
+		struct timespec t1;
+		clock_gettime(CLOCK_MONOTONIC, &t1);
+		waited_ms = static_cast<uint64_t>(t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+		const uint32_t s = cluster::index_startup_retry_sleep_ms(waited_ms, this->_index_startup_wait_ms);
+		if (s == 0) {
+			break;
+		}
+		log_notice("index server not reachable yet (waited %llu of %u ms; the operator may still be acquiring its lease): retrying in %u ms",
+			static_cast<unsigned long long>(waited_ms), this->_index_startup_wait_ms, s);
+		usleep(s * 1000);
+		c = this->_open_index();
+	}
 	if (!c) {
-		log_err("failed to connect to index server", 0);
+		log_err("failed to connect to index server (gave up after %llu ms of a %u ms startup wait)",
+			static_cast<unsigned long long>(waited_ms), this->_index_startup_wait_ms);
 		return -1;
 	}
 

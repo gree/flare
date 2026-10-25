@@ -90,7 +90,8 @@ cluster::cluster(thread_pool* req_tp, thread_pool* other_tp, string server_name,
 		_coordinator(NULL),
 		_noreply_window_limit(0),
 		_index_startup_wait_ms(0),
-		_startup_connect_timeout_ms(0),
+		_startup_deadline_ms(0),
+		_startup_connect_attempts(0),
 		_proxy_concurrency(0),
 		_reconstruction_interval(0),
 		_reconstruction_bwlimit(0),
@@ -309,6 +310,20 @@ int cluster::index_startup_connect_timeout_ms(uint32_t remaining_ms) {
 	return static_cast<int>(remaining_ms < 1000 ? remaining_ms : 1000);
 }
 
+uint64_t cluster::monotonic_now_ms() {
+	struct timespec t;
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return static_cast<uint64_t>(t.tv_sec) * 1000ULL + static_cast<uint64_t>(t.tv_nsec) / 1000000ULL;
+}
+
+int cluster::startup_connect_bound_ms(uint64_t now_ms, uint64_t deadline_ms) {
+	if (now_ms >= deadline_ms) {
+		return 0;
+	}
+	return cluster::index_startup_connect_timeout_ms(static_cast<uint32_t>(
+		deadline_ms - now_ms > 0xffffffffULL ? 0xffffffffULL : deadline_ms - now_ms));
+}
+
 uint32_t cluster::index_startup_retry_sleep_ms(uint64_t elapsed_ms, uint32_t wait_ms) {
 	if (elapsed_ms >= wait_ms) {
 		return 0;
@@ -359,10 +374,12 @@ int cluster::startup_node(const vector<index_server>& index_servers, uint32_t pr
 			struct timespec tn;
 			clock_gettime(CLOCK_MONOTONIC, &tn);
 			left = cluster::index_startup_remaining_ms(cluster::monotonic_elapsed_ms(t0, tn), this->_index_startup_wait_ms);
-			this->_startup_connect_timeout_ms = cluster::index_startup_connect_timeout_ms(left);
+			// the connect paths (single and redundant) bound each attempt by this absolute deadline
+			this->_startup_deadline_ms = static_cast<uint64_t>(t0.tv_sec) * 1000ULL + static_cast<uint64_t>(t0.tv_nsec) / 1000000ULL
+				+ this->_index_startup_wait_ms;
 		}
 		c = (bounded && left == 0) ? shared_connection() : this->_open_index();
-		this->_startup_connect_timeout_ms = 0;
+		this->_startup_deadline_ms = 0;
 		const char* what = "index server not reachable yet";
 		if (c && bounded) {
 			struct timespec tn;
@@ -3496,10 +3513,16 @@ shared_connection cluster::_open_index_single_server() {
 	// with minimal latency. If it's not reachable, K8s will restart the pod.
 	ctp->set_connect_retry_limit(2);
 #endif
-	if (this->_startup_connect_timeout_ms > 0) {
-		// startup_node's bounded loop: one bounded attempt per call, the loop retries
+	if (this->_startup_deadline_ms > 0) {
+		// startup_node's bounded loop: one attempt bounded by min(1 s, time left), the loop retries;
+		// with no time left no attempt is made (fail closed)
+		const int b = cluster::startup_connect_bound_ms(cluster::monotonic_now_ms(), this->_startup_deadline_ms);
+		if (b <= 0) {
+			return shared_connection();
+		}
 		ctp->set_connect_retry_limit(0);
-		ctp->set_connect_timeout_ms(this->_startup_connect_timeout_ms);
+		ctp->set_connect_timeout_ms(b);
+		this->_startup_connect_attempts++;
 	}
 	if (ctp && ctp->open() == 0) {
 		return ctp;
@@ -3518,6 +3541,18 @@ shared_connection cluster::_open_index_redundant() {
 		shared_connection_tcp ctp(new connection_tcp(it->index_server_name, it->index_server_port));
 		int connect_retry_limit = ctp->get_connect_retry_limit();
 		ctp->set_connect_retry_limit(0);
+		if (this->_startup_deadline_ms > 0) {
+			// startup_node's bounded loop: each server gets one attempt bounded by min(1 s, time left),
+			// recomputed per server, so a blackholed server cannot hold the startup past its deadline nor
+			// keep the next server from being tried; with no time left no further attempt is made
+			const int b = cluster::startup_connect_bound_ms(cluster::monotonic_now_ms(), this->_startup_deadline_ms);
+			if (b <= 0) {
+				log_notice("startup budget exhausted before trying index server %s:%d", it->index_server_name.c_str(), it->index_server_port);
+				return shared_connection();
+			}
+			ctp->set_connect_timeout_ms(b);
+			this->_startup_connect_attempts++;
+		}
 		if (ctp && ctp->open() == 0) {
 			ctp->set_connect_retry_limit(connect_retry_limit);
 			return ctp;

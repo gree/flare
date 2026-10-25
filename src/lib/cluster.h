@@ -227,9 +227,11 @@ protected:
 	// how long startup_node keeps retrying the index server (K8s operator mode: a new
 	// cluster's operator may still be waiting to lead); 0 = the connect retries only
 	uint32_t								_index_startup_wait_ms;
-	// startup_node only: the per-attempt connect bound (ms, 0 = the connection's defaults) and a single
-	// connect attempt per call, so a connect never outlives the startup deadline
-	int										_startup_connect_timeout_ms;
+	// startup_node only: the absolute startup deadline on CLOCK_MONOTONIC (ms; 0 = none). While it is set,
+	// every connect attempt to an index server (single or redundant) is ONE attempt bounded by
+	// min(1 s, time left), recomputed before each attempt; with no time left no attempt is made.
+	uint64_t								_startup_deadline_ms;
+	uint32_t								_startup_connect_attempts;		// connect attempts made under the deadline (tests)
 
 	// [node]
 	vector<index_server>	_index_servers;
@@ -425,6 +427,7 @@ public:
 	int set_noreply_window_limit(int noreply_window_limit) { this->_noreply_window_limit = noreply_window_limit; return 0; };
 	int set_index_startup_wait_ms(uint32_t ms) { this->_index_startup_wait_ms = ms; return 0; }
 	uint32_t get_index_startup_wait_ms() { return this->_index_startup_wait_ms; }
+	uint32_t get_startup_connect_attempts() { return this->_startup_connect_attempts; }
 	/** startup_node's bounded wait for the index server: how long to sleep before the next attempt
 	    after `elapsed_ms` of failed attempts with a budget of `wait_ms` (0 = give up now). */
 	static uint32_t index_startup_retry_sleep_ms(uint64_t elapsed_ms, uint32_t wait_ms);
@@ -433,6 +436,11 @@ public:
 	static uint32_t index_startup_remaining_ms(uint64_t elapsed_ms, uint32_t wait_ms);
 	/** the bound of one connect attempt in the startup loop: at most 1 s, never past the deadline */
 	static int index_startup_connect_timeout_ms(uint32_t remaining_ms);
+	/** CLOCK_MONOTONIC in ms */
+	static uint64_t monotonic_now_ms();
+	/** the bound of the next connect attempt under the absolute deadline `deadline_ms` at `now_ms`
+	    (0 = no time left: make no attempt) */
+	static int startup_connect_bound_ms(uint64_t now_ms, uint64_t deadline_ms);
 	/** whole milliseconds from `t0` to `t1` (CLOCK_MONOTONIC readings): each reading is normalized to
 	    unsigned nanoseconds first, so a nanosecond borrow needs no signed arithmetic; 0 if `t1` is not
 	    after `t0` (never a wrap to a huge value). */

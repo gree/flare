@@ -30,6 +30,9 @@
 #include <time.h>
 #include <unistd.h>
 #include <sys/socket.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <errno.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
@@ -650,6 +653,96 @@ namespace test_cluster
 		}
 	};
 
+	// a loopback "blackhole": a listener whose accept queue is full drops further SYNs, so a connect to it
+	// neither completes nor is refused (until the client's own timeout)
+	struct blackhole_server {
+		int fd;
+		int port;
+		std::vector<int> fillers;
+		blackhole_server(): fd(-1), port(0) {
+			fd = socket(AF_INET, SOCK_STREAM, 0);
+			struct sockaddr_in a;
+			memset(&a, 0, sizeof(a));
+			a.sin_family = AF_INET;
+			a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+			bind(fd, (struct sockaddr*)&a, sizeof(a));
+			listen(fd, 0);
+			socklen_t l = sizeof(a);
+			getsockname(fd, (struct sockaddr*)&a, &l);
+			port = ntohs(a.sin_port);
+			for (int i = 0; i < 4; i++) {		// fill the accept queue (never accepted)
+				int c = socket(AF_INET, SOCK_STREAM, 0);
+				fcntl(c, F_SETFL, O_NONBLOCK);
+				connect(c, (struct sockaddr*)&a, sizeof(a));
+				fillers.push_back(c);
+				usleep(20000);
+			}
+		}
+		/** does a fresh connect hang (the precondition of the tests that use it)? */
+		bool holds() {
+			struct sockaddr_in a;
+			memset(&a, 0, sizeof(a));
+			a.sin_family = AF_INET;
+			a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+			a.sin_port = htons(port);
+			int c = socket(AF_INET, SOCK_STREAM, 0);
+			fcntl(c, F_SETFL, O_NONBLOCK);
+			int r = connect(c, (struct sockaddr*)&a, sizeof(a));
+			bool hangs = false;
+			if (r < 0 && errno == EINPROGRESS) {
+				struct pollfd p;
+				p.fd = c;
+				p.events = POLLOUT;
+				hangs = poll(&p, 1, 300) == 0;
+			}
+			close(c);
+			return hangs;
+		}
+		~blackhole_server() {
+			for (size_t i = 0; i < fillers.size(); i++) close(fillers[i]);
+			close(fd);
+		}
+	};
+
+	// a reachable index that accepts and closes at once (the node add fails fast: the loop goes on)
+	struct closing_server {
+		int fd;
+		int port;
+		volatile bool stop;
+		int accepted;
+		pthread_t th;
+		closing_server(): fd(-1), port(0), stop(false), accepted(0) {
+			fd = socket(AF_INET, SOCK_STREAM, 0);
+			int one = 1;
+			setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+			struct sockaddr_in a;
+			memset(&a, 0, sizeof(a));
+			a.sin_family = AF_INET;
+			a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+			bind(fd, (struct sockaddr*)&a, sizeof(a));
+			listen(fd, 16);
+			socklen_t l = sizeof(a);
+			getsockname(fd, (struct sockaddr*)&a, &l);
+			port = ntohs(a.sin_port);
+			pthread_create(&th, NULL, run, this);
+		}
+		static void* run(void* p) {
+			closing_server* s = static_cast<closing_server*>(p);
+			while (!s->stop) {
+				struct timeval tv = {0, 50000};
+				fd_set r;
+				FD_ZERO(&r);
+				FD_SET(s->fd, &r);
+				if (select(s->fd + 1, &r, NULL, NULL, &tv) > 0) {
+					int c = accept(s->fd, NULL, NULL);
+					if (c >= 0) { s->accepted++; close(c); }
+				}
+			}
+			return NULL;
+		}
+		~closing_server() { stop = true; pthread_join(th, NULL); close(fd); }
+	};
+
 	static uint64_t mono_ms() { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000; }
 
 	// review of bf1583d: an index that ACCEPTS the connection and never answers must not hold startup_node
@@ -693,6 +786,60 @@ namespace test_cluster
 		const uint64_t took = mono_ms() - t0;
 		cut_assert_true(took >= 1900);
 		cut_assert_true(took <= 2000 + 1500);
+	}
+
+	static vector<cluster::index_server> servers(int p1, int p2) {
+		vector<cluster::index_server> v;
+		cluster::index_server a;
+		a.index_server_name = "127.0.0.1";
+		a.index_server_port = p1;
+		v.push_back(a);
+		a.index_server_port = p2;
+		v.push_back(a);
+		return v;
+	}
+
+	// review of 6cadb3d: with SEVERAL index servers (the redundant path) a blackholed one must not hold the
+	// startup past its deadline nor keep the next one from being tried: each attempt is min(1 s, time left)
+	void test_redundant_index_blackhole_does_not_stall_the_next_server()
+	{
+		blackhole_server bh;
+		cut_assert_true(bh.holds());						// precondition: the blackhole really hangs a connect
+		closing_server ok;
+		cluster_test cl(".");
+		cl.set_index_startup_wait_ms(5000);				// an iteration costs up to 1 s (blackhole) + 1 s (sleep)
+		const uint64_t t0 = mono_ms();
+		cppcut_assert_equal(-1, cl.startup_node(servers(bh.port, ok.port), 0));
+		const uint64_t took = mono_ms() - t0;
+		cut_assert_true(ok.accepted >= 2);					// the reachable server was reached again and again
+		cut_assert_true(cl.get_startup_connect_attempts() >= 3);
+		cut_assert_true(took >= 4900);
+		cut_assert_true(took <= 5000 + 1500);				// exact wall bound: the budget plus slack
+	}
+
+	// all index servers blackholed: still ends within the budget, after more than one bounded attempt
+	void test_redundant_all_blackholed_ends_within_the_budget()
+	{
+		blackhole_server bh1;
+		blackhole_server bh2;
+		cut_assert_true(bh1.holds() && bh2.holds());
+		cluster_test cl(".");
+		cl.set_index_startup_wait_ms(2500);
+		const uint64_t t0 = mono_ms();
+		cppcut_assert_equal(-1, cl.startup_node(servers(bh1.port, bh2.port), 0));
+		const uint64_t took = mono_ms() - t0;
+		cut_assert_true(cl.get_startup_connect_attempts() >= 2);
+		cut_assert_true(took >= 2400);
+		cut_assert_true(took <= 2500 + 1500);
+	}
+
+	// the per-attempt bound under an absolute deadline
+	void test_startup_connect_bound_under_a_deadline()
+	{
+		cppcut_assert_equal(1000, cluster::startup_connect_bound_ms(10000, 40000));
+		cppcut_assert_equal(300, cluster::startup_connect_bound_ms(39700, 40000));
+		cppcut_assert_equal(0, cluster::startup_connect_bound_ms(40000, 40000));
+		cppcut_assert_equal(0, cluster::startup_connect_bound_ms(41000, 40000));
 	}
 
 	// the helpers the loop uses: the time left and a connect bound that never exceeds it

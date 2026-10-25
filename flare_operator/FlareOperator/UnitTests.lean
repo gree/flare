@@ -936,6 +936,18 @@ private def checkBreakerUnavailable (ctx : Ctx) : IO Unit := do
      && Reconciler.leftActive stAct stAct == []
      && K8sReconciler.unreadyStreaks [(k "c", 6)] [k "c"] stAct (K8sReconciler.rejoinedAfterDown [] stAct ++ Reconciler.leftActive stAct afterAdd) == [(k "c", 1)]
      && K8sReconciler.unreadyStreaks [(k "c", 6)] [k "c"] stAct (K8sReconciler.rejoinedAfterDown [] stAct) == [(k "c", 7)])
+  -- review of 3517cbd: flared now retries `node add` within its startup budget; a registration the operator
+  -- applied whose reply was lost is retried. It must be answered like the first (as a container restart's
+  -- re-registration always was), never refused as "already registered".
+  check ctx "node add is idempotent for the registering node: a repeated node add (a retry after a lost reply, or a restart) is answered like the first, never an error, and the node stays in the map"
+    (let crd1 : FlareClusterView := { metadata := { name := "c" }, spec := { partitions := 1, replicas := 3 } }
+     let notError := fun (r : FlareOperator.Flare.FlareResponse) => match r with
+       | .ServerError _ => false
+       | .Error => false
+       | _ => true
+     let (s1, r1) := Reconciler.reconcileStep stAct crd1 (.NodeAdd "c" 12121)
+     let (s2, r2) := Reconciler.reconcileStep s1 crd1 (.NodeAdd "c" 12121)
+     notError r1 && notError r2 && (s2.lookupNode (k "c")).isSome)
   check ctx "one long-Down node in eight (12%) does not trip"
     (!trips big [] ((List.range 7).map fun i => k s!"n{i}"))
 

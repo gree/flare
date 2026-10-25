@@ -425,6 +425,10 @@ public:
 	/** startup_node's bounded wait for the index server: how long to sleep before the next attempt
 	    after `elapsed_ms` of failed attempts with a budget of `wait_ms` (0 = give up now). */
 	static uint32_t index_startup_retry_sleep_ms(uint64_t elapsed_ms, uint32_t wait_ms);
+	/** whole milliseconds from `t0` to `t1` (CLOCK_MONOTONIC readings): each reading is normalized to
+	    unsigned nanoseconds first, so a nanosecond borrow needs no signed arithmetic; 0 if `t1` is not
+	    after `t0` (never a wrap to a huge value). */
+	static uint64_t monotonic_elapsed_ms(const struct timespec& t0, const struct timespec& t1);
 	int get_noreply_window_limit() { return this->_noreply_window_limit; }
 
 	inline string to_node_key(string server_name, int server_port) {

@@ -271,6 +271,15 @@ int cluster::startup_index(coordinator* coord, key_resolver::type key_resolver_t
 	return 0;
 }
 
+uint64_t cluster::monotonic_elapsed_ms(const struct timespec& t0, const struct timespec& t1) {
+	if (t0.tv_sec < 0 || t1.tv_sec < 0 || t0.tv_nsec < 0 || t1.tv_nsec < 0) {
+		return 0;
+	}
+	const uint64_t n0 = static_cast<uint64_t>(t0.tv_sec) * 1000000000ULL + static_cast<uint64_t>(t0.tv_nsec);
+	const uint64_t n1 = static_cast<uint64_t>(t1.tv_sec) * 1000000000ULL + static_cast<uint64_t>(t1.tv_nsec);
+	return n1 > n0 ? (n1 - n0) / 1000000ULL : 0;
+}
+
 uint32_t cluster::index_startup_retry_sleep_ms(uint64_t elapsed_ms, uint32_t wait_ms) {
 	if (elapsed_ms >= wait_ms) {
 		return 0;
@@ -309,7 +318,7 @@ int cluster::startup_node(const vector<index_server>& index_servers, uint32_t pr
 	while (!c) {
 		struct timespec t1;
 		clock_gettime(CLOCK_MONOTONIC, &t1);
-		waited_ms = static_cast<uint64_t>(t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+		waited_ms = cluster::monotonic_elapsed_ms(t0, t1);
 		const uint32_t s = cluster::index_startup_retry_sleep_ms(waited_ms, this->_index_startup_wait_ms);
 		if (s == 0) {
 			break;

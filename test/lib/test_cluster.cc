@@ -580,6 +580,49 @@ namespace test_cluster
 		cppcut_assert_equal(0U, cluster::index_startup_retry_sleep_ms(31000, 30000));
 		cppcut_assert_equal(0U, cluster::index_startup_retry_sleep_ms(0, 0));					// disabled: the connect retries only
 	}
+
+	static struct timespec ts(time_t s, long ns) { struct timespec t; t.tv_sec = s; t.tv_nsec = ns; return t; }
+
+	// the elapsed time startup_node measures between two CLOCK_MONOTONIC readings
+	void test_monotonic_elapsed_ms_normalizes_the_nanosecond_borrow()
+	{
+		cppcut_assert_equal(static_cast<uint64_t>(300), cluster::monotonic_elapsed_ms(ts(10, 800000000), ts(11, 100000000)));	// 10.8 s -> 11.1 s
+		cppcut_assert_equal(static_cast<uint64_t>(1000), cluster::monotonic_elapsed_ms(ts(10, 999999), ts(11, 999999)));		// whole second
+		cppcut_assert_equal(static_cast<uint64_t>(0), cluster::monotonic_elapsed_ms(ts(10, 100000000), ts(10, 100999999)));		// sub-millisecond
+		cppcut_assert_equal(static_cast<uint64_t>(1), cluster::monotonic_elapsed_ms(ts(10, 999999999), ts(11, 999999)));			// carry across the second
+		cppcut_assert_equal(static_cast<uint64_t>(0), cluster::monotonic_elapsed_ms(ts(11, 0), ts(11, 0)));						// equal
+		cppcut_assert_equal(static_cast<uint64_t>(0), cluster::monotonic_elapsed_ms(ts(11, 100000000), ts(10, 800000000)));		// t1 before t0: 0, never a wrap
+		cppcut_assert_equal(static_cast<uint64_t>(30000), cluster::monotonic_elapsed_ms(ts(100, 500000000), ts(130, 500000000)));
+	}
+
+	// a startup retry loop driven by these readings: the elapsed time never decreases and the sleeps never
+	// carry it past the budget; the loop stops exactly at the budget
+	void test_startup_wait_stays_monotonic_and_within_the_budget()
+	{
+		const uint32_t budget = 30000;
+		struct timespec t0 = ts(10, 800000000);
+		uint64_t now_ns = 10ULL * 1000000000ULL + 800000000ULL;
+		uint64_t last = 0, slept = 0;
+		int rounds = 0;
+		for (;;) {
+			now_ns += 1500000000ULL;																							// one failed connect attempt (~1.5 s)
+			struct timespec t1 = ts(static_cast<time_t>(now_ns / 1000000000ULL), static_cast<long>(now_ns % 1000000000ULL));
+			const uint64_t e = cluster::monotonic_elapsed_ms(t0, t1);
+			cut_assert_true(e >= last);
+			last = e;
+			const uint32_t s = cluster::index_startup_retry_sleep_ms(e, budget);
+			if (s == 0) {
+				break;
+			}
+			cut_assert_true(e + s <= budget);
+			slept += s;
+			now_ns += static_cast<uint64_t>(s) * 1000000ULL;
+			rounds++;
+		}
+		cut_assert_true(last >= budget);
+		cut_assert_true(last < budget + 1500 + 1);
+		cut_assert_true(rounds > 0 && slept > 0);
+	}
 }
 
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 noexpandtab autoindent

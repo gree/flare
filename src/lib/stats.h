@@ -108,6 +108,15 @@ protected:
 	// until the item is released for all of them (an over-count, never under).
 	pthread_mutex_t _mutex_repl_in_flight;
 	map<string, uint64_t> _repl_in_flight;
+	// Terminal outcomes of in-cluster forwards that the replica ANSWERED, per
+	// destination (review of 8d64aaf: "in flight = 0" also follows a forward
+	// that failed). failed = any answer other than stored / deleted / touched /
+	// ok / not_found / not_stored; skipped = not_stored (the replica already
+	// holds a newer version: a set forwarded with its version is refused as
+	// "older or equal"). Drops (never delivered) are counted separately in
+	// proxy_write_dropped. Guarded by _mutex_repl_in_flight.
+	map<string, uint64_t> _proxy_write_failed;
+	map<string, uint64_t> _proxy_write_skipped;
 	// Reconstruction lifecycle of THIS node, counted once per request (a
 	// request is one handler_reconstruction; its internal retries are not
 	// separate requests). "started" is what a controller compares against
@@ -186,6 +195,10 @@ public:
 	void repl_in_flight_add(const string& dest);
 	void repl_in_flight_sub(const string& dest);
 	map<string, uint64_t> get_repl_in_flight(uint64_t& total);
+	void increment_proxy_write_failed(const string& dest);
+	void increment_proxy_write_skipped(const string& dest);
+	map<string, uint64_t> get_proxy_write_failed(uint64_t& total);
+	map<string, uint64_t> get_proxy_write_skipped(uint64_t& total);
 	void set_crepl_seed_state(const string& state);
 	string get_crepl_seed_state();
 	inline int increment_reconstruction_started()   { this->_reconstruction_started.incr();return 0; };

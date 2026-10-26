@@ -313,6 +313,20 @@ int queue_proxy_write::run(shared_connection c) {
 	// or counted): the replica ANSWERED, but not with a success — its answer
 	// was ignored here. Logged (rate-limited) with the destination; no change
 	// of behaviour (whether such an answer is a drop is not decided yet).
+	// terminal outcome of an answered in-cluster forward, per destination
+	// (node key = host:port, the same key as proxy_write_dropped[...])
+	if (this->_post_proxy && !this->_foreign) {
+		if (const connection_tcp* ctp = dynamic_cast<const connection_tcp*>(c.get())) {
+			const string dest = ctp->get_host() + ":" + boost::lexical_cast<string>(ctp->get_port());
+			if (this->_result == op::result_not_stored) {
+				stats_object->increment_proxy_write_skipped(dest);
+			} else if (this->_result != op::result_stored && this->_result != op::result_deleted
+					&& this->_result != op::result_touched && this->_result != op::result_ok
+					&& this->_result != op::result_not_found) {
+				stats_object->increment_proxy_write_failed(dest);
+			}
+		}
+	}
 	if (this->_result != op::result_stored && this->_result != op::result_deleted
 			&& this->_result != op::result_touched && this->_result != op::result_ok
 			&& this->_result != op::result_not_found) {

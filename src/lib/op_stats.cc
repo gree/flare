@@ -216,6 +216,23 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 			_send_stat(key, it->second);
 		}
 		_send_stat("proxy_write_in_flight", total);
+		// terminal outcomes of answered forwards (stats.h); totals always sent
+		uint64_t failed = 0;
+		map<string, uint64_t> f = stats_object->get_proxy_write_failed(failed);
+		for (map<string, uint64_t>::const_iterator it = f.begin(); it != f.end(); it++) {
+			char key[BUFSIZ];
+			snprintf(key, sizeof(key), "proxy_write_failed[%s]", it->first.c_str());
+			_send_stat(key, it->second);
+		}
+		_send_stat("proxy_write_failed", failed);
+		uint64_t skipped = 0;
+		map<string, uint64_t> k = stats_object->get_proxy_write_skipped(skipped);
+		for (map<string, uint64_t>::const_iterator it = k.begin(); it != k.end(); it++) {
+			char key[BUFSIZ];
+			snprintf(key, sizeof(key), "proxy_write_skipped[%s]", it->first.c_str());
+			_send_stat(key, it->second);
+		}
+		_send_stat("proxy_write_skipped", skipped);
 	}
 	_send_stat("delete_misses"				, stats_object->get_delete_misses());
 	// Reconstruction lifecycle (see stats.h): a controller that requested a

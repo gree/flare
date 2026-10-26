@@ -495,16 +495,25 @@ spec:
                   - -c
                   - |
                     end=$(( $(date +%s) + {{ int $drain }} ))
+                    rd() { { exec 3<>/dev/tcp/127.0.0.1/{{ $c.flarePort }} && printf 'stats\r\nquit\r\n' >&3 && timeout 5 tr -d '\r' <&3; } 2>/dev/null; }
+                    st() { printf '%s\n' "$1" | sed -n "s/^STAT $2 //p"; }
+                    out=$(rd); d0=$(st "$out" proxy_write_dropped); f0=$(st "$out" proxy_write_failed)
                     while [ "$(date +%s)" -lt "$end" ]; do
-                      out=$( { exec 3<>/dev/tcp/127.0.0.1/{{ $c.flarePort }} && printf 'stats\r\nquit\r\n' >&3 && timeout 5 tr -d '\r' <&3; } 2>/dev/null )
-                      role=$(printf '%s\n' "$out" | sed -n 's/^STAT own_role //p')
-                      inflight=$(printf '%s\n' "$out" | sed -n 's/^STAT proxy_write_in_flight //p')
-                      if [ "$role" = proxy ] && [ "$inflight" = 0 ]; then
+                      out=$(rd)
+                      role=$(st "$out" own_role); inflight=$(st "$out" proxy_write_in_flight)
+                      d=$(st "$out" proxy_write_dropped); f=$(st "$out" proxy_write_failed)
+                      if [ -n "$d0" ] && [ -n "$f0" ] && { [ "$d" != "$d0" ] || [ "$f" != "$f0" ]; }; then
+                        echo "flare preStop: forward drain NOT LOSSLESS (dropped $d0 -> $d, refused $f0 -> $f)" > /proc/1/fd/1
+                        exit 0
+                      fi
+                      if [ "$role" = proxy ] && [ "$inflight" = 0 ] && [ -n "$d0" ] && [ -n "$f0" ]; then
+                        echo "flare preStop: proxy and every forward delivered (dropped $d, refused $f unchanged)" > /proc/1/fd/1
                         sleep 2
                         exit 0
                       fi
                       sleep 0.2
                     done
+                    echo "flare preStop: forward drain NOT CONFIRMED within {{ int $drain }} s (role '$role', in flight '$inflight')" > /proc/1/fd/1
                     exit 0
           {{- end }}
       volumes:

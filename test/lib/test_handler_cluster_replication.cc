@@ -595,6 +595,25 @@ namespace test_handler_cluster_replication {
 		cut_assert_equal_int(0, (int)total);
 	}
 
+	// review of 8d64aaf: terminal outcomes of answered in-cluster forwards are
+	// counted per destination (failed / skipped), with totals from one snapshot
+	void test_proxy_write_outcomes_are_counted_per_destination() {
+		uint64_t total = 1;
+		stats_object->get_proxy_write_failed(total);
+		cut_assert_equal_int(0, (int)total);
+		stats_object->increment_proxy_write_failed("a:12121");
+		stats_object->increment_proxy_write_failed("a:12121");
+		stats_object->increment_proxy_write_failed("b:12121");
+		stats_object->increment_proxy_write_skipped("a:12121");
+		map<string, uint64_t> f = stats_object->get_proxy_write_failed(total);
+		cut_assert_equal_int(3, (int)total);
+		cut_assert_equal_int(2, (int)f["a:12121"]);
+		cut_assert_equal_int(1, (int)f["b:12121"]);
+		map<string, uint64_t> k = stats_object->get_proxy_write_skipped(total);
+		cut_assert_equal_int(1, (int)total);
+		cut_assert_equal_int(1, (int)k["a:12121"]);
+	}
+
 	// Shutdown with one forward running and one queued: each ends with
 	// exactly ONE outcome (stopping, abandoned), and nothing stays in flight
 	// once released — the gate's "enqueued == outcomes when nothing is in

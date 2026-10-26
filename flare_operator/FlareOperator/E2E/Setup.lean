@@ -384,12 +384,30 @@ def statefulSetYaml (cfg : ClusterConfig) : String :=
   -- preStop drain window: keep flared alive+Ready while Terminating so the
   -- operator's graceful drain is observable. grace must exceed drainSeconds.
   let graceSeconds := if cfg.drainSeconds > 0 then cfg.drainSeconds + 10 else 5
+  -- the chart's hook (helm/flare-operator/templates/flare-cluster.yaml): wait
+  -- until the node's own role is proxy and no in-cluster forward is in flight
+  -- (NODE-OPS-LOSSLESS-PLAN L2), then 2 s; at most drainSeconds
   let preStopBlock := if cfg.drainSeconds > 0 then
       s!"
           lifecycle:
             preStop:
               exec:
-                command: [\"sh\", \"-c\", \"sleep {cfg.drainSeconds}\"]"
+                command:
+                  - /bin/bash
+                  - -c
+                  - |
+                    end=$(( $(date +%s) + {cfg.drainSeconds} ))
+                    while [ \"$(date +%s)\" -lt \"$end\" ]; do
+                      out=$( \{ exec 3<>/dev/tcp/127.0.0.1/{cfg.flarePort} && printf 'stats\\r\\nquit\\r\\n' >&3 && timeout 5 tr -d '\\r' <&3; } 2>/dev/null )
+                      role=$(printf '%s\\n' \"$out\" | sed -n 's/^STAT own_role //p')
+                      inflight=$(printf '%s\\n' \"$out\" | sed -n 's/^STAT proxy_write_in_flight //p')
+                      if [ \"$role\" = proxy ] && [ \"$inflight\" = 0 ]; then
+                        sleep 2
+                        exit 0
+                      fi
+                      sleep 0.2
+                    done
+                    exit 0"
     else ""
   let pvcMount := if persistent then "
             - name: data

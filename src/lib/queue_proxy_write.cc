@@ -76,6 +76,18 @@ queue_proxy_write::~queue_proxy_write() {
 	if (this->_in_flight) {
 		stats_object->crepl_in_flight_sub();
 	}
+	for (vector<string>::const_iterator it = this->_repl_dests.begin(); it != this->_repl_dests.end(); it++) {
+		stats_object->repl_in_flight_sub(*it);
+	}
+}
+
+/**
+ *	Count this in-cluster forward as in flight toward replica `dest` until
+ *	the item is destroyed. Called before it is queued for `dest`.
+ */
+void queue_proxy_write::track_repl_in_flight(const string& dest) {
+	this->_repl_dests.push_back(dest);
+	stats_object->repl_in_flight_add(dest);
 }
 
 /**

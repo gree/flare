@@ -66,6 +66,7 @@ private:
 	string			_mysql_replication_table;
 #endif
 	int					_noreply_window_limit;
+	int					_shutdown_forward_drain_msec;
 	int					_net_read_timeout;
 	bool				_net_read_timeout_set;
 	int					_proxy_concurrency;
@@ -155,6 +156,10 @@ public:
 	static const int default_mysql_replication_id = 19790217;
 #endif
 	static const int default_noreply_window_limit = 0;						// disabled
+	// on a graceful stop (SIGTERM), how long flared keeps its forwarding threads
+	// running for the in-cluster forwards still queued to replicas (NODE-OPS-
+	// LOSSLESS-PLAN L2): they are writes a client was told STORED
+	static const int default_shutdown_forward_drain_msec = 30000;
 	static const int default_net_read_timeout = 10*60;						// sec
 	static const int default_proxy_concurrency = 2;
 	static const int default_reconstruction_interval = 0;
@@ -238,6 +243,7 @@ public:
 	string get_mysql_replication_table() { return this->_mysql_replication_table; };
 #endif
 	int get_noreply_window_limit() { return this->_noreply_window_limit; };
+	int get_shutdown_forward_drain_msec() { return this->_shutdown_forward_drain_msec; };
 	int get_net_read_timeout() { return this->_net_read_timeout; };
 	// net-read-timeout was given explicitly (config file or command line)
 	bool is_net_read_timeout_set() { return this->_net_read_timeout_set; };

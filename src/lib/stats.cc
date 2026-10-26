@@ -80,6 +80,7 @@ stats::stats():
 	pthread_mutex_init(&this->_mutex_proxy_write_dropped_by_dest, NULL);
 	pthread_mutex_init(&this->_mutex_diag, NULL);
 	pthread_mutex_init(&this->_mutex_crepl, NULL);
+	pthread_mutex_init(&this->_mutex_repl_in_flight, NULL);
 	this->_crepl_seed_state = "none";
 	this->_crepl_in_flight = 0;
 	this->_diag_enabled = getenv("FLARE_TEST_FORWARD_DIAG") != NULL;
@@ -122,6 +123,7 @@ stats::~stats() {
 	pthread_mutex_destroy(&this->_mutex_proxy_write_dropped_by_dest);
 	pthread_mutex_destroy(&this->_mutex_diag);
 	pthread_mutex_destroy(&this->_mutex_crepl);
+	pthread_mutex_destroy(&this->_mutex_repl_in_flight);
 	pthread_mutex_destroy(&this->_mutex_reconstruction);
 }
 // }}}
@@ -405,6 +407,36 @@ void stats::crepl_in_flight_sub() {
 		this->_crepl_in_flight--;
 	}
 	pthread_mutex_unlock(&this->_mutex_crepl);
+}
+
+void stats::repl_in_flight_add(const string& dest) {
+	pthread_mutex_lock(&this->_mutex_repl_in_flight);
+	this->_repl_in_flight[dest]++;
+	pthread_mutex_unlock(&this->_mutex_repl_in_flight);
+}
+
+void stats::repl_in_flight_sub(const string& dest) {
+	pthread_mutex_lock(&this->_mutex_repl_in_flight);
+	map<string, uint64_t>::iterator it = this->_repl_in_flight.find(dest);
+	if (it != this->_repl_in_flight.end()) {
+		if (it->second > 1) {
+			it->second--;
+		} else {
+			this->_repl_in_flight.erase(it);
+		}
+	}
+	pthread_mutex_unlock(&this->_mutex_repl_in_flight);
+}
+
+map<string, uint64_t> stats::get_repl_in_flight(uint64_t& total) {
+	pthread_mutex_lock(&this->_mutex_repl_in_flight);
+	map<string, uint64_t> r = this->_repl_in_flight;
+	pthread_mutex_unlock(&this->_mutex_repl_in_flight);
+	total = 0;
+	for (map<string, uint64_t>::const_iterator it = r.begin(); it != r.end(); it++) {
+		total += it->second;
+	}
+	return r;
 }
 
 map<string, uint64_t> stats::get_crepl_snapshot(uint64_t& in_flight) {

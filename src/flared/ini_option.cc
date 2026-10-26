@@ -56,6 +56,7 @@ ini_option::ini_option():
 		_mysql_replication_table(""),
 #endif
 		_noreply_window_limit(default_noreply_window_limit),
+		_shutdown_forward_drain_msec(default_shutdown_forward_drain_msec),
 		_net_read_timeout(default_net_read_timeout),
 		_net_read_timeout_set(false),
 		_proxy_concurrency(default_proxy_concurrency),
@@ -263,6 +264,9 @@ int ini_option::load() {
 		}
 #endif
 
+		if (opt_var_map.count("shutdown-forward-drain-msec")) {
+			this->_shutdown_forward_drain_msec = opt_var_map["shutdown-forward-drain-msec"].as<int>();
+		}
 		if (opt_var_map.count("noreply-window-limit")) {
 			this->_noreply_window_limit = opt_var_map["noreply-window-limit"].as<int>();
 		}
@@ -906,6 +910,7 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("mysql-replication-table",	program_options::value<string>(),		"mysql replication table")
 #endif
 		("noreply-window-limit",		program_options::value<int>(),			"noreply window limit")
+		("shutdown-forward-drain-msec",	program_options::value<int>(),			"on a graceful stop, how long the forwarding threads keep sending the in-cluster forwards still queued to replicas before they stop (msec, 0 = do not wait)")
 		("net-read-timeout",				program_options::value<int>(),			"network read timeout (sec) (dynamic)")
 		("proxy-concurrency",				program_options::value<int>(),			"proxy request concurrency for each node")
 		("reconstruction-interval",	program_options::value<int>(),			"master/slave dump interval in usec (dynamic)")

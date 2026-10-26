@@ -480,13 +480,32 @@ spec:
           lifecycle:
             preStop:
               exec:
-                # Graceful drain: once the pod is Terminating it is already out
-                # of the Service/CLB endpoints (no new connections) and the
-                # operator promotes a slave for any partition this pod mastered
-                # (TerminatingPodHandling). flared stays up for this window,
-                # continuing to serve/forward the connections it still holds, so
-                # clients drain or reconnect before SIGTERM. See cluster.drainSeconds.
-                command: ["sh", "-c", "sleep {{ int $drain }}"]
+                # Graceful drain: once the pod is Terminating the operator takes
+                # its role away (TerminatingPodHandling: a master is demoted to
+                # proxy with a slave promoted). flared stays up, serving and
+                # forwarding the connections it still holds. SIGTERM waits until
+                # this node's OWN view says it is a proxy AND none of its
+                # in-cluster forwards to replicas is still in flight (they carry
+                # writes a client was told STORED: NODE-OPS-LOSSLESS-PLAN L2),
+                # then 2 s more; at most drainSeconds. A flared that does not
+                # report proxy_write_in_flight (older build) waits the whole
+                # window, as the plain sleep did. See cluster.drainSeconds.
+                command:
+                  - /bin/bash
+                  - -c
+                  - |
+                    end=$(( $(date +%s) + {{ int $drain }} ))
+                    while [ "$(date +%s)" -lt "$end" ]; do
+                      out=$( { exec 3<>/dev/tcp/127.0.0.1/{{ $c.flarePort }} && printf 'stats\r\nquit\r\n' >&3 && timeout 5 tr -d '\r' <&3; } 2>/dev/null )
+                      role=$(printf '%s\n' "$out" | sed -n 's/^STAT own_role //p')
+                      inflight=$(printf '%s\n' "$out" | sed -n 's/^STAT proxy_write_in_flight //p')
+                      if [ "$role" = proxy ] && [ "$inflight" = 0 ]; then
+                        sleep 2
+                        exit 0
+                      fi
+                      sleep 0.2
+                    done
+                    exit 0
           {{- end }}
       volumes:
         - name: flared-config

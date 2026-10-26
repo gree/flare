@@ -204,6 +204,19 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 		_send_stat("cluster_replication_forward_in_flight", in_flight);
 		_send_stat("cluster_replication_seed", stats_object->get_crepl_seed_state());
 	}
+	{
+		// In-cluster forwards to replicas that exist right now (stats.h). The
+		// total is ALWAYS sent: its presence says the per-destination lines
+		// are complete (an absent destination = 0).
+		uint64_t total = 0;
+		map<string, uint64_t> rif = stats_object->get_repl_in_flight(total);
+		for (map<string, uint64_t>::const_iterator it = rif.begin(); it != rif.end(); it++) {
+			char key[BUFSIZ];
+			snprintf(key, sizeof(key), "proxy_write_in_flight[%s]", it->first.c_str());
+			_send_stat(key, it->second);
+		}
+		_send_stat("proxy_write_in_flight", total);
+	}
 	_send_stat("delete_misses"				, stats_object->get_delete_misses());
 	// Reconstruction lifecycle (see stats.h): a controller that requested a
 	// resync reads these back to tell "started and finished" from "never

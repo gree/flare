@@ -61,7 +61,7 @@ stdenv.mkDerivation {
     # capture guards: write bounds for a connected peer that stops reading,
     # worst-case-pin capacity rule
     # switch gate: in-flight forwards as a value, one outcome per forward on shutdown
-    grep -E 'test_in_flight_counts_a_forward_until_it_is_released|test_in_flight_and_outcomes_on_shutdown|test_foreign_outcome_counters_are_the_gate_set|test_enqueue_after_the_handler_returned_is_refused|test_post_proxy_forward_is_not_handed_to_a_reused_thread' test/run-tests.sh.log || echo "in-flight tests NOT found in the cutter log"
+    grep -E 'test_in_flight_counts_a_forward_until_it_is_released|test_repl_in_flight_counts_per_destination_until_released|test_in_flight_and_outcomes_on_shutdown|test_foreign_outcome_counters_are_the_gate_set|test_enqueue_after_the_handler_returned_is_refused|test_post_proxy_forward_is_not_handed_to_a_reused_thread' test/run-tests.sh.log || echo "in-flight tests NOT found in the cutter log"
     # reseed / dump serve: progress bound, no total deadline (round 8)
     grep -E 'test_reseed_serve_ends_when_the_receiver_stops_reading|test_reseed_serve_to_a_slow_reader_completes_past_several_windows|test_run_server_ends_when_the_receiver_stops_reading|test_final_frame_is_bounded_when_only_it_is_stuck|test_bound_is_off_after_a_complete_dump' test/run-tests.sh.log || echo "serve bound tests NOT found in the cutter log"
     # per-key-only migration: the destination refuses a snapshot push with the switch off

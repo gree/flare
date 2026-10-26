@@ -83,6 +83,7 @@ private:
 	int _listen();
 	int _set_resource_limit();
 	int _set_signal_handler();
+	void _drain_forwards(int msec);
 };
 
 }	// namespace flare

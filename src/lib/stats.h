@@ -98,6 +98,16 @@ protected:
 	// gate needs "nothing in flight" as a value, not as a difference of
 	// counters read apart (review 2026-10-12).
 	uint64_t _crepl_in_flight;
+	// In-cluster forwards to replicas (post-proxy) that exist right now, per
+	// destination node key: counted when a forward is made for that replica
+	// (before it is queued) and uncounted when the forward item is destroyed,
+	// whatever ended it (delivered, dropped, abandoned). The planned switch
+	// (NODE-OPS-LOSSLESS-PLAN 5.6) waits for 0 toward the successor before it
+	// promotes it, and preStop waits for 0 before flared exits. One item is
+	// shared by every replica of the write, so a destination stays counted
+	// until the item is released for all of them (an over-count, never under).
+	pthread_mutex_t _mutex_repl_in_flight;
+	map<string, uint64_t> _repl_in_flight;
 	// Reconstruction lifecycle of THIS node, counted once per request (a
 	// request is one handler_reconstruction; its internal retries are not
 	// separate requests). "started" is what a controller compares against
@@ -173,6 +183,9 @@ public:
 	void crepl_in_flight_add();
 	void crepl_in_flight_sub();
 	map<string, uint64_t> get_crepl_snapshot(uint64_t& in_flight);
+	void repl_in_flight_add(const string& dest);
+	void repl_in_flight_sub(const string& dest);
+	map<string, uint64_t> get_repl_in_flight(uint64_t& total);
 	void set_crepl_seed_state(const string& state);
 	string get_crepl_seed_state();
 	inline int increment_reconstruction_started()   { this->_reconstruction_started.incr();return 0; };

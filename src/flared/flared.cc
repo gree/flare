@@ -28,6 +28,7 @@
  */
 #include <cstring>
 #include <sys/stat.h>
+#include <unistd.h>
 #include "signal_interrupt.h"
 #include "flared.h"
 #include "connection_tcp.h"
@@ -667,6 +668,12 @@ int flared::reload() {
 int flared::shutdown() {
 	log_notice("shutting down active, and pool threads...", 0);
 	this->_req_thread_pool->shutdown();
+	// No client request runs any more, so no new forward is made. The ones
+	// still queued to replicas carry writes a client was told STORED: keep
+	// the forwarding threads (other pool) running until they are sent, within
+	// a bound (NODE-OPS-LOSSLESS-PLAN L2). What is left at the bound is
+	// abandoned and counted, as before.
+	this->_drain_forwards(ini_option_object().get_shutdown_forward_drain_msec());
 	this->_other_thread_pool->shutdown();
 	log_notice("all threads are successfully shutdown", 0);
 
@@ -676,6 +683,39 @@ int flared::shutdown() {
 	this->_clear_pid();
 
 	return 0;
+}
+
+/**
+ *	wait (at most `msec`) until no in-cluster forward to a replica exists
+ */
+void flared::_drain_forwards(int msec) {
+	uint64_t total = 0;
+	stats_object->get_repl_in_flight(total);
+	if (total == 0 || msec <= 0) {
+		log_notice("in-cluster forwards in flight at shutdown: %llu (not waiting)", static_cast<unsigned long long>(total));
+		return;
+	}
+	log_notice("in-cluster forwards in flight at shutdown: %llu -> waiting up to %d msec for them to be sent", static_cast<unsigned long long>(total), msec);
+	struct timespec t0;
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	for (;;) {
+		usleep(20 * 1000);
+		map<string, uint64_t> left = stats_object->get_repl_in_flight(total);
+		struct timespec t1;
+		clock_gettime(CLOCK_MONOTONIC, &t1);
+		const long long elapsed = (static_cast<long long>(t1.tv_sec) - t0.tv_sec) * 1000 + (static_cast<long long>(t1.tv_nsec) - t0.tv_nsec) / 1000000;
+		if (total == 0) {
+			log_notice("every in-cluster forward was sent after %lld msec", elapsed);
+			return;
+		}
+		if (elapsed >= msec) {
+			for (map<string, uint64_t>::const_iterator it = left.begin(); it != left.end(); it++) {
+				log_err("shutdown: %llu in-cluster forward(s) to %s still in flight after %lld msec — they are abandoned (counted as dropped)",
+					static_cast<unsigned long long>(it->second), it->first.c_str(), elapsed);
+			}
+			return;
+		}
+	}
 }
 
 /**

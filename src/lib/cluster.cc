@@ -1854,6 +1854,7 @@ cluster::proxy_request cluster::post_proxy_write(op_proxy_write* op, bool sync) 
 	for (vector<partition_node>::iterator it = p_tmp.slave.begin(); it != p_tmp.slave.end(); it++) {
 		// proxy request to slave
 		log_debug("proxy request to slave (node_key=%s, ident=%s)", it->node_key.c_str(), op->get_ident().c_str());
+		q->track_repl_in_flight(it->node_key);
 		if (this->_enqueue(q, it->node_key, key_hash_value, sync) < 0) {
 			// The forward was not queued (max-total-thread-queue reached, or the
 			// proxy thread is exiting): the replica will miss this write. Count

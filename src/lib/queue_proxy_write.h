@@ -62,6 +62,8 @@ protected:
 	shared_thread						_owner;
 	// counted in stats' in-flight forwards until this item is destroyed
 	bool										_in_flight;
+	// in-cluster replicas this forward is counted in flight for (stats' per-destination gauge)
+	vector<string>					_repl_dests;
 
 public:
 	static const int max_retry = 4;
@@ -103,6 +105,7 @@ public:
 	bool is_foreign() { return this->_foreign; };
 	void set_owner(shared_thread t) { this->_owner = t; };
 	void track_in_flight();
+	void track_repl_in_flight(const string& dest);
 	virtual void on_abandoned(const string& dest);
 	int set_generic_value(uint64_t generic_value) { this->_generic_value = generic_value; return 0; };
 	uint64_t get_generic_value() { return this->_generic_value; };

@@ -558,6 +558,43 @@ namespace test_handler_cluster_replication {
 		cut_assert_equal_int(0, (int)in_flight());
 	}
 
+	// In-cluster forwards to replicas (NODE-OPS-LOSSLESS-PLAN L2): counted per
+	// destination from the moment a forward is made for it until the item is
+	// released, whatever ended it; the total and the per-destination values
+	// come from one snapshot; a released destination leaves no 0 entry.
+	void test_repl_in_flight_counts_per_destination_until_released() {
+		uint64_t total = 1;
+		map<string, uint64_t> snap = stats_object->get_repl_in_flight(total);
+		cut_assert_equal_int(0, (int)total);
+		cut_assert_equal_int(0, (int)snap.size());
+		storage::entry e = get_entry(" rk 0 0 5 3", storage::parse_type_set, "VALUE");
+		vector<string> proxy;
+		shared_queue_proxy_write q(new queue_proxy_write(NULL, NULL, proxy, e, "set"));
+		q->set_post_proxy(true);
+		q->track_repl_in_flight("a:12121");
+		q->track_repl_in_flight("b:12121");
+		shared_queue_proxy_write q2(new queue_proxy_write(NULL, NULL, proxy, e, "set"));
+		q2->set_post_proxy(true);
+		q2->track_repl_in_flight("a:12121");
+		snap = stats_object->get_repl_in_flight(total);
+		cut_assert_equal_int(3, (int)total);
+		cut_assert_equal_int(2, (int)snap["a:12121"]);
+		cut_assert_equal_int(1, (int)snap["b:12121"]);
+		q.reset();
+		snap = stats_object->get_repl_in_flight(total);
+		cut_assert_equal_int(1, (int)total);
+		cut_assert_equal_int(1, (int)snap["a:12121"]);
+		cut_assert_equal_int(0, (int)snap.count("b:12121"));
+		q2.reset();
+		snap = stats_object->get_repl_in_flight(total);
+		cut_assert_equal_int(0, (int)total);
+		cut_assert_equal_int(0, (int)snap.size());
+		// an uncounted destination is never driven below 0
+		stats_object->repl_in_flight_sub("c:12121");
+		snap = stats_object->get_repl_in_flight(total);
+		cut_assert_equal_int(0, (int)total);
+	}
+
 	// Shutdown with one forward running and one queued: each ends with
 	// exactly ONE outcome (stopping, abandoned), and nothing stays in flight
 	// once released — the gate's "enqueued == outcomes when nothing is in

@@ -75,7 +75,8 @@ private def redundant (c : Ctx) (avoid : Option String) : IO Bool := do
       match ← c.stats mp.ip, ← c.stats rp.ip with
       | some mo, some ro =>
         let sameHistory := (statOf mo "rocksdb_source_epoch").isSome && statOf mo "rocksdb_source_epoch" == statOf ro "rocksdb_source_epoch"
-        let eligible := (statOf ro "repl_read_source_eligible").getD "1" == "1"
+        -- a missing or unreadable safety stat is NOT eligible: only an explicit 1 is
+        let eligible := statOf ro "repl_read_source_eligible" == some "1"
         return sameHistory && eligible
       | _, _ => return false
     | none => return false
@@ -316,6 +317,53 @@ def switchTest (c : Ctx) (op : SwitchOp) : IO TestResult := do
     | some why => return .fail why
     | none => return .pass
 
+/-- S5 (review of 8d64aaf): the drain gate must not call a drain lossless when
+    the old master's forwards to the replica fail. The master is cut from the
+    replica (both directions, iptables on the kind nodes) and deleted under a
+    write load; its own log (followed while it runs) must carry a NOT LOSSLESS
+    / NOT CONFIRMED report from preStop or flared and no lossless claim. This
+    is a gate test, not a data verdict (the cut makes the old master's late
+    writes undeliverable on purpose). -/
+def gateTest (c : Ctx) : IO TestResult := do
+  match ← c.placement with
+  | .error e => return .fail e
+  | .ok p =>
+    if !(← waitForCondition "the pair is redundant with the replica on the master's history" 300 (redundant c none)) then
+      return .fail (notSetUp "the cluster did not start this test with a healthy pair")
+    c.conditions ["S5: the master is cut from the replica, then deleted under a write load; its log must report the drain as NOT lossless"]
+    match ← c.ensureLoadWriter with
+    | .error e => return .fail (notSetUp e)
+    | .ok () => pure ()
+    let ns := c.cfg.«namespace»
+    let logFile := s!"/tmp/s5-{ns}-{p.master.name}-{← epochNow}.log"
+    discard <| IO.Process.output { cmd := "sh", args := #["-c", s!"(kubectl logs -f {p.master.name} -n {ns} > {logFile} 2>&1 &) >/dev/null 2>&1"] }
+    if !(← c.startLoad "svc" (svcHost c) 4 200) then return .fail (notSetUp "the load did not start")
+    let (_, _) ← observe c 10 (pure false)
+    let rules := podCutRules (← kindNodes) p.master.ip p.replica.ip
+    let installed ← match ← installCuts rules with
+      | .ok r => pure r
+      | .error (why, part) => removeCuts part; return .fail (notSetUp s!"could not cut master <-> replica: {why}")
+    c.event s!"cut {p.master.ip} <-> {p.replica.ip} ({installed.length} rules); deleting the master {p.master.name}"
+    discard <| kubectlLong 180 ["delete", "pod", p.master.name, "-n", ns, "--wait=false"]
+    let gone ← waitForCondition s!"the old master pod {p.master.uid} is gone" (c.cfg.drainSeconds + 90) do
+      let ps := (← c.pods).getD []
+      return !(ps.any fun q => q.uid == p.master.uid)
+    removeCuts installed
+    c.event s!"old master gone={gone}; cut removed"
+    discard <| c.stopLoad "svc" 4
+    let log ← (try IO.FS.readFile logFile catch _ => pure "")
+    for l in (log.splitOn "\n").filter (fun l => containsSubstr l "preStop" || containsSubstr l "forward drain") do
+      c.art "gate.txt" l
+    let claimedLossless := containsSubstr log "every forward delivered" || containsSubstr log "shutdown forward drain lossless"
+    let reportedNot := containsSubstr log "NOT LOSSLESS" || containsSubstr log "NOT CONFIRMED"
+    IO.eprintln s!"# [{c.test}] old master gone={gone}; gate lines {(log.splitOn "\n").filter (fun l => containsSubstr l "preStop" || containsSubstr l "forward drain")}"
+    let (_, _) ← observe c 300 (redundant c none)
+    if !gone then return .fail (notSetUp "the old master pod did not go away")
+    if log.isEmpty then return .fail (unobservable "the old master's log could not be followed")
+    if claimedLossless then return .fail "GATE: the drain was reported lossless although the old master's forwards to the replica were cut"
+    if !reportedNot then return .fail (unobservable "the old master's log carries no drain verdict at all (NOT LOSSLESS / NOT CONFIRMED)")
+    return .pass
+
 private def switchTests (cfg : ClusterConfig) (suite : String) : List TestCase := [
   { name := "(S1) kubectl delete pod of the MASTER under a client-like load: the pod is replaced; 0 write errors, 0 acknowledged writes missing on the final master and replica"
     run := switchTest { cfg, suite, test := "s-delete" } .deleteMaster },
@@ -324,7 +372,9 @@ private def switchTests (cfg : ClusterConfig) (suite : String) : List TestCase :
   { name := "(S3) operator Deployment + StatefulSet rollout restart together (helm-upgrade-like, not a helm upgrade) under a client-like load: 0 write errors, 0 missing"
     run := switchTest { cfg, suite, test := "s-rollboth" } .rollBoth },
   { name := "(S4) kubectl drain of the MASTER's worker (no eviction guard) under a client-like load: the drain completes and no flared pod is left there; 0 write errors, 0 missing"
-    run := switchTest { cfg, suite, test := "s-drain" } .drainMaster }
+    run := switchTest { cfg, suite, test := "s-drain" } .drainMaster },
+  { name := "(S5) the old master is cut from the replica and deleted under a write load: preStop / flared report the drain as NOT lossless, never as lossless (gate test)"
+    run := gateTest { cfg, suite, test := "s-gate" } }
 ]
 
 private def switchSuiteOf (name suite : String) (tmpfs pvc : Bool) : TestSuite :=

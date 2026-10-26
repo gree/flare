@@ -1442,11 +1442,15 @@ Replication to the replica is asynchronous: the master acknowledges a write
 before the replica has applied it.
 
 Requirement (decision 2026-10-26):
-- **Abnormal case — the old master cannot be reached** (its pod/worker is gone
-  or stopped, or it is cut off): the replica is promoted and writes the old
+- **Abnormal case — the old master cannot be reached on the DATA plane**: no
+  client and no peer can reach it any more (its pod/worker is gone or stopped,
+  or its data-plane network is cut). The replica is promoted and writes the old
   master acknowledged that had not reached it are lost. This is specified, not
   a fault. The operator logs `PROMOTION NOT LOSS-FREE` when it seats a copy
   known to be behind; it does not count the lost writes.
+  A cut of the CONTROL plane only (C′: the Kubernetes API cannot reach the
+  worker, clients still reach the old master) is NOT this case: it is the
+  separately accepted known gap #cprime-dual-write, not a specified loss.
 - **Every switch the operator makes while the old master is reachable** (drain,
   eviction, pod replacement, rolling update, planned handover, scale-down,
   self-heal, a failover it decides with the old master reachable) must lose
@@ -1456,12 +1460,19 @@ Requirement (decision 2026-10-26):
 
 What the code guarantees today (audit of 896656f, NODE-OPS-LOSSLESS-PLAN
 2026-10-26; fix tracked as `flare-lossless-switch-paths`):
-- Lossless: `kubectl drain` / Eviction API of a flared pod with the eviction
-  guard ON (`evictionGuard.enabled: true`) AND WAL follow ON
-  (`spec.rocksdb.replFollowEnabled: true`). It fences the master, drains
-  in-flight writes, waits for the pinned successor to reach the barrier, then
-  switches; otherwise it holds and aborts at its deadline (E2E node-ops-drain:
-  0 acknowledged writes missing). Both settings are OFF by default.
+- Conditionally lossless, with one residual window: `kubectl drain` /
+  Eviction API of a flared pod with the eviction guard ON
+  (`evictionGuard.enabled: true`) AND WAL follow ON
+  (`spec.rocksdb.replFollowEnabled: true`); both are OFF by default. It fences
+  the master, drains in-flight writes, waits for the pinned successor to reach
+  the barrier, then switches; if the successor cannot catch up it holds and
+  aborts at its deadline. Residual window (open): the fence lasts 30 s and is
+  re-armed once per reconcile pass; if it lapses after the switch is committed
+  but before the old master has applied the map that demotes it, writes the old
+  master acknowledges in that gap can be lost (the operator only aborts and
+  reports it). E2E node-ops-drain (0 acknowledged writes missing) shows the
+  path works; it does not prove this window cannot occur. Closing it is part of
+  `flare-lossless-switch-paths`.
 - NOT guaranteed (no fence before the switch): pod deletion paths — rolling
   update / `helm upgrade`, `kubectl delete pod`, StatefulSet scale-down,
   a drain without the eviction guard — the empty-master self-heal, a failover

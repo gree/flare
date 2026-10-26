@@ -99,6 +99,8 @@ jobs:
             {"group":"authority","suites":"topology-authority,resync-failure-self-demote,snapshot-push-seed"},
             {"group":"cluster-init","suites":"partition-reduction,continuous-replication-lag-hold,cluster-init"},
             {"group":"repair","suites":"replica-repair,prepare-evidence,native-metrics,continuous-replication-upgrade,continuous-replication-lag-hold-unreadable"},
+            {"group":"node-ops-switch","suites":"node-ops-switch"},
+            {"group":"node-ops-switch-tmpfs","suites":"node-ops-switch-tmpfs"},
             {"group":"stats-cost","suites":"stats-cost"},
             {"group":"continuous-replication","suites":"copy-retention-measure,continuous-replication,continuous-replication-scale,continuous-replication-sustained,continuous-replication-outage,continuous-replication-outage-tmpfs,visibility-bench"}
           ]'
@@ -303,8 +305,22 @@ jobs:
           git rev-parse 'HEAD^{tree}' > ci-results/tested-tree.txt
           timeout --kill-after=10 120 flare_operator/.lake/build/bin/flare_unit 2>&1 | tee ci-results/flare-unit.log
 
+      # The node-operations suites (planned switches, drain) need separate
+      # workers: .github/kind/multinode.yaml (control-plane + 3 data workers).
+      # Every other leg keeps the single-node cluster.
       - name: Create kind cluster
-        run: kind create cluster --name flare-e2e --wait 120s
+        env:
+          SUITE_GROUP: ${{ matrix.group }}
+          SUITES: ${{ matrix.suites }}
+        run: |
+          case "$SUITE_GROUP" in node-ops*) multi=1 ;; *) multi=0 ;; esac
+          if [ "$SUITE_GROUP" = single-suite ] && echo ",$SUITES," | grep -q ',node-ops-'; then multi=1; fi
+          if [ "$multi" = 1 ]; then
+            kind create cluster --name flare-e2e --config .github/kind/multinode.yaml --wait 240s
+            kubectl get nodes -L flare-e2e/data -o wide
+          else
+            kind create cluster --name flare-e2e --wait 120s
+          fi
 
       # The two flared images are C++ builds (~3 min each) whose builder
       # stage copies only the C++ build inputs, so their layers are cached

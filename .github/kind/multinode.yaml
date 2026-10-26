@@ -1,0 +1,17 @@
+# Multi-node kind for the node-operations suites (docs/design-node-operations-2026-10-19.md):
+# a control-plane for the operator and the harness pods, and three data
+# workers — flared runs one pod per worker, so with 1 partition x 2 replicas
+# one worker stays free to relocate to (drain, replacement).
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+  - role: worker
+    labels:
+      flare-e2e/data: "true"
+  - role: worker
+    labels:
+      flare-e2e/data: "true"
+  - role: worker
+    labels:
+      flare-e2e/data: "true"

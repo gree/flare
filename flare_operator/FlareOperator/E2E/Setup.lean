@@ -128,6 +128,18 @@ structure ClusterConfig where
   limitDefaults : String × String := ("500m", "256Mi")
   flaredCpuRequest : String := "100m"
   debugImage : String := "busybox:1.36"
+  /-- Multi-node kind (.github/kind/multinode.yaml): the operator and the
+      debug pod run on the control-plane (so a worker drain / stop never
+      takes the harness or the operator with it unless a test says so);
+      flared pods run only on the workers labelled `flare-e2e/data=true`, one
+      per worker (required pod anti-affinity on the cluster label), so master
+      and replica are on different workers and a spare worker stays free to
+      relocate to. (Ported from the node-operations harness, source
+      f3861b0e77e343079d52b9fa026345d9d211a459.) -/
+  multiNode : Bool := false
+  /-- A PodDisruptionBudget over the flared pods, as the chart renders it
+      (`cluster.pdb.maxUnavailable`); `none` = no PDB (most suites). -/
+  pdbMaxUnavailable : Option Nat := none
   deriving Repr
 
 /-- Image tag used for the flared container in this cluster. -/
@@ -197,9 +209,22 @@ def nodeSelectorBlock (cfg : ClusterConfig) (indent : Nat) : String :=
     let pad := String.mk (List.replicate indent ' ')
     s!"\n{pad}nodeSelector:\n{pad}  kubernetes.io/hostname: \"{h}\""
 
+/-- Multi-node placement: infrastructure pods (operator, debug) on the
+    control-plane (tolerating its taint); flared pods on the data workers, one
+    per worker. `flaredLabel` = the flared pods' cluster label, `none` for
+    infrastructure pods. -/
+def multiNodeBlock (indent : Nat) (flaredLabel : Option String) : String :=
+  let pad := String.mk (List.replicate indent ' ')
+  match flaredLabel with
+  | none =>
+    s!"\n{pad}nodeSelector:\n{pad}  node-role.kubernetes.io/control-plane: \"\"\n{pad}tolerations:\n{pad}  - key: node-role.kubernetes.io/control-plane\n{pad}    operator: Exists\n{pad}    effect: NoSchedule"
+  | some sel =>
+    s!"\n{pad}nodeSelector:\n{pad}  flare-e2e/data: \"true\"\n{pad}affinity:\n{pad}  podAntiAffinity:\n{pad}    requiredDuringSchedulingIgnoredDuringExecution:\n{pad}      - labelSelector:\n{pad}          matchLabels:\n{pad}            cluster: {sel}\n{pad}        topologyKey: kubernetes.io/hostname"
+
 /-- Required node affinity (pool In, hostname NotIn avoidNodes) and, for the
     flared pods, required co-location with each other. Empty when unset. -/
 def placementBlock (cfg : ClusterConfig) (indent : Nat) (colocateLabel : Option String) : String :=
+  if cfg.multiNode then multiNodeBlock indent colocateLabel else
   if cfg.nodeHost.isSome || (cfg.avoidNodes.isEmpty && cfg.nodePool.isNone) then "" else
   let pad := String.mk (List.replicate indent ' ')
   let pool := match cfg.nodePool.map (·.splitOn "=") with
@@ -500,6 +525,23 @@ spec:
           configMap:
             name: {cluster}-config{tmpfsVolume}{pvcTemplates}"
 
+/-- The flared PodDisruptionBudget, as the chart renders it
+    (helm flare-cluster.yaml: maxUnavailable over the `app: flare` pods of
+    the cluster). -/
+def pdbYaml (cfg : ClusterConfig) (maxUnavailable : Nat) : String :=
+  s!"apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {cfg.name}-nodes
+  namespace: {cfg.«namespace»}
+spec:
+  maxUnavailable: {maxUnavailable}
+  selector:
+    matchLabels:
+      app: flare
+      cluster: {cfg.name}
+"
+
 /-- The extra.conf pods boot with: the suite's lines plus the rebuild reserve. -/
 def bootFlaredConf (cfg : ClusterConfig) : String :=
   match cfg.rebuildReserveBytes with
@@ -699,7 +741,9 @@ def deployCluster (cfg : ClusterConfig) : IO Unit := do
     throw (IO.userError s!"ConfigMap {cmName} missing after create")
 
   -- Create debug pod (direct kubectl so errors are visible)
-  let overrides := match cfg.nodeHost with
+  let overrides := if cfg.multiNode then
+      [s!"--overrides=\{\"spec\":\{\"nodeSelector\":\{\"node-role.kubernetes.io/control-plane\":\"\"},\"tolerations\":[\{\"key\":\"node-role.kubernetes.io/control-plane\",\"operator\":\"Exists\",\"effect\":\"NoSchedule\"}]}}"]
+    else match cfg.nodeHost with
     | some h => [s!"--overrides=\{\"spec\":\{\"nodeSelector\":\{\"kubernetes.io/hostname\":\"{h}\"}}}"]
     | none =>
       if cfg.avoidNodes.isEmpty then [] else
@@ -759,6 +803,8 @@ def deployCluster (cfg : ClusterConfig) : IO Unit := do
   else
     IO.eprintln s!"# Deploying StatefulSet..."
     applyYaml (statefulSetYaml cfg)
+  if let some mu := cfg.pdbMaxUnavailable then
+    applyYaml (pdbYaml cfg mu)
 
 /-- Create the FlareCluster (optionally approving its first build) and the
     StatefulSet of a cluster deployed with `deferClusterCr`. -/

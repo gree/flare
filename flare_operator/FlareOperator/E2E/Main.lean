@@ -47,6 +47,7 @@ import FlareOperator.E2E.Tests.VisibilityBench
 import FlareOperator.E2E.Tests.SnapshotPushSeed
 import FlareOperator.E2E.Tests.ReadBalance
 import FlareOperator.E2E.Tests.RestoreIsolated
+import FlareOperator.E2E.Tests.NodeOpsSwitch
 
 open FlareOperator.E2E
 
@@ -113,6 +114,8 @@ def main (args : List String) : IO UInt32 :=
     Tests.ContinuousReplicationLimits.promotionDisconnectedEmptySuite,
     Tests.ContinuousReplicationLimits.promotionProxyOnlySuite,
     Tests.StatsCost.suite,
+    Tests.NodeOpsSwitch.switchSuite,
+    Tests.NodeOpsSwitch.switchTmpfsSuite,
     Tests.ContinuousReplicationLimits.historyHeldSuite,
     Tests.ContinuousReplicationLimits.historyIntentSuite,
     Tests.ContinuousReplicationLimits.forwardWindowSuite,

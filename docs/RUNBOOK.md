@@ -1436,26 +1436,44 @@ also require the local deadline.
   of the leader, timestamps). Test seams (never set in production):
   `FLARE_TEST_LEASE_API_STALL_FILE`, `FLARE_TEST_RECONCILE_PASS_DELAY_FILE`.
 
-## A failover can lose writes acknowledged just before it {#failover-ack-loss}
+## Which master switches may lose acknowledged writes {#failover-ack-loss}
 
 Replication to the replica is asynchronous: the master acknowledges a write
-before the replica has applied it. When the master is lost and its replica is
-promoted, writes the old master acknowledged in its last moments that had not
-reached the replica are NOT on the new master: they are lost. This is the
-specified behaviour of this release (decision 2026-10-26), not a fault.
+before the replica has applied it.
 
-- When: only on a failover after an unplanned master loss (pod/worker stop, or
-  the control-plane cut below). A planned drain hands over after the successor
-  has caught up and does not lose acknowledged writes this way.
-- How much: the writes acknowledged within the replication lag at the moment
-  of loss (measured only in E2E, not in production). The operator logs
-  `PROMOTION NOT LOSS-FREE` when it seats a copy known to be behind; it does
-  not count the lost writes.
-- Clients that need durability across a failover must not treat flare as the
-  only copy of a write (re-derive or re-send after a failover).
-- The write authority (C′, `write-authority-enabled`) is OFF in this release
-  (decision 2026-10-26: write availability during a normal failover is
-  preferred over its ttl + margin write stop).
+Requirement (decision 2026-10-26):
+- **Abnormal case — the old master cannot be reached** (its pod/worker is gone
+  or stopped, or it is cut off): the replica is promoted and writes the old
+  master acknowledged that had not reached it are lost. This is specified, not
+  a fault. The operator logs `PROMOTION NOT LOSS-FREE` when it seats a copy
+  known to be behind; it does not count the lost writes.
+- **Every switch the operator makes while the old master is reachable** (drain,
+  eviction, pod replacement, rolling update, planned handover, scale-down,
+  self-heal, a failover it decides with the old master reachable) must lose
+  NO acknowledged write: stop the old master's writes, wait until the successor
+  has applied up to the old master's last position, then promote; if it cannot
+  catch up, do not promote.
+
+What the code guarantees today (audit of 896656f, NODE-OPS-LOSSLESS-PLAN
+2026-10-26; fix tracked as `flare-lossless-switch-paths`):
+- Lossless: `kubectl drain` / Eviction API of a flared pod with the eviction
+  guard ON (`evictionGuard.enabled: true`) AND WAL follow ON
+  (`spec.rocksdb.replFollowEnabled: true`). It fences the master, drains
+  in-flight writes, waits for the pinned successor to reach the barrier, then
+  switches; otherwise it holds and aborts at its deadline (E2E node-ops-drain:
+  0 acknowledged writes missing). Both settings are OFF by default.
+- NOT guaranteed (no fence before the switch): pod deletion paths — rolling
+  update / `helm upgrade`, `kubectl delete pod`, StatefulSet scale-down,
+  a drain without the eviction guard — the empty-master self-heal, a failover
+  of a master that is NotReady but still reachable, the breaker's recovery
+  refill, and a migration forward switch without an external write stop.
+- Until that is fixed: change a master only through the guarded eviction above,
+  and stop client writes during `helm upgrade`, rolling restarts, scale-down
+  and migration switches.
+
+The write authority (C′, `write-authority-enabled`) is OFF in this release
+(decision 2026-10-26: write availability during a normal failover is
+preferred over its ttl + margin write stop).
 
 ## A control-plane-only cut can leave two masters accepting writes {#cprime-dual-write}
 

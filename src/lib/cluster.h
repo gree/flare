@@ -191,6 +191,15 @@ protected:
 	node_partition_map		_node_partition_prepare_map;
 	pthread_rwlock_t			_mutex_node_map;
 	pthread_rwlock_t			_mutex_node_partition_map;
+	// WRITE SECTION (NODE-OPS-LOSSLESS-PLAN L1): a write that this node applies
+	// (as master or replica) holds it shared from the role decision in
+	// pre_proxy_write until its forwards to the replicas are queued in
+	// post_proxy_write; reconstruct_node takes it exclusively around the map
+	// swap. A demotion map therefore never lands between "applied as master"
+	// and "forwarded", which returned STORED with nothing forwarded. Writer-
+	// preferring, so a map swap is not starved by a steady write load. Order:
+	// write section, then the node / partition map locks.
+	pthread_rwlock_t			_mutex_write_section;
 
 	string								_node_key;
 	// decision 2026-10-08: set when the map made this node a master while its
@@ -260,6 +269,8 @@ public:
 	int set_node_role(string node_server_name, int node_server_port, role node_role, int node_balance, int node_partition);
 	int set_node_state(string node_server_name, int node_server_port, state node_state);
 	int reconstruct_node(vector<node> v, uint64_t node_map_version = 0);
+	void write_section_enter();
+	void write_section_leave();
 	int run_boot_shift();
 	void set_activation_pending(bool v) { this->_activation_pending = v; };
 	int _run_boot_shift_locked();
@@ -276,6 +287,10 @@ public:
 	proxy_request pre_proxy_read(op_proxy_read* op, storage::entry& e, void* parameter, shared_queue_proxy_read& q);
 	proxy_request pre_proxy_write(op_proxy_write* op, shared_queue_proxy_write& q, uint64_t generic_value = 0);
 	proxy_request post_proxy_write(op_proxy_write* op, bool sync = false);
+private:
+	int _reconstruct_node(vector<node> v, uint64_t node_map_version);
+	proxy_request _post_proxy_write(op_proxy_write* op, bool sync);
+public:
 	// TEST SEAM (FLARE_TEST_READ_TRACE_PREFIX): is `key` traced, and log the
 	// ANSWER a traced read got (hit / miss / unavailable + why), on the same
 	// connection identity as the decision line.

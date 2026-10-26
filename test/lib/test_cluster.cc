@@ -247,6 +247,54 @@ namespace test_cluster
 		cppcut_assert_equal(-1, cluster.reconstruct_node(v, ver-1)); // deny lower version
 	}
 
+	struct swap_arg {
+		cluster_test* c;
+		uint64_t ver;
+		volatile int done;
+	};
+
+	static void* swap_map(void* a) {
+		swap_arg* x = static_cast<swap_arg*>(a);
+		vector<cluster::node> v;
+		x->c->reconstruct_node(v, x->ver);
+		x->done = 1;
+		return NULL;
+	}
+
+	// NODE-OPS-LOSSLESS-PLAN L1: a write in its write section (role decided,
+	// applied, forwards not yet queued) holds a map swap back until it leaves;
+	// a nested entry on the same thread does not lock again (no self-deadlock)
+	void test_map_swap_waits_for_a_write_in_its_section()
+	{
+		const std::string _tmp_dir = tmp_dir + std::string("/write_section");
+		mkdir(_tmp_dir.c_str(), 0700);
+		cluster_test cluster(_tmp_dir);
+		swap_arg a;
+		a.c = &cluster;
+		a.ver = cluster.get_node_map_version() + 10;
+		a.done = 0;
+		cluster.write_section_enter();
+		cluster.write_section_enter();		// nested: depth 2, one lock
+		pthread_t t;
+		cut_assert_equal_int(0, pthread_create(&t, NULL, swap_map, &a));
+		usleep(300 * 1000);
+		cut_assert_equal_int(0, a.done, cut_message("the map was swapped while a write was in its section"));
+		cluster.write_section_leave();		// depth 1: still held
+		usleep(300 * 1000);
+		cut_assert_equal_int(0, a.done, cut_message("the map was swapped after the inner leave"));
+		cluster.write_section_leave();		// released
+		for (int i = 0; i < 50 && !a.done; i++) {
+			usleep(100 * 1000);
+		}
+		pthread_join(t, NULL);
+		cut_assert_equal_int(1, a.done);
+		cppcut_assert_equal(a.ver, cluster.get_node_map_version());
+		// an unbalanced leave is ignored
+		cluster.write_section_leave();
+		cluster.write_section_enter();
+		cluster.write_section_leave();
+	}
+
 	cluster::node mk(const char* name, int port, cluster::role r, cluster::state st, int part) {
 		cluster::node n;
 		n.node_server_name = name;

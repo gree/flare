@@ -107,6 +107,15 @@ cluster::cluster(thread_pool* req_tp, thread_pool* other_tp, string server_name,
 	pthread_mutex_init(&this->_mutex_node_map_version, NULL);
 	pthread_rwlock_init(&this->_mutex_node_map, NULL);
 	pthread_rwlock_init(&this->_mutex_node_partition_map, NULL);
+	{
+		pthread_rwlockattr_t a;
+		pthread_rwlockattr_init(&a);
+#ifdef PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP
+		pthread_rwlockattr_setkind_np(&a, PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP);
+#endif
+		pthread_rwlock_init(&this->_mutex_write_section, &a);
+		pthread_rwlockattr_destroy(&a);
+	}
 	pthread_mutex_init(&this->_mutex_read_source, NULL);
 	pthread_cond_init(&this->_cond_read_source, NULL);
 	this->_read_source_wake = false;
@@ -1114,6 +1123,32 @@ int cluster::request_up_node(string node_server_name, int node_server_port) {
  *	reconstruct all node map
  */
 int cluster::reconstruct_node(vector<node> v, uint64_t node_map_version) {
+	// waits for the writes in their write section (applied, forwards not yet
+	// queued) and keeps new ones out while the map is swapped
+	pthread_rwlock_wrlock(&this->_mutex_write_section);
+	int r = this->_reconstruct_node(v, node_map_version);
+	pthread_rwlock_unlock(&this->_mutex_write_section);
+	return r;
+}
+
+namespace {
+	// the write-section depth of THIS thread: a nested entry does not lock again
+	__thread int write_section_depth = 0;
+}
+
+void cluster::write_section_enter() {
+	if (write_section_depth++ == 0) {
+		pthread_rwlock_rdlock(&this->_mutex_write_section);
+	}
+}
+
+void cluster::write_section_leave() {
+	if (write_section_depth > 0 && --write_section_depth == 0) {
+		pthread_rwlock_unlock(&this->_mutex_write_section);
+	}
+}
+
+int cluster::_reconstruct_node(vector<node> v, uint64_t node_map_version) {
 	stack<node_shift_state> shift_state_stack;
 	stack<node_shift_role> shift_role_stack;
 
@@ -1753,9 +1788,13 @@ cluster::proxy_request cluster::pre_proxy_write(op_proxy_write* op, shared_queue
 
 	partition p, p_prepare;
 	bool is_prepare;
+	// the role decision and, for a local apply, everything up to queueing the
+	// forwards in post_proxy_write, is one write section (L1)
+	this->write_section_enter();
 	int n = this->_determine_partition(e, p, false, is_prepare);
 	if (n < 0) {
 		// perhaps no partition available
+		this->write_section_leave();
 		return proxy_request_error_partition;
 	}
 	this->_determine_partition(e, p_prepare, true, is_prepare);
@@ -1773,18 +1812,26 @@ cluster::proxy_request cluster::pre_proxy_write(op_proxy_write* op, shared_queue
 
 	if (p.master.node_key == this->_node_key && this->_promotion_refused) {
 		// decision 2026-10-08: a master over a forbidden copy accepts nothing
+		this->write_section_leave();
 		return proxy_request_error_partition;
 	}
 	if (p.master.node_key == this->_node_key || (local_proxy_request && is_prepare && p_prepare.master.node_key == this->_node_key)) {
 		// should be write at this node
+		op->set_in_write_section(true);
 		return proxy_request_continue;
 	}
 
 	if (local_proxy_request) {
 		if (p.index.count(this->_node_key) > 0 || (is_prepare && p_prepare.index.count(this->_node_key) > 0)) {
+			// a change applied because this node is a replica of the partition
+			op->set_in_write_section(true);
 			return proxy_request_continue;
 		}
 	}
+
+	// not applied here: the forward to the master is a network round trip and
+	// must not hold the section (a map swap would wait for it)
+	this->write_section_leave();
 
 	// proxy request to master
 	bool sync = (e.option & storage::option_noreply) ? false : true;
@@ -1807,6 +1854,13 @@ cluster::proxy_request cluster::pre_proxy_write(op_proxy_write* op, shared_queue
  *	[node] post proxy for writing ops
  */
 cluster::proxy_request cluster::post_proxy_write(op_proxy_write* op, bool sync) {
+	proxy_request r = this->_post_proxy_write(op, sync);
+	// the forwards are queued (or this node had none to make): the map may change now
+	op->leave_write_section();
+	return r;
+}
+
+cluster::proxy_request cluster::_post_proxy_write(op_proxy_write* op, bool sync) {
 	for (vector<shared_proxy_event_listener>::iterator it = this->_fixed_proxy_event_listeners.begin();
 			   it != this->_fixed_proxy_event_listeners.end(); it++) {
 		proxy_request r = (*it)->on_post_proxy_write(op, this->get_node(this->_node_key));

@@ -38,13 +38,25 @@ namespace flare {
 op_proxy_write::op_proxy_write(shared_connection c, string ident, binary_header::opcode opcode, cluster* cl, storage* st):
 		op(c, ident, opcode),
 		_cluster(cl),
-		_storage(st) {
+		_storage(st),
+		_in_write_section(false) {
 }
 
 /**
  *	dtor for op_proxy_write
  */
 op_proxy_write::~op_proxy_write() {
+	// an op that returned before post_proxy_write (a storage error, a refusal)
+	this->leave_write_section();
+}
+
+void op_proxy_write::leave_write_section() {
+	if (this->_in_write_section) {
+		this->_in_write_section = false;
+		if (this->_cluster != NULL) {
+			this->_cluster->write_section_leave();
+		}
+	}
 }
 // }}}
 

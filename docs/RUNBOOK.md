@@ -1436,7 +1436,54 @@ also require the local deadline.
   of the leader, timestamps). Test seams (never set in production):
   `FLARE_TEST_LEASE_API_STALL_FILE`, `FLARE_TEST_RECONCILE_PASS_DELAY_FILE`.
 
+## A failover can lose writes acknowledged just before it {#failover-ack-loss}
+
+Replication to the replica is asynchronous: the master acknowledges a write
+before the replica has applied it. When the master is lost and its replica is
+promoted, writes the old master acknowledged in its last moments that had not
+reached the replica are NOT on the new master: they are lost. This is the
+specified behaviour of this release (decision 2026-10-26), not a fault.
+
+- When: only on a failover after an unplanned master loss (pod/worker stop, or
+  the control-plane cut below). A planned drain hands over after the successor
+  has caught up and does not lose acknowledged writes this way.
+- How much: the writes acknowledged within the replication lag at the moment
+  of loss (measured only in E2E, not in production). The operator logs
+  `PROMOTION NOT LOSS-FREE` when it seats a copy known to be behind; it does
+  not count the lost writes.
+- Clients that need durability across a failover must not treat flare as the
+  only copy of a write (re-derive or re-send after a failover).
+- The write authority (C′, `write-authority-enabled`) is OFF in this release
+  (decision 2026-10-26: write availability during a normal failover is
+  preferred over its ttl + margin write stop).
+
+## A control-plane-only cut can leave two masters accepting writes {#cprime-dual-write}
+
+Known product gap of this release, accepted as an ABNORMAL case (decision
+2026-10-26; release table #1). If the worker that runs a master loses its link
+to the Kubernetes API while clients can still reach the master (existing
+connections, or routes that bypass the cut), the node turns NotReady, the
+operator fails the partition over and promotes the replica — but the old
+master does not know and keeps acknowledging writes. For that interval both
+pods acknowledge writes for the same partition (E2E node-ops-faults C′:
+about 18 000 acknowledgements on each side during a ~6 min cut). Writes the
+old master acknowledged after the promotion are not on the new master.
+
+- Recognise it: the ex-master's worker is NotReady while that pod still
+  answers clients; two pods report `role=master` for one partition in their
+  own `stats`.
+- Act: isolate the ex-master as soon as it is noticed (stop flared on that
+  worker or cut its client path). Its acknowledged writes from the overlap are
+  not recovered.
+- The fix (write authority) exists in code and is verified in E2E, but it is
+  OFF and not wired into the chart in this release.
+
 ## Known limits (do not be surprised by)
+
+- Cross-cluster seeding: use the per-key seed (`snapshotPush: false`,
+  #initial-migration). A destination seeded by SNAPSHOT PUSH does not get its
+  master back after that master restarts (X4: the copy carries the source's
+  history, the destination refuses to promote it). Not fixed in this release.
 
 - Selective network partition (pod alive, TCP to operator blocked) is
   mitigated (per-tick rebroadcast, lease fence) but not fully modeled —

@@ -432,6 +432,14 @@ run の範囲だけを示す（候補は未固定。R5）。
 
 | 日付 | 項目 | 判定 | SHA / run | 根拠 |
 |------|------|------|-----------|------|
+| 2026-10-26 | 判断（ユーザー）：write authority（C′） | **今回のリリースは OFF（既定のまま、chart への配線も追加しない）**。書き込み可用性を優先：通常の failover は API 疎通下で起き、その切替で ttl + margin（試験値で約 11 s）書けなくなることは受け入れない | 896656f | 判断資料 flare-ci-inputs/decisions/SAF10-DECISIONS-2026-10-26.md 項目 C（C3） |
+| 2026-10-26 | 判断（ユーザー）：#1 C′ 二重 write（authority OFF） | **異常系の既知の製品ギャップとして受容**。RUNBOOK#cprime-dual-write に明記 | 896656f / 40234597519 job 121293398943 | 旧・新 master が互いに相手が master の間に約 1.8 万件ずつ ACK |
+| 2026-10-26 | 判断（ユーザー）：#13 failover 直前の ACK 損失 | **仕様として明文化**（非同期 replication、authority OFF 前提）。RUNBOOK#failover-ack-loss | 896656f | 項目 B（B1 を authority OFF 前提に書き直し） |
+| 2026-10-26 | 判断（ユーザー）：cluster-init t13 | 試験の証拠不足（製品不具合ではない）。修正は次の SHA 変更時に同梱 | 896656f / 40234597519 job 121293398809 | 項目 A（A1）。復旧後 30/30・SAF-09 安全性検査は成立、復旧中 probe の完了 0 回 |
+| 2026-10-26 | 判断（ユーザー）：X4 / #9 | 延期。条件：本番は per-key-only（`snapshotPush: false`）。既定 false 化は次 SHA で任意 | 896656f / job 121293398837 | 項目 D（D1）。RUNBOOK Known limits |
+| 2026-10-26 | 判断（ユーザー）：#8 / #10 / #11 | 延期（#8 負の対照はハーネス、#10 forward TOCTOU は write authority の窓で OFF では対象外、#11 SIGUSR1 は直近 40 回の nix-linux で痕跡なし） | 896656f / job 121293399045 | 項目 E（E8a / E10a / E11a） |
+| 2026-10-26 | 判断（ユーザー）：Lease 再作成と旧 leader 期限の重なり | 閉じる（cb9e27b 以降で実装済み：18 s の連続不在観測後に作成） | 896656f / 40228739343 | 項目 F（F1） |
+| 2026-10-26 | full matrix 判定 | **896656f は既知・延期済みの失敗のみ**（22/26：#8・X4・#1・cluster-init t13）。リリース判定レビューへ。tag / publish / deploy / 本番承認は別承認 | 896656f / 40234597519、nix-linux 40228751098 | 上記の判断 |
 | 2026-10-06 | R3 test 4 | 合格（時系列） | e2fdc27 / 37438962871 | 新 map 受理後に旧コピーは STOPPED。新 master のコピーで check→activation。400 キーの値が一致しローカル応答。operator の切替時刻は未取得 |
 | 2026-10-06 | R10 | 製品不具合（修正済み、CI 未実行） | — | 上の判定シート |
 | 2026-10-06 | R3 test 6 | 順序は正しい（手評価）。試験の失敗は未判定 | 100153c / 37445879349 | v…608 受理 → 旧コピー STOPPED → n1 から dump → v…622 で check → n1 で activation。map シフト行は窓の外 |

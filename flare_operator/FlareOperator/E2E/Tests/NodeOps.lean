@@ -20,6 +20,7 @@ import FlareOperator.E2E.Framework
 import FlareOperator.E2E.Helpers
 import FlareOperator.E2E.Setup
 import FlareOperator.E2E.NodeOpsHarness
+import FlareOperator.E2E.LoadWriter
 import FlareOperator.Kubectl
 import Lean.Data.Json
 
@@ -1193,5 +1194,142 @@ def partitionSuite : TestSuite :=
       { name := "(C') the master's worker is also cut from the control-plane (proven: kubelet->API closed, node NotReady/Unknown, Lease stopped) while the client still reaches it: detection -> promotion decision -> old/new master write authority, judged from the nodes' own views; dual write = PRODUCT GAP, no failover = NOT VERIFIED (never green)"
         run := partitionTest { cfg, suite := "node-ops-partition", test := "c-node" } true }
     ] }
+
+/-! ## S: planned master switches under a client-like write load
+    (NODE-OPS-LOSSLESS-PLAN 5.6, issue flare-lossless-switch-paths)
+
+    Target of every planned switch: NO write error the client sees (server
+    error, timeout, connection error) and NO acknowledged write missing on the
+    final master or the replica; a delay is allowed and is measured (p50 / p99
+    / max reply time, the longest time a connection went without an ack).
+    Load: 4 kept-open connections through the partition Service (the client
+    path) and 2 to the other pod (the proxy path), 200 requests/s each. -/
+
+inductive SwitchOp where
+  /-- `kubectl delete pod` of the master (graceful) -/
+  | deleteMaster
+  /-- `kubectl rollout restart` of the StatefulSet (what a pod-template change does) -/
+  | rollingRestart
+  /-- the operator Deployment and the StatefulSet rolled together (what `helm upgrade` of both does) -/
+  | upgradeBoth
+  /-- `kubectl drain` of the master's worker (Eviction API, PDB honoured) -/
+  | drainMaster
+  deriving BEq, Repr
+
+def SwitchOp.label : SwitchOp → String
+  | .deleteMaster => "kubectl delete pod (master)"
+  | .rollingRestart => "kubectl rollout restart statefulset"
+  | .upgradeBoth => "operator Deployment + StatefulSet rolled together (helm upgrade of both)"
+  | .drainMaster => "kubectl drain of the master's worker"
+
+structure SwitchObs where
+  svc : LoadStats
+  peer : LoadStats
+  missingMaster : Option Nat
+  missingReplica : Option Nat
+  redundant : Bool
+  newMaster : Option String
+
+/-- The target: 0 errors on both loads, 0 acknowledged writes missing on the
+    final master and on the replica, redundancy back. -/
+def switchVerdict (o : SwitchObs) : Option String :=
+  match o.missingMaster, o.missingReplica with
+  | none, _ => some (unobservable "the final master's copy could not be read")
+  | _, none => some (unobservable "the replica's copy could not be read")
+  | some mm, some mr =>
+    let errs := o.svc.errors + o.peer.errors
+    if mm != 0 || mr != 0 then some s!"DATA: {mm} acknowledged write(s) missing on the final master, {mr} on the replica (see missing.txt); {errs} write error(s)"
+    else if errs != 0 then some s!"WRITE ERRORS: {o.svc.errors} on the client path {o.svc.errorKinds}, {o.peer.errors} on the proxy path {o.peer.errorKinds} (a planned switch must only delay)"
+    else if !o.redundant then some "redundancy (master + active replica) was not restored within the bound"
+    else none
+
+private def switchRun (c : Ctx) (op : SwitchOp) : IO (Except String SwitchObs) := do
+  match ← c.placement with
+  | .error e => return .error e
+  | .ok p =>
+    c.conditions [s!"scenario S: {op.label} under a client-like load (4 x 200/s via the partition Service, 2 x 200/s via the other pod; kept-open connections)"]
+    match ← c.ensureLoadWriter with
+    | .error e => return .error (notSetUp e)
+    | .ok () => pure ()
+    if !(← c.startLoad "svc" (svcHost c) 4 200) then return .error (notSetUp "the client-path load did not start")
+    if !(← c.startLoad "peer" (podHost c p.replica.name) 2 200) then return .error (notSetUp "the proxy-path load did not start")
+    let (s0, _) ← observe c 10 (pure false)
+    let ns := c.cfg.«namespace»
+    c.event s!"{op.label} starts (master {p.master.name} on {p.master.node})"
+    let mut drained : Option String := none
+    match op with
+    | .deleteMaster => discard <| kubectlWall 180 ["delete", "pod", p.master.name, "-n", ns, "--wait=false"]
+    | .rollingRestart => discard <| kubectl ["rollout", "restart", s!"statefulset/{c.cfg.name}-nodes", "-n", ns]
+    | .upgradeBoth =>
+      discard <| kubectl ["rollout", "restart", s!"deployment/{c.cfg.operatorName}", "-n", ns]
+      discard <| kubectl ["rollout", "restart", s!"statefulset/{c.cfg.name}-nodes", "-n", ns]
+    | .drainMaster =>
+      let stem ← startDrain p.master.node 600
+      let (_, _) ← observe c 660 (return (← drainResult stem).isSome)
+      let (rc, out) := (← drainResult stem).getD ("timeout", "")
+      for l in out.splitOn "\n" do c.art "drain.txt" l
+      c.event s!"drain finished rc={rc}"
+      drained := some p.master.node
+    if op == .rollingRestart || op == .upgradeBoth then
+      let ok ← kubectlRolloutStatus s!"statefulset/{c.cfg.name}-nodes" ns 900
+      c.event s!"statefulset roll complete={ok}"
+    let (s1, red) ← observe c 600 (redundant c none)
+    c.event s!"redundancy restored={red}"
+    let (s2, _) ← observe c 10 (pure false)
+    if let some n := drained then uncordon n
+    let svc? ← c.stopLoad "svc" 4
+    let peer? ← c.stopLoad "peer" 2
+    let (some svcRs, some peerRs) := (svc?, peer?)
+      | return .error (unobservable "a load log could not be read or failed its integrity check (never counted as 'no error')")
+    let _ := s0 ++ s1 ++ s2
+    let newM := (← c.roles).bind (·.1)
+    let ps := (← c.pods).getD []
+    let copies ← finalCopies c
+    let copyOf := fun (pod : Option String) => pod.bind fun n => (copies.lookup n).join
+    let replicaPod := ps.find? (fun r => some r.name != newM) |>.map (·.name)
+    let acks := (svcRs ++ peerRs).filter (·.ack) |>.map (·.toWrite)
+    let mm ← match copyOf newM with | some d => pure (some (← recordMissing c "master" acks d)) | none => pure none
+    let mr ← match copyOf replicaPod with | some d => pure (some (← recordMissing c "replica" acks d)) | none => pure none
+    let o : SwitchObs := { svc := loadStats svcRs, peer := loadStats peerRs, missingMaster := mm, missingReplica := mr,
+                           redundant := red, newMaster := newM }
+    c.art "report.txt" (o.svc.summary "svc")
+    c.art "report.txt" (o.peer.summary "peer")
+    return .ok o
+
+def switchTest (c : Ctx) (op : SwitchOp) : IO TestResult := do
+  match ← switchRun c op with
+  | .error e => return .fail e
+  | .ok o =>
+    IO.eprintln s!"# [{c.test}] {op.label}: master -> {o.newMaster}; redundancy={o.redundant}; missing on master {o.missingMaster}, on replica {o.missingReplica}; {o.svc.summary "svc"}; {o.peer.summary "peer"}"
+    match switchVerdict o with
+    | some why => return .fail why
+    | none => return .pass
+
+private def switchTests (cfg : ClusterConfig) (suite : String) : List TestCase := [
+  { name := "(S1) kubectl delete pod of the MASTER under a client-like load: 0 write errors, 0 acknowledged writes missing on the final master and replica (latency p50/p99/max recorded)"
+    run := switchTest { cfg, suite, test := "s-delete" } .deleteMaster },
+  { name := "(S2) rolling restart of the StatefulSet (pod-template change) under a client-like load: 0 write errors, 0 missing"
+    run := switchTest { cfg, suite, test := "s-rolling" } .rollingRestart },
+  { name := "(S3) the operator and the StatefulSet rolled together (helm upgrade of both) under a client-like load: 0 write errors, 0 missing"
+    run := switchTest { cfg, suite, test := "s-upgrade" } .upgradeBoth },
+  { name := "(S4) kubectl drain of the MASTER's worker under a client-like load: 0 write errors, 0 missing"
+    run := switchTest { cfg, suite, test := "s-drain" } .drainMaster }
+]
+
+private def switchSuiteOf (name suite : String) (tmpfs pvc : Bool) : TestSuite :=
+  -- the product defaults: no eviction guard, no WAL follow (the planned
+  -- switch must be lossless with the op-proxy forward alone)
+  let cfg := { cfgOf name tmpfs pvc with extraFlaredConf := "" }
+  { name := suite
+    setup := do deployCluster cfg; IO.sleep 50000
+    teardown := do
+      for w in ← dataWorkers do uncordon w
+      cleanupCluster cfg
+    onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
+    afterEach := fun i => saveFullLogs cfg.«namespace» s!"after-test-{i}"
+    tests := switchTests cfg suite }
+
+def switchSuite : TestSuite := switchSuiteOf "node-sw" "node-ops-switch" false true
+def switchTmpfsSuite : TestSuite := switchSuiteOf "node-swt" "node-ops-switch-tmpfs" true false
 
 end FlareOperator.E2E.Tests.NodeOps

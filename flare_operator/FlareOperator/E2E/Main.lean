@@ -120,6 +120,8 @@ def main (args : List String) : IO UInt32 :=
     Tests.NodeOps.holdSuite,
     Tests.NodeOps.stopSuite,
     Tests.NodeOps.partitionSuite,
+    Tests.NodeOps.switchSuite,
+    Tests.NodeOps.switchTmpfsSuite,
     Tests.WriteAuthority.drainWaSuite,
     Tests.WriteAuthority.holdWaSuite,
     Tests.WriteAuthority.stopWaSuite,

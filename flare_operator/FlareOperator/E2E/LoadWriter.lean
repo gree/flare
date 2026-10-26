@@ -40,7 +40,8 @@ def loadWriterPod (c : Ctx) : String := s!"lw-{c.cfg.name}"
 
 /-- The writer program. argv: name host port workers prefix rate-per-worker.
     Output: /tmp/lw-<name>-<w>.log, one line per request:
-    `w n key value reply t0us t1us peer`, then `END n`. -/
+    `START wallus monous` first, then `w n key value reply t0us t1us peer m0us m1us` (t = wall clock for
+    alignment with the timeline, m = monotonic for latency and stalls), then `END n wallus monous`. -/
 def loadWriterScript : String := "import os, socket, sys, threading, time
 name, host, port, workers, prefix, rate = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), sys.argv[5], float(sys.argv[6])
 stop = '/tmp/lw-stop-' + name
@@ -48,8 +49,12 @@ stop = '/tmp/lw-stop-' + name
 def us():
     return time.time_ns() // 1000
 
+def mus():
+    return time.monotonic_ns() // 1000
+
 def worker(w):
     out = open('/tmp/lw-%s-%d.log' % (name, w), 'w', buffering=1 << 16)
+    out.write('START %d %d\\n' % (us(), mus()))
     s = None
     peer = '-'
     buf = b''
@@ -61,6 +66,7 @@ def worker(w):
         k = '%s_%d_%d' % (prefix, w, n)
         v = 'v%s-%d-%d' % (prefix, w, n)
         t0 = us()
+        m0 = mus()
         broken = False
         try:
             if s is None:
@@ -87,7 +93,8 @@ def worker(w):
             reply = 'CONNERR:' + type(e).__name__
             broken = True
         t1 = us()
-        out.write('%d %d %s %s %s %d %d %s\\n' % (w, n, k, v, reply, t0, t1, peer))
+        m1 = mus()
+        out.write('%d %d %s %s %s %d %d %s %d %d\\n' % (w, n, k, v, reply, t0, t1, peer, m0, m1))
         if broken:
             if s is not None:
                 try:
@@ -104,7 +111,7 @@ def worker(w):
                 time.sleep(d)
             else:
                 nxt = time.monotonic()
-    out.write('END %d\\n' % n)
+    out.write('END %d %d %d\\n' % (n, us(), mus()))
     out.close()
 
 ts = [threading.Thread(target=worker, args=(w,)) for w in range(workers)]
@@ -147,29 +154,46 @@ structure LoadRec where
   key : String
   value : String
   reply : String
+  /-- send and reply time, wall clock (µs since the epoch): alignment with the timeline -/
   t0 : Nat
   t1 : Nat
   peer : String
+  /-- send and reply time, monotonic clock (µs): latency and stalls -/
+  m0 : Nat
+  m1 : Nat
   deriving Repr
 
 def parseLoadLine (l : String) : Option LoadRec :=
   match (l.trim.splitOn " ").filter (!·.isEmpty) with
-  | [w, n, k, v, r, t0, t1, p] =>
-    match w.toNat?, n.toNat?, t0.toNat?, t1.toNat? with
-    | some w, some n, some t0, some t1 => some { w, n, key := k, value := v, reply := r, t0, t1, peer := p }
-    | _, _, _, _ => none
+  | [w, n, k, v, r, t0, t1, p, m0, m1] =>
+    match w.toNat?, n.toNat?, t0.toNat?, t1.toNat?, m0.toNat?, m1.toNat? with
+    | some w, some n, some t0, some t1, some m0, some m1 => some { w, n, key := k, value := v, reply := r, t0, t1, peer := p, m0, m1 }
+    | _, _, _, _, _, _ => none
   | _ => none
 
-/-- One worker's log: every line parses, the sequence is 1..N, the last line
-    is `END N`. -/
-def parseLoadLog (out : String) : Except String (List LoadRec) := do
+/-- One worker's measurement window (monotonic µs): from its START line to its END line. -/
+structure LoadWindow where
+  w : Nat
+  startMono : Nat
+  stopMono : Nat
+  deriving Repr
+
+/-- One worker's log: `START wall mono`, records with the sequence 1..N, `END N wall mono`. -/
+def parseLoadLog (w : Nat) (out : String) : Except String (List LoadRec × LoadWindow) := do
   let ls := (out.splitOn "\n").filter (!·.trim.isEmpty)
+  let some first := ls.head? | throw "the log is empty"
   let some last := ls.getLast? | throw "the log is empty"
-  if !last.startsWith "END " then throw "no END marker (the worker was not confirmed stopped)"
-  let some nEnd := (last.drop 4).trim.toNat? | throw s!"a bad END marker: {last.take 40}"
+  let startMono ← match (first.trim.splitOn " ").filter (!·.isEmpty) with
+    | ["START", _, m] => match m.toNat? with | some x => pure x | none => throw s!"a bad START marker: {first.take 40}"
+    | _ => throw "no START marker"
+  let (nEnd, stopMono) ← match (last.trim.splitOn " ").filter (!·.isEmpty) with
+    | ["END", n, _, m] => match n.toNat?, m.toNat? with
+      | some n, some m => pure (n, m)
+      | _, _ => throw s!"a bad END marker: {last.take 40}"
+    | _ => throw "no END marker (the worker was not confirmed stopped)"
   let mut rs : List LoadRec := []
   let mut i := 0
-  for l in ls.dropLast do
+  for l in (ls.drop 1).dropLast do
     i := i + 1
     match parseLoadLine l with
     | some r =>
@@ -177,11 +201,16 @@ def parseLoadLog (out : String) : Except String (List LoadRec) := do
       rs := r :: rs
     | none => throw s!"line {i} does not parse: {l.take 80}"
   if nEnd != i then throw s!"the END marker says {nEnd} records, the log has {i}"
-  return rs.reverse
+  return (rs.reverse, { w, startMono, stopMono })
+
+/-- A stopped load: every request and each connection's window. -/
+structure LoadResult where
+  recs : List LoadRec
+  windows : List LoadWindow
 
 /-- Stop a load and read every worker's log (bounded wait for the markers).
     `none` = a log is missing or rejected (the measurement is UNOBSERVABLE). -/
-def Ctx.stopLoad (c : Ctx) (name : String) (workers : Nat) : IO (Option (List LoadRec)) := do
+def Ctx.stopLoad (c : Ctx) (name : String) (workers : Nat) : IO (Option LoadResult) := do
   let pod := loadWriterPod c
   let ns := c.cfg.«namespace»
   discard <| kubectl ["exec", pod, "-n", ns, "--", "sh", "-c", s!"touch /tmp/lw-stop-{name}"]
@@ -195,17 +224,19 @@ def Ctx.stopLoad (c : Ctx) (name : String) (workers : Nat) : IO (Option (List Lo
       | .error _ => IO.sleep 1000
   if !ended then c.event s!"load {name}: not every worker wrote its END marker within 30 s"
   let mut all : List LoadRec := []
+  let mut wins : List LoadWindow := []
   for w in List.range workers do
     match ← kubectlLong 180 ["exec", pod, "-n", ns, "--", "cat", s!"/tmp/lw-{name}-{w}.log"] with
     | .error e => c.event s!"load {name} worker {w}: the log cannot be read ({e.take 120})"; return none
     | .ok out =>
-      match parseLoadLog out with
+      match parseLoadLog w out with
       | .error why => c.event s!"load {name} worker {w}: log REJECTED as unobserved — {why}"; return none
-      | .ok rs =>
+      | .ok (rs, win) =>
         -- the raw log as the artifact, in one write (10^5 lines: no per-line append)
         if let some d ← c.dir then IO.FS.writeFile s!"{d}/load-{name}-{w}.txt" out
         all := all ++ rs
-  return some all
+        wins := wins ++ [win]
+  return some { recs := all, windows := wins }
 
 def LoadRec.ack (r : LoadRec) : Bool := r.reply == "STORED"
 
@@ -220,9 +251,17 @@ def percentileUs (xs : List Nat) (p : Nat) : Nat :=
   let i := min (a.size - 1) ((p * a.size + 99) / 100 - (if p == 0 then 0 else 1))
   a[i]!
 
-/-- What one load saw: requests, acknowledgements, every error by kind,
-    reply latency (all requests) and, per connection, the longest time
-    without an acknowledgement (the stall the client sees). -/
+/-- What one load saw. Definitions:
+    - latency: reply time − send time of each request, monotonic clock;
+    - stall: per connection, the longest time with no acknowledgement, from
+      the window START to the first ack, between consecutive acks, and from
+      the last ack to the window END (a connection that never got an ack
+      stalls for its whole window);
+    - sendRate: requests sent per second over the windows (requests ÷
+      the longest window); throughput: acknowledgements per second over the
+      same span. The writer is closed-loop (one request per connection at a
+      time), so both drop while replies are slow or connections fail;
+    - minPerSecond: the fewest requests sent in any whole second of the window. -/
 structure LoadStats where
   total : Nat
   acked : Nat
@@ -234,15 +273,13 @@ structure LoadStats where
   p99Us : Nat
   maxUs : Nat
   maxStallUs : Nat
-  /-- requests per second actually sent over the whole load (the writer is
-      closed-loop: one request per connection at a time, so the rate drops
-      while replies are slow) -/
-  achievedRps : Nat
-  /-- the lowest number of requests sent in any whole second of the load -/
+  sendRate : Nat
+  throughput : Nat
   minPerSecond : Nat
   deriving Repr
 
-def loadStats (rs : List LoadRec) : LoadStats := Id.run do
+def loadStats (res : LoadResult) : LoadStats := Id.run do
+  let rs := res.recs
   let errs := rs.filter (!·.ack)
   let mut kinds : List (String × Nat) := []
   for r in errs do
@@ -250,35 +287,34 @@ def loadStats (rs : List LoadRec) : LoadStats := Id.run do
     kinds := match kinds.lookup k with
       | some n => (k, n + 1) :: kinds.filter (·.1 != k)
       | none => (k, 1) :: kinds
-  let lat := rs.map fun r => r.t1 - r.t0
-  -- per worker: the longest gap between two consecutive acknowledgements
-  -- (from the earlier one's reply to the later one's reply)
+  let lat := rs.map fun r => r.m1 - r.m0
   let mut stall := 0
-  for w in (rs.map (·.w)).eraseDups do
-    let acks := (rs.filter fun r => r.w == w && r.ack).map (·.t1)
-    let mut prev : Option Nat := none
+  for win in res.windows do
+    let acks := (rs.filter fun r => r.w == win.w && r.ack).map (·.m1)
+    let mut prev := win.startMono
     for t in acks do
-      if let some p := prev then stall := max stall (t - p)
-      prev := some t
+      stall := max stall (t - prev)
+      prev := t
+    stall := max stall (win.stopMono - prev)
+  let spanUs := (res.windows.map fun win => win.stopMono - win.startMono).max?.getD 0
+  let rate := fun (n : Nat) => if spanUs == 0 then 0 else n * 1000000 / spanUs
+  -- requests sent per whole second of the window (monotonic)
+  let start := (res.windows.map (·.startMono)).min?.getD 0
+  let stop := (res.windows.map (·.stopMono)).max?.getD 0
+  let secs : Std.HashMap Nat Nat := rs.foldl (fun m r => m.insert ((r.m0 - start) / 1000000) ((m.getD ((r.m0 - start) / 1000000) 0) + 1)) {}
+  let whole := (stop - start) / 1000000
+  let perSec := (List.range whole).map fun i => secs.getD i 0
   let errT := errs.map (·.t0)
-  let t0s := rs.map (·.t0)
-  let (first, last) := (t0s.min?.getD 0, (rs.map (·.t1)).max?.getD 0)
-  let spanUs := last - first
-  let achieved := if spanUs == 0 then 0 else rs.length * 1000000 / spanUs
-  -- requests sent per whole second, from the first to the last second of the load
-  let secs : Std.HashMap Nat Nat := t0s.foldl (fun m t => m.insert (t / 1000000) ((m.getD (t / 1000000) 0) + 1)) {}
-  let s0 := first / 1000000
-  let s1 := last / 1000000
-  let inner := if s1 > s0 + 1 then (List.range (s1 - s0 - 1)).map (fun i => secs.getD (s0 + 1 + i) 0) else []
-  return { achievedRps := achieved, minPerSecond := inner.min?.getD achieved, total := rs.length, acked := (rs.filter (·.ack)).length, errors := errs.length, errorKinds := kinds,
+  return { total := rs.length, acked := (rs.filter (·.ack)).length, errors := errs.length, errorKinds := kinds,
            firstErrorUs := errT.min?, lastErrorUs := errT.max?,
-           p50Us := percentileUs lat 50, p99Us := percentileUs lat 99, maxUs := lat.max?.getD 0, maxStallUs := stall }
+           p50Us := percentileUs lat 50, p99Us := percentileUs lat 99, maxUs := lat.max?.getD 0, maxStallUs := stall,
+           sendRate := rate rs.length, throughput := rate (rs.filter (·.ack)).length, minPerSecond := perSec.min?.getD 0 }
 
 def LoadStats.summary (name : String) (s : LoadStats) : String :=
   let ms := fun (us : Nat) => s!"{us / 1000}.{(us % 1000) / 100} ms"
   let win := match s.firstErrorUs, s.lastErrorUs with
     | some a, some b => s!" over {ms (b - a)} ({a / 1000}..{b / 1000} ms epoch)"
     | _, _ => ""
-  s!"load {name}: {s.total} requests ({s.achievedRps}/s achieved, lowest {s.minPerSecond} in one second), {s.acked} acknowledged, {s.errors} errors {s.errorKinds}{win}; latency p50 {ms s.p50Us}, p99 {ms s.p99Us}, max {ms s.maxUs}; longest stall without an ack {ms s.maxStallUs}"
+  s!"load {name}: {s.total} requests (sent {s.sendRate}/s, acknowledged {s.throughput}/s, fewest sent in one second {s.minPerSecond}), {s.acked} acknowledged, {s.errors} errors {s.errorKinds}{win}; latency p50 {ms s.p50Us}, p99 {ms s.p99Us}, max {ms s.maxUs}; longest time without an ack (window start to end) {ms s.maxStallUs}"
 
 end FlareOperator.E2E.NodeOps

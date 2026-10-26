@@ -192,6 +192,11 @@ private def switchRun (c : Ctx) (op : SwitchOp) : IO (Except String SwitchObs) :
     if !(← c.startLoad "svc" (svcHost c) 4 200) then return .error (notSetUp "the client-path load did not start")
     if !(← c.startLoad "peer" (podHost c p.replica.name) 2 200) then return .error (notSetUp "the proxy-path load did not start")
     let before := (← c.pods).getD []
+    let opUids := fun (_ : Unit) => do
+      match ← kubectl ["get", "pods", "-n", c.cfg.«namespace», "-l", s!"app={c.cfg.operatorName}", "-o", "jsonpath={.items[*].metadata.uid}"] with
+      | .ok o => pure (some ((o.trim.splitOn " ").filter (!·.isEmpty)))
+      | .error _ => pure none
+    let opBefore ← opUids ()
     let (ips0, _) ← observe c 10 (pure false)
     let ns := c.cfg.«namespace»
     c.event s!"{op.label} starts (master {p.master.name} on {p.master.node})"
@@ -228,6 +233,15 @@ private def switchRun (c : Ctx) (op : SwitchOp) : IO (Except String SwitchObs) :
       let ok ← kubectlRolloutStatus s!"statefulset/{c.cfg.name}-nodes" ns 900
       if !ok then opOk := false; opDetail := opDetail ++ "; statefulset rollout did not complete within 900 s"
       c.event s!"statefulset rollout complete={ok}"
+    if opOk && op == .rollBoth then
+      let ok ← kubectlRolloutStatus s!"deployment/{c.cfg.operatorName}" ns 600
+      let opAfter ← opUids ()
+      let replaced := match opBefore, opAfter with
+        | some b, some a => !b.isEmpty && !a.isEmpty && b.all (fun u => !a.contains u)
+        | _, _ => false
+      c.event s!"operator rollout complete={ok}, operator pods replaced={replaced} ({opBefore} -> {opAfter})"
+      if !ok then opOk := false; opDetail := opDetail ++ "; operator rollout did not complete within 600 s"
+      if !replaced then opOk := false; opDetail := opDetail ++ s!"; operator pods not replaced ({opBefore} -> {opAfter})"
     let (ips1, red) ← observe c 600 (redundant c drained)
     c.event s!"redundancy restored={red}"
     -- did pods move
@@ -249,11 +263,13 @@ private def switchRun (c : Ctx) (op : SwitchOp) : IO (Except String SwitchObs) :
     if let some n := drained then uncordon n
     let svc? ← c.stopLoad "svc" 4
     let peer? ← c.stopLoad "peer" 2
-    let (some svcRs, some peerRs) := (svc?, peer?)
+    let (some svcRes, some peerRes) := (svc?, peer?)
       | return .error (unobservable "a load log could not be read or failed its integrity check (never counted as 'no error')")
     let ips := ips0 ++ ips1 ++ ips2
     let newM := (← c.roles).bind (·.1)
     let ps := (← c.pods).getD []
+    let svcRs := svcRes.recs
+    let peerRs := peerRes.recs
     let acks : List WriteRec := ((svcRs ++ peerRs).filter (fun (r : LoadRec) => r.ack)).map (fun (r : LoadRec) => r.toWrite)
     let copies ← finalCopies c "settled"
     let copyOf := fun (cs : List (String × Option (List (String × String)))) (pod : Option String) => pod.bind fun n => (cs.lookup n).join
@@ -267,7 +283,7 @@ private def switchRun (c : Ctx) (op : SwitchOp) : IO (Except String SwitchObs) :
       match copyOf copies2 replicaPod with
       | some d => pure (some (← recordMissing c "replica-later" acks d))
       | none => pure none
-    let o : SwitchObs := { opOk, opDetail, moved, movedDetail, svc := loadStats svcRs, peer := loadStats peerRs,
+    let o : SwitchObs := { opOk, opDetail, moved, movedDetail, svc := loadStats svcRes, peer := loadStats peerRes,
                            svcByPod := errorsByPod ips svcRs, peerByPod := errorsByPod ips peerRs,
                            missingMaster := mm, missingReplica := mr, missingReplicaLater := mrLater,
                            redundant := red, newMaster := newM }

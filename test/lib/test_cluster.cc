@@ -295,6 +295,99 @@ namespace test_cluster
 		cluster.write_section_leave();
 	}
 
+	struct reader_arg {
+		cluster_test* c;
+		volatile int stop;
+		volatile long entries;
+	};
+
+	static void* steady_writer(void* a) {
+		reader_arg* x = static_cast<reader_arg*>(a);
+		while (!x->stop) {
+			x->c->write_section_enter();
+			usleep(300);
+			x->c->write_section_leave();
+			x->entries++;
+		}
+		return NULL;
+	}
+
+	// NODE-OPS-LOSSLESS-PLAN L1, review of 8d64aaf: under a steady write load
+	// (overlapping readers that never all leave at once) a map swap still gets
+	// the section within a bound — the lock prefers the writer (glibc)
+	void test_map_swap_is_not_starved_by_a_steady_write_load()
+	{
+		const std::string _tmp_dir = tmp_dir + std::string("/write_section_steady");
+		mkdir(_tmp_dir.c_str(), 0700);
+		cluster_test cluster(_tmp_dir);
+		const int n = 4;
+		reader_arg ra[n];
+		pthread_t rt[n];
+		for (int i = 0; i < n; i++) {
+			ra[i].c = &cluster;
+			ra[i].stop = 0;
+			ra[i].entries = 0;
+			cut_assert_equal_int(0, pthread_create(&rt[i], NULL, steady_writer, &ra[i]));
+		}
+		usleep(200 * 1000);
+		swap_arg a;
+		a.c = &cluster;
+		a.ver = cluster.get_node_map_version() + 10;
+		a.done = 0;
+		struct timespec t0, t1;
+		clock_gettime(CLOCK_MONOTONIC, &t0);
+		pthread_t t;
+		cut_assert_equal_int(0, pthread_create(&t, NULL, swap_map, &a));
+		for (int i = 0; i < 200 && !a.done; i++) {
+			usleep(10 * 1000);
+		}
+		clock_gettime(CLOCK_MONOTONIC, &t1);
+		const long ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+		long before = 0;
+		for (int i = 0; i < n; i++) {
+			before += ra[i].entries;
+		}
+		for (int i = 0; i < n; i++) {
+			ra[i].stop = 1;
+		}
+		for (int i = 0; i < n; i++) {
+			pthread_join(rt[i], NULL);
+		}
+		pthread_join(t, NULL);
+		cut_assert_equal_int(1, a.done, cut_message("the map swap did not get the write section within 2 s under a steady write load (%ld ms, %ld writes)", ms, before));
+		cut_assert(before > 100, cut_message("the write load was not steady (%ld writes)", before));
+		cppcut_assert_equal(a.ver, cluster.get_node_map_version());
+	}
+
+	// a section held on one cluster instance does not let a nested entry on
+	// another instance skip that instance's lock
+	void test_write_section_depth_is_per_cluster_instance()
+	{
+		const std::string d1 = tmp_dir + std::string("/write_section_i1");
+		const std::string d2 = tmp_dir + std::string("/write_section_i2");
+		mkdir(d1.c_str(), 0700);
+		mkdir(d2.c_str(), 0700);
+		cluster_test c1(d1);
+		cluster_test c2(d2);
+		c1.write_section_enter();
+		c2.write_section_enter();		// another instance: takes c2's lock
+		swap_arg a;
+		a.c = &c2;
+		a.ver = c2.get_node_map_version() + 10;
+		a.done = 0;
+		pthread_t t;
+		cut_assert_equal_int(0, pthread_create(&t, NULL, swap_map, &a));
+		usleep(300 * 1000);
+		cut_assert_equal_int(0, a.done, cut_message("c2's map was swapped while a write was in c2's section"));
+		c2.write_section_leave();
+		for (int i = 0; i < 50 && !a.done; i++) {
+			usleep(100 * 1000);
+		}
+		pthread_join(t, NULL);
+		cut_assert_equal_int(1, a.done);
+		c1.write_section_leave();
+	}
+
 	cluster::node mk(const char* name, int port, cluster::role r, cluster::state st, int part) {
 		cluster::node n;
 		n.node_server_name = name;

@@ -108,9 +108,15 @@ cluster::cluster(thread_pool* req_tp, thread_pool* other_tp, string server_name,
 	pthread_rwlock_init(&this->_mutex_node_map, NULL);
 	pthread_rwlock_init(&this->_mutex_node_partition_map, NULL);
 	{
+		// writer preference, so a map swap is not starved by a steady write load.
+		// On glibc PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP is an enum
+		// constant, not a macro: test the C library, not the name (review of
+		// 8d64aaf). Other C libraries keep their default policy; the
+		// sustained-reader test (test_cluster) shows whether a swap gets the
+		// lock under continuous writes on the platform it runs on.
 		pthread_rwlockattr_t a;
 		pthread_rwlockattr_init(&a);
-#ifdef PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP
+#if defined(__GLIBC__)
 		pthread_rwlockattr_setkind_np(&a, PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP);
 #endif
 		pthread_rwlock_init(&this->_mutex_write_section, &a);
@@ -1132,18 +1138,63 @@ int cluster::reconstruct_node(vector<node> v, uint64_t node_map_version) {
 }
 
 namespace {
-	// the write-section depth of THIS thread: a nested entry does not lock again
-	__thread int write_section_depth = 0;
+	// the write-section depth of THIS thread, per cluster instance: a nested
+	// entry into the same cluster's section does not lock again; an entry
+	// into another instance's section takes that instance's lock (review of
+	// 8d64aaf: one shared counter let a nested call on a second instance skip
+	// its lock). A thread is inside the sections of at most a few instances.
+	const int write_section_slots = 8;
+	__thread const void* write_section_owner[write_section_slots];
+	__thread int write_section_depth[write_section_slots];
+	// entries taken without a slot (more instances than slots); released by
+	// the matching leave that finds no slot
+	__thread int write_section_overflow = 0;
+
+	int write_section_slot(const void* c, bool create) {
+		int free_slot = -1;
+		for (int i = 0; i < write_section_slots; i++) {
+			if (write_section_depth[i] > 0 && write_section_owner[i] == c) {
+				return i;
+			}
+			if (free_slot < 0 && write_section_depth[i] == 0) {
+				free_slot = i;
+			}
+		}
+		if (!create) {
+			return -1;
+		}
+		if (free_slot >= 0) {
+			write_section_owner[free_slot] = c;
+		}
+		return free_slot;
+	}
 }
 
 void cluster::write_section_enter() {
-	if (write_section_depth++ == 0) {
+	int i = write_section_slot(this, true);
+	if (i < 0) {
+		// more instances at once than slots: take the lock without counting
+		// (fail safe: the swap still waits; a nested entry would deadlock, so
+		// this is logged as an error to be noticed)
+		log_err("write section: more than %d cluster instances entered by one thread", write_section_slots);
+		write_section_overflow++;
+		pthread_rwlock_rdlock(&this->_mutex_write_section);
+		return;
+	}
+	if (write_section_depth[i]++ == 0) {
 		pthread_rwlock_rdlock(&this->_mutex_write_section);
 	}
 }
 
 void cluster::write_section_leave() {
-	if (write_section_depth > 0 && --write_section_depth == 0) {
+	int i = write_section_slot(this, false);
+	if (i >= 0) {
+		if (--write_section_depth[i] == 0) {
+			write_section_owner[i] = NULL;
+			pthread_rwlock_unlock(&this->_mutex_write_section);
+		}
+	} else if (write_section_overflow > 0) {
+		write_section_overflow--;
 		pthread_rwlock_unlock(&this->_mutex_write_section);
 	}
 }

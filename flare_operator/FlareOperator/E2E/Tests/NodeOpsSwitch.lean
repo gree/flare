@@ -56,7 +56,11 @@ private def svcHost (c : Ctx) : String := s!"{c.cfg.name}-0.{c.cfg.«namespace»
 private def podHost (c : Ctx) (pod : String) : String := s!"{pod}.{c.cfg.name}-nodes.{c.cfg.«namespace»}.svc.cluster.local"
 
 /-- Redundancy restored: a master and an ACTIVE replica of partition 0, both
-    pods Ready and not deleting, on different workers, none on `avoid`. -/
+    pods Ready and not deleting, on different workers, none on `avoid`, AND the
+    replica holds the master's history and is read-eligible (its own
+    `rocksdb_source_epoch` equals the master's and `repl_read_source_eligible`
+    is 1): a replica left on an older history after a re-promotion under the
+    same pod name is not redundancy (baseline 40341355474, S3 -> S4). -/
 private def redundant (c : Ctx) (avoid : Option String) : IO Bool := do
   let some ps ← c.pods | return false
   let some (some m, rs) ← c.roles | return false
@@ -65,8 +69,15 @@ private def redundant (c : Ctx) (avoid : Option String) : IO Bool := do
   match ps.find? (·.name == m), activeR.head? with
   | some mp, some r =>
     match ps.find? (·.name == r) with
-    | some rp => return mp.ready && rp.ready && !mp.deleting && !rp.deleting && mp.node != rp.node
-                  && some mp.node != avoid && some rp.node != avoid
+    | some rp =>
+      if !(mp.ready && rp.ready && !mp.deleting && !rp.deleting && mp.node != rp.node
+            && some mp.node != avoid && some rp.node != avoid) then return false
+      match ← c.stats mp.ip, ← c.stats rp.ip with
+      | some mo, some ro =>
+        let sameHistory := (statOf mo "rocksdb_source_epoch").isSome && statOf mo "rocksdb_source_epoch" == statOf ro "rocksdb_source_epoch"
+        let eligible := (statOf ro "repl_read_source_eligible").getD "1" == "1"
+        return sameHistory && eligible
+      | _, _ => return false
     | none => return false
   | _, _ => return false
 
@@ -185,6 +196,10 @@ private def switchRun (c : Ctx) (op : SwitchOp) : IO (Except String SwitchObs) :
   match ← c.placement with
   | .error e => return .error e
   | .ok p =>
+    -- each test starts from a healthy pair (the previous test may have left a
+    -- replica on an older history): wait for it, else it is a precondition failure
+    if !(← waitForCondition "the pair is redundant with the replica on the master's history" 300 (redundant c none)) then
+      return .error (notSetUp "the cluster did not start this test with a master and a replica on its history (left by the previous test?)")
     c.conditions [s!"scenario: {op.label} under a client-like load (4 x 200/s via the partition Service, 2 x 200/s via the other pod; kept-open connections, closed loop)"]
     match ← c.ensureLoadWriter with
     | .error e => return .error (notSetUp e)
@@ -246,9 +261,10 @@ private def switchRun (c : Ctx) (op : SwitchOp) : IO (Except String SwitchObs) :
     c.event s!"redundancy restored={red}"
     -- did pods move
     let after := (← c.pods).getD []
+    -- replaced = a new incarnation (another UID) that is Ready; a Pending or
+    -- missing replacement has not moved
     let uidChanged := fun (n : String) => match before.find? (·.name == n), after.find? (·.name == n) with
-      | some b, some a => b.uid != a.uid
-      | some _, none => true
+      | some b, some a => b.uid != a.uid && a.ready && !a.deleting
       | _, _ => false
     let (moved, movedDetail) := match op with
       | .deleteMaster => (uidChanged p.master.name, s!"master pod {p.master.name} replaced={uidChanged p.master.name}")

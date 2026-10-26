@@ -1442,20 +1442,26 @@ Replication to the replica is asynchronous: the master acknowledges a write
 before the replica has applied it.
 
 Requirement (decision 2026-10-26):
-- **Abnormal case — the old master cannot be reached on the DATA plane**: no
-  client and no peer can reach it any more (its pod/worker is gone or stopped,
-  or its data-plane network is cut). The replica is promoted and writes the old
-  master acknowledged that had not reached it are lost. This is specified, not
-  a fault. The operator logs `PROMOTION NOT LOSS-FREE` when it seats a copy
+- **Abnormal case — an UNEXPECTED data-plane failure, not caused by the
+  operator or a planned operation**: no client and no peer can reach the old
+  master any more because it crashed, its worker failed, or its data-plane
+  network broke. The replica is promoted and writes the old master
+  acknowledged that had not reached it are lost. This is specified, not a
+  fault. A master that becomes unreachable BECAUSE it was stopped or deleted
+  on purpose (operator self-heal, drain, eviction, pod delete, rolling update,
+  scale-down, node maintenance) is NOT this case: a planned stop/delete is a
+  no-loss path (next bullet), even though the master is unreachable afterwards. The operator logs `PROMOTION NOT LOSS-FREE` when it seats a copy
   known to be behind; it does not count the lost writes.
   A cut of the CONTROL plane only (C′: the Kubernetes API cannot reach the
   worker, clients still reach the old master) is NOT this case: it is the
   separately accepted known gap #cprime-dual-write, not a specified loss.
-- **Every switch the operator makes while the old master is reachable** (drain,
-  eviction, pod replacement, rolling update, planned handover, scale-down,
-  self-heal, a failover it decides with the old master reachable) must lose
-  NO acknowledged write: stop the old master's writes, wait until the successor
-  has applied up to the old master's last position, then promote; if it cannot
+- **Every operator-initiated or planned stop / delete / switch** (drain,
+  eviction, pod replacement or delete, rolling update, planned handover,
+  scale-down, self-heal, node maintenance, and a failover the operator decides
+  while the old master is still reachable) must lose NO acknowledged write —
+  also when the old master is unreachable afterwards as a result: stop the old
+  master's writes, wait until the successor has applied up to the old master's
+  last position, then promote (and only then stop/delete it); if it cannot
   catch up, do not promote.
 
 What the code guarantees today (audit of 896656f, NODE-OPS-LOSSLESS-PLAN

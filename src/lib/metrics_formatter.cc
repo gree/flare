@@ -90,6 +90,12 @@ const stat_mapping flared_gauges[] = {
 	{ "proxy_write_in_flight",   "flare_node_proxy_write_in_flight",   "gauge"   },
 	{ "proxy_write_failed",      "flare_node_proxy_write_failed",      "counter" },
 	{ "proxy_write_skipped",     "flare_node_proxy_write_skipped",     "counter" },
+	// forwards that waited out an unanswering replica (L12 hold) and the
+	// longest such wait (msec)
+	{ "proxy_write_held",        "flare_node_proxy_write_held",        "counter" },
+	{ "proxy_write_held_ms_max", "flare_node_proxy_write_held_ms_max", "gauge"   },
+	// client requests being executed now (a graceful stop waits for 0)
+	{ "requests_in_progress",    "flare_node_requests_in_progress",    "gauge"   },
 	// 1 = the node map makes this node a master but it REFUSES to serve as one
 	// (a copy it knows is unfit, or a restored copy of another partition):
 	// writes to its partition fail. A confirmed refusal, read from the node

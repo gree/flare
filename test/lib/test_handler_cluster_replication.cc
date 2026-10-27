@@ -37,6 +37,11 @@
 #include <cppcutter.h>
 #include <time.h>
 #include <set>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 using namespace std;
 using namespace gree::flare;
@@ -88,6 +93,7 @@ namespace test_handler_cluster_replication {
 		delete stats_object;
 		queue_proxy_write::foreign_retry_window_ms = 120 * 1000;
 		queue_proxy_write::hold_window_ms = 0;
+		queue_proxy_write::clear_held_given_up();
 
 		if (sigaction(SIGUSR1, &prev_sigusr1_action, NULL) < 0) {
 			log_err("sigaction for %d failed: %s (%d)", SIGUSR1, util::strerror(errno), errno);
@@ -544,6 +550,155 @@ namespace test_handler_cluster_replication {
 		q3->sync();
 		cut_assert_equal_boolean(true, q3->is_success());
 		cut_assert_equal_int(2, (int)stats_object->get_proxy_write_dropped());
+	}
+
+	long elapsed_ms(const struct timespec& t0) {
+		struct timespec t1;
+		clock_gettime(CLOCK_MONOTONIC, &t1);
+		return (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+	}
+
+	// A replica that restarted and has not got its role back answers
+	// SERVER_ERROR: within the hold window it is resent like no answer, and
+	// stored the second time (review of cf27570: it was taken as final).
+	void test_in_cluster_server_error_is_retried_within_the_hold() {
+		queue_proxy_write::hold_window_ms = 8000;
+		shared_thread t = start_handler();
+		shared_queue_proxy_write q = enqueue_replica_set(t, "key");
+		char *p, *v;
+		cs[0]->readline(&p);
+		cs[0]->readline(&v);
+		cs[0]->writeline("SERVER_ERROR no partition available");
+		delete[] p;
+		delete[] v;
+		cs[0]->readline(&p);
+		cs[0]->readline(&v);
+		cut_assert_equal_string("set key 0 0 5 3\n", p);
+		cs[0]->writeline("STORED");
+		delete[] p;
+		delete[] v;
+		q->sync();
+		cut_assert_equal_boolean(true, q->is_success());
+		cut_assert_equal_int(op::result_stored, q->get_result());
+		cut_assert_equal_int(0, (int)stats_object->get_proxy_write_dropped());
+		uint64_t failed = 0;
+		stats_object->get_proxy_write_failed(failed);
+		cut_assert_equal_int(0, (int)failed);
+		uint64_t held = 0;
+		stats_object->get_proxy_write_held(held);
+		cut_assert_equal_int(1, (int)held);
+	}
+
+	// The window is a hard bound on the whole send. A replica that accepts
+	// the connection and never answers: every try's read is cut at the time
+	// left, so the forward ends (dropped, counted) close to the window and
+	// not a read timeout later (review of cf27570).
+	void test_in_cluster_hold_is_bounded_by_a_silent_replica() {
+		queue_proxy_write::hold_window_ms = 1500;
+		s->listen(port);
+		shared_thread t = start_handler(false);
+		cs = s->wait();
+		struct timespec t0;
+		clock_gettime(CLOCK_MONOTONIC, &t0);
+		shared_queue_proxy_write q = enqueue_replica_set(t, "key");
+		q->sync();
+		const long ms = elapsed_ms(t0);
+		cut_assert_equal_boolean(false, q->is_success());
+		cut_assert_equal_int(1, (int)stats_object->get_proxy_write_dropped());
+		cut_assert(ms >= 1400 && ms < 2500, cut_message("a silent replica held the forward %ld ms (window 1500)", ms));
+	}
+
+	// A replica whose address drops the SYNs (an old pod address, or here a
+	// listener whose accept queue is full): every try's connect is cut at
+	// the time left, so the forward ends close to the window.
+	void test_in_cluster_hold_is_bounded_by_a_blackholed_connect() {
+		queue_proxy_write::hold_window_ms = 1500;
+		// a listener that never accepts, its accept queue filled
+		int lfd = socket(AF_INET, SOCK_STREAM, 0);
+		struct sockaddr_in a;
+		memset(&a, 0, sizeof(a));
+		a.sin_family = AF_INET;
+		a.sin_addr.s_addr = inet_addr("127.0.0.1");
+		a.sin_port = htons(port);
+		int one = 1;
+		setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+		cut_assert_equal_int(0, bind(lfd, (struct sockaddr*)&a, sizeof(a)));
+		cut_assert_equal_int(0, ::listen(lfd, 0));
+		vector<int> fill;
+		for (int i = 0; i < 4; i++) {
+			int f = socket(AF_INET, SOCK_STREAM, 0);
+			fcntl(f, F_SETFL, fcntl(f, F_GETFL, 0) | O_NONBLOCK);
+			connect(f, (struct sockaddr*)&a, sizeof(a));
+			fill.push_back(f);
+		}
+		usleep(200 * 1000);
+		shared_thread t = start_handler(false);
+		// the handler's own first open (at thread start, before any forward,
+		// with the connection's own connect bounds) is not part of a hold:
+		// time the forward from when the thread waits for work
+		// (nix 2026-10-27: 8007 ms measured from the thread start)
+		for (int i = 0; i < 300 && t->get_state() != "wait"; i++) {
+			usleep(100 * 1000);
+		}
+		cut_assert_equal_string("wait", t->get_state().c_str());
+		struct timespec t0;
+		clock_gettime(CLOCK_MONOTONIC, &t0);
+		shared_queue_proxy_write q = enqueue_replica_set(t, "key");
+		q->sync();
+		const long ms = elapsed_ms(t0);
+		for (size_t i = 0; i < fill.size(); i++) {
+			::close(fill[i]);
+		}
+		::close(lfd);
+		cut_assert_equal_boolean(false, q->is_success());
+		cut_assert_equal_int(1, (int)stats_object->get_proxy_write_dropped());
+		cut_assert(ms < 2500, cut_message("a blackholed replica held the forward %ld ms (window 1500)", ms));
+	}
+
+	// Head of line: each forwarding thread to a replica serializes its own
+	// forwards behind a held one. Once ONE thread waited out the window, the
+	// replica is given up for every thread: another thread's next forward
+	// tries once and is counted at once, instead of waiting out a window of
+	// its own (review of cf27570: the mark was per connection). The held
+	// counters record how long the held forward waited.
+	void test_in_cluster_given_up_is_shared_by_every_forwarding_thread() {
+		queue_proxy_write::hold_window_ms = 1500;
+		shared_thread a = start_handler(false);
+		shared_thread b = start_handler(false);
+		shared_queue_proxy_write q1 = enqueue_replica_set(a, "key1");
+		q1->sync();
+		cut_assert_equal_boolean(false, q1->is_success());
+		struct timespec t0;
+		clock_gettime(CLOCK_MONOTONIC, &t0);
+		shared_queue_proxy_write q2 = enqueue_replica_set(b, "key2");
+		q2->sync();
+		const long ms = elapsed_ms(t0);
+		cut_assert_equal_boolean(false, q2->is_success());
+		cut_assert_equal_int(2, (int)stats_object->get_proxy_write_dropped());
+		cut_assert(ms < 1000, cut_message("the second thread waited %ld ms although the replica was given up", ms));
+		uint64_t held = 0, held_ms_max = 0;
+		stats_object->get_proxy_write_held(held);
+		stats_object->get_proxy_write_held_ms_max(held_ms_max);
+		cut_assert_equal_int(1, (int)held);
+		cut_assert(held_ms_max >= 1400, cut_message("held_ms_max %llu", (unsigned long long)held_ms_max));
+	}
+
+	// Two threads forwarding to a replica that is down concurrently wait in
+	// PARALLEL, not one after the other: the cost of a hold is one window
+	// per thread at the same time, not proxy-concurrency windows in a row.
+	void test_in_cluster_concurrent_holds_overlap() {
+		queue_proxy_write::hold_window_ms = 1500;
+		shared_thread a = start_handler(false);
+		shared_thread b = start_handler(false);
+		struct timespec t0;
+		clock_gettime(CLOCK_MONOTONIC, &t0);
+		shared_queue_proxy_write q1 = enqueue_replica_set(a, "key1");
+		shared_queue_proxy_write q2 = enqueue_replica_set(b, "key2");
+		q1->sync();
+		q2->sync();
+		const long ms = elapsed_ms(t0);
+		cut_assert_equal_int(2, (int)stats_object->get_proxy_write_dropped());
+		cut_assert(ms < 2500, cut_message("two concurrent holds took %ld ms (window 1500)", ms));
 	}
 
 	// SERVER_ERROR is transient (a restarted destination without its role):

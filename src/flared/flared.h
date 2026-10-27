@@ -84,6 +84,7 @@ private:
 	int _set_resource_limit();
 	int _set_signal_handler();
 	void _drain_forwards(int msec);
+	void _wait_requests(int msec);
 	void _note_drain_baseline();
 	bool _drain_baseline_set;
 	uint64_t _drain_dropped0;

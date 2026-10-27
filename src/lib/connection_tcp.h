@@ -167,6 +167,9 @@ public:
 	virtual int get_connect_retry_limit() const { return this->_connect_retry_limit; };
 	virtual int set_connect_retry_limit(int retry_limit) { this->_connect_retry_limit = retry_limit; return 0; };
 	virtual int set_connect_timeout_ms(int ms) { this->_connect_timeout_ms = ms; return 0; };
+	int get_connect_timeout_ms() const { return this->_connect_timeout_ms; };
+	// drop the whole-request read / write deadlines (set_*deadline_from_now)
+	void clear_deadlines() { this->_deadline_ms = 0; this->_write_deadline_ms = 0; };
 	// Whole-request deadline, `ms` from now (applies to every read after it).
 	virtual int set_deadline_from_now(int ms);
 	virtual int set_write_progress_timeout_ms(int ms) { this->_write_progress_timeout_ms = ms > 0 ? ms : 0; return 0; };

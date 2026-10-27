@@ -166,6 +166,17 @@ namespace test_metrics_formatter
 		cut_assert_true(contains(out, "flare_node_proxy_write_skipped 5\n"));
 	}
 
+	void test_proxy_write_held_counters() {
+		push("proxy_write_held", "7");
+		push("proxy_write_held_ms_max", "4100");
+		string out = metrics_formatter::format(stats);
+		cut_assert_true(contains(out, "flare_node_proxy_write_held 7\n"));
+		cut_assert_true(contains(out, "flare_node_proxy_write_held_ms_max 4100\n"));
+		push("requests_in_progress", "2");
+		out = metrics_formatter::format(stats);
+		cut_assert_true(contains(out, "flare_node_requests_in_progress 2\n"));
+	}
+
 	// data-dir usage (statvfs): the tmpfs-RAM truth that container-level
 	// memory metrics miss — must reach /metrics for the dashboards.
 	void test_data_dir_usage_gauges() {

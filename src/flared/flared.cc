@@ -677,6 +677,14 @@ int flared::reload() {
  */
 int flared::shutdown() {
 	log_notice("shutting down active, and pool threads...", 0);
+	// A request being executed (on a proxy, a client write being forwarded
+	// to its master) is finished and answered before its thread is
+	// interrupted: threads close their client connection after the current
+	// request, and the interrupt waits (bounded) until none is executing
+	// (review of cf27570). An idle connection is closed by the interrupt;
+	// its client reconnects (through the Service) for its next request.
+	handler_request::set_stop_after_request(true);
+	this->_wait_requests(ini_option_object().get_shutdown_forward_drain_msec());
 	this->_req_thread_pool->shutdown();
 	// No client request runs any more, so no new forward is made. The ones
 	// still queued to replicas carry writes a client was told STORED: keep
@@ -693,6 +701,30 @@ int flared::shutdown() {
 	this->_clear_pid();
 
 	return 0;
+}
+
+/**
+ *	wait (at most `msec`) until no client request is being executed
+ */
+void flared::_wait_requests(int msec) {
+	struct timespec t0;
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	for (;;) {
+		const uint64_t n = stats_object->get_requests_in_progress();
+		struct timespec t1;
+		clock_gettime(CLOCK_MONOTONIC, &t1);
+		const long long elapsed = (static_cast<long long>(t1.tv_sec) - t0.tv_sec) * 1000 + (static_cast<long long>(t1.tv_nsec) - t0.tv_nsec) / 1000000;
+		if (n == 0) {
+			log_notice("no client request in progress at shutdown (waited %lld msec)", elapsed);
+			return;
+		}
+		if (msec <= 0 || elapsed >= msec) {
+			log_err("shutdown: %llu client request(s) still in progress after %lld msec — their threads are interrupted (the clients get no answer)",
+				static_cast<unsigned long long>(n), elapsed);
+			return;
+		}
+		usleep(10 * 1000);
+	}
 }
 
 /**

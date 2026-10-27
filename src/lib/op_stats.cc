@@ -245,6 +245,23 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 			_send_stat(key, it->second);
 		}
 		_send_stat("proxy_write_skipped", skipped);
+		uint64_t held = 0;
+		map<string, uint64_t> hd = stats_object->get_proxy_write_held(held);
+		for (map<string, uint64_t>::const_iterator it = hd.begin(); it != hd.end(); it++) {
+			char key[BUFSIZ];
+			snprintf(key, sizeof(key), "proxy_write_held[%s]", it->first.c_str());
+			_send_stat(key, it->second);
+		}
+		_send_stat("proxy_write_held", held);
+		uint64_t held_ms_max = 0;
+		map<string, uint64_t> hm = stats_object->get_proxy_write_held_ms_max(held_ms_max);
+		for (map<string, uint64_t>::const_iterator it = hm.begin(); it != hm.end(); it++) {
+			char key[BUFSIZ];
+			snprintf(key, sizeof(key), "proxy_write_held_ms_max[%s]", it->first.c_str());
+			_send_stat(key, it->second);
+		}
+		_send_stat("proxy_write_held_ms_max", held_ms_max);
+		_send_stat("requests_in_progress", stats_object->get_requests_in_progress());
 	}
 	_send_stat("delete_misses"				, stats_object->get_delete_misses());
 	// Reconstruction lifecycle (see stats.h): a controller that requested a

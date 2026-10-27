@@ -95,7 +95,7 @@ private def switchSample (c : Ctx) : IO (List (String × String)) := do
     | none => own := own ++ [s!"{p.name}:unreadable"]
     | some o =>
       let g := fun (k : String) => (statOf o k).getD "?"
-      own := own ++ [s!"{p.name}@{p.node}(uid {p.uid.take 8},ready {p.ready},deleting {p.deleting}):own_role={g "own_role"},own_partition={g "own_partition"},map={g "node_map_version"},items={g "curr_items"},recon={g "reconstruction_started"}/{g "reconstruction_completed"}"]
+      own := own ++ [s!"{p.name}@{p.node}(uid {p.uid.take 8},ready {p.ready},deleting {p.deleting}):own_role={g "own_role"},own_partition={g "own_partition"},map={g "node_map_version"},items={g "curr_items"},recon={g "reconstruction_started"}/{g "reconstruction_completed"},inflight={g "proxy_write_in_flight"},held={g "proxy_write_held"}/{g "proxy_write_held_ms_max"}ms,dropped={g "proxy_write_dropped"},reqs={g "requests_in_progress"}"]
   let repairs ← match ← kubectl ["get", "flarecluster", c.cfg.name, "-n", c.cfg.«namespace», "-o", "jsonpath={.status.replicaRepairs}"] with
     | .ok o => pure (if o.trim.isEmpty then "none" else o.trim.take 400)
     | .error _ => pure "unreadable"

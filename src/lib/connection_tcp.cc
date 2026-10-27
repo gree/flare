@@ -255,13 +255,18 @@ int connection_tcp::_open(string host, int port) {
 				this->_errno = errno;
 				return -1;
 			}
-			usleep(this->_connect_retry_wait);
+			if (i < this->_connect_retry_limit) {
+				// no wait after the last attempt: nothing follows it
+				usleep(this->_connect_retry_wait);
+			}
 			errno = err;
 			continue;
 		}
 		if (connect(this->_sock, (struct sockaddr*)&this->_addr_inet, sizeof(this->_addr_inet)) < 0) {
 			log_warning("connect() failed: %s (%d) -> wait for %d usec", util::strerror(errno), errno, this->_connect_retry_wait);
-			usleep(this->_connect_retry_wait);
+			if (i < this->_connect_retry_limit) {
+				usleep(this->_connect_retry_wait);
+			}
 			continue;
 		}
 		break;

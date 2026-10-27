@@ -84,6 +84,8 @@ public:
 	// told STORED, missing on the replica that was promoted next. 0 keeps
 	// the 4 quick tries. Set from proxy-forward-hold-msec.
 	static int hold_window_ms;
+	// forget which replicas were given up (tests)
+	static void clear_held_given_up();
 
 	// What a destination's answer to a forwarded op means for the source.
 	// applied: the destination took this change. noop: it already holds this

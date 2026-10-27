@@ -49,6 +49,7 @@ stats::stats():
 		_get_hits(0),
 		_get_misses(0),
 		_proxy_write_dropped(0),
+		_requests_in_progress(0),
 		_reconstruction_started(0),
 		_reconstruction_completed(0),
 		_reconstruction_failed(0),
@@ -464,6 +465,33 @@ static map<string, uint64_t> snapshot_with_total(pthread_mutex_t* m, const map<s
 
 map<string, uint64_t> stats::get_proxy_write_failed(uint64_t& total) {
 	return snapshot_with_total(&this->_mutex_repl_in_flight, this->_proxy_write_failed, total);
+}
+
+void stats::note_proxy_write_held(const string& dest, uint64_t ms) {
+	pthread_mutex_lock(&this->_mutex_repl_in_flight);
+	this->_proxy_write_held[dest]++;
+	uint64_t& m = this->_proxy_write_held_ms_max[dest];
+	if (ms > m) {
+		m = ms;
+	}
+	pthread_mutex_unlock(&this->_mutex_repl_in_flight);
+}
+
+map<string, uint64_t> stats::get_proxy_write_held(uint64_t& total) {
+	return snapshot_with_total(&this->_mutex_repl_in_flight, this->_proxy_write_held, total);
+}
+
+map<string, uint64_t> stats::get_proxy_write_held_ms_max(uint64_t& max_all) {
+	pthread_mutex_lock(&this->_mutex_repl_in_flight);
+	map<string, uint64_t> r = this->_proxy_write_held_ms_max;
+	pthread_mutex_unlock(&this->_mutex_repl_in_flight);
+	max_all = 0;
+	for (map<string, uint64_t>::const_iterator it = r.begin(); it != r.end(); it++) {
+		if (it->second > max_all) {
+			max_all = it->second;
+		}
+	}
+	return r;
 }
 
 map<string, uint64_t> stats::get_proxy_write_skipped(uint64_t& total) {

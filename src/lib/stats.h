@@ -65,6 +65,9 @@ protected:
 	// success (the master's own write succeeded), so this is silent replica
 	// divergence — the only signal that it happened. Monotonic.
 	AtomicCounter _proxy_write_dropped;
+	// client requests being executed now (parsed, not yet answered): on a
+	// proxy, a write being forwarded to its master is one of them
+	AtomicCounter _requests_in_progress;
 	// The same drops broken down BY DESTINATION, so a controller can tell
 	// WHICH replica is now behind and resync only that one. The aggregate
 	// counter above cannot: it says a replica diverged, not which. Drops are
@@ -117,6 +120,11 @@ protected:
 	// proxy_write_dropped. Guarded by _mutex_repl_in_flight.
 	map<string, uint64_t> _proxy_write_failed;
 	map<string, uint64_t> _proxy_write_skipped;
+	// forwards to a replica that needed more than one try within their hold
+	// window (queue_proxy_write::hold_window_ms), and the longest such wait
+	// (msec) per destination: how long writes queued behind a held one
+	map<string, uint64_t> _proxy_write_held;
+	map<string, uint64_t> _proxy_write_held_ms_max;
 	// Reconstruction lifecycle of THIS node, counted once per request (a
 	// request is one handler_reconstruction; its internal retries are not
 	// separate requests). "started" is what a controller compares against
@@ -183,6 +191,9 @@ public:
 	inline int increment_get_hits()              { this->_get_hits.incr();return 0; };
 	inline int increment_get_misses()            { this->_get_misses.incr();return 0; };
 	inline int increment_proxy_write_dropped()   { this->_proxy_write_dropped.incr();return 0; };
+	inline void request_begin() { this->_requests_in_progress.incr(); };
+	inline void request_end() { this->_requests_in_progress.sub(1); };
+	inline uint64_t get_requests_in_progress() { return this->_requests_in_progress.fetch(); };
 	int increment_proxy_write_dropped(const string& dest);
 	bool diag_enabled() const { return this->_diag_enabled; };
 	void diag_incr(const string& name);
@@ -197,6 +208,9 @@ public:
 	map<string, uint64_t> get_repl_in_flight(uint64_t& total);
 	void increment_proxy_write_failed(const string& dest);
 	void increment_proxy_write_skipped(const string& dest);
+	void note_proxy_write_held(const string& dest, uint64_t ms);
+	map<string, uint64_t> get_proxy_write_held(uint64_t& total);
+	map<string, uint64_t> get_proxy_write_held_ms_max(uint64_t& max_all);
 	map<string, uint64_t> get_proxy_write_failed(uint64_t& total);
 	map<string, uint64_t> get_proxy_write_skipped(uint64_t& total);
 	void set_crepl_seed_state(const string& state);

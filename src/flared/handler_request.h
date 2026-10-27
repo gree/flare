@@ -45,6 +45,15 @@ public:
 	virtual ~handler_request();
 
 	virtual int run();
+
+	// Set on a graceful stop (flared::shutdown): each request thread closes
+	// its client connection after the request it is executing, instead of
+	// reading the next one, so the stop does not interrupt a request.
+	static void set_stop_after_request(bool v) { __atomic_store_n(&handler_request::_stop_after_request, v ? 1 : 0, __ATOMIC_SEQ_CST); };
+	static bool is_stop_after_request() { return __atomic_load_n(&handler_request::_stop_after_request, __ATOMIC_SEQ_CST) != 0; };
+
+private:
+	static int _stop_after_request;
 };
 
 }	// namespace flare

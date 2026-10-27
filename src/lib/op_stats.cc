@@ -216,6 +216,18 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 			_send_stat(key, it->second);
 		}
 		_send_stat("proxy_write_in_flight", total);
+		// this node's own assignment in the node map it has ACCEPTED: preStop
+		// waits for own_role=proxy (rc68 had no such stat, so the hook never
+		// saw "proxy" and always slept its whole window)
+		{
+			cluster::role r = cluster::role_proxy;
+			cluster::state stt = cluster::state_active;
+			int partition = -1;
+			const bool known = cl->get_own_assignment(r, stt, partition);
+			_send_stat("own_role"				, known ? cluster::role_cast(r) : string("unknown"));
+			_send_stat("own_state"				, known ? cluster::state_cast(stt) : string("unknown"));
+			_send_stat("own_partition"			, known ? partition : -1);
+		}
 		// terminal outcomes of answered forwards (stats.h); totals always sent
 		uint64_t failed = 0;
 		map<string, uint64_t> f = stats_object->get_proxy_write_failed(failed);

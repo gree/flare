@@ -404,12 +404,12 @@ def statefulSetYaml (cfg : ClusterConfig) : String :=
                       out=$(rd)
                       role=$(st \"$out\" own_role); inflight=$(st \"$out\" proxy_write_in_flight)
                       d=$(st \"$out\" proxy_write_dropped); f=$(st \"$out\" proxy_write_failed)
-                      if [ -n \"$d0\" ] && [ -n \"$f0\" ] && \{ [ \"$d\" != \"$d0\" ] || [ \"$f\" != \"$f0\" ]; }; then
-                        echo \"flare preStop: forward drain NOT LOSSLESS (dropped $d0 -> $d, refused $f0 -> $f)\" > /proc/1/fd/1
-                        exit 0
-                      fi
-                      if [ \"$role\" = proxy ] && [ \"$inflight\" = 0 ] && [ -n \"$d0\" ] && [ -n \"$f0\" ]; then
-                        echo \"flare preStop: proxy and every forward delivered (dropped $d, refused $f unchanged)\" > /proc/1/fd/1
+                      if [ \"$role\" = proxy ] && [ \"$inflight\" = 0 ]; then
+                        if [ -n \"$d0\" ] && [ -n \"$f0\" ] && [ \"$d\" = \"$d0\" ] && [ \"$f\" = \"$f0\" ]; then
+                          echo \"flare preStop: proxy and every forward delivered (dropped $d, refused $f unchanged)\" > /proc/1/fd/1
+                        else
+                          echo \"flare preStop: proxy and nothing in flight, but forward drain NOT LOSSLESS (dropped $d0 -> $d, refused $f0 -> $f)\" > /proc/1/fd/1
+                        fi
                         sleep 2
                         exit 0
                       fi

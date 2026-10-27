@@ -87,6 +87,7 @@ namespace test_handler_cluster_replication {
 		delete thread_idx;
 		delete stats_object;
 		queue_proxy_write::foreign_retry_window_ms = 120 * 1000;
+		queue_proxy_write::hold_window_ms = 0;
 
 		if (sigaction(SIGUSR1, &prev_sigusr1_action, NULL) < 0) {
 			log_err("sigaction for %d failed: %s (%d)", SIGUSR1, util::strerror(errno), errno);
@@ -458,6 +459,91 @@ namespace test_handler_cluster_replication {
 		cut_assert_equal_boolean(true, q3->is_success());
 		cut_assert_equal_int(2, (int)stats_object->get_proxy_write_dropped());
 		cut_assert_equal_int(1, (int)crepl("forward_applied"));
+	}
+
+	shared_queue_proxy_write enqueue_replica_set(shared_thread t, const string& key) {
+		storage::entry e = get_entry(" " + key + " 0 0 5 3", storage::parse_type_set, "VALUE");
+		vector<string> proxy;
+		shared_queue_proxy_write q(new queue_proxy_write(NULL, NULL, proxy, e, "set"));
+		q->set_post_proxy(true);
+		q->sync_ref();
+		enqueue(t, q);
+		return q;
+	}
+
+	// L12: a replica recreated under the same name does not answer at first
+	// (its name still resolves to the old pod's address). Without a hold
+	// window the forward is dropped after the 4 quick tries — the write the
+	// client was told STORED is missing on that replica (the rolling-restart
+	// loss of rc68 runs 40449075597 / 40449096897).
+	void test_in_cluster_forward_without_hold_is_dropped() {
+		queue_proxy_write::hold_window_ms = 0;
+		shared_thread t = start_handler(false);
+		shared_queue_proxy_write q = enqueue_replica_set(t, "key");
+		q->sync();
+		cut_assert_equal_boolean(false, q->is_success());
+		cut_assert_equal_int(1, (int)stats_object->get_proxy_write_dropped());
+	}
+
+	// With the hold window the same forward waits the replica out and is
+	// delivered once it answers: nothing dropped.
+	void test_in_cluster_forward_is_held_until_the_replica_answers() {
+		queue_proxy_write::hold_window_ms = 20000;
+		shared_thread t = start_handler(false);
+		shared_queue_proxy_write q = enqueue_replica_set(t, "key");
+		// well after the first attempts (one open = 2 connects, see
+		// test_foreign_rides_out_a_late_destination)
+		usleep(4000 * 1000);
+		s->listen(port);
+		cs = s->wait();
+		char *p, *v;
+		cs[0]->readline(&p);
+		cs[0]->readline(&v);
+		cut_assert_equal_string("set key 0 0 5 3\n", p);
+		cs[0]->writeline("STORED");
+		delete[] p;
+		delete[] v;
+		q->sync();
+		cut_assert_equal_boolean(true, q->is_success());
+		cut_assert_equal_int(op::result_stored, q->get_result());
+		cut_assert_equal_int(0, (int)stats_object->get_proxy_write_dropped());
+	}
+
+	// The window runs out: that forward is dropped and counted; the next one
+	// makes ONE attempt and is counted at once (a dead replica does not hold
+	// every write for the whole window); once the replica answers, the next
+	// forward is delivered.
+	void test_in_cluster_hold_gives_up_then_tries_once_each() {
+		queue_proxy_write::hold_window_ms = 1500;
+		shared_thread t = start_handler(false);
+		shared_queue_proxy_write q1 = enqueue_replica_set(t, "key1");
+		q1->sync();
+		cut_assert_equal_boolean(false, q1->is_success());
+		cut_assert_equal_int(1, (int)stats_object->get_proxy_write_dropped());
+
+		struct timespec t0, t1;
+		clock_gettime(CLOCK_MONOTONIC, &t0);
+		shared_queue_proxy_write q2 = enqueue_replica_set(t, "key2");
+		q2->sync();
+		clock_gettime(CLOCK_MONOTONIC, &t1);
+		long ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+		cut_assert_equal_boolean(false, q2->is_success());
+		cut_assert_equal_int(2, (int)stats_object->get_proxy_write_dropped());
+		cut_assert(ms < 1500, cut_message("a given-up replica still held the forward %ld ms", ms));
+
+		s->listen(port);
+		shared_queue_proxy_write q3 = enqueue_replica_set(t, "key3");
+		cs = s->wait();
+		char *p, *v;
+		cs[0]->readline(&p);
+		cs[0]->readline(&v);
+		cut_assert_equal_string("set key3 0 0 5 3\n", p);
+		cs[0]->writeline("STORED");
+		delete[] p;
+		delete[] v;
+		q3->sync();
+		cut_assert_equal_boolean(true, q3->is_success());
+		cut_assert_equal_int(2, (int)stats_object->get_proxy_write_dropped());
 	}
 
 	// SERVER_ERROR is transient (a restarted destination without its role):

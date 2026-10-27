@@ -67,6 +67,7 @@ private:
 #endif
 	int					_noreply_window_limit;
 	int					_shutdown_forward_drain_msec;
+	int					_proxy_forward_hold_msec;
 	int					_net_read_timeout;
 	bool				_net_read_timeout_set;
 	int					_proxy_concurrency;
@@ -160,6 +161,12 @@ public:
 	// running for the in-cluster forwards still queued to replicas (NODE-OPS-
 	// LOSSLESS-PLAN L2): they are writes a client was told STORED
 	static const int default_shutdown_forward_drain_msec = 30000;
+	// how long an in-cluster forward to a replica that does not answer is kept
+	// and sent again (the address is resolved again on each try) before it is
+	// dropped: a replica recreated under the same name is reached at its new
+	// address once the name resolves to it (L12 — DNS answers for a pod name
+	// are cached up to ~30 s)
+	static const int default_proxy_forward_hold_msec = 60000;
 	static const int default_net_read_timeout = 10*60;						// sec
 	static const int default_proxy_concurrency = 2;
 	static const int default_reconstruction_interval = 0;
@@ -244,6 +251,7 @@ public:
 #endif
 	int get_noreply_window_limit() { return this->_noreply_window_limit; };
 	int get_shutdown_forward_drain_msec() { return this->_shutdown_forward_drain_msec; };
+	int get_proxy_forward_hold_msec() { return this->_proxy_forward_hold_msec; };
 	int get_net_read_timeout() { return this->_net_read_timeout; };
 	// net-read-timeout was given explicitly (config file or command line)
 	bool is_net_read_timeout_set() { return this->_net_read_timeout_set; };

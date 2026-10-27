@@ -57,8 +57,8 @@ protected:
 	// a forward to ANOTHER cluster (cluster_replication): its answer is
 	// classified and counted per op (cross-cluster audit 2026-10-11)
 	bool										_foreign;
-	// the forwarding thread running this item (foreign only): its shutdown
-	// request ends the retry wait
+	// the forwarding thread running this item: its shutdown request ends the
+	// retry wait (foreign and held in-cluster forwards)
 	shared_thread						_owner;
 	// counted in stats' in-flight forwards until this item is destroyed
 	bool										_in_flight;
@@ -74,6 +74,16 @@ public:
 	// up within seconds). The thread's later forwards wait behind it, so the
 	// order per key is kept. Tests shorten it.
 	static int foreign_retry_window_ms;
+	// An in-cluster forward to a replica that does not answer is kept and
+	// sent again, with backoff, for this long before it is dropped (counted);
+	// each try opens the connection again, so the replica's name is resolved
+	// again. L12 (rc68 runs 40341355474, 40449075597, 40449096897): after a
+	// replica pod was recreated, its name kept resolving to the old pod's
+	// address for up to ~30 s (cached DNS answers), and the 4 quick tries
+	// below dropped every forward of that time — writes the clients were
+	// told STORED, missing on the replica that was promoted next. 0 keeps
+	// the 4 quick tries. Set from proxy-forward-hold-msec.
+	static int hold_window_ms;
 
 	// What a destination's answer to a forwarded op means for the source.
 	// applied: the destination took this change. noop: it already holds this
@@ -115,6 +125,7 @@ public:
 protected:
 	op_proxy_write* _get_op(string op_ident, shared_connection c);
 	int _run_foreign(shared_connection c);
+	bool _send_held(shared_connection c, op_proxy_write* p);
 	bool _owner_stopping();
 };
 

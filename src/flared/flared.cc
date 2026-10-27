@@ -32,6 +32,7 @@
 #include "signal_interrupt.h"
 #include "flared.h"
 #include "connection_tcp.h"
+#include "queue_proxy_write.h"
 #include "handler_alarm.h"
 #include "handler_metrics.h"
 #include "handler_reaper.h"
@@ -248,6 +249,7 @@ int flared::startup(int argc, char **argv) {
 	this->_cluster->set_max_total_thread_queue(ini_option_object().get_max_total_thread_queue());
 	this->_cluster->set_read_unavailable_error(ini_option_object().is_read_unavailable_error());
 	this->_cluster->set_noreply_window_limit(ini_option_object().get_noreply_window_limit());
+	queue_proxy_write::hold_window_ms = ini_option_object().get_proxy_forward_hold_msec();
 	this->_cluster->add_proxy_event_listener(this->_cluster_replication);
 #ifdef ENABLE_K8S_OPERATOR
 	// In K8s operator mode, override the index server address from environment
@@ -608,6 +610,7 @@ int flared::reload() {
 
 	// noreply_window_limit
 	this->_cluster->set_noreply_window_limit(ini_option_object().get_noreply_window_limit());
+	queue_proxy_write::hold_window_ms = ini_option_object().get_proxy_forward_hold_msec();
 
 	time_watcher_object->stop();
 	time_watcher_observer::set_threshold_warn_msec(ini_option_object().get_storage_access_watch_threshold_warn_msec());

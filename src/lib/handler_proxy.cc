@@ -164,6 +164,9 @@ int handler_proxy::_process_queue(shared_thread_queue q) {
 		return r->run(this->_connection);
 	} else if (q->get_ident() == "proxy_write") {
 		shared_queue_proxy_write r = boost::dynamic_pointer_cast<queue_proxy_write, thread_queue>(q);
+		// a held forward (queue_proxy_write::hold_window_ms) stops waiting when
+		// this thread is asked to stop
+		r->set_owner(this->_thread);
 		int noreply_window_limit = this->_cluster->get_noreply_window_limit();
 		if (!r->is_post_proxy() || (r->get_entry().option & storage::option_noreply) || noreply_window_limit <= 0) {
 			return r->run(this->_connection);

@@ -207,12 +207,17 @@ int queue_proxy_write::run(shared_connection c) {
 	}
 #endif
 
+	// a forward to a replica of this cluster waits out a destination that does
+	// not answer (hold_window_ms) instead of dropping at once
+	const bool held = this->_post_proxy && queue_proxy_write::hold_window_ms > 0;
+
 	// FAIL FAST (forward-window-steps 38048708017): the destination's
 	// connection is down and its last open TIMED OUT moments ago — count this forward
 	// as dropped now (the repair path sees it) instead of queueing it behind
 	// another bounded connect; a later forward tries to connect again.
+	// Not for a held forward: it waits the destination out itself.
 	if (connection_tcp* fctp = dynamic_cast<connection_tcp*>(c.get())) {
-		if (!fctp->is_available() && fctp->open_failed_within(handler_proxy::proxy_fail_fast_window_ms)) {
+		if (!held && !fctp->is_available() && fctp->open_failed_within(handler_proxy::proxy_fail_fast_window_ms)) {
 			char dest[BUFSIZ];
 			snprintf(dest, sizeof(dest), "%s:%d", fctp->get_host().c_str(), fctp->get_port());
 			if (!this->_post_proxy) {
@@ -253,8 +258,14 @@ int queue_proxy_write::run(shared_connection c) {
 		}
 	}
 
-	int retry = queue_proxy_write::max_retry;
-	while (retry > 0) {
+	if (held) {
+		if (!this->_send_held(c, p)) {
+			delete p;
+			return -1;
+		}
+	}
+	int retry = held ? 1 : queue_proxy_write::max_retry;
+	while (!held && retry > 0) {
 		if (p->run_client(this->_entry) >= 0) {
 			break;
 		}
@@ -373,6 +384,99 @@ uint64_t foreign_now_ms() {
 
 bool queue_proxy_write::_owner_stopping() {
 	return this->_owner && this->_owner->is_shutdown_request() != thread::shutdown_request_none;
+}
+
+int queue_proxy_write::hold_window_ms = 0;
+
+/**
+ *	Send one in-cluster forward to a replica, waiting out a destination that
+ *	does not answer (L12).
+ *
+ *	- Each try opens the connection again when it is down, which resolves the
+ *	  replica's name again: a replica recreated under the same name is reached
+ *	  at its new address once the name resolves to it.
+ *	- A failed exchange closes the connection (what is left on it is not
+ *	  trusted). Sending a versioned change again is idempotent: one applied
+ *	  whose reply was lost comes back NOT_STORED / NOT_FOUND.
+ *	- Waits 200 ms, 400 ms ... 2 s between tries, for hold_window_ms in all.
+ *	  The thread's later forwards wait behind this one (order kept); they are
+ *	  counted in flight, so a graceful stop waits for them too.
+ *	- Ends early, counted as dropped: the thread is stopping, or the
+ *	  destination is a proxy in the node map now (it holds no copy to keep).
+ *	- After a forward waited out the whole window, the destination is marked
+ *	  given up: later forwards try once each (counted at once when it fails)
+ *	  until one is delivered, so a dead replica does not hold every write.
+ *
+ *	Returns true when the destination answered (the answer is classified by
+ *	the caller); false when the forward is dropped (counted here).
+ */
+bool queue_proxy_write::_send_held(shared_connection c, op_proxy_write* p) {
+	connection_tcp* ctp = dynamic_cast<connection_tcp*>(c.get());
+	const string dest = ctp ? ctp->get_host() + ":" + boost::lexical_cast<string>(ctp->get_port()) : "";
+	const bool given_up = ctp != NULL && ctp->sender_given_up();
+	const uint64_t started = foreign_now_ms();
+	int wait_ms = 200;
+	int attempts = 0;
+	const char* why = "its hold window ended";
+	for (;;) {
+		if (!c->is_available()) {
+			c->open();
+		}
+		attempts++;
+		if (c->is_available() && p->run_client(this->_entry) >= 0) {
+			if (given_up) {
+				ctp->set_sender_given_up(false);
+				log_notice("replica %s answers again — forwards to it wait out their hold window again", dest.c_str());
+			}
+			if (attempts > 1) {
+				static AtomicCounter held_logged(0);
+				if (held_logged.incr() % 100 == 1) {
+					log_notice("proxy write delivered after %d attempts in %llu ms (dest=%s, op=%s, key=%s, version=%u) (logged 1 in 100)",
+						attempts, (unsigned long long)(foreign_now_ms() - started), dest.c_str(),
+						this->_op_ident.c_str(), this->_entry.key.c_str(), this->_entry.version);
+				}
+			}
+			return true;
+		}
+		c->close();
+		if (given_up) {
+			why = "an earlier forward to it already waited out its hold window";
+			break;
+		}
+		if (this->_owner_stopping()) {
+			why = "the forwarding thread is stopping";
+			break;
+		}
+		if (this->_cluster != NULL && ctp != NULL
+				&& this->_cluster->get_node(ctp->get_host(), ctp->get_port()).node_role == cluster::role_proxy) {
+			why = "the destination is a proxy in the node map now";
+			break;
+		}
+		if (foreign_now_ms() - started >= (uint64_t)queue_proxy_write::hold_window_ms) {
+			break;
+		}
+		for (int slept = 0; slept < wait_ms && !this->_owner_stopping(); slept += 100) {
+			usleep(100 * 1000);
+		}
+		wait_ms = wait_ms * 2 > 2000 ? 2000 : wait_ms * 2;
+	}
+
+	if (dest.empty()) {
+		stats_object->increment_proxy_write_dropped();
+	} else {
+		stats_object->increment_proxy_write_dropped(dest);
+	}
+	if (!given_up && ctp != NULL && !this->_owner_stopping()
+			&& foreign_now_ms() - started >= (uint64_t)queue_proxy_write::hold_window_ms) {
+		ctp->set_sender_given_up(true);
+	}
+	static AtomicCounter dropped_logged(0);
+	if (dropped_logged.incr() % 100 == 1) {
+		log_err("proxy write DROPPED after %d attempts in %llu ms (dest=%s, op=%s, key=%s, version=%u): %s — counted; replica now diverges until it reconstructs (logged 1 in 100)",
+			attempts, (unsigned long long)(foreign_now_ms() - started), dest.c_str(),
+			this->_op_ident.c_str(), this->_entry.key.c_str(), this->_entry.version, why);
+	}
+	return false;
 }
 
 /**

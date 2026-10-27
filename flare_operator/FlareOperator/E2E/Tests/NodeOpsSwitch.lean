@@ -352,6 +352,9 @@ def gateTest (c : Ctx) : IO TestResult := do
     c.event s!"old master gone={gone}; cut removed"
     discard <| c.stopLoad "svc" 4
     let log ← (try IO.FS.readFile logFile catch _ => pure "")
+    -- the whole followed log is kept: PVC 40449082661 had a log without any
+    -- verdict line, and the file under /tmp was not uploaded to tell why
+    c.art "old-master.log" log
     for l in (log.splitOn "\n").filter (fun l => containsSubstr l "preStop" || containsSubstr l "forward drain") do
       c.art "gate.txt" l
     let claimedLossless := containsSubstr log "every forward delivered" || containsSubstr log "shutdown forward drain lossless"

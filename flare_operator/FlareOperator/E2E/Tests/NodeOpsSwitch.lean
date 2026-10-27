@@ -364,21 +364,35 @@ def gateTest (c : Ctx) : IO TestResult := do
     if !reportedNot then return .fail (unobservable "the old master's log carries no drain verdict at all (NOT LOSSLESS / NOT CONFIRMED)")
     return .pass
 
-private def switchTests (cfg : ClusterConfig) (suite : String) : List TestCase := [
-  { name := "(S1) kubectl delete pod of the MASTER under a client-like load: the pod is replaced; 0 write errors, 0 acknowledged writes missing on the final master and replica"
-    run := switchTest { cfg, suite, test := "s-delete" } .deleteMaster },
-  { name := "(S2) rolling restart of the StatefulSet under a client-like load: every pod is replaced; 0 write errors, 0 missing"
-    run := switchTest { cfg, suite, test := "s-rolling" } .rollingRestart },
-  { name := "(S3) operator Deployment + StatefulSet rollout restart together (helm-upgrade-like, not a helm upgrade) under a client-like load: 0 write errors, 0 missing"
-    run := switchTest { cfg, suite, test := "s-rollboth" } .rollBoth },
-  { name := "(S4) kubectl drain of the MASTER's worker (no eviction guard) under a client-like load: the drain completes and no flared pod is left there; 0 write errors, 0 missing"
-    run := switchTest { cfg, suite, test := "s-drain" } .drainMaster },
-  { name := "(S5) the old master is cut from the replica and deleted under a write load: preStop / flared report the drain as NOT lossless, never as lossless (gate test)"
-    run := gateTest { cfg, suite, test := "s-gate" } }
-]
+/-- One scenario per suite, each on a FRESH cluster: a scenario that leaves the
+    pair broken (e.g. a replica on an older history after S3) no longer makes
+    the next one fail on its precondition, and each leg stays well inside the
+    job's time limit (runs 40363315500 / 40422801175 were cancelled at 120 min
+    with all scenarios in one leg). -/
+inductive Scenario where
+  | op (o : SwitchOp)
+  | gate
+  deriving BEq
 
-private def switchSuiteOf (name suite : String) (tmpfs pvc : Bool) : TestSuite :=
-  let cfg := cfgOf name tmpfs pvc
+def Scenario.slug : Scenario → String
+  | .op .deleteMaster => "delete"
+  | .op .rollingRestart => "rolling"
+  | .op .rollBoth => "rollboth"
+  | .op .drainMaster => "drain"
+  | .gate => "gate"
+
+def Scenario.title : Scenario → String
+  | .op .deleteMaster => "(S1) kubectl delete pod of the MASTER under a client-like load: the pod is replaced; 0 write errors, 0 acknowledged writes missing on the final master and replica"
+  | .op .rollingRestart => "(S2) rolling restart of the StatefulSet under a client-like load: every pod is replaced; 0 write errors, 0 missing"
+  | .op .rollBoth => "(S3) operator Deployment + StatefulSet rollout restart together (helm-upgrade-like, not a helm upgrade) under a client-like load: 0 write errors, 0 missing"
+  | .op .drainMaster => "(S4) kubectl drain of the MASTER's worker (no eviction guard) under a client-like load: the drain completes and no flared pod is left there; 0 write errors, 0 missing"
+  | .gate => "(S5) the old master is cut from the replica and deleted under a write load: preStop / flared report the drain as NOT lossless, never as lossless (gate test)"
+
+private def scenarioSuite (sc : Scenario) (tmpfs : Bool) : TestSuite :=
+  let short := if tmpfs then s!"swt-{sc.slug}" else s!"sw-{sc.slug}"
+  let suite := s!"node-ops-switch{if tmpfs then "-tmpfs" else ""}-{sc.slug}"
+  let cfg := cfgOf s!"node-{short}" tmpfs (!tmpfs)
+  let c : Ctx := { cfg, suite, test := s!"s-{sc.slug}" }
   { name := suite
     setup := do deployCluster cfg; IO.sleep 50000
     teardown := do
@@ -386,9 +400,12 @@ private def switchSuiteOf (name suite : String) (tmpfs pvc : Bool) : TestSuite :
       cleanupCluster cfg
     onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
     afterEach := fun i => saveFullLogs cfg.«namespace» s!"after-test-{i}"
-    tests := switchTests cfg suite }
+    tests := [{ name := sc.title, run := match sc with | .op o => switchTest c o | .gate => gateTest c }] }
 
-def switchSuite : TestSuite := switchSuiteOf "node-sw" "node-ops-switch" false true
-def switchTmpfsSuite : TestSuite := switchSuiteOf "node-swt" "node-ops-switch-tmpfs" true false
+def scenarios : List Scenario := [.op .deleteMaster, .op .rollingRestart, .op .rollBoth, .op .drainMaster, .gate]
+
+/-- node-ops-switch-<scenario> (PVC) and node-ops-switch-tmpfs-<scenario>. -/
+def switchSuites : List TestSuite :=
+  scenarios.map (fun sc => scenarioSuite sc false) ++ scenarios.map (fun sc => scenarioSuite sc true)
 
 end FlareOperator.E2E.Tests.NodeOpsSwitch

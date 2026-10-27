@@ -52,7 +52,7 @@ import FlareOperator.E2E.Tests.NodeOpsSwitch
 open FlareOperator.E2E
 
 def main (args : List String) : IO UInt32 :=
-  e2eMain [
+  e2eMain ([
     Tests.Failover.suite,
     Tests.ReadBalance.suite,
     Tests.ScaleOutMaster.suite,
@@ -114,8 +114,6 @@ def main (args : List String) : IO UInt32 :=
     Tests.ContinuousReplicationLimits.promotionDisconnectedEmptySuite,
     Tests.ContinuousReplicationLimits.promotionProxyOnlySuite,
     Tests.StatsCost.suite,
-    Tests.NodeOpsSwitch.switchSuite,
-    Tests.NodeOpsSwitch.switchTmpfsSuite,
     Tests.ContinuousReplicationLimits.historyHeldSuite,
     Tests.ContinuousReplicationLimits.historyIntentSuite,
     Tests.ContinuousReplicationLimits.forwardWindowSuite,
@@ -136,4 +134,4 @@ def main (args : List String) : IO UInt32 :=
     Tests.NativeMetrics.suite,
     Tests.BlueGreenMigration.suite,
     Tests.SnapshotPushSeed.suite
-  ] args
+  ] ++ Tests.NodeOpsSwitch.switchSuites) args

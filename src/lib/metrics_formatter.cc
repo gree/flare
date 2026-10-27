@@ -85,6 +85,11 @@ const command_mapping memcached_commands[] = {
 const stat_mapping flared_gauges[] = {
 	{ "node_map_version",   "flared_node_map_version",                 "gauge"   },
 	{ "proxy_write_dropped",     "flare_node_proxy_write_dropped",     "counter" },
+	// in-cluster forwards to replicas: queued now (gauge) and answered with a
+	// refusal / with "already newer" (counters); the drain gate reads them
+	{ "proxy_write_in_flight",   "flare_node_proxy_write_in_flight",   "gauge"   },
+	{ "proxy_write_failed",      "flare_node_proxy_write_failed",      "counter" },
+	{ "proxy_write_skipped",     "flare_node_proxy_write_skipped",     "counter" },
 	// 1 = the node map makes this node a master but it REFUSES to serve as one
 	// (a copy it knows is unfit, or a restored copy of another partition):
 	// writes to its partition fail. A confirmed refusal, read from the node

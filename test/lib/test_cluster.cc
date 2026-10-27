@@ -247,18 +247,31 @@ namespace test_cluster
 		cppcut_assert_equal(-1, cluster.reconstruct_node(v, ver-1)); // deny lower version
 	}
 
+	// shared flags between the test threads: atomic loads / stores (no data
+	// race; review of 10f5f57)
+	static int ld(const int* p) { return __atomic_load_n(p, __ATOMIC_SEQ_CST); }
+	static void st(int* p, int v) { __atomic_store_n(p, v, __ATOMIC_SEQ_CST); }
+	static long ldl(const long* p) { return __atomic_load_n(p, __ATOMIC_SEQ_CST); }
+
 	struct swap_arg {
 		cluster_test* c;
 		uint64_t ver;
-		volatile int done;
+		int done;
 	};
 
 	static void* swap_map(void* a) {
 		swap_arg* x = static_cast<swap_arg*>(a);
 		vector<cluster::node> v;
 		x->c->reconstruct_node(v, x->ver);
-		x->done = 1;
+		st(&x->done, 1);
 		return NULL;
+	}
+
+	static bool wait_flag(const int* f, int ms) {
+		for (int i = 0; i < ms / 10 && !ld(f); i++) {
+			usleep(10 * 1000);
+		}
+		return ld(f) != 0;
 	}
 
 	// NODE-OPS-LOSSLESS-PLAN L1: a write in its write section (role decided,
@@ -272,22 +285,19 @@ namespace test_cluster
 		swap_arg a;
 		a.c = &cluster;
 		a.ver = cluster.get_node_map_version() + 10;
-		a.done = 0;
+		st(&a.done, 0);
 		cluster.write_section_enter();
 		cluster.write_section_enter();		// nested: depth 2, one lock
 		pthread_t t;
 		cut_assert_equal_int(0, pthread_create(&t, NULL, swap_map, &a));
 		usleep(300 * 1000);
-		cut_assert_equal_int(0, a.done, cut_message("the map was swapped while a write was in its section"));
+		cut_assert_equal_int(0, ld(&a.done), cut_message("the map was swapped while a write was in its section"));
 		cluster.write_section_leave();		// depth 1: still held
 		usleep(300 * 1000);
-		cut_assert_equal_int(0, a.done, cut_message("the map was swapped after the inner leave"));
+		cut_assert_equal_int(0, ld(&a.done), cut_message("the map was swapped after the inner leave"));
 		cluster.write_section_leave();		// released
-		for (int i = 0; i < 50 && !a.done; i++) {
-			usleep(100 * 1000);
-		}
+		cut_assert_true(wait_flag(&a.done, 5000));
 		pthread_join(t, NULL);
-		cut_assert_equal_int(1, a.done);
 		cppcut_assert_equal(a.ver, cluster.get_node_map_version());
 		// an unbalanced leave is ignored
 		cluster.write_section_leave();
@@ -295,26 +305,87 @@ namespace test_cluster
 		cluster.write_section_leave();
 	}
 
-	struct reader_arg {
+	struct probe_arg {
 		cluster_test* c;
-		volatile int stop;
-		volatile long entries;
+		int refused;			// a new write was refused while the swap waited
+		int entered_while_waiting;
+		int stop;
 	};
 
-	static void* steady_writer(void* a) {
-		reader_arg* x = static_cast<reader_arg*>(a);
-		while (!x->stop) {
-			x->c->write_section_enter();
-			usleep(300);
-			x->c->write_section_leave();
-			x->entries++;
+	// a NEW write (another thread, no section held) tries to enter while a
+	// write holds the section and a swap waits; it records whether it was
+	// refused (the swap is preferred) or let in
+	static void* probe_new_write(void* a) {
+		probe_arg* x = static_cast<probe_arg*>(a);
+		for (int i = 0; i < 200 && !ld(&x->stop); i++) {
+			if (x->c->write_section_try_enter()) {
+				x->c->write_section_leave();
+			} else {
+				st(&x->refused, 1);
+				break;
+			}
+			usleep(10 * 1000);
 		}
 		return NULL;
 	}
 
-	// NODE-OPS-LOSSLESS-PLAN L1, review of 8d64aaf: under a steady write load
-	// (overlapping readers that never all leave at once) a map swap still gets
-	// the section within a bound — the lock prefers the writer (glibc)
+	// The map swap is preferred over new writes (review of 8d64aaf / 10f5f57):
+	// while one write holds the section and a swap is QUEUED, a new write must
+	// be refused (try-enter fails) — with a reader-preferring lock it is let
+	// in, and a steady stream of writes can hold the swap off indefinitely.
+	// The probe keeps trying for up to 2 s, so it is not a guess about when
+	// the swap queued: it is refused only once the swap is queued, and never
+	// on a reader-preferring lock.
+	void test_a_waiting_map_swap_is_preferred_over_a_new_write()
+	{
+		const std::string _tmp_dir = tmp_dir + std::string("/write_section_pref");
+		mkdir(_tmp_dir.c_str(), 0700);
+		cluster_test cluster(_tmp_dir);
+		cluster.write_section_enter();			// write 1 holds the section
+		swap_arg a;
+		a.c = &cluster;
+		a.ver = cluster.get_node_map_version() + 10;
+		st(&a.done, 0);
+		pthread_t ts;
+		cut_assert_equal_int(0, pthread_create(&ts, NULL, swap_map, &a));
+		probe_arg p;
+		p.c = &cluster;
+		st(&p.refused, 0);
+		st(&p.entered_while_waiting, 0);
+		st(&p.stop, 0);
+		pthread_t tp;
+		cut_assert_equal_int(0, pthread_create(&tp, NULL, probe_new_write, &p));
+		pthread_join(tp, NULL);
+		const int refused = ld(&p.refused);
+		const int swapped_early = ld(&a.done);
+		cluster.write_section_leave();			// write 1 ends: the swap goes
+		cut_assert_true(wait_flag(&a.done, 5000), cut_message("the swap did not complete after the write left"));
+		pthread_join(ts, NULL);
+		cut_assert_equal_int(0, swapped_early, cut_message("the swap completed while a write held the section"));
+		cut_assert_equal_int(1, refused, cut_message("a new write kept entering the section for 2 s while a map swap was queued (the lock prefers readers)"));
+	}
+
+	struct reader_arg {
+		cluster_test* c;
+		int stop;
+		long entries;
+	};
+
+	static void* steady_writer(void* a) {
+		reader_arg* x = static_cast<reader_arg*>(a);
+		while (!ld(&x->stop)) {
+			x->c->write_section_enter();
+			usleep(300);
+			x->c->write_section_leave();
+			__atomic_add_fetch(&x->entries, 1, __ATOMIC_SEQ_CST);
+		}
+		return NULL;
+	}
+
+	// liveness under a steady write load: a map swap gets the section within
+	// a bound. A smoke test only: on a reader-preferring lock it passed once
+	// and failed once with this load, so the preference itself is shown by
+	// the deterministic test above
 	void test_map_swap_is_not_starved_by_a_steady_write_load()
 	{
 		const std::string _tmp_dir = tmp_dir + std::string("/write_section_steady");
@@ -325,36 +396,30 @@ namespace test_cluster
 		pthread_t rt[n];
 		for (int i = 0; i < n; i++) {
 			ra[i].c = &cluster;
-			ra[i].stop = 0;
-			ra[i].entries = 0;
+			st(&ra[i].stop, 0);
+			__atomic_store_n(&ra[i].entries, 0L, __ATOMIC_SEQ_CST);
 			cut_assert_equal_int(0, pthread_create(&rt[i], NULL, steady_writer, &ra[i]));
 		}
 		usleep(200 * 1000);
 		swap_arg a;
 		a.c = &cluster;
 		a.ver = cluster.get_node_map_version() + 10;
-		a.done = 0;
-		struct timespec t0, t1;
-		clock_gettime(CLOCK_MONOTONIC, &t0);
+		st(&a.done, 0);
 		pthread_t t;
 		cut_assert_equal_int(0, pthread_create(&t, NULL, swap_map, &a));
-		for (int i = 0; i < 200 && !a.done; i++) {
-			usleep(10 * 1000);
-		}
-		clock_gettime(CLOCK_MONOTONIC, &t1);
-		const long ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+		const bool done = wait_flag(&a.done, 2000);
 		long before = 0;
 		for (int i = 0; i < n; i++) {
-			before += ra[i].entries;
+			before += ldl(&ra[i].entries);
 		}
 		for (int i = 0; i < n; i++) {
-			ra[i].stop = 1;
+			st(&ra[i].stop, 1);
 		}
 		for (int i = 0; i < n; i++) {
 			pthread_join(rt[i], NULL);
 		}
 		pthread_join(t, NULL);
-		cut_assert_equal_int(1, a.done, cut_message("the map swap did not get the write section within 2 s under a steady write load (%ld ms, %ld writes)", ms, before));
+		cut_assert_true(done, cut_message("the map swap did not get the write section within 2 s under a steady write load (%ld writes)", before));
 		cut_assert(before > 100, cut_message("the write load was not steady (%ld writes)", before));
 		cppcut_assert_equal(a.ver, cluster.get_node_map_version());
 	}
@@ -374,17 +439,14 @@ namespace test_cluster
 		swap_arg a;
 		a.c = &c2;
 		a.ver = c2.get_node_map_version() + 10;
-		a.done = 0;
+		st(&a.done, 0);
 		pthread_t t;
 		cut_assert_equal_int(0, pthread_create(&t, NULL, swap_map, &a));
 		usleep(300 * 1000);
-		cut_assert_equal_int(0, a.done, cut_message("c2's map was swapped while a write was in c2's section"));
+		cut_assert_equal_int(0, ld(&a.done), cut_message("c2's map was swapped while a write was in c2's section"));
 		c2.write_section_leave();
-		for (int i = 0; i < 50 && !a.done; i++) {
-			usleep(100 * 1000);
-		}
+		cut_assert_true(wait_flag(&a.done, 5000));
 		pthread_join(t, NULL);
-		cut_assert_equal_int(1, a.done);
 		c1.write_section_leave();
 	}
 

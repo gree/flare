@@ -1186,6 +1186,23 @@ void cluster::write_section_enter() {
 	}
 }
 
+bool cluster::write_section_try_enter() {
+	int i = write_section_slot(this, true);
+	if (i < 0) {
+		return false;
+	}
+	if (write_section_depth[i] > 0) {
+		write_section_depth[i]++;
+		return true;
+	}
+	if (pthread_rwlock_tryrdlock(&this->_mutex_write_section) != 0) {
+		write_section_owner[i] = NULL;
+		return false;
+	}
+	write_section_depth[i] = 1;
+	return true;
+}
+
 void cluster::write_section_leave() {
 	int i = write_section_slot(this, false);
 	if (i >= 0) {

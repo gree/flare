@@ -121,7 +121,10 @@ flared::flared():
 		_req_thread_pool(NULL),
 		_other_thread_pool(NULL),
 		_cluster(NULL),
-		_storage(NULL) {
+		_storage(NULL),
+		_drain_baseline_set(false),
+		_drain_dropped0(0),
+		_drain_failed0(0) {
 }
 
 /**
@@ -457,6 +460,10 @@ int flared::run() {
 	for (;;) {
 		if (this->_shutdown_request) {
 			log_notice("shutdown request accepted -> breaking running loop", 0);
+			// the drain's baseline is the moment the stop was requested: a
+			// forward dropped or refused while the request threads finish
+			// is part of this stop (review of 10f5f57)
+			this->_note_drain_baseline();
 			log_notice("send shutdown message to index server", 0);
 			this->_server->close(); /* prevent this node from responding */
 			// Stop following before telling the index we are leaving, so no
@@ -688,20 +695,30 @@ int flared::shutdown() {
 /**
  *	wait (at most `msec`) until no in-cluster forward to a replica exists
  */
+void flared::_note_drain_baseline() {
+	if (this->_drain_baseline_set) {
+		return;
+	}
+	stats_object->get_proxy_write_failed(this->_drain_failed0);
+	this->_drain_dropped0 = stats_object->get_proxy_write_dropped();
+	this->_drain_baseline_set = true;
+}
+
 void flared::_drain_forwards(int msec) {
 	// "in flight = 0" means every forward item ended — delivered, refused or
 	// dropped — not that it was delivered (review of 8d64aaf). The drain is
-	// lossless only if no forward to a replica was dropped or refused while
-	// it ran, and it ended before the bound.
+	// lossless only if no forward to a replica was dropped or refused since
+	// the stop was requested, nothing is left when it ends, and it ended
+	// within the bound. A bound of 0 does not wait: anything still queued
+	// makes the drain NOT confirmed (review of 10f5f57).
+	this->_note_drain_baseline();
+	const uint64_t failed0 = this->_drain_failed0;
+	const uint64_t dropped0 = this->_drain_dropped0;
 	uint64_t total = 0;
-	uint64_t failed0 = 0;
-	stats_object->get_proxy_write_failed(failed0);
-	const uint64_t dropped0 = stats_object->get_proxy_write_dropped();
 	stats_object->get_repl_in_flight(total);
 	struct timespec t0;
 	clock_gettime(CLOCK_MONOTONIC, &t0);
 	long long elapsed = 0;
-	bool timed_out = false;
 	if (total > 0 && msec > 0) {
 		log_notice("in-cluster forwards in flight at shutdown: %llu -> waiting up to %d msec for them to end", static_cast<unsigned long long>(total), msec);
 		for (;;) {
@@ -710,29 +727,27 @@ void flared::_drain_forwards(int msec) {
 			struct timespec t1;
 			clock_gettime(CLOCK_MONOTONIC, &t1);
 			elapsed = (static_cast<long long>(t1.tv_sec) - t0.tv_sec) * 1000 + (static_cast<long long>(t1.tv_nsec) - t0.tv_nsec) / 1000000;
-			if (total == 0) {
+			if (total == 0 || elapsed >= msec) {
 				break;
 			}
-			if (elapsed >= msec) {
-				timed_out = true;
-				map<string, uint64_t> left = stats_object->get_repl_in_flight(total);
-				for (map<string, uint64_t>::const_iterator it = left.begin(); it != left.end(); it++) {
-					log_err("shutdown: %llu in-cluster forward(s) to %s still in flight after %lld msec — they are abandoned (counted as dropped)",
-						static_cast<unsigned long long>(it->second), it->first.c_str(), elapsed);
-				}
-				break;
-			}
+		}
+	}
+	if (total > 0) {
+		map<string, uint64_t> left = stats_object->get_repl_in_flight(total);
+		for (map<string, uint64_t>::const_iterator it = left.begin(); it != left.end(); it++) {
+			log_err("shutdown: %llu in-cluster forward(s) to %s still in flight after %lld msec (bound %d msec) — they are abandoned (counted as dropped)",
+				static_cast<unsigned long long>(it->second), it->first.c_str(), elapsed, msec);
 		}
 	}
 	uint64_t failed1 = 0;
 	stats_object->get_proxy_write_failed(failed1);
 	const uint64_t dropped1 = stats_object->get_proxy_write_dropped();
-	if (timed_out || dropped1 != dropped0 || failed1 != failed0) {
-		log_err("shutdown forward drain NOT LOSSLESS: %s; forwards dropped during the drain %llu, refused by a replica %llu (after %lld msec)",
-			timed_out ? "the bound was reached with forwards still queued" : "every forward ended, but not all were delivered",
+	if (total > 0 || dropped1 != dropped0 || failed1 != failed0) {
+		log_err("shutdown forward drain NOT LOSSLESS: %s; since the stop was requested %llu forward(s) dropped and %llu refused by a replica (after %lld msec)",
+			total > 0 ? "forwards were still queued when the drain ended" : "every forward ended, but not all were delivered",
 			static_cast<unsigned long long>(dropped1 - dropped0), static_cast<unsigned long long>(failed1 - failed0), elapsed);
 	} else {
-		log_notice("shutdown forward drain lossless: every in-cluster forward was delivered (after %lld msec; none dropped or refused during the drain)", elapsed);
+		log_notice("shutdown forward drain lossless: every in-cluster forward was delivered (after %lld msec; none dropped or refused since the stop was requested)", elapsed);
 	}
 }
 

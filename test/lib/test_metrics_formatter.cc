@@ -155,6 +155,17 @@ namespace test_metrics_formatter
 		cut_assert_true(contains(out, "flare_node_proxy_write_dropped 7\n"));
 	}
 
+	// the drain gate's counters reach Prometheus (review of 10f5f57)
+	void test_proxy_write_drain_counters() {
+		push("proxy_write_in_flight", "3");
+		push("proxy_write_failed", "2");
+		push("proxy_write_skipped", "5");
+		string out = metrics_formatter::format(stats);
+		cut_assert_true(contains(out, "flare_node_proxy_write_in_flight 3\n"));
+		cut_assert_true(contains(out, "flare_node_proxy_write_failed 2\n"));
+		cut_assert_true(contains(out, "flare_node_proxy_write_skipped 5\n"));
+	}
+
 	// data-dir usage (statvfs): the tmpfs-RAM truth that container-level
 	// memory metrics miss — must reach /metrics for the dashboards.
 	void test_data_dir_usage_gauges() {

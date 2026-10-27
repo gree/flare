@@ -271,6 +271,9 @@ public:
 	int reconstruct_node(vector<node> v, uint64_t node_map_version = 0);
 	void write_section_enter();
 	void write_section_leave();
+	// enter only if the section is free of a queued swap (tryrdlock); false =
+	// not entered. Used by the tests to observe the swap's priority.
+	bool write_section_try_enter();
 	int run_boot_shift();
 	void set_activation_pending(bool v) { this->_activation_pending = v; };
 	int _run_boot_shift_locked();

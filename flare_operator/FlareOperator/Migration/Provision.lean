@@ -244,6 +244,8 @@ metadata:
     {commonLabels p}{adoptionLabels p}{adoptionAnnotations p}
 spec:
   serviceName: {cluster}-nodes
+  updateStrategy:
+    type: OnDelete
   replicas: {numPods}
   selector:
     matchLabels:

@@ -227,6 +227,13 @@ metadata:
 spec:
   serviceName: {{ $c.name }}-nodes
   replicas: {{ mul $c.partitions $c.replicas }}
+  # OnDelete (A0): a template change (helm upgrade, rollout restart) replaces
+  # no pod by itself. The operator replaces the pods not on the update
+  # revision one at a time, a master last through the ordered handover, and
+  # only while every replica is caught up. With RollingUpdate the controller
+  # deleted the master as soon as the restarted replica was Ready.
+  updateStrategy:
+    type: OnDelete
   selector:
     matchLabels:
       app: flare

@@ -61,8 +61,25 @@ def kubectlWaitReady (resource ns : String) (timeoutSec : Nat) : IO Bool := do
   | .ok _ => return true
   | .error _ => return false
 
-/-- Wait for rollout status of a resource. -/
+/-- Wait for rollout status of a resource. A StatefulSet uses updateStrategy
+    OnDelete (A0: the operator replaces its pods), for which `kubectl rollout
+    status` is not available: it is done when the controller has seen the
+    latest spec and every replica is on the update revision and Ready. -/
 def kubectlRolloutStatus (resource ns : String) (timeoutSec : Nat) : IO Bool := do
+  if resource.startsWith "statefulset/" then
+    let deadline := (← IO.monoMsNow) + timeoutSec * 1000
+    repeat
+      match ← kubectl ["get", resource, "-n", ns, "-o",
+          "jsonpath={.metadata.generation}|{.status.observedGeneration}|{.spec.replicas}|{.status.updatedReplicas}|{.status.readyReplicas}"] with
+      | .ok out =>
+        match (out.trim.splitOn "|").map (·.toNat?) with
+        | [some g, some og, some n, some u, some r] =>
+          if og >= g && u == n && r == n then return true
+        | _ => pure ()
+      | .error _ => pure ()
+      if (← IO.monoMsNow) >= deadline then return false
+      IO.sleep 3000
+    return false
   match ← kubectl ["rollout", "status", resource, "-n", ns,
                     s!"--timeout={timeoutSec}s"] with
   | .ok _ => return true

@@ -50,6 +50,9 @@ structure PodInfo where
       observed. -/
   uid : String := ""
   restarts : Option Nat := none
+  /-- the StatefulSet revision the pod was created from
+      (controller-revision-hash); "" when not labelled -/
+  revision : String := ""
   deriving Repr, BEq
 
 /-- Convert a PodInfo to a node key matching the FQDN used by flared for registration.
@@ -74,14 +77,19 @@ def getFlareClusterCRD (crName ns : String) : IO (Except String FlareClusterView
     column count is wrong is dropped rather than guessed. -/
 def parsePodRows (ns output : String) : List PodInfo :=
   (output.splitOn "\n").filterMap fun line =>
-    match line.trim.splitOn "|" with
-    | [name, ip, ready, hostname, subdomain, nodeName, uid, rc, ts] =>
+    let row := fun (name ip ready hostname subdomain nodeName uid rc ts rev : String) =>
       if name.trim.isEmpty then none
-      else some {
+      else some ({
         name := name.trim, ip := ip.trim, port := 12121,
         hostname := hostname.trim, subdomain := subdomain.trim, «namespace» := ns,
         ready := ready.trim == "True", nodeName := nodeName.trim,
-        terminating := !ts.trim.isEmpty, uid := uid.trim, restarts := rc.trim.toNat? }
+        terminating := !ts.trim.isEmpty, uid := uid.trim, restarts := rc.trim.toNat?,
+        revision := rev.trim } : PodInfo)
+    match line.trim.splitOn "|" with
+    | [name, ip, ready, hostname, subdomain, nodeName, uid, rc, ts, rev] =>
+      row name ip ready hostname subdomain nodeName uid rc ts rev
+    | [name, ip, ready, hostname, subdomain, nodeName, uid, rc, ts] =>
+      row name ip ready hostname subdomain nodeName uid rc ts ""
     | _ => none
 
 /-- List flared pods matching the cluster label selector.
@@ -100,10 +108,20 @@ def listFlaredPodsE (crName ns : String) : IO (Except String (List PodInfo)) := 
   -- no deletionTimestamp) keeps every column in place.
   let result ← retryConservative s!"list pods for {crName}" do
     kubectl ["get", "pods", "-n", ns, "-l", s!"app=flare,cluster={crName}",
-             "-o", "jsonpath={range .items[*]}{.metadata.name}|{.status.podIP}|{.status.conditions[?(.type==\"Ready\")].status}|{.spec.hostname}|{.spec.subdomain}|{.spec.nodeName}|{.metadata.uid}|{.status.containerStatuses[0].restartCount}|{.metadata.deletionTimestamp}{\"\\n\"}{end}"]
+             "-o", "jsonpath={range .items[*]}{.metadata.name}|{.status.podIP}|{.status.conditions[?(.type==\"Ready\")].status}|{.spec.hostname}|{.spec.subdomain}|{.spec.nodeName}|{.metadata.uid}|{.status.containerStatuses[0].restartCount}|{.metadata.deletionTimestamp}|{.metadata.labels.controller-revision-hash}{\"\\n\"}{end}"]
   match result with
   | .error e => return .error e
   | .ok output => return .ok (parsePodRows ns output)
+
+/-- The StatefulSet's update revision (status.updateRevision): the revision
+    every pod must be created from. With updateStrategy OnDelete the
+    operator replaces the pods that are not on it (A0). -/
+def statefulSetUpdateRevision (stsName ns : String) : IO (Except String String) := do
+  match ← kubectl ["get", "statefulset", stsName, "-n", ns, "-o", "jsonpath={.status.updateRevision}"] with
+  | .ok out =>
+    if out.trim.isEmpty then return .error s!"statefulset {stsName} has no updateRevision yet"
+    else return .ok out.trim
+  | .error e => return .error e
 
 /-- Node keys of pods that are Terminating (have a deletionTimestamp). -/
 def terminatingPodKeys (pods : List PodInfo) : List String :=

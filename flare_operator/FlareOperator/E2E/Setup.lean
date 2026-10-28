@@ -473,6 +473,25 @@ spec:
       targetPort: flare
       name: flare
 ---
+# every flared pod that is Ready, as the chart's <cluster>-nodes-external (the
+# clients' way in; a pod being replaced or rebuilt is out of its endpoints)
+apiVersion: v1
+kind: Service
+metadata:
+  name: {cluster}-nodes-external
+  namespace: {ns}
+  labels:
+    app: flare
+    cluster: {cluster}
+spec:
+  selector:
+    app: flare
+    cluster: {cluster}
+  ports:
+    - port: {cfg.flarePort}
+      targetPort: flare
+      name: flare
+---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -480,6 +499,8 @@ metadata:
   namespace: {ns}
 spec:
   serviceName: {cluster}-nodes
+  updateStrategy:
+    type: OnDelete
   replicas: {numPods}
   # podManagementPolicy stays OrderedReady (the default; same as the helm
   # chart). Parallel was tried for faster bootstrap under the sync-gated

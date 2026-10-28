@@ -36,6 +36,7 @@ import FlareOperator.StateMachine.AuthoritativeHistory
 import FlareOperator.StateMachine.CopyDiscardApproval
 import FlareOperator.StateMachine.PromotionEvidence
 import FlareOperator.UnitTestsHandover
+import FlareOperator.UnitTestsRolling
 
 open FlareOperator.K8s
 open FlareOperator.ReplicaRepair
@@ -1410,6 +1411,10 @@ def checkPodRows (ctx : Ctx) : IO Unit := do
     ((find "n-1").map (fun p => (p.ready, p.ip, p.uid, p.restarts, p.nodeName)) == some (false, "", "uid-B", none, ""))
   check ctx "SAF-08 pod list: a deletionTimestamp marks the pod Terminating; a malformed row is dropped"
     ((find "n-2").map (·.terminating) == some true && pods.length == 3)
+  let out2 := "n-0|10.0.0.1|True|n-0|svc|node-a|uid-A|2||sts-abc\nn-1|10.0.0.2|True|n-1|svc|node-b|uid-B|0||\n"
+  let pods2 := FlareOperator.K8s.Bridge.parsePodRows "ns" out2
+  check ctx "A0 pod list: the controller-revision-hash column is read (empty when unlabelled)"
+    ((pods2.map (·.revision)) == ["sts-abc", ""])
 
 
 -- ─── E2E evidence harness (TraceMatch): ambiguous input never passes ─────
@@ -2688,6 +2693,8 @@ def checkSnapshotPushSwitch (ctx : Ctx) : IO Unit := do
 def run : IO UInt32 := do
   let ctx : Ctx := { failures := ← IO.mkRef [], count := ← IO.mkRef 0 }
   for (name, ok) in FlareOperator.UnitTestsHandover.results do
+    check ctx name ok
+  for (name, ok) in FlareOperator.UnitTestsRolling.results do
     check ctx name ok
   checkObserve ctx
   checkRequestResolve ctx

@@ -101,10 +101,11 @@ jobs:
             {"group":"repair","suites":"replica-repair,prepare-evidence,native-metrics,continuous-replication-upgrade,continuous-replication-lag-hold-unreadable"},
             {"group":"node-ops-switch-a","suites":"node-ops-switch-delete,node-ops-switch-rolling"},
             {"group":"node-ops-switch-b","suites":"node-ops-switch-rollboth,node-ops-switch-gate"},
-            {"group":"node-ops-switch-c","suites":"node-ops-switch-drain"},
+            {"group":"node-ops-switch-c","suites":"node-ops-switch-drain,node-ops-switch-savefail"},
+            {"group":"node-ops-switch-d","suites":"node-ops-switch-sigterm-hold,node-ops-switch-tmpfs-sigterm-hold"},
             {"group":"node-ops-switch-tmpfs-a","suites":"node-ops-switch-tmpfs-delete,node-ops-switch-tmpfs-rolling"},
             {"group":"node-ops-switch-tmpfs-b","suites":"node-ops-switch-tmpfs-rollboth,node-ops-switch-tmpfs-gate"},
-            {"group":"node-ops-switch-tmpfs-c","suites":"node-ops-switch-tmpfs-drain"},
+            {"group":"node-ops-switch-tmpfs-c","suites":"node-ops-switch-tmpfs-drain,node-ops-switch-tmpfs-savefail"},
             {"group":"stats-cost","suites":"stats-cost"},
             {"group":"continuous-replication","suites":"copy-retention-measure,continuous-replication,continuous-replication-scale,continuous-replication-sustained,continuous-replication-outage,continuous-replication-outage-tmpfs,visibility-bench"}
           ]'

@@ -7,8 +7,9 @@
   error, timeout, connection error) and NO acknowledged write missing on the
   final master or the replica; a delay is allowed and is measured.
 
-  Load: 4 writers through the partition Service (the client path) and 2 to
-  the other pod (the proxy path), 200 requests/s each, a new connection per
+  Load: 4 writers through the partition Service (the client path) and 2
+  through the all-pods Service <cluster>-nodes-external (writes landing on a
+  non-master pod take the proxy path), 200 requests/s each, a new connection per
   request (clients connect for each use, a connection lasts seconds at most:
   user decision 2026-10-28), closed loop (one request at a time per writer) — the rate actually achieved
   and the lowest rate in any second are reported with the result.
@@ -118,6 +119,14 @@ private partial def observe (c : Ctx) (secs : Nat) (done : IO Bool) : IO (List (
     IO.sleep 2000
   return (ips, false)
 
+/-- The operator has finished its startup grace (dead detection and drain
+    active): every scenario assumes a settled operator. CI 40653574118 sent
+    S6's SIGTERM ~60 s before the grace ended (the setup is slower there), and
+    the restarted master was handled as a grace-period rejoin. -/
+private def operatorSettled (c : Ctx) : IO Bool :=
+  waitForCondition "the operator's startup grace period is over" 300 do
+    return containsSubstr (← kubectlLogsLabel s!"app={c.cfg.operatorName}" c.cfg.«namespace» 5000) "grace period over"
+
 /-- Final copies: (pod, own copy); an unreadable copy is `none`, never empty. -/
 private def finalCopies (c : Ctx) (tag : String) : IO (List (String × Option (List (String × String)))) := do
   let ps := (← c.pods).getD []
@@ -212,14 +221,19 @@ private def switchRun (c : Ctx) (op : SwitchOp) : IO (Except String SwitchObs) :
   | .ok p =>
     -- each test starts from a healthy pair (the previous test may have left a
     -- replica on an older history): wait for it, else it is a precondition failure
+    if !(← operatorSettled c) then
+      return .error (notSetUp "the operator did not finish its startup grace period")
     if !(← waitForCondition "the pair is redundant with the replica on the master's history" 300 (redundant c none)) then
       return .error (notSetUp "the cluster did not start this test with a master and a replica on its history (left by the previous test?)")
-    c.conditions [s!"scenario: {op.label} under a client-like load (4 x 200/s via the partition Service, 2 x 200/s via the other pod; a new connection per request, closed loop)"]
+    c.conditions [s!"scenario: {op.label} under a client-like load (4 x 200/s via the partition Service, 2 x 200/s via the all-pods Service; a new connection per request, closed loop)"]
     match ← c.ensureLoadWriter with
     | .error e => return .error (notSetUp e)
     | .ok () => pure ()
     if !(← c.startLoad "svc" (svcHost c) 4 200) then return .error (notSetUp "the client-path load did not start")
-    if !(← c.startLoad "peer" (podHost c p.replica.name) 2 200) then return .error (notSetUp "the proxy-path load did not start")
+    -- the clients' all-pods Service (the chart's <cluster>-nodes-external):
+    -- the writes that land on a non-master pod take the proxy path. A pod's
+    -- own DNS name would keep sending to a pod the switch replaces.
+    if !(← c.startLoad "peer" s!"{c.cfg.name}-nodes-external.{c.cfg.«namespace»}.svc.cluster.local" 2 200) then return .error (notSetUp "the proxy-path load did not start")
     let before := (← c.pods).getD []
     let opUids := fun (_ : Unit) => do
       match ← kubectl ["get", "pods", "-n", c.cfg.«namespace», "-l", s!"app={c.cfg.operatorName}", "-o", "jsonpath={.items[*].metadata.uid}"] with
@@ -446,6 +460,8 @@ def sigtermHoldTest (c : Ctx) : IO TestResult := do
   match ← c.placement with
   | .error e => return .fail e
   | .ok p =>
+    if !(← operatorSettled c) then
+      return .fail (notSetUp "the operator did not finish its startup grace period")
     if !(← waitForCondition "the pair is redundant with the replica on the master's history" 300 (redundant c none)) then
       return .fail (notSetUp "the cluster did not start this test with a healthy pair")
     c.conditions ["S6: one sync client write waits on a forward held by a master/replica cut; the master gets SIGTERM 5 s later; the cut is removed 40 s after the SIGTERM; the client must get STORED and the replica must hold the value"]
@@ -472,9 +488,13 @@ def sigtermHoldTest (c : Ctx) : IO TestResult := do
     let reply := ((out.splitOn "\n").find? (fun l => l.startsWith "REPLY")).getD s!"(no reply line: {out.take 200})"
     c.event s!"client: {reply}"
     let (_, _) ← observe c 300 (redundant c none)
-    let got ← IO.Process.output { cmd := "kubectl", args := oneShotArgs c p.replica.ip s!"get {key}\\r\\n" true }
-    let onReplica := containsSubstr got.stdout "value"
-    IO.eprintln s!"# [{c.test}] SIGTERM {match term with | .ok _ => "sent" | .error e => s!"failed ({e})"}; client {reply}; replica holds the value={onReplica} ({got.stdout.trim.take 200})"
+    -- the replica's OWN copy (a get through it can be proxied: a replica that
+    -- re-validates forwards reads, and a restarted master without a
+    -- partition answers a miss — CI 40653574118 read END that way)
+    let copy ← c.ownCopy p.replica.ip
+    let onReplica := (copy.getD []).any (·.1 == key)
+    IO.eprintln s!"# [{c.test}] SIGTERM {match term with | .ok _ => "sent" | .error e => s!"failed ({e})"}; client {reply}; replica's own copy holds the value={onReplica} ({match copy with | some d => s!"{d.length} keys" | none => "UNREADABLE"})"
+    if copy.isNone then return .fail (unobservable "the replica's own copy could not be read")
     if term matches .error _ then return .fail (notSetUp "the SIGTERM could not be sent")
     if !containsSubstr reply "STORED" then
       return .fail s!"the sync client write did not get its terminal answer STORED across the SIGTERM: {reply}"

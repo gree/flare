@@ -26,6 +26,7 @@ import FlareOperator.StateMachine.Reconciler
 import FlareOperator.StateMachine.K8sReconciler
 import FlareOperator.StateMachine.ReplicaRepair
 import FlareOperator.StateMachine.Handover
+import FlareOperator.StateMachine.Rolling
 import FlareOperator.StateMachine.SyncEvidence
 import FlareOperator.StateMachine.StatsObservation
 import FlareOperator.StateMachine.FollowEvidence
@@ -689,6 +690,57 @@ private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterSta
   handoverRef.set out
   handoverActiveRef.set (out.entries.any fun e => e.phase != .aborted)
   return Handover.blockedKeys out ++ Handover.drainHeldKeys out
+
+initialize rollingStablePassesRef : IO.Ref Nat ← IO.mkRef 0
+initialize rollingLastRef : IO.Ref String ← IO.mkRef ""
+
+/-- A0: one pass of the operator-driven replacement (StateMachine/Rolling).
+    With updateStrategy OnDelete nothing else replaces the pods. Reads the
+    StatefulSet's update revision and the pods' revisions; only when a pod
+    is outdated are the slaves' stats read for the stability check. Deletes
+    at most one pod per pass (UID precondition). FLARE_OPERATOR_ROLLING=off
+    turns it off (pods are then replaced by hand, one at a time). -/
+private def runRolling (crName ns : String) (stateRef : IO.Ref FlareClusterState)
+    (replicas : Nat) (busy : Bool) : IO Unit := do
+  if (← IO.getEnv "FLARE_OPERATOR_ROLLING") == some "off" then return
+  let rev ← match ← Bridge.statefulSetUpdateRevision s!"{crName}-nodes" ns with
+    | .ok r => pure r
+    | .error _ => pure ""
+  let pods ← match ← Bridge.listFlaredPodsE crName ns with
+    | .ok ps => pure ps
+    | .error _ => return
+  let cands : List Rolling.Candidate := pods.map fun p =>
+    { name := p.name, nodeKey := p.toNodeKey, uid := p.uid, revision := p.revision,
+      ready := p.ready, terminating := p.terminating }
+  let st ← stateRef.get
+  let masterKeys := (st.nodeMap.filter fun kv => kv.2.role == FlareRole.Master).map Prod.fst
+  let old := Rolling.outdated rev cands
+  let mut passes ← rollingStablePassesRef.get
+  if old.isEmpty then
+    rollingStablePassesRef.set 0
+  else
+    let readyKeys := (pods.filter fun p => p.ready && !p.terminating).map Bridge.PodInfo.toNodeKey
+    let mut eligible : List String := []
+    for (k, n) in st.nodeMap do
+      if n.role == FlareRole.Slave && n.state == FlareState.Active then
+        if let some out ← podStatsOf k ns then
+          if statNat out "repl_read_source_eligible" == some 1 then
+            eligible := eligible ++ [k]
+    let ok := Rolling.stable st (replicas - 1) readyKeys eligible busy
+    passes := if ok then passes + 1 else 0
+    rollingStablePassesRef.set passes
+  let d := Rolling.decide rev cands masterKeys passes 2
+  let label := d.label
+  if label != (← rollingLastRef.get) then
+    rollingLastRef.set label
+    IO.eprintln s!"[flare-operator] ROLLING: {label}"
+  match d with
+  | .delete c _ =>
+    match ← Bridge.deletePodWithUidPrecondition c.name ns c.uid with
+    | .ok () => IO.eprintln s!"[flare-operator] ROLLING: deleted {c.name} (uid {c.uid}, revision {c.revision} -> {rev})"
+    | .error e => IO.eprintln s!"[flare-operator] ROLLING: delete of {c.name} not confirmed ({e}); the next pass reads it again"
+    rollingStablePassesRef.set 0
+  | _ => pure ()
 
 /-- Ensure K8s Service selectors point to the current Master for each partition. -/
 private def ensureServiceRouting (state : FlareClusterState) (crName ns : String)
@@ -2949,6 +3001,10 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
 
   let drainBlockedRef ← IO.mkRef 0
   runReconcileDriver stateRef migrationRef graceCyclesRef trippedRef drainBlockedRef unreadyCyclesRef podKeysRef podAddrsRef heldKeys crName ns
+  -- A0: the operator replaces the pods not on the StatefulSet's update
+  -- revision, one at a time, while the cluster is stable
+  let busyNow := !(← ledgerRef.get).entries.isEmpty || (← handoverActiveRef.get) || !heldKeys.isEmpty
+  runRolling crName ns stateRef (← crdRef.get).spec.replicas busyNow
   metrics.circuitBreakerTripped.set (if ← trippedRef.get then 1.0 else 0.0)
   -- CRITICAL drain-guard gauge: >0 pages a human — a draining master has no
   -- promotable successor and its partition dies with the pod (see RUNBOOK

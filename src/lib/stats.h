@@ -68,6 +68,11 @@ protected:
 	// client requests being executed now (parsed, not yet answered): on a
 	// proxy, a write being forwarded to its master is one of them
 	AtomicCounter _requests_in_progress;
+	// W: writes waiting now for their partition to get a master, and how the
+	// waits ended (a master came / the wait timed out with an error)
+	AtomicCounter _writes_waiting_for_master;
+	AtomicCounter _master_waits_ok;
+	AtomicCounter _master_waits_timeout;
 	// The same drops broken down BY DESTINATION, so a controller can tell
 	// WHICH replica is now behind and resync only that one. The aggregate
 	// counter above cannot: it says a replica diverged, not which. Drops are
@@ -194,6 +199,11 @@ public:
 	inline void request_begin() { this->_requests_in_progress.incr(); };
 	inline void request_end() { this->_requests_in_progress.sub(1); };
 	inline uint64_t get_requests_in_progress() { return this->_requests_in_progress.fetch(); };
+	inline void master_wait_begin() { this->_writes_waiting_for_master.incr(); };
+	inline void master_wait_end(bool ok) { this->_writes_waiting_for_master.sub(1); if (ok) { this->_master_waits_ok.incr(); } else { this->_master_waits_timeout.incr(); } };
+	inline uint64_t get_writes_waiting_for_master() { return this->_writes_waiting_for_master.fetch(); };
+	inline uint64_t get_master_waits_ok() { return this->_master_waits_ok.fetch(); };
+	inline uint64_t get_master_waits_timeout() { return this->_master_waits_timeout.fetch(); };
 	int increment_proxy_write_dropped(const string& dest);
 	bool diag_enabled() const { return this->_diag_enabled; };
 	void diag_incr(const string& name);

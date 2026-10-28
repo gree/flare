@@ -250,6 +250,7 @@ int flared::startup(int argc, char **argv) {
 	this->_cluster->set_read_unavailable_error(ini_option_object().is_read_unavailable_error());
 	this->_cluster->set_noreply_window_limit(ini_option_object().get_noreply_window_limit());
 	queue_proxy_write::hold_window_ms = ini_option_object().get_proxy_forward_hold_msec();
+	this->_cluster->set_master_wait_ms(ini_option_object().get_master_wait_msec());
 	this->_cluster->add_proxy_event_listener(this->_cluster_replication);
 #ifdef ENABLE_K8S_OPERATOR
 	// In K8s operator mode, override the index server address from environment
@@ -611,6 +612,7 @@ int flared::reload() {
 	// noreply_window_limit
 	this->_cluster->set_noreply_window_limit(ini_option_object().get_noreply_window_limit());
 	queue_proxy_write::hold_window_ms = ini_option_object().get_proxy_forward_hold_msec();
+	this->_cluster->set_master_wait_ms(ini_option_object().get_master_wait_msec());
 
 	time_watcher_object->stop();
 	time_watcher_observer::set_threshold_warn_msec(ini_option_object().get_storage_access_watch_threshold_warn_msec());

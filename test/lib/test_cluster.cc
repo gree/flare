@@ -24,6 +24,7 @@
  */
 
 #include <cppcutter.h>
+#include "op_set.h"
 
 #include <fstream>
 
@@ -487,6 +488,161 @@ namespace test_cluster
 		cluster.set_activation_pending(true);
 		cppcut_assert_equal(0, cluster.reconstruct_node(v, ++ver));
 		cut_assert_equal_int(cluster::state_active, cluster.get_node("localhost", 11211).node_state);
+	}
+
+	// a client (or proxied) set of `key` through pre_proxy_write; `sender` is
+	// the proxy mark ("" = a client write)
+	struct ppw_arg {
+		cluster_test* c;
+		std::string key;
+		std::string sender;
+		int result;
+		long ms;
+		int done;
+	};
+
+	static long now_ms() {
+		struct timespec ts;
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		return ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+	}
+
+	static void* run_ppw(void* a) {
+		ppw_arg* x = static_cast<ppw_arg*>(a);
+		op_set* o = new op_set(shared_connection(), x->c, NULL);
+		storage::entry& e = o->get_entry();
+		e.key = x->key;
+		e.version = 3;
+		if (!x->sender.empty()) {
+			o->set_proxy(x->sender);
+		}
+		shared_queue_proxy_write q;
+		const long t0 = now_ms();
+		x->result = x->c->pre_proxy_write(o, q, 0);
+		x->ms = now_ms() - t0;
+		delete o;		// leaves the write section of a local apply
+		st(&x->done, 1);
+		return NULL;
+	}
+
+	// W (handover design): the partition's master is master/down (a planned
+	// handover's demote step). A client write waits for a map with a master
+	// instead of failing; when the map names a master again it is decided
+	// from the start. Here the map that ends the wait is the handover's
+	// rollback (this node, the master/down placeholder, back to master/active:
+	// no role shift, which the test cluster cannot do), so the write is applied
+	// here. Every check is made after the thread is joined: an assertion that
+	// left the test with the thread still waiting would destroy the cluster
+	// under it.
+	void test_a_write_waits_for_a_master_while_the_partition_has_none()
+	{
+		const std::string _tmp_dir = tmp_dir + std::string("/master_wait");
+		mkdir(_tmp_dir.c_str(), 0700);
+		cluster_test cluster(_tmp_dir);
+		cluster._type = cluster::type_node;
+		cluster.set_master_wait_ms(5000);
+		uint64_t ver = cluster.get_node_map_version() + 10;
+		vector<cluster::node> v;
+		v.push_back(mk("localhost", 11211, cluster::role_master, cluster::state_down, 0));
+		v.push_back(mk("s1", 12121, cluster::role_slave, cluster::state_active, 0));
+		cppcut_assert_equal(0, cluster.reconstruct_node(v, ver));
+		const uint64_t ok0 = stats_object->get_master_waits_ok();
+		ppw_arg a;
+		a.c = &cluster;
+		a.key = "k";
+		a.result = -100;
+		st(&a.done, 0);
+		pthread_t t;
+		cut_assert_equal_int(0, pthread_create(&t, NULL, run_ppw, &a));
+		usleep(300 * 1000);
+		const int done_early = ld(&a.done);
+		const int waiting = (int)stats_object->get_writes_waiting_for_master();
+		// the rollback map: the master is back
+		v[0] = mk("localhost", 11211, cluster::role_master, cluster::state_active, 0);
+		const int rc = cluster.reconstruct_node(v, ++ver);
+		const bool finished = wait_flag(&a.done, 5000);
+		if (!finished) {
+			// end the wait before leaving (the cluster is on this stack)
+			cluster.set_master_wait_ms(0);
+		}
+		pthread_join(t, NULL);
+		cut_assert_equal_int(0, done_early, cut_message("the write did not wait for a master"));
+		cut_assert_equal_int(1, waiting);
+		cppcut_assert_equal(0, rc);
+		cut_assert_true(finished);
+		cut_assert_equal_int(cluster::proxy_request_continue, a.result);
+		cut_assert(a.ms >= 250, cut_message("answered after %ld ms", a.ms));
+		cut_assert_equal_int(0, (int)stats_object->get_writes_waiting_for_master());
+		cut_assert_equal_int(1, (int)(stats_object->get_master_waits_ok() - ok0));
+	}
+
+	// ... and fails with the partition error when no master comes within the
+	// wait (the client hears an error, as before W)
+	void test_a_write_waiting_for_a_master_fails_at_the_bound()
+	{
+		const std::string _tmp_dir = tmp_dir + std::string("/master_wait_bound");
+		mkdir(_tmp_dir.c_str(), 0700);
+		cluster_test cluster(_tmp_dir);
+		cluster._type = cluster::type_node;
+		cluster.set_master_wait_ms(400);
+		uint64_t ver = cluster.get_node_map_version() + 10;
+		vector<cluster::node> v;
+		v.push_back(mk("old", 12121, cluster::role_master, cluster::state_down, 0));
+		v.push_back(mk("localhost", 11211, cluster::role_slave, cluster::state_active, 0));
+		cppcut_assert_equal(0, cluster.reconstruct_node(v, ver));
+		const uint64_t timeout0 = stats_object->get_master_waits_timeout();
+		ppw_arg a;
+		a.c = &cluster;
+		a.key = "k";
+		st(&a.done, 0);
+		run_ppw(&a);
+		cut_assert_equal_int(cluster::proxy_request_error_partition, a.result);
+		cut_assert(a.ms >= 350 && a.ms < 2000, cut_message("failed after %ld ms (bound 400)", a.ms));
+		cut_assert_equal_int(1, (int)(stats_object->get_master_waits_timeout() - timeout0));
+		// without W (0) it fails at once, as before
+		cluster.set_master_wait_ms(0);
+		run_ppw(&a);
+		cut_assert_equal_int(cluster::proxy_request_error_partition, a.result);
+		cut_assert(a.ms < 200, cut_message("W off still waited %ld ms", a.ms));
+	}
+
+	// L4: a proxied change is applied as a replica only when its sender is a
+	// master of the partition in this node's map — the current master, or
+	// the master/down placeholder of a handover still draining its forwards.
+	// From any other node (a late forward of an old map) it is routed like a
+	// client write instead, never applied here as a replica. (The routed
+	// case is checked with the partition's master down and no wait, so it
+	// ends at once in the partition error: this cluster has no forwarding
+	// threads.)
+	void test_a_replica_applies_only_changes_from_a_master_of_the_partition()
+	{
+		const std::string _tmp_dir = tmp_dir + std::string("/replica_sender");
+		mkdir(_tmp_dir.c_str(), 0700);
+		cluster_test cluster(_tmp_dir);
+		cluster._type = cluster::type_node;
+		cluster.set_master_wait_ms(0);
+		uint64_t ver = cluster.get_node_map_version() + 10;
+		vector<cluster::node> v;
+		v.push_back(mk("m1", 12121, cluster::role_master, cluster::state_active, 0));
+		v.push_back(mk("localhost", 11211, cluster::role_slave, cluster::state_active, 0));
+		v.push_back(mk("px", 12121, cluster::role_proxy, cluster::state_active, -1));
+		cppcut_assert_equal(0, cluster.reconstruct_node(v, ver));
+		ppw_arg a;
+		a.c = &cluster;
+		a.key = "k";
+		a.sender = "m1:12121";		// the current master
+		run_ppw(&a);
+		cut_assert_equal_int(cluster::proxy_request_continue, a.result);
+		// a handover's demote step: m1 is the master/down placeholder
+		v[0] = mk("m1", 12121, cluster::role_master, cluster::state_down, 0);
+		cppcut_assert_equal(0, cluster.reconstruct_node(v, ++ver));
+		a.sender = "m1:12121";		// its forwards still drain: applied
+		run_ppw(&a);
+		cut_assert_equal_int(cluster::proxy_request_continue, a.result);
+		a.sender = "px:12121";		// a node of this cluster that is not a master
+		run_ppw(&a);
+		cut_assert_equal_int(cluster::proxy_request_error_partition, a.result,
+			cut_message("a change from a non-master was applied as a replica (or not routed as a client write)"));
 	}
 }
 

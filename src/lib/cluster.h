@@ -241,6 +241,15 @@ protected:
 	source_binding							_read_source;
 	pthread_mutex_t							_mutex_read_source;
 	pthread_cond_t							_cond_read_source;
+	// W (handover design, HANDOVER-DESIGN-rc68.md): a write to a partition
+	// whose master is empty in the map (a planned handover's demote step:
+	// the old master is master/down) waits, up to _master_wait_ms, for a map
+	// with a master instead of failing. reconstruct_node bumps the
+	// generation and wakes the waiters. A leaf lock.
+	pthread_mutex_t							_mutex_map_generation;
+	pthread_cond_t							_cond_map_generation;
+	uint64_t								_map_generation;
+	int										_master_wait_ms;
 	bool									_read_source_wake;
 	shared_thread							_source_validator_thread;
 	int										_source_check_interval_ms;
@@ -271,6 +280,14 @@ public:
 	int reconstruct_node(vector<node> v, uint64_t node_map_version = 0);
 	void write_section_enter();
 	void write_section_leave();
+	// W: how long a write waits for its partition to get a master (msec, 0 =
+	// fail at once as before)
+	void set_master_wait_ms(int ms) { this->_master_wait_ms = ms; };
+	int get_master_wait_ms() const { return this->_master_wait_ms; };
+	uint64_t get_map_generation();
+	// wait until the map generation moves past `seen` or the monotonic
+	// `deadline_ms` passes; true = it moved
+	bool wait_map_change(uint64_t seen, uint64_t deadline_ms);
 	// enter only if the section is free of a queued swap (tryrdlock); false =
 	// not entered. Used by the tests to observe the swap's priority.
 	bool write_section_try_enter();
@@ -526,6 +543,9 @@ protected:
 	// R3: called with the map write locks held, right after a map is installed
 	void _check_read_source_locked(uint64_t node_map_version);
 	bool _is_local_proxy_request(op_proxy_write* op);
+	// L4: the immediate sender (last proxy mark) is a master of `partition` in
+	// this node's map (active or the down placeholder), or the prepare master
+	bool _is_partition_master_sender(op_proxy_write* op, int partition, const string& prepare_master);
 	string _get_partition_key(string key);
 	// t_id: the thread's id (map key) in the copy it was found in; pass it to
 	// thread::enqueue so a thread reused since then refuses the item

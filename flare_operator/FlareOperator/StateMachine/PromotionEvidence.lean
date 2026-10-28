@@ -464,6 +464,17 @@ def commitTimeAllows : Class → Bool
   | .eligible | .legacy | .empty => true
   | _ => false
 
+/-- An ordered handover's successor (StateMachine/Handover.lean), and only it.
+    During the demote step the partition has no Active master (the old one is
+    a Master/Down placeholder), so a copy that is current to the last write
+    reads `revalidating` and classifies as `lagging` (the recorded history).
+    The handover's drain is the proof of currency R3 cannot give then: every
+    forward of the old master to it was acknowledged, from one process, with
+    no drop or failure since the start. -/
+def handoverCommitAllows : Class → Bool
+  | .lagging => true
+  | c => commitTimeAllows c
+
 /-- Evidence bound to what it was read from; the commit re-reads these. -/
 structure Binding where
   podUid : Option String

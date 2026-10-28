@@ -1160,6 +1160,18 @@ def breakerUnavailableKeys (state : FlareClusterState) (deadKeys livePodKeys : L
     (node.state == FlareState.Down ||
      (node.state == FlareState.Prepare && !livePodKeys.contains key))) |>.map Prod.fst)
 
+/-- What the breaker counts: `breakerUnavailableKeys` without the placeholder
+    of a planned handover — the old master Master/Down while its pod is still
+    alive and Terminating (flare-lossless-handover). That is an ordered switch
+    in progress, not lost capacity. -/
+def breakerCountedKeys (state : FlareClusterState) (deadKeys livePodKeys terminatingKeys : List String)
+    : List String :=
+  (breakerUnavailableKeys state deadKeys livePodKeys).filter fun k =>
+    !(match state.lookupNode k with
+      | some n => n.role == FlareRole.Master && n.state == FlareState.Down
+                    && terminatingKeys.contains k && livePodKeys.contains k
+      | none => false)
+
 /-- The breaker never counts FEWER nodes than are dead this tick, so every
     outage that tripped it before still trips it. -/
 theorem breakerUnavailable_ge_dead (state : FlareClusterState) (deadKeys livePodKeys : List String) :
@@ -1589,7 +1601,7 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
     let totalNodes := clusterState.nodeMap.length
     -- SAF-11: the breaker counts capacity unavailable NOW (dead this tick +
     -- already Down + pod-less Prepare), not only this tick's new deaths.
-    let unavailable := breakerUnavailableKeys clusterState s.deadNodeKeys s.livePodKeys
+    let unavailable := breakerCountedKeys clusterState s.deadNodeKeys s.livePodKeys s.terminatingKeys
     let deadCount := unavailable.length
 
     -- Get circuit breaker config from CRD (default if not available)
@@ -1965,7 +1977,7 @@ theorem flareReconcileStep_decreases_measure (resp : K8sResponse)
     · left; simp [flareReconcileMeasure]  -- deadCount == 0
     · -- deadCount > 0, check circuit breaker decision
       have h_decision := circuitBreakerDecision_only_returns_emergency_or_failover
-        (breakerUnavailableKeys cs s.deadNodeKeys s.livePodKeys).length cs.nodeMap.length
+        (breakerCountedKeys cs s.deadNodeKeys s.livePodKeys s.terminatingKeys).length cs.nodeMap.length
         (match s.cachedCrd with | some crd => crd.spec.circuitBreaker | none => {})
         s.wasTripped
       rcases h_decision with hd | hd | hd

@@ -17,6 +17,7 @@ import FlareOperator.K8s.Retry
 import FlareOperator.Kubectl
 import Lean.Data.Json
 import FlareOperator.StateMachine.ReplicaRepair
+import FlareOperator.StateMachine.Handover
 
 namespace FlareOperator.K8s.Bridge
 
@@ -452,6 +453,32 @@ def readRepairLedger (crName ns : String) : IO (Except String (Option ReplicaRep
     object is rewritten, arrays included). -/
 def writeRepairLedger (crName ns : String) (l : ReplicaRepair.Ledger) : IO (Except String Unit) := do
   let patch := (Lean.Json.mkObj [("status", Lean.Json.mkObj [("replicaRepairs", l.toJson)])]).compress
+  match ← kubectl ["patch", "flarecluster", crName, "-n", ns,
+      "--subresource=status", "--type=merge", "-p", patch] with
+  | .error e => return .error e
+  | .ok _ => return .ok ()
+
+/-- The handover ledger persisted in `status.handovers` (flare-lossless-
+    handover): an operator restart resumes a handover where it was (a map V1
+    already sent is always finished by a promote or a rollback). Same three
+    outcomes as the repair ledger: absent, restored, or an error that must
+    not be taken for absence. -/
+def readHandovers (crName ns : String) : IO (Except String (Option Handover.Ledger)) := do
+  match ← kubectl ["get", "flarecluster", crName, "-n", ns, "-o", "json"] with
+  | .error e => return .error s!"handover read failed: {e}"
+  | .ok out =>
+    match Lean.Json.parse out with
+    | .error e => return .error s!"handover read: CR JSON did not parse: {e}"
+    | .ok j =>
+      match j.getObjVal? "status" >>= (·.getObjVal? "handovers") with
+      | .error _ => return .ok none
+      | .ok r =>
+        match Handover.Ledger.fromJson? r with
+        | some l => return .ok (some l)
+        | none => return .error "handover read: status.handovers is present but does not parse (corrupt)"
+
+def writeHandovers (crName ns : String) (l : Handover.Ledger) : IO (Except String Unit) := do
+  let patch := (Lean.Json.mkObj [("status", Lean.Json.mkObj [("handovers", l.toJson)])]).compress
   match ← kubectl ["patch", "flarecluster", crName, "-n", ns,
       "--subresource=status", "--type=merge", "-p", patch] with
   | .error e => return .error e

@@ -262,6 +262,9 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 		}
 		_send_stat("proxy_write_held_ms_max", held_ms_max);
 		_send_stat("requests_in_progress", stats_object->get_requests_in_progress());
+		_send_stat("writes_waiting_for_master", stats_object->get_writes_waiting_for_master());
+		_send_stat("master_waits_ok", stats_object->get_master_waits_ok());
+		_send_stat("master_waits_timeout", stats_object->get_master_waits_timeout());
 	}
 	_send_stat("delete_misses"				, stats_object->get_delete_misses());
 	// Reconstruction lifecycle (see stats.h): a controller that requested a

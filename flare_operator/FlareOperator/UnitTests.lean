@@ -35,6 +35,7 @@ import FlareOperator.StateMachine.RebuildConcurrency
 import FlareOperator.StateMachine.AuthoritativeHistory
 import FlareOperator.StateMachine.CopyDiscardApproval
 import FlareOperator.StateMachine.PromotionEvidence
+import FlareOperator.UnitTestsHandover
 
 open FlareOperator.K8s
 open FlareOperator.ReplicaRepair
@@ -2686,6 +2687,8 @@ def checkSnapshotPushSwitch (ctx : Ctx) : IO Unit := do
 
 def run : IO UInt32 := do
   let ctx : Ctx := { failures := ← IO.mkRef [], count := ← IO.mkRef 0 }
+  for (name, ok) in FlareOperator.UnitTestsHandover.results do
+    check ctx name ok
   checkObserve ctx
   checkRequestResolve ctx
   checkGate ctx

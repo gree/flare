@@ -272,6 +272,14 @@ spec:
                 migrationPhase:
                   type: string
                   enum: [None, Dumping, Forwarding]
+                handovers:
+                  description: |
+                    Ordered handovers of planned master switches (flare-lossless-handover):
+                    per partition, the old master, the successor, the phase
+                    (requested / demoting / draining / promoting / done / aborted) and the
+                    node map versions of the demote, promote and rollback maps.
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
                 replicaRepairs:
                   description: |
                     Replica-repair ledger (SC-03): reconstruction requests

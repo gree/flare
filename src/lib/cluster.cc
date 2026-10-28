@@ -125,6 +125,17 @@ cluster::cluster(thread_pool* req_tp, thread_pool* other_tp, string server_name,
 	pthread_mutex_init(&this->_mutex_read_source, NULL);
 	pthread_cond_init(&this->_cond_read_source, NULL);
 	this->_read_source_wake = false;
+	pthread_mutex_init(&this->_mutex_map_generation, NULL);
+	{
+		// timed waits on the monotonic clock (the deadline is monotonic)
+		pthread_condattr_t ca;
+		pthread_condattr_init(&ca);
+		pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
+		pthread_cond_init(&this->_cond_map_generation, &ca);
+		pthread_condattr_destroy(&ca);
+	}
+	this->_map_generation = 0;
+	this->_master_wait_ms = 0;
 	this->_source_check_interval_ms = 2000;
 }
 
@@ -1134,7 +1145,40 @@ int cluster::reconstruct_node(vector<node> v, uint64_t node_map_version) {
 	pthread_rwlock_wrlock(&this->_mutex_write_section);
 	int r = this->_reconstruct_node(v, node_map_version);
 	pthread_rwlock_unlock(&this->_mutex_write_section);
+	// W: writes waiting for a master look at the new map
+	pthread_mutex_lock(&this->_mutex_map_generation);
+	this->_map_generation++;
+	pthread_cond_broadcast(&this->_cond_map_generation);
+	pthread_mutex_unlock(&this->_mutex_map_generation);
 	return r;
+}
+
+uint64_t cluster::get_map_generation() {
+	pthread_mutex_lock(&this->_mutex_map_generation);
+	const uint64_t g = this->_map_generation;
+	pthread_mutex_unlock(&this->_mutex_map_generation);
+	return g;
+}
+
+namespace {
+	uint64_t monotonic_ms() {
+		struct timespec ts;
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+	}
+}
+
+bool cluster::wait_map_change(uint64_t seen, uint64_t deadline_ms) {
+	struct timespec ts;
+	ts.tv_sec = deadline_ms / 1000;
+	ts.tv_nsec = (deadline_ms % 1000) * 1000000;
+	pthread_mutex_lock(&this->_mutex_map_generation);
+	while (this->_map_generation == seen && monotonic_ms() < deadline_ms) {
+		pthread_cond_timedwait(&this->_cond_map_generation, &this->_mutex_map_generation, &ts);
+	}
+	const bool moved = this->_map_generation != seen;
+	pthread_mutex_unlock(&this->_mutex_map_generation);
+	return moved;
 }
 
 namespace {
@@ -1854,8 +1898,15 @@ cluster::proxy_request cluster::pre_proxy_write(op_proxy_write* op, shared_queue
 		}
 	}
 
+	// W: a write whose partition has no master in the map (master/down: a
+	// planned handover's demote step) waits for a map with one, up to
+	// _master_wait_ms, then decides again from the start
+	uint64_t wait_deadline = 0;
+	bool waiting = false;
 	partition p, p_prepare;
 	bool is_prepare;
+	for (;;) {
+	const uint64_t generation = this->get_map_generation();
 	// the role decision and, for a local apply, everything up to queueing the
 	// forwards in post_proxy_write, is one write section (L1)
 	this->write_section_enter();
@@ -1863,6 +1914,9 @@ cluster::proxy_request cluster::pre_proxy_write(op_proxy_write* op, shared_queue
 	if (n < 0) {
 		// perhaps no partition available
 		this->write_section_leave();
+		if (waiting) {
+			stats_object->master_wait_end(false);
+		}
 		return proxy_request_error_partition;
 	}
 	this->_determine_partition(e, p_prepare, true, is_prepare);
@@ -1881,20 +1935,60 @@ cluster::proxy_request cluster::pre_proxy_write(op_proxy_write* op, shared_queue
 	if (p.master.node_key == this->_node_key && this->_promotion_refused) {
 		// decision 2026-10-08: a master over a forbidden copy accepts nothing
 		this->write_section_leave();
+		if (waiting) {
+			stats_object->master_wait_end(false);
+		}
 		return proxy_request_error_partition;
 	}
 	if (p.master.node_key == this->_node_key || (local_proxy_request && is_prepare && p_prepare.master.node_key == this->_node_key)) {
 		// should be write at this node
+		if (waiting) {
+			stats_object->master_wait_end(true);
+		}
 		op->set_in_write_section(true);
 		return proxy_request_continue;
 	}
 
 	if (local_proxy_request) {
-		if (p.index.count(this->_node_key) > 0 || (is_prepare && p_prepare.index.count(this->_node_key) > 0)) {
+		// L4: a change is applied as a replica only when it comes from a
+		// master of this partition in OUR map (the current master, or the
+		// master/down placeholder of a handover whose forwards are still
+		// being drained). A forward from a node that is no longer a master
+		// here (a late one of an old map) is routed like a client write
+		// instead, so it never overwrites the copy of the current master.
+		if ((p.index.count(this->_node_key) > 0 || (is_prepare && p_prepare.index.count(this->_node_key) > 0))
+				&& this->_is_partition_master_sender(op, n, is_prepare ? p_prepare.master.node_key : string(""))) {
 			// a change applied because this node is a replica of the partition
+			if (waiting) {
+				stats_object->master_wait_end(true);
+			}
 			op->set_in_write_section(true);
 			return proxy_request_continue;
 		}
+	}
+
+	if (p.master.node_key.empty()) {
+		this->write_section_leave();
+		if (this->_master_wait_ms <= 0) {
+			return proxy_request_error_partition;
+		}
+		const uint64_t now = monotonic_ms();
+		if (!waiting) {
+			waiting = true;
+			wait_deadline = now + (uint64_t)this->_master_wait_ms;
+			stats_object->master_wait_begin();
+		}
+		if (now >= wait_deadline || !this->wait_map_change(generation, wait_deadline)) {
+			stats_object->master_wait_end(false);
+			log_warning("no master for partition %d within %d msec (key=%s) -> error", n, this->_master_wait_ms, e.key.c_str());
+			return proxy_request_error_partition;
+		}
+		continue;
+	}
+	if (waiting) {
+		stats_object->master_wait_end(true);
+	}
+	break;
 	}
 
 	// not applied here: the forward to the master is a network round trip and
@@ -2623,6 +2717,25 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
  *	the SOURCE cluster's hop list attached) must not get final-delivery
  *	treatment here: its marks describe a foreign topology.
  */
+bool cluster::_is_partition_master_sender(op_proxy_write* op, int partition, const string& prepare_master) {
+	vector<string> proxy = op->get_proxy();
+	if (proxy.empty()) {
+		return false;
+	}
+	const string sender = proxy.back();
+	if (!prepare_master.empty() && sender == prepare_master) {
+		return true;
+	}
+	bool r = false;
+	pthread_rwlock_rdlock(&this->_mutex_node_map);
+	node_map::iterator it = this->_node_map.find(sender);
+	if (it != this->_node_map.end() && it->second.node_role == role_master && it->second.node_partition == partition) {
+		r = true;
+	}
+	pthread_rwlock_unlock(&this->_mutex_node_map);
+	return r;
+}
+
 bool cluster::_is_local_proxy_request(op_proxy_write* op) {
 	if (!op->is_proxy_request()) {
 		return false;

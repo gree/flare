@@ -68,6 +68,7 @@ private:
 	int					_noreply_window_limit;
 	int					_shutdown_forward_drain_msec;
 	int					_proxy_forward_hold_msec;
+	int					_master_wait_msec;
 	int					_net_read_timeout;
 	bool				_net_read_timeout_set;
 	int					_proxy_concurrency;
@@ -167,6 +168,10 @@ public:
 	// address once the name resolves to it (L12 — DNS answers for a pod name
 	// are cached up to ~30 s)
 	static const int default_proxy_forward_hold_msec = 60000;
+	// W (handover design): how long a write to a partition whose master is
+	// master/down (a planned handover's demote step) waits for a map with a
+	// master before it fails (Tw; Th + Tb < Tw, Tw + forward < Tc = 30 s)
+	static const int default_master_wait_msec = 20000;
 	static const int default_net_read_timeout = 10*60;						// sec
 	static const int default_proxy_concurrency = 2;
 	static const int default_reconstruction_interval = 0;
@@ -252,6 +257,7 @@ public:
 	int get_noreply_window_limit() { return this->_noreply_window_limit; };
 	int get_shutdown_forward_drain_msec() { return this->_shutdown_forward_drain_msec; };
 	int get_proxy_forward_hold_msec() { return this->_proxy_forward_hold_msec; };
+	int get_master_wait_msec() { return this->_master_wait_msec; };
 	int get_net_read_timeout() { return this->_net_read_timeout; };
 	// net-read-timeout was given explicitly (config file or command line)
 	bool is_net_read_timeout_set() { return this->_net_read_timeout_set; };

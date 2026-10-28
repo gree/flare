@@ -58,6 +58,7 @@ ini_option::ini_option():
 		_noreply_window_limit(default_noreply_window_limit),
 		_shutdown_forward_drain_msec(default_shutdown_forward_drain_msec),
 		_proxy_forward_hold_msec(default_proxy_forward_hold_msec),
+		_master_wait_msec(default_master_wait_msec),
 		_net_read_timeout(default_net_read_timeout),
 		_net_read_timeout_set(false),
 		_proxy_concurrency(default_proxy_concurrency),
@@ -270,6 +271,9 @@ int ini_option::load() {
 		}
 		if (opt_var_map.count("proxy-forward-hold-msec")) {
 			this->_proxy_forward_hold_msec = opt_var_map["proxy-forward-hold-msec"].as<int>();
+		}
+		if (opt_var_map.count("master-wait-msec")) {
+			this->_master_wait_msec = opt_var_map["master-wait-msec"].as<int>();
 		}
 		if (opt_var_map.count("noreply-window-limit")) {
 			this->_noreply_window_limit = opt_var_map["noreply-window-limit"].as<int>();
@@ -916,6 +920,7 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("noreply-window-limit",		program_options::value<int>(),			"noreply window limit")
 		("shutdown-forward-drain-msec",	program_options::value<int>(),			"on a graceful stop, how long the forwarding threads keep sending the in-cluster forwards still queued to replicas before they stop (msec, 0 = do not wait)")
 		("proxy-forward-hold-msec",	program_options::value<int>(),			"how long an in-cluster forward to a replica that does not answer is kept and sent again, resolving the replica's name on each try, before it is dropped and counted (msec, 0 = the 4 quick tries of before)")
+		("master-wait-msec",	program_options::value<int>(),			"how long a write to a partition without a master (its master is down in the node map during a planned handover) waits for a master before it fails (msec, 0 = fail at once as before)")
 		("net-read-timeout",				program_options::value<int>(),			"network read timeout (sec) (dynamic)")
 		("proxy-concurrency",				program_options::value<int>(),			"proxy request concurrency for each node")
 		("reconstruction-interval",	program_options::value<int>(),			"master/slave dump interval in usec (dynamic)")

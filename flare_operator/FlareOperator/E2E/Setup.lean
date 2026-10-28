@@ -140,6 +140,13 @@ structure ClusterConfig where
   /-- A PodDisruptionBudget over the flared pods, as the chart renders it
       (`cluster.pdb.maxUnavailable`); `none` = no PDB (most suites). -/
   pdbMaxUnavailable : Option Nat := none
+  /-- The node-guard admission webhook (A0 stage 6b, as the chart's
+      nodeGuard): a TLS sidecar (socat) in the operator pod, a CA + serving
+      certificate made with openssl on the runner, a Service and a
+      ValidatingWebhookConfiguration for this namespace's flared pods DELETE
+      and StatefulSet (scale) UPDATE. -/
+  nodeGuard : Bool := false
+  tlsSidecarImage : String := "alpine/socat:1.8.0.0"
   deriving Repr
 
 /-- Image tag used for the flared container in this cluster. -/
@@ -290,12 +297,17 @@ spec:
     here, so the higher ceiling applies on the amd64 runners too; a ceiling
     that is not reached costs nothing. -/
 def operatorDeploymentYaml (cfg : ClusterConfig) : String :=
+  let env := cfg.operatorEnv ++ (if cfg.nodeGuard then
+      [("FLARE_NODE_GUARD", "on"), ("FLARE_WEBHOOK_PORT", "9444"), ("FLARE_OPERATOR_SERVICE_ACCOUNT", "flare-operator")]
+    else [])
   let envBlock :=
-    if cfg.operatorEnv.isEmpty then ""
-    else "\n          env:" ++ String.join (cfg.operatorEnv.map (fun (k, v) =>
+    if env.isEmpty then ""
+    else "\n          env:" ++ String.join (env.map (fun (k, v) =>
       s!"\n            - name: {k}\n              value: \"{v}\""))
   let name := cfg.operatorName
   let ns := cfg.«namespace»
+  let guardSidecar := if !cfg.nodeGuard then "" else
+    s!"\n        - name: webhook-tls\n          image: {cfg.tlsSidecarImage}\n          imagePullPolicy: IfNotPresent\n          args: [\"OPENSSL-LISTEN:9443,reuseaddr,fork,cert=/tls/tls.crt,key=/tls/tls.key,verify=0\", \"TCP:127.0.0.1:9444\"]\n          ports:\n            - containerPort: 9443\n              name: webhook\n          volumeMounts:\n            - name: webhook-tls\n              mountPath: /tls\n              readOnly: true\n      volumes:\n        - name: webhook-tls\n          secret:\n            secretName: {name}-webhook-tls"
   s!"apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -340,7 +352,7 @@ spec:
             limits:
               cpu: 500m
               # ceiling, not a reservation - see operatorDeploymentYaml
-              memory: 1Gi
+              memory: 1Gi{guardSidecar}
 ---
 apiVersion: v1
 kind: Service
@@ -710,6 +722,72 @@ def approveFirstBuild (cfg : ClusterConfig) : IO Unit := do
     IO.sleep 2000
   IO.eprintln s!"# WARNING: could not approve the first build of {cfg.name}"
 
+/-- The node-guard webhook objects (cfg.nodeGuard), as the chart's
+    node-guard-webhook.yaml: a CA and a serving certificate made with
+    openssl, the TLS Secret the sidecar mounts, the Service and a
+    ValidatingWebhookConfiguration (this namespace; pods DELETE of app=flare,
+    statefulsets + statefulsets/scale UPDATE; sideEffects None, Fail, 5 s). -/
+def setupNodeGuardWebhook (cfg : ClusterConfig) : IO Unit := do
+  let ns := cfg.«namespace»
+  let svc := s!"{cfg.operatorName}-webhook"
+  let dir := s!"/tmp/flare-node-guard-{ns}"
+  let script := s!"set -e; rm -rf {dir}; mkdir -p {dir}; cd {dir}; " ++
+    "openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=flare-e2e-ca -keyout ca.key -out ca.crt 2>/dev/null; " ++
+    s!"openssl req -newkey rsa:2048 -nodes -subj /CN={svc}.{ns}.svc -keyout tls.key -out tls.csr 2>/dev/null; " ++
+    s!"printf 'subjectAltName=DNS:{svc}.{ns}.svc,DNS:{svc}.{ns}.svc.cluster.local\\n' > ext.cnf; " ++
+    "openssl x509 -req -in tls.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 2 -extfile ext.cnf -out tls.crt 2>/dev/null; " ++
+    s!"kubectl -n {ns} create secret tls {cfg.operatorName}-webhook-tls --cert tls.crt --key tls.key --dry-run=client -o yaml | kubectl apply -f - >/dev/null; " ++
+    "base64 < ca.crt | tr -d '\\n' > ca.b64"
+  let out ← IO.Process.output { cmd := "sh", args := #["-c", script] }
+  if out.exitCode != 0 then
+    throw (IO.userError s!"node guard certificates: {out.stderr.trim}")
+  let ca := (← IO.FS.readFile s!"{dir}/ca.b64").trim
+  let hook := fun (hname path : String) (rules : String) (objSel : String) =>
+    s!"  - name: {hname}
+    admissionReviewVersions: [\"v1\"]
+    sideEffects: None
+    failurePolicy: Fail
+    timeoutSeconds: 5
+    matchPolicy: Equivalent
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {ns}{objSel}
+    rules:
+{rules}
+    clientConfig:
+      caBundle: {ca}
+      service:
+        name: {svc}
+        namespace: {ns}
+        path: {path}
+        port: 443
+"
+  applyYaml (s!"apiVersion: v1
+kind: Service
+metadata:
+  name: {svc}
+  namespace: {ns}
+spec:
+  selector:
+    app: {cfg.operatorName}
+  ports:
+    - port: 443
+      targetPort: 9443
+      protocol: TCP
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: flare-node-guard-{ns}
+webhooks:
+" ++ hook "pods.node-guard.flare.gree.net" "/pods"
+      "      - apiGroups: [\"\"]\n        apiVersions: [\"v1\"]\n        operations: [\"DELETE\"]\n        resources: [\"pods\"]\n        scope: Namespaced"
+      "\n    objectSelector:\n      matchLabels:\n        app: flare"
+    ++ hook "statefulsets.node-guard.flare.gree.net" "/statefulsets"
+      "      - apiGroups: [\"apps\"]\n        apiVersions: [\"v1\"]\n        operations: [\"UPDATE\"]\n        resources: [\"statefulsets\", \"statefulsets/scale\"]\n        scope: Namespaced"
+      "")
+  IO.eprintln s!"# node guard webhook flare-node-guard-{ns} -> {svc}.{ns}.svc (TLS sidecar {cfg.tlsSidecarImage})"
+
 /-- Deploy a full cluster: namespace → CRD/RBAC → FlareCluster CR → partition services →
     debug pod → empty ConfigMap → operator → StatefulSet -/
 def deployCluster (cfg : ClusterConfig) : IO Unit := do
@@ -826,6 +904,7 @@ def deployCluster (cfg : ClusterConfig) : IO Unit := do
   let _ ← kubectlWaitReady s!"pod/{cfg.debugPod}" cfg.«namespace» 60
 
   -- Deploy operator
+  if cfg.nodeGuard then setupNodeGuardWebhook cfg
   applyYaml (operatorDeploymentYaml cfg)
 
   -- Wait for operator to be ready.
@@ -920,6 +999,7 @@ def deploySecondCluster (cfg : ClusterConfig) : IO Unit := do
   let _ ← kubectlWaitReady s!"pod/{cfg.debugPod}" cfg.«namespace» 60
 
   -- Deploy operator
+  if cfg.nodeGuard then setupNodeGuardWebhook cfg
   applyYaml (operatorDeploymentYaml cfg)
   let _ ← kubectlRolloutStatus s!"deployment/{cfg.operatorName}" cfg.«namespace» 300
 
@@ -932,6 +1012,8 @@ def deploySecondCluster (cfg : ClusterConfig) : IO Unit := do
 def cleanupCluster (cfg : ClusterConfig) : IO Unit := do
   IO.eprintln s!"# Cleaning up cluster '{cfg.name}'"
   let ns := cfg.«namespace»
+  if cfg.nodeGuard then
+    discard <| kubectl ["delete", "validatingwebhookconfiguration", s!"flare-node-guard-{ns}", "--ignore-not-found"]
   kubectlDelete "flarecluster" cfg.name ns
   kubectlDelete "statefulset" s!"{cfg.name}-nodes" ns
   kubectlDelete "deployment" cfg.operatorName ns

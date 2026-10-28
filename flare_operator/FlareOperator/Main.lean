@@ -476,11 +476,13 @@ private def statDest (out name dest : String) : Option Nat :=
     live map at once (the pass's lease, persist and publication fences);
     `commitPromote` commits V2 through the pass's promotion gates (true =
     nothing refused it); `route` points the partition Services at the
-    masters of the live map. -/
+    masters of the live map; `renew` renews this pod's lease (the fast loop
+    can outlast a lease period: it must not starve the leader loop's
+    renewal). -/
 private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterState)
     (repairLed : ReplicaRepair.Ledger) (publish : String → IO Bool)
     (commitPromote : Option (String × String) → FlareClusterState → IO Bool)
-    (route : IO Unit) : IO (List String) := do
+    (route : IO Unit) (renew : IO Bool) : IO (List String) := do
   if !(← handoverLoadedRef.get) then
     match ← Bridge.readHandovers crName ns with
     | .ok l =>
@@ -545,9 +547,18 @@ private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterSta
   let mut out : Handover.Ledger := {}
   let mut first := true
   let mut routed := false
+  let mut renewedMs ← IO.monoMsNow
   repeat
     if !first then
       IO.sleep 100
+      -- local kind 2026-10-28 (S8): an abort, its rollback and the pass
+      -- around it outlasted the 15 s lease; the lease expired and the next
+      -- maps were fenced. Renew every 2 s; on a lost lease stop here.
+      if (← IO.monoMsNow) >= renewedMs + 2000 then
+        if !(← renew) then
+          IO.eprintln "[flare-operator] HANDOVER: the lease could not be renewed (not the holder, or the API refused); the fast loop stops — the leader loop decides"
+          break
+        renewedMs ← IO.monoMsNow
       match ← Bridge.listFlaredPodsE crName ns with
       | .ok ps => pods := ps
       | .error e =>
@@ -790,10 +801,10 @@ private def nodeGuardAnswer (crName ns : String) (stateRef : IO.Ref FlareCluster
       | _, _ => pure (NodeGuard.Verdict.allow "not gated")
     match verdict with
     | .deny why =>
-      IO.eprintln s!"[flare-operator] NODE GUARD: REFUSED {r.operation} {r.resource}{if r.subResource.isEmpty then "" else "/" ++ r.subResource} {r.name} by {r.username}{if r.dryRun then " (dry run)" else ""}: {why}"
+      IO.eprintln s!"[flare-operator] NODE GUARD: REFUSED {r.operation} {r.resource}{if r.subResource.isEmpty then "" else "/" ++ r.subResource} {r.name}{if r.podUid.isEmpty then "" else s!" (uid {r.podUid}, grace {r.gracePeriodSeconds})"} by {r.username}{if r.dryRun then " (dry run)" else ""}: {why}"
     | .allow why =>
       if r.resource == "pods" || r.subResource == "scale" || r.resource == "statefulsets" then
-        IO.eprintln s!"[flare-operator] NODE GUARD: allowed {r.operation} {r.resource}{if r.subResource.isEmpty then "" else "/" ++ r.subResource} {r.name} by {r.username}: {why}"
+        IO.eprintln s!"[flare-operator] NODE GUARD: allowed {r.operation} {r.resource}{if r.subResource.isEmpty then "" else "/" ++ r.subResource} {r.name}{if r.podUid.isEmpty then "" else s!" (uid {r.podUid}, grace {r.gracePeriodSeconds})"} by {r.username}{if r.dryRun then " (dry run)" else ""}: {why}"
     return Admission.reviewResponse r.uid verdict.allowed verdict.message
 
 /-- Ensure K8s Service selectors point to the current Master for each partition. -/
@@ -3051,6 +3062,14 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
         handoverProvenRef.set []
       pure !(← promotionAbortedRef.get))
     (do ensureServiceRouting (← stateRef.get) crName ns)
+    (do
+      match ← getLease leaseName ns with
+      | .ok l =>
+        if l.holderIdentity != identity then pure false
+        else match ← renewLease leaseName ns identity with
+          | .ok () => pure true
+          | .error _ => pure false
+      | .error _ => pure false)
   let heldKeys := heldKeys ++ handoverHeld.filter (fun k => !heldKeys.contains k)
 
   let drainBlockedRef ← IO.mkRef 0

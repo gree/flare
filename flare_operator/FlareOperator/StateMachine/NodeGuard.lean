@@ -41,11 +41,16 @@ def overrideAnnotation : String := "flare.gree.net/delete-override"
 /-- Requests the guard never stands in the way of: the operator itself, and
     Kubernetes' own controllers (namespace deletion, garbage collection, the
     node lifecycle; the StatefulSet controller removes pods only after a
-    scale-down this guard already allowed). -/
+    scale-down this guard already allowed), and the kubelet's confirmation of
+    a pod that already terminated. -/
 def trustedRequester (username operatorAccount : String) : Bool :=
   (!operatorAccount.isEmpty && username == operatorAccount)
   || username == "system:kube-controller-manager"
   || username.startsWith "system:serviceaccount:kube-system:"
+  -- the kubelet confirms a terminated pod's removal with its own DELETE
+  -- (grace 0) once the containers stopped: refusing it would leave every
+  -- deleted pod Terminating
+  || username.startsWith "system:node:"
 
 /-- An Active, Ready replica of `partition` other than `except`. -/
 def hasSuccessor (s : FlareClusterState) (readyKeys : List String) (partition : Int) (except : String) : Bool :=

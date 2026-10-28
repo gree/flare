@@ -46,6 +46,8 @@ def results : List (String × Bool) := Id.run do
   r := r ++ [("node guard: an override naming another UID does not",
               !(podDelete st ready user op "m:12121" "u1" (some "other") (some 0)).allowed)]
   r := r ++ [("node guard: the operator's own delete is allowed", (podDelete st ["m:12121"] op op "m:12121" "u1" none (some 0)).allowed)]
+  r := r ++ [("node guard: the kubelet's final delete of a terminated pod is allowed",
+              (podDelete st [] "system:node:worker-1" op "m:12121" "u1" none (some 0)).allowed)]
   r := r ++ [("node guard: Kubernetes controllers are allowed",
               (podDelete st [] "system:serviceaccount:kube-system:namespace-controller" op "m:12121" "u1" none (some 0)).allowed
                 && (podDelete st [] "system:kube-controller-manager" op "m:12121" "u1" none none).allowed)]

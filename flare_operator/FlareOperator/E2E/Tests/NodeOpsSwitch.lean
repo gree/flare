@@ -321,12 +321,31 @@ private def switchRun (c : Ctx) (op : SwitchOp) : IO (Except String SwitchObs) :
         match ← kubectlLong 180 ["delete", "pod", p.master.name, "-n", ns, "--wait=false"] with
         | .error e => removeCuts installed; opOk := false; opDetail := s!"delete failed: {e.take 200}"
         | .ok _ =>
-          let aborted ← waitForCondition "the first handover aborted (forwards to the cut successor do not drain)" 90 do
-            return containsSubstr (← opLogs ()) "-> aborted"
+          -- the abort must be the one under test: V1 sent, the drain to the
+          -- cut successor not clean within Th, then the rollback map V1′
+          -- committed — and applied by BOTH pods before the cut is healed
+          -- (review of 4bdc83b: any "-> aborted" could be a pre-V1 abort, and
+          -- the phase line comes before V1′ is even committed)
+          let rollbackVersion := fun (l : String) =>
+            ((l.splitOn "aborted map committed as v").drop 1).head?.bind fun rest =>
+              (rest.takeWhile Char.isDigit).toNat?
+          let aborted ← waitForCondition "the first handover aborted from draining on Th, and its rollback map was committed" 90 do
+            let l ← opLogs ()
+            return containsSubstr l "demoting map committed as v" && containsSubstr l "draining -> aborted"
+              && containsSubstr l "not drained within" && (rollbackVersion l).isSome
+          let vBack := rollbackVersion (← opLogs ())
+          let applied ← match vBack with
+            | none => pure false
+            | some v => waitForCondition s!"the rollback map v{v} is applied by the old master and the successor" 60 do
+                let ver := fun (ip : String) => do
+                  return ((← c.stats ip).bind (statOf · "node_map_version")).bind (·.toNat?)
+                let a ← ver p.master.ip
+                let b ← ver p.replica.ip
+                return a.any (· >= v) && b.any (· >= v)
           removeCuts installed
-          c.event s!"first handover aborted={aborted}; cut removed"
-          if !aborted then
-            opOk := false; opDetail := "delete accepted, but the handover never aborted under the cut (the forced abort was not produced)"
+          c.event s!"first handover aborted on Th={aborted}; rollback map {vBack} applied by both={applied}; cut removed"
+          if !aborted || !applied then
+            opOk := false; opDetail := s!"the forced abort was not produced as intended (aborted from draining on Th={aborted}, rollback v{vBack} applied by both={applied})"
           else
             let retried ← waitForCondition "the handover is retried (attempt 2) and completes" 120 do
               let l ← opLogs ()
@@ -539,6 +558,128 @@ def sigtermHoldTest (c : Ctx) : IO TestResult := do
     if !onReplica then return .fail s!"the client was told STORED but the replica does not hold {key}"
     return .pass
 
+/-- S9 (review of 4bdc83b): attempt exhaustion through the real
+    orchestration. The master stays cut from its successor, so every handover
+    aborts on Th; attempts 2 and 3 must start, and only after the third
+    abort may the one-map drain take the master. An orchestration test, not
+    a data verdict: the cut makes the old master's forwards undeliverable on
+    purpose. -/
+def abortExhaustTest (c : Ctx) : IO TestResult := do
+  match ← c.placement with
+  | .error e => return .fail e
+  | .ok p =>
+    if !(← operatorSettled c) then
+      return .fail (notSetUp "the operator did not finish its startup grace period")
+    if !(← waitForCondition "the pair is redundant with the replica on the master's history" 300 (redundant c none)) then
+      return .fail (notSetUp "the cluster did not start this test with a healthy pair")
+    c.conditions ["S9: the master is cut from its successor and deleted under a write load; the cut stays: three handover attempts abort, then the one-map drain may take the master"]
+    let ns := c.cfg.«namespace»
+    -- writes keep forwards to the cut successor in flight: without them the
+    -- drain is trivially clean and nothing aborts (first local run)
+    match ← c.ensureLoadWriter with
+    | .error e => return .fail (notSetUp e)
+    | .ok () => pure ()
+    if !(← c.startLoad "svc" (svcHost c) 4 200) then return .fail (notSetUp "the write load did not start")
+    let opLogs := fun (_ : Unit) => kubectlLogsLabel s!"app={c.cfg.operatorName}" ns 30000
+    let rules := podCutRules (← kindNodes) p.master.ip p.replica.ip
+    let installed ← match ← installCuts rules with
+      | .ok r => pure r
+      | .error (why, part) => removeCuts part; return .fail (notSetUp s!"could not cut master <-> replica: {why}")
+    c.event s!"cut {p.master.ip} <-> {p.replica.ip}; deleting the master {p.master.name}"
+    match ← kubectlLong 180 ["delete", "pod", p.master.name, "-n", ns, "--wait=false"] with
+    | .error e => removeCuts installed; return .fail (notSetUp s!"delete failed: {e.take 200}")
+    | .ok _ => pure ()
+    let drainLine := s!"graceful drain: demoting Terminating node(s) to live proxy + promoting replacement(s): [{p.master.name}"
+    let count := fun (l n : String) => (l.splitOn n).length - 1
+    let done ← waitForCondition "three handover attempts aborted, then the one-map drain took the master" 170 do
+      let l ← opLogs ()
+      return count l "draining -> aborted" >= 3 && containsSubstr l drainLine
+    removeCuts installed
+    discard <| c.stopLoad "svc" 4
+    let l ← opLogs ()
+    for x in (l.splitOn "\n").filter (fun x => containsSubstr x "HANDOVER" || containsSubstr x "graceful drain") do c.art "operator-handover.txt" x
+    -- order: the drain line comes after the third abort
+    let afterThird := match (l.splitOn "draining -> aborted").drop 3 with
+      | rest :: _ => containsSubstr rest drainLine
+      | [] => false
+    let beforeThird := match (l.splitOn "draining -> aborted").take 3 with
+      | parts => parts.any (containsSubstr · drainLine)
+    IO.eprintln s!"# [{c.test}] aborts={count l "draining -> aborted"}, attempt 2 started={containsSubstr l "(attempt 2 of"}, attempt 3 started={containsSubstr l "(attempt 3 of"}, drain after the third abort={afterThird}, drain before it={beforeThird}"
+    if !done then return .fail "three aborts followed by the one-map drain were not seen within 170 s (see operator-handover.txt)"
+    if !(containsSubstr l "(attempt 2 of" && containsSubstr l "(attempt 3 of") then
+      return .fail "attempt 2 or 3 never started (see operator-handover.txt)"
+    if beforeThird then return .fail "the one-map drain took the master before the attempts were used up"
+    if !afterThird then return .fail "the one-map drain did not follow the third abort"
+    return .pass
+
+/-- G1 (A0 stage 6b): the node-guard webhook. With the guard on:
+    a force delete (grace 0) of the master is refused and the pod stays;
+    a StatefulSet scale-down over an ordinal that holds data is refused;
+    the delete-override annotation (the pod's UID) lets a force delete of
+    the replica through; a graceful delete of the master is allowed and the
+    ordered handover moves its partition. -/
+def nodeGuardTest (c : Ctx) : IO TestResult := do
+  match ← c.placement with
+  | .error e => return .fail e
+  | .ok p =>
+    if !(← operatorSettled c) then
+      return .fail (notSetUp "the operator did not finish its startup grace period")
+    if !(← waitForCondition "the pair is redundant with the replica on the master's history" 300 (redundant c none)) then
+      return .fail (notSetUp "the cluster did not start this test with a healthy pair")
+    c.conditions ["G1: node guard on; force delete / scale-down refused, override and graceful delete allowed"]
+    let ns := c.cfg.«namespace»
+    let uidOf := fun (pod : String) => do
+      match ← kubectl ["get", "pod", pod, "-n", ns, "-o", "jsonpath={.metadata.uid}"] with
+      | .ok o => pure o.trim
+      | .error _ => pure ""
+    let mut fails : List String := []
+    -- 1. force delete of the master: refused, the pod stays
+    let mUid ← uidOf p.master.name
+    let r1 ← kubectlLong 60 ["delete", "pod", p.master.name, "-n", ns, "--grace-period=0", "--force", "--wait=false"]
+    let mUidAfter ← uidOf p.master.name
+    c.event s!"force delete of the master: {match r1 with | .ok o => s!"ACCEPTED {o.take 120}" | .error e => s!"refused: {e.take 300}"}"
+    match r1 with
+    | .ok _ => fails := fails ++ ["the force delete of the master was accepted"]
+    | .error e =>
+      if !containsSubstr e "flare: a force delete" then fails := fails ++ [s!"the force delete was refused, but not by the node guard: {e.take 200}"]
+    if mUidAfter != mUid then fails := fails ++ ["the master pod was replaced after a refused force delete"]
+    -- 2. scale-down over the replica's ordinal: refused
+    let r2 ← kubectl ["scale", s!"statefulset/{c.cfg.name}-nodes", "-n", ns, "--replicas=1"]
+    c.event s!"scale 2 -> 1: {match r2 with | .ok o => s!"ACCEPTED {o.take 120}" | .error e => s!"refused: {e.take 300}"}"
+    match r2 with
+    | .ok _ =>
+      fails := fails ++ ["the scale-down over a data-holding ordinal was accepted"]
+      discard <| kubectl ["scale", s!"statefulset/{c.cfg.name}-nodes", "-n", ns, "--replicas=2"]
+    | .error e =>
+      if !containsSubstr e "flare: scaling" then fails := fails ++ [s!"the scale-down was refused, but not by the node guard: {e.take 200}"]
+    -- 3. the override lets a force delete of the replica through
+    let rUid ← uidOf p.replica.name
+    discard <| kubectl ["annotate", "pod", p.replica.name, "-n", ns, "--overwrite", s!"flare.gree.net/delete-override={rUid}"]
+    let r3 ← kubectlLong 60 ["delete", "pod", p.replica.name, "-n", ns, "--grace-period=0", "--force", "--wait=false"]
+    -- judged by the outcome, not kubectl's exit: the API server may run the
+    -- delete's admission again on the pod the StatefulSet already recreated
+    -- under the same name (a new UID, no override), which is refused as it
+    -- should be — the pod the override named is gone either way
+    let rUidAfter ← uidOf p.replica.name
+    c.event s!"force delete of the replica with the override: {match r3 with | .ok _ => "accepted" | .error e => s!"kubectl error (tail) {e.takeRight 400}"}; uid {rUid} -> {rUidAfter}"
+    if rUidAfter == rUid then fails := fails ++ ["the override did not let the force delete of the replica through (the pod is still there)"]
+    else if !containsSubstr (← kubectlLogsLabel s!"app={c.cfg.operatorName}" ns 20000) s!"allowed DELETE pods {p.replica.name} (uid {rUid}" then
+      fails := fails ++ ["the replica was replaced, but the node guard did not log the override allowing it"]
+    if !(← waitForCondition "the replica is back and the pair redundant" 600 (redundant c none)) then
+      fails := fails ++ ["the pair did not become redundant again after the replica's force delete"]
+    -- 4. a graceful delete of the master: allowed; the handover moves it
+    let r4 ← kubectlLong 60 ["delete", "pod", p.master.name, "-n", ns, "--wait=false"]
+    c.event s!"graceful delete of the master: {match r4 with | .ok _ => "accepted" | .error e => s!"REFUSED {e.take 300}"}"
+    if r4 matches .error _ then fails := fails ++ ["the graceful delete of the master was refused"]
+    else
+      let moved ← waitForCondition "the ordered handover completes" 180 do
+        return containsSubstr (← kubectlLogsLabel s!"app={c.cfg.operatorName}" ns 20000) "HANDOVER p0 done"
+      if !moved then fails := fails ++ ["no handover completed after the graceful delete of the master"]
+    let logs ← kubectlLogsLabel s!"app={c.cfg.operatorName}" ns 20000
+    for x in (logs.splitOn "\n").filter (fun x => containsSubstr x "NODE GUARD") do c.art "node-guard.txt" x
+    IO.eprintln s!"# [{c.test}] node guard: {if fails.isEmpty then "every check held" else String.intercalate "; " fails}"
+    if fails.isEmpty then return .pass else return .fail (String.intercalate "; " fails)
+
 /-- One scenario per suite, each on a FRESH cluster: a scenario that leaves the
     pair broken (e.g. a replica on an older history after S3) no longer makes
     the next one fail on its precondition, and each leg stays well inside the
@@ -548,6 +689,8 @@ inductive Scenario where
   | op (o : SwitchOp)
   | gate
   | sigtermHold
+  | abortExhaust
+  | nodeGuard
   deriving BEq
 
 def Scenario.slug : Scenario → String
@@ -559,6 +702,8 @@ def Scenario.slug : Scenario → String
   | .op .deleteMasterAbortRetry => "abortretry"
   | .gate => "gate"
   | .sigtermHold => "sigterm-hold"
+  | .abortExhaust => "abortexhaust"
+  | .nodeGuard => "node-guard"
 
 def Scenario.title : Scenario → String
   | .op .deleteMaster => "(S1) kubectl delete pod of the MASTER under a client-like load: the pod is replaced; 0 write errors, 0 acknowledged writes missing on the final master and replica"
@@ -568,6 +713,8 @@ def Scenario.title : Scenario → String
   | .op .deleteMasterAbortRetry => "(S8) kubectl delete pod of the MASTER while it is cut from its successor, under a client-like load: the first handover aborts and rolls back, the cut is removed, the retry (attempt 2) completes; the one-map drain never takes the master; 0 write errors, 0 missing"
   | .op .deleteMasterSaveFail => "(S7) kubectl delete pod of the MASTER while the operator cannot save its handover ledger, then an operator restart, under a client-like load: no handover map before its phase is saved; the new operator completes the switch; 0 write errors, 0 missing"
   | .gate => "(S5) the old master is cut from the replica and deleted under a write load: preStop / flared report the drain as NOT lossless, never as lossless (gate test)"
+  | .nodeGuard => "(G1) node guard webhook: a force delete of the master and a scale-down over a data-holding ordinal are refused; the delete-override annotation and a graceful delete of the master are allowed (the handover moves it)"
+  | .abortExhaust => "(S9) the master stays cut from its successor and is deleted: attempts 2 and 3 start, and only after the third abort does the one-map drain take the master (orchestration test, not a data verdict)"
   | .sigtermHold => "(S6) a sync client write held on a cut replica across a SIGTERM (cut removed 40 s after it): the client gets STORED and the replica holds the value"
 
 private def scenarioSuite (sc : Scenario) (tmpfs : Bool) : TestSuite :=
@@ -578,6 +725,9 @@ private def scenarioSuite (sc : Scenario) (tmpfs : Bool) : TestSuite :=
   -- operator's restart (its startup is not what S7 measures)
   let cfg := if sc == .op .deleteMasterSaveFail then
       { cfg0 with operatorEnv := [("FLARE_TEST_HANDOVER_SAVE_FAIL_FILE", saveFailFile)], drainSeconds := 180 }
+    -- S9: three attempts (Th + rollback + retry delay each) outlast 60 s
+    else if sc == .abortExhaust then { cfg0 with drainSeconds := 180 }
+    else if sc == .nodeGuard then { cfg0 with nodeGuard := true }
     else cfg0
   let c : Ctx := { cfg, suite, test := s!"s-{sc.slug}" }
   { name := suite
@@ -587,9 +737,9 @@ private def scenarioSuite (sc : Scenario) (tmpfs : Bool) : TestSuite :=
       cleanupCluster cfg
     onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
     afterEach := fun i => saveFullLogs cfg.«namespace» s!"after-test-{i}"
-    tests := [{ name := sc.title, run := match sc with | .op o => switchTest c o | .gate => gateTest c | .sigtermHold => sigtermHoldTest c }] }
+    tests := [{ name := sc.title, run := match sc with | .op o => switchTest c o | .gate => gateTest c | .sigtermHold => sigtermHoldTest c | .abortExhaust => abortExhaustTest c | .nodeGuard => nodeGuardTest c }] }
 
-def scenarios : List Scenario := [.op .deleteMaster, .op .rollingRestart, .op .rollBoth, .op .drainMaster, .gate, .sigtermHold, .op .deleteMasterSaveFail, .op .deleteMasterAbortRetry]
+def scenarios : List Scenario := [.op .deleteMaster, .op .rollingRestart, .op .rollBoth, .op .drainMaster, .gate, .sigtermHold, .op .deleteMasterSaveFail, .op .deleteMasterAbortRetry, .abortExhaust, .nodeGuard]
 
 /-- node-ops-switch-<scenario> (PVC) and node-ops-switch-tmpfs-<scenario>. -/
 def switchSuites : List TestSuite :=

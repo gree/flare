@@ -60,6 +60,17 @@ private:
 	shared_cluster_replication	_cluster_replication;
 
 public:
+	// The graceful-stop budget (msec) shared by the wait for executing client
+	// requests and the forward drain: shutdown-forward-drain-msec, raised to
+	// the forward hold + 5 s (a sync client write may wait that long on a
+	// held forward). 0 (no drain) stays 0: nothing is waited for.
+	static int shutdown_budget_ms(int drain_ms, int hold_ms) {
+		if (drain_ms <= 0) {
+			return 0;
+		}
+		const int held = hold_ms > 0 ? hold_ms + 5000 : 0;
+		return drain_ms > held ? drain_ms : held;
+	};
 	flared();
 	~flared();
 

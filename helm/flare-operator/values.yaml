@@ -156,7 +156,8 @@ cluster:
   # still holds. It approximates flare's old "demote to proxy, then drain"
   # behaviour: no NEW connections arrive, existing clients finish or reconnect,
   # and only then is flared sent SIGTERM. terminationGracePeriodSeconds is
-  # drainSeconds + 30 (headroom for flared's own graceful shutdown after SIGTERM).
+  # drainSeconds + 75 (flared's own graceful shutdown after SIGTERM: up to 65 s
+  # for executing client requests and queued forwards, + 10 s headroom).
   # Cost: each pod takes ~drainSeconds longer to roll — a full 6-pod rolling
   # restart is +6×drainSeconds. Set 0 to disable the hook (abrupt stop).
   drainSeconds: 60

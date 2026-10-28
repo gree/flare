@@ -259,8 +259,11 @@ spec:
       {{- end }}
       {{- if gt (int $drain) 0 }}
       # Room for the preStop drain (below) + flared's own graceful shutdown after
-      # SIGTERM. Must exceed drainSeconds or K8s SIGKILLs mid-drain.
-      terminationGracePeriodSeconds: {{ add (int $drain) 30 }}
+      # SIGTERM: its budget is max(shutdown-forward-drain-msec 30 s, the
+      # forward hold 60 s + 5 s) = 65 s for client requests still executing and
+      # the forwards still queued, + 10 s headroom. Less, and K8s SIGKILLs a
+      # client write that waits on a held forward (review of 09624ee).
+      terminationGracePeriodSeconds: {{ add (int $drain) 75 }}
       {{- end }}
       {{- /* ALWAYS render serviceAccountName (falling back to "default"):
              `kubectl apply` / ArgoCD cannot UNSET a field that the desired

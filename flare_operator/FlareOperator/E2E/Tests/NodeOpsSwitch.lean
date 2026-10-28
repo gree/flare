@@ -367,6 +367,78 @@ def gateTest (c : Ctx) : IO TestResult := do
     if !reportedNot then return .fail (unobservable "the old master's log carries no drain verdict at all (NOT LOSSLESS / NOT CONFIRMED)")
     return .pass
 
+/-- A one-shot memcached client in the load-writer pod: sends `req` to
+    host:12121 and prints `REPLY <repr> <seconds>` once a reply line (or the
+    `END` of a get) arrived, or the connection ended. -/
+private def oneShotScript : String := "import socket, sys, time
+t = time.time()
+host, req, until_end = sys.argv[1], sys.argv[2].encode().decode('unicode_escape').encode(), sys.argv[3] == '1'
+b = b''
+try:
+    s = socket.create_connection((host, 12121), timeout=150)
+    s.settimeout(150)
+    s.sendall(req)
+    while True:
+        d = s.recv(4096)
+        if not d:
+            break
+        b += d
+        if (until_end and b.endswith(b'END\\r\\n')) or (not until_end and b.endswith(b'\\r\\n')):
+            break
+except Exception as e:
+    b += ('EXC ' + type(e).__name__).encode()
+print('REPLY', repr(b), round(time.time() - t, 1))
+"
+
+private def oneShotArgs (c : Ctx) (host req : String) (untilEnd : Bool) : Array String :=
+  #["exec", loadWriterPod c, "-n", c.cfg.«namespace», "--", "python3", "-c", oneShotScript, host, req, if untilEnd then "1" else "0"]
+
+/-- S6 (review of 09624ee): a sync client write waits on a forward held for up
+    to the hold window (60 s); a SIGTERM must not cut it off. The master is cut
+    from the replica, a client sends one `set ... sync` to the master, flared
+    is sent SIGTERM 5 s later, and the cut is removed 40 s after the SIGTERM —
+    past the old 30 s stop budget, inside the hold. The client must get its
+    terminal answer (STORED: the replica has the write) and the replica must
+    hold the value. -/
+def sigtermHoldTest (c : Ctx) : IO TestResult := do
+  match ← c.placement with
+  | .error e => return .fail e
+  | .ok p =>
+    if !(← waitForCondition "the pair is redundant with the replica on the master's history" 300 (redundant c none)) then
+      return .fail (notSetUp "the cluster did not start this test with a healthy pair")
+    c.conditions ["S6: one sync client write waits on a forward held by a master/replica cut; the master gets SIGTERM 5 s later; the cut is removed 40 s after the SIGTERM; the client must get STORED and the replica must hold the value"]
+    match ← c.ensureLoadWriter with
+    | .error e => return .fail (notSetUp e)
+    | .ok () => pure ()
+    let ns := c.cfg.«namespace»
+    let key := s!"s6key{← epochNow}"
+    let rules := podCutRules (← kindNodes) p.master.ip p.replica.ip
+    let installed ← match ← installCuts rules with
+      | .ok r => pure r
+      | .error (why, part) => removeCuts part; return .fail (notSetUp s!"could not cut master <-> replica: {why}")
+    c.event s!"cut {p.master.ip} <-> {p.replica.ip}; sending one sync set of {key} to the master {p.master.name}"
+    let client ← IO.Process.spawn { cmd := "kubectl", args := oneShotArgs c p.master.ip s!"set {key} 0 0 5 sync\\r\\nvalue\\r\\n" false,
+                                    stdout := .piped, stderr := .piped }
+    IO.sleep 5000
+    let term ← kubectlLong 30 ["exec", p.master.name, "-n", ns, "-c", "flared", "--", "sh", "-c", "kill -TERM 1"]
+    c.event s!"SIGTERM to flared on {p.master.name}: {match term with | .ok _ => "sent" | .error e => s!"failed: {e}"}"
+    IO.sleep 40000
+    removeCuts installed
+    c.event "cut removed (40 s after the SIGTERM)"
+    let out ← client.stdout.readToEnd
+    let _ ← client.wait
+    let reply := ((out.splitOn "\n").find? (fun l => l.startsWith "REPLY")).getD s!"(no reply line: {out.take 200})"
+    c.event s!"client: {reply}"
+    let (_, _) ← observe c 300 (redundant c none)
+    let got ← IO.Process.output { cmd := "kubectl", args := oneShotArgs c p.replica.ip s!"get {key}\\r\\n" true }
+    let onReplica := containsSubstr got.stdout "value"
+    IO.eprintln s!"# [{c.test}] SIGTERM {match term with | .ok _ => "sent" | .error e => s!"failed ({e})"}; client {reply}; replica holds the value={onReplica} ({got.stdout.trim.take 200})"
+    if term matches .error _ then return .fail (notSetUp "the SIGTERM could not be sent")
+    if !containsSubstr reply "STORED" then
+      return .fail s!"the sync client write did not get its terminal answer STORED across the SIGTERM: {reply}"
+    if !onReplica then return .fail s!"the client was told STORED but the replica does not hold {key}"
+    return .pass
+
 /-- One scenario per suite, each on a FRESH cluster: a scenario that leaves the
     pair broken (e.g. a replica on an older history after S3) no longer makes
     the next one fail on its precondition, and each leg stays well inside the
@@ -375,6 +447,7 @@ def gateTest (c : Ctx) : IO TestResult := do
 inductive Scenario where
   | op (o : SwitchOp)
   | gate
+  | sigtermHold
   deriving BEq
 
 def Scenario.slug : Scenario → String
@@ -383,6 +456,7 @@ def Scenario.slug : Scenario → String
   | .op .rollBoth => "rollboth"
   | .op .drainMaster => "drain"
   | .gate => "gate"
+  | .sigtermHold => "sigterm-hold"
 
 def Scenario.title : Scenario → String
   | .op .deleteMaster => "(S1) kubectl delete pod of the MASTER under a client-like load: the pod is replaced; 0 write errors, 0 acknowledged writes missing on the final master and replica"
@@ -390,6 +464,7 @@ def Scenario.title : Scenario → String
   | .op .rollBoth => "(S3) operator Deployment + StatefulSet rollout restart together (helm-upgrade-like, not a helm upgrade) under a client-like load: 0 write errors, 0 missing"
   | .op .drainMaster => "(S4) kubectl drain of the MASTER's worker (no eviction guard) under a client-like load: the drain completes and no flared pod is left there; 0 write errors, 0 missing"
   | .gate => "(S5) the old master is cut from the replica and deleted under a write load: preStop / flared report the drain as NOT lossless, never as lossless (gate test)"
+  | .sigtermHold => "(S6) a sync client write held on a cut replica across a SIGTERM (cut removed 40 s after it): the client gets STORED and the replica holds the value"
 
 private def scenarioSuite (sc : Scenario) (tmpfs : Bool) : TestSuite :=
   let short := if tmpfs then s!"swt-{sc.slug}" else s!"sw-{sc.slug}"
@@ -403,9 +478,9 @@ private def scenarioSuite (sc : Scenario) (tmpfs : Bool) : TestSuite :=
       cleanupCluster cfg
     onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
     afterEach := fun i => saveFullLogs cfg.«namespace» s!"after-test-{i}"
-    tests := [{ name := sc.title, run := match sc with | .op o => switchTest c o | .gate => gateTest c }] }
+    tests := [{ name := sc.title, run := match sc with | .op o => switchTest c o | .gate => gateTest c | .sigtermHold => sigtermHoldTest c }] }
 
-def scenarios : List Scenario := [.op .deleteMaster, .op .rollingRestart, .op .rollBoth, .op .drainMaster, .gate]
+def scenarios : List Scenario := [.op .deleteMaster, .op .rollingRestart, .op .rollBoth, .op .drainMaster, .gate, .sigtermHold]
 
 /-- node-ops-switch-<scenario> (PVC) and node-ops-switch-tmpfs-<scenario>. -/
 def switchSuites : List TestSuite :=

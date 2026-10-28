@@ -443,9 +443,10 @@ void queue_proxy_write::clear_held_given_up() {
  *	  are counted in flight, so a graceful stop waits for them too.
  *	- Ends early, counted as dropped: the thread is stopping, or the
  *	  destination is a proxy in the node map now (it holds no copy to keep).
- *	- After a forward waited out the whole window without any answer, the
- *	  destination is given up for EVERY forwarding thread: later forwards try
- *	  once each (counted at once when it fails) until one is answered.
+ *	- After a forward waited out the whole window without any answer, or
+ *	  with SERVER_ERROR only, the destination is given up for EVERY forwarding
+ *	  thread: later forwards try once each (counted at once when it fails)
+ *	  until one is delivered (an answer other than SERVER_ERROR).
  *
  *	Returns true when the destination answered (the last answer is
  *	classified by the caller: a SERVER_ERROR at the end of the window counts
@@ -524,6 +525,23 @@ bool queue_proxy_write::_send_held(shared_connection c, op_proxy_write* p) {
 		stats_object->note_proxy_write_held(dest, took);
 	}
 
+	// SERVER_ERROR is a refusal, not a delivery (review of 09624ee): it never
+	// lifts the given-up mark, and a refusal that lasted the whole window
+	// gives the replica up like no answer (the caller counts it as failed)
+	const bool refused = answered && p->get_result() == op::result_server_error;
+	if (refused) {
+		if (!given_up && !dest.empty() && !this->_owner_stopping() && took >= window) {
+			held_set_given_up(dest, true);
+		}
+		static AtomicCounter refused_logged(0);
+		if (refused_logged.incr() % 100 == 1) {
+			log_err("proxy write REFUSED by the replica after %d attempts in %llu ms (dest=%s, op=%s, key=%s, version=%u): %s — counted as failed (logged 1 in 100)",
+				attempts, (unsigned long long)took, dest.c_str(),
+				this->_op_ident.c_str(), this->_entry.key.c_str(), this->_entry.version,
+				given_up ? "the replica was already given up" : "SERVER_ERROR through its hold window");
+		}
+		return true;
+	}
 	if (answered) {
 		if (given_up) {
 			held_set_given_up(dest, false);

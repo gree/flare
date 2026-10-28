@@ -589,6 +589,98 @@ namespace test_handler_cluster_replication {
 		cut_assert_equal_int(1, (int)held);
 	}
 
+	// answer every forward that arrives on c with `reply` until none arrives
+	// for `idle_ms` (the sender stopped trying); returns how many were answered
+	int answer_all(shared_connection_tcp c, const char* reply, int idle_ms) {
+		c->set_read_timeout(idle_ms);
+		int n = 0;
+		for (;;) {
+			char *p = NULL, *v = NULL;
+			if (c->readline(&p) <= 0) {
+				break;
+			}
+			if (c->readline(&v) <= 0) {
+				delete[] p;
+				break;
+			}
+			delete[] p;
+			delete[] v;
+			c->writeline(reply);
+			n++;
+		}
+		return n;
+	}
+
+	// One exchange on c: read one forward, answer `reply`.
+	void answer_one(shared_connection_tcp c, const char* reply) {
+		char *p, *v;
+		c->readline(&p);
+		c->readline(&v);
+		delete[] p;
+		delete[] v;
+		c->writeline(reply);
+	}
+
+	// A replica that refuses (SERVER_ERROR) through the whole hold window is
+	// given up like one that does not answer (review of 09624ee: the refusal
+	// counted as an answer, so it was never given up and every forward, on
+	// every thread, waited out a whole window again). The forward is counted
+	// as failed, not dropped. A second thread then makes ONE fast attempt; a
+	// SERVER_ERROR answer keeps the replica given up; only a delivery (STORED)
+	// lifts it.
+	void test_in_cluster_refusal_through_the_hold_gives_the_replica_up() {
+		queue_proxy_write::hold_window_ms = 1500;
+		shared_thread a = start_handler();
+		shared_queue_proxy_write q1 = enqueue_replica_set(a, "key1");
+		const int refused = answer_all(cs[0], "SERVER_ERROR no partition available", 2500);
+		q1->sync();
+		cut_assert(refused >= 2, cut_message("the refused forward was tried %d time(s) within its hold", refused));
+		cut_assert_equal_int(op::result_server_error, q1->get_result());
+		uint64_t failed = 0;
+		stats_object->get_proxy_write_failed(failed);
+		cut_assert_equal_int(1, (int)failed);
+		cut_assert_equal_int(0, (int)stats_object->get_proxy_write_dropped());
+
+		// another forwarding thread: one attempt, answered SERVER_ERROR at once
+		shared_thread b = start_handler(false);
+		vector<shared_connection_tcp> bcs;
+		for (int i = 0; i < 50 && bcs.size() == 0; i++) {
+			bcs = s->wait();
+		}
+		cut_assert_true(bcs.size() > 0);
+		struct timespec t0;
+		clock_gettime(CLOCK_MONOTONIC, &t0);
+		shared_queue_proxy_write q2 = enqueue_replica_set(b, "key2");
+		answer_one(bcs[0], "SERVER_ERROR no partition available");
+		q2->sync();
+		const long ms = elapsed_ms(t0);
+		cut_assert(ms < 1000, cut_message("a given-up replica held the next forward %ld ms", ms));
+		cut_assert_equal_int(op::result_server_error, q2->get_result());
+		stats_object->get_proxy_write_failed(failed);
+		cut_assert_equal_int(2, (int)failed);
+
+		// still given up after that refusal: the next one is also one attempt
+		clock_gettime(CLOCK_MONOTONIC, &t0);
+		shared_queue_proxy_write q3 = enqueue_replica_set(b, "key3");
+		answer_one(bcs[0], "SERVER_ERROR no partition available");
+		q3->sync();
+		cut_assert(elapsed_ms(t0) < 1000, cut_message("a SERVER_ERROR lifted the given-up mark"));
+
+		// a delivery lifts it: the next refusal is held (resent) again
+		shared_queue_proxy_write q4 = enqueue_replica_set(b, "key4");
+		answer_one(bcs[0], "STORED");
+		q4->sync();
+		cut_assert_equal_int(op::result_stored, q4->get_result());
+		shared_queue_proxy_write q5 = enqueue_replica_set(b, "key5");
+		answer_one(bcs[0], "SERVER_ERROR no partition available");
+		answer_one(bcs[0], "STORED");
+		q5->sync();
+		cut_assert_equal_int(op::result_stored, q5->get_result());
+		for (size_t i = 0; i < bcs.size(); i++) {
+			bcs[i]->close();
+		}
+	}
+
 	// The window is a hard bound on the whole send. A replica that accepts
 	// the connection and never answers: every try's read is cut at the time
 	// left, so the forward ends (dropped, counted) close to the window and

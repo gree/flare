@@ -214,7 +214,7 @@ def statefulSetYaml (p : TargetPlan) : String :=
   let cluster := p.targetName
   let numPods := p.partitions * p.replicas
   let operatorSvc := s!"{p.targetName}-operator.{p.ns}.svc.cluster.local"
-  let graceSeconds := p.drainSeconds + 30
+  let graceSeconds := p.drainSeconds + 75  -- the chart's grace: preStop + flared's 65 s stop budget + 10 s
   s!"apiVersion: v1
 kind: Service
 metadata:

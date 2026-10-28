@@ -683,15 +683,31 @@ int flared::shutdown() {
 	// request, and the interrupt waits (bounded) until none is executing
 	// (review of cf27570). An idle connection is closed by the interrupt;
 	// its client reconnects (through the Service) for its next request.
+	//
+	// One budget for both waits (review of 09624ee): a client write may be
+	// waiting on a forward held for up to proxy-forward-hold-msec (sync
+	// replication), so the budget is at least that hold plus 5 s; the pod's
+	// terminationGracePeriodSeconds must cover the preStop window plus it.
+	const int budget_ms = flared::shutdown_budget_ms(ini_option_object().get_shutdown_forward_drain_msec(),
+		ini_option_object().get_proxy_forward_hold_msec());
+	struct timespec t0;
+	clock_gettime(CLOCK_MONOTONIC, &t0);
 	handler_request::set_stop_after_request(true);
-	this->_wait_requests(ini_option_object().get_shutdown_forward_drain_msec());
+	this->_wait_requests(budget_ms);
 	this->_req_thread_pool->shutdown();
 	// No client request runs any more, so no new forward is made. The ones
 	// still queued to replicas carry writes a client was told STORED: keep
 	// the forwarding threads (other pool) running until they are sent, within
 	// a bound (NODE-OPS-LOSSLESS-PLAN L2). What is left at the bound is
 	// abandoned and counted, as before.
-	this->_drain_forwards(ini_option_object().get_shutdown_forward_drain_msec());
+	{
+		struct timespec t1;
+		clock_gettime(CLOCK_MONOTONIC, &t1);
+		const long long used = (static_cast<long long>(t1.tv_sec) - t0.tv_sec) * 1000 + (static_cast<long long>(t1.tv_nsec) - t0.tv_nsec) / 1000000;
+		// at least 1 ms: a budget of 0 means "do not wait" (NOT confirmed)
+		const long long left = budget_ms - used;
+		this->_drain_forwards(budget_ms <= 0 ? 0 : (left > 0 ? static_cast<int>(left) : 1));
+	}
 	this->_other_thread_pool->shutdown();
 	log_notice("all threads are successfully shutdown", 0);
 

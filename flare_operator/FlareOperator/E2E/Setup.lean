@@ -383,7 +383,9 @@ def statefulSetYaml (cfg : ClusterConfig) : String :=
   let storageFlag := s!"--storage-type={cfg.storageBackend}"
   -- preStop drain window: keep flared alive+Ready while Terminating so the
   -- operator's graceful drain is observable. grace must exceed drainSeconds.
-  let graceSeconds := if cfg.drainSeconds > 0 then cfg.drainSeconds + 10 else 5
+  -- + flared's own stop budget after SIGTERM (65 s: the forward hold 60 s +
+  -- 5 s, see the chart) + 10 s
+  let graceSeconds := if cfg.drainSeconds > 0 then cfg.drainSeconds + 75 else 5
   -- the chart's hook (helm/flare-operator/templates/flare-cluster.yaml): wait
   -- until the node's own role is proxy and no in-cluster forward is in flight
   -- (NODE-OPS-LOSSLESS-PLAN L2), then 2 s; at most drainSeconds

@@ -149,7 +149,20 @@ def results : List (String × Bool) := Id.run do
   r := r ++ [("handover: the one-map drain is held off the old master from requested to promoting, not after an abort",
               drainHeldKeys { entries := [fresh] } == ["m:12121"] && drainHeldKeys { entries := [e1s] } == ["m:12121"]
                 && drainHeldKeys { entries := [e3] } == ["m:12121"] && drainHeldKeys { entries := [e6s] } == ["m:12121"]
-                && drainHeldKeys { entries := [eas] } == [] && drainHeldKeys { entries := [{ e9 with phase := .done }] } == [])]
+                && drainHeldKeys { entries := [{ e9 with phase := .done }] } == [])]
+  -- L7: an abort that rolled back is retried (attempts left): the drain still
+  -- leaves the master; with the attempts used up, or no rollback possible,
+  -- the drain gets it back
+  r := r ++ [("handover: a rolled-back abort with attempts left is retryable and held from the one-map drain",
+              retryable cfg eas && drainHeldKeys { entries := [eas] } == ["m:12121"])]
+  r := r ++ [("handover: the last attempt's abort is not retried; the drain gets the master back",
+              !retryable cfg { eas with attempt := cfg.maxAttempts } && drainHeldKeys { entries := [{ eas with attempt := cfg.maxAttempts }] } == [])]
+  r := r ++ [("handover: an abort without a rollback (old master gone) is never retried",
+              !retryable cfg ehs && drainHeldKeys { entries := [ehs] } == [])]
+  r := r ++ [("handover: an abort before any map was sent is retryable (nothing to roll back)",
+              retryable cfg e1c)]
+  r := r ++ [("handover: the attempt survives the JSON round trip",
+              (Ledger.fromJson? ({ entries := [{ eas with attempt := 2 }] } : Ledger).toJson).map (·.entries.map (·.attempt)) == some [2])]
   -- the commit gate: `lagging` (re-validating while the partition has only
   -- the Master/Down placeholder, the recorded history) is enough for a
   -- handover's proven successor, and for nothing else

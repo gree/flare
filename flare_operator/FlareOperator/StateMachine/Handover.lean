@@ -90,6 +90,9 @@ structure Entry where
       after the old master's pod went away was not drained and takes the
       normal rules. -/
   drainProven : Bool := false
+  /-- 1 for the first handover of this old master's pod, +1 for each retry
+      after an abort (Config.maxAttempts) -/
+  attempt : Nat := 1
   phase : Phase := .requested
   /-- node map versions of the demote / promote / rollback maps once sent -/
   v1 : Option Nat := none
@@ -118,6 +121,12 @@ structure Config where
   handoverMs : Nat := 10000
   /-- how long `requested` may wait for its preconditions -/
   startMs : Nat := 30000
+  /-- handovers of one old master pod, the first included: an abort that
+      rolled back (the old master serves again) is retried after
+      `retryDelayMs` while attempts remain (L7: the one-map drain is not
+      the fallback while a lossless handover can still be tried) -/
+  maxAttempts : Nat := 3
+  retryDelayMs : Nat := 5000
   deriving Repr
 
 /-- What Main observed this pass for one entry. `none` = not readable now;
@@ -273,11 +282,19 @@ def apply (s : FlareClusterState) (e : Entry) : FlareClusterState :=
 def blockedKeys (l : Ledger) : List String :=
   (l.entries.filter fun e => e.phase == .requested || e.phase.oldIsDown).map (·.successor)
 
+/-- An aborted handover that rolled back (or never sent a map) and may be
+    tried again for the same old master pod. -/
+def retryable (cfg : Config) (e : Entry) : Bool :=
+  e.phase == .aborted && !e.noRollback && e.attempt < cfg.maxAttempts
+    && (e.v1.isNone || e.vBack.isSome)
+
 /-- Old masters the one-map drain must leave alone: their handover is in
-    progress (requested … promoting). An aborted handover gives its master
-    back to the drain (the old behaviour, logged as not loss-free). -/
-def drainHeldKeys (l : Ledger) : List String :=
-  (l.entries.filter fun e => e.phase == .requested || e.phase.oldIsDown || e.phase == .promoting).map (·.oldMaster)
+    progress (requested … promoting), or aborted and still to be retried.
+    Once the attempts are used up the drain gets the master back (the old
+    behaviour, logged as not loss-free). -/
+def drainHeldKeys (l : Ledger) (cfg : Config := {}) : List String :=
+  (l.entries.filter fun e => e.phase == .requested || e.phase.oldIsDown || e.phase == .promoting
+      || retryable cfg e).map (·.oldMaster)
 
 /-- Old masters a running handover owns: the plain drain path leaves them. -/
 def ownedMasters (l : Ledger) : List String :=
@@ -306,7 +323,7 @@ def Entry.toJson (e : Entry) : Json :=
     ([("partition", Json.num e.partition), ("oldMaster", Json.str e.oldMaster),
       ("successor", Json.str e.successor), ("phase", Json.str e.phase.toString),
       ("oldUid", Json.str e.oldUid), ("noRollback", Json.bool e.noRollback),
-      ("drainProven", Json.bool e.drainProven),
+      ("drainProven", Json.bool e.drainProven), ("attempt", Json.num e.attempt),
       ("startedMs", Json.num e.startedMs), ("demotedMs", Json.num e.demotedMs),
       ("phaseMs", Json.num e.phaseMs),
       ("reason", Json.str e.reason)] : List (String × Json))
@@ -324,6 +341,7 @@ def Entry.fromJson? (j : Json) : Option Entry := do
          oldUid := (j.getObjValAs? String "oldUid").toOption.getD "",
          noRollback := (j.getObjValAs? Bool "noRollback").toOption.getD false,
          drainProven := (j.getObjValAs? Bool "drainProven").toOption.getD false,
+         attempt := (o "attempt").getD 1,
          v1 := o "v1", v2 := o "v2", vBack := o "vBack",
          oldBoot := o "oldBoot", dropped0 := o "dropped0", failed0 := o "failed0",
          startedMs := (o "startedMs").getD 0, demotedMs := (o "demotedMs").getD 0,

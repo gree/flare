@@ -510,14 +510,23 @@ private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterSta
     | some n =>
       if n.role == FlareRole.Master && n.state == FlareState.Active && n.partition >= 0 then
         let pIdx := n.partition.toNat
-        if (Handover.find? led pIdx).isNone then
+        -- a new handover, or the retry of one that aborted and rolled back
+        -- (same old master pod, after the retry delay, attempts left): L7 —
+        -- the lossless handover is tried again before the one-map drain
+        let prev := Handover.find? led pIdx
+        let retry := match prev with
+          | some e => Handover.retryable cfg e && e.oldMaster == k && e.oldUid == p.uid
+                        && now >= e.phaseMs + cfg.retryDelayMs
+          | none => false
+        if prev.isNone || retry then
           match state0.partitionMap.find? (fun (i, _) => i == pIdx) with
           | some (_, part) =>
             match K8sReconciler.findActiveSuccessor state0 part n.partition with
             | some succ =>
+              let attempt := (prev.map (·.attempt + 1)).getD 1
               led := Handover.upsert led { partition := pIdx, oldMaster := k, successor := succ,
-                                           oldUid := p.uid, startedMs := now, phaseMs := now }
-              IO.eprintln s!"[flare-operator] HANDOVER requested: partition {pIdx} master {k} is Terminating; successor {succ}"
+                                           oldUid := p.uid, attempt, startedMs := now, phaseMs := now }
+              IO.eprintln s!"[flare-operator] HANDOVER requested: partition {pIdx} master {k} is Terminating; successor {succ}{if retry then s!" (attempt {attempt} of {cfg.maxAttempts}, after: {(prev.map (·.reason)).getD ""})" else ""}"
             | none => pure ()
           | none => pure ()
     | none => pure ()

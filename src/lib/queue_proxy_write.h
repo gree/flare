@@ -68,6 +68,8 @@ protected:
 	// changed while it was queued). A client write forwarded to its master
 	// is then routed again (cluster::pre_proxy_write), not failed.
 	bool										_skipped;
+	// how many times a skipped forward was routed again (bounded)
+	int											_reroutes;
 
 public:
 	static const int max_retry = 4;
@@ -119,6 +121,7 @@ public:
 	bool is_post_proxy() { return this->_post_proxy; };
 	void set_skipped(bool b) { this->_skipped = b; };
 	bool is_skipped() { return this->_skipped; };
+	int incr_reroutes() { return ++this->_reroutes; };
 	void set_foreign(bool foreign);
 	bool is_foreign() { return this->_foreign; };
 	void set_owner(shared_thread t) { this->_owner = t; };

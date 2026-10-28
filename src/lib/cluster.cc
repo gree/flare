@@ -2769,6 +2769,41 @@ bool cluster::_is_local_proxy_request(op_proxy_write* op) {
 
 int cluster::enqueue_retry_ms = 2000;
 
+int cluster::reroute_skipped_noreply_write(shared_queue_proxy_write q) {
+	storage::entry& e = q->get_entry();
+	const int attempt = q->incr_reroutes();
+	if (attempt > 5) {
+		log_err("noreply write LOST: routed again 5 times, its master kept turning proxy (key=%s)", e.key.c_str());
+		return -1;
+	}
+	q->set_skipped(false);
+	const uint64_t deadline = monotonic_ms() + (this->_master_wait_ms > 0 ? (uint64_t)this->_master_wait_ms : 0);
+	for (;;) {
+		const uint64_t generation = this->get_map_generation();
+		partition p;
+		bool is_prepare;
+		if (this->_determine_partition(e, p, false, is_prepare) < 0) {
+			log_err("noreply write LOST: no partition for it when routed again (key=%s)", e.key.c_str());
+			return -1;
+		}
+		if (!p.master.node_key.empty()) {
+			// to the master in force — this node itself included (its own
+			// port: applied there as a write from a node of this cluster)
+			log_notice("noreply forward was not sent (its destination is a proxy now) -> queued to %s (key=%s, attempt %d)", p.master.node_key.c_str(), e.key.c_str(), attempt);
+			if (this->_enqueue(q, p.master.node_key, e.get_key_hash_value(this->_proxy_hash_algorithm), false) < 0) {
+				log_err("noreply write LOST: could not be queued to %s (key=%s)", p.master.node_key.c_str(), e.key.c_str());
+				return -1;
+			}
+			return 0;
+		}
+		// no master (a handover's demote step): wait for a map with one (W)
+		if (monotonic_ms() >= deadline || !this->wait_map_change(generation, deadline)) {
+			log_err("noreply write LOST: no master for its partition within %d msec (key=%s)", this->_master_wait_ms, e.key.c_str());
+			return -1;
+		}
+	}
+}
+
 int cluster::_enqueue(shared_thread_queue q, string node_key, int key_hash, bool sync) {
 	log_debug("enqueue (ident=%s, node_key=%s, key_hash=%d)", q->get_ident().c_str(), node_key.c_str(), key_hash);
 

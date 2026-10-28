@@ -777,6 +777,51 @@ namespace test_handler_proxy {
 		int broadcast(shared_thread_queue q, vector<string> prior) { return this->_broadcast(q, false, prior); }
 	};
 
+	// review of 93f5cc3: a NOREPLY client write on its way to a master that
+	// turned proxy before it was sent has no sender waiting to route it
+	// again; the forwarding thread queues it to the partition's master in
+	// force instead of dropping it unseen
+	void test_noreply_client_write_skipped_to_a_proxy_goes_to_the_master_in_force() {
+		test_server* m = new test_server();
+		cut_assert_equal_int(0, m->listen(0));
+		const int mport = m->bound_port();
+		pool_cluster pc("localhost", 1, tp);
+		cluster::node old_master = pc.set_node("localhost", port, cluster::role_proxy, cluster::state_active, -1);
+		cluster::node new_master = pc.set_node("localhost", mport, cluster::role_master, cluster::state_active, 0, 100);
+		pc.set_partition(0, new_master);
+		shared_thread t = tp->get(old_master.node_thread_type);
+		t->trigger(new handler_proxy(t, &pc, "localhost", port), true, false);
+
+		storage::entry e = get_entry(" nkey 0 0 5 3", storage::parse_type_set, "VALUE");
+		e.option |= storage::option_noreply;
+		shared_queue_proxy_write q(new queue_proxy_write(&pc, NULL, vector<string>(), e, "set"));
+		shared_thread_queue tq = q;
+		cut_assert_equal_int(0, t->enqueue(tq));
+
+		vector<shared_connection_tcp> mcs;
+		for (int r = 0; r < 50 && mcs.size() == 0; r++) {
+			mcs = m->wait();
+			if (mcs.size() == 0) usleep(100 * 1000);
+		}
+		string got;
+		if (mcs.size() > 0) {
+			char* line = NULL;
+			if (mcs[0]->readline(&line) > 0) {
+				got = line;
+			}
+			delete[] line;
+		}
+		for (size_t k = 0; k < mcs.size(); k++) {
+			mcs[k]->close();
+		}
+		m->close();
+		delete m;
+		cut_assert_true(mcs.size() > 0, cut_message("the master in force was never contacted: the noreply write was dropped unseen"));
+		cut_assert_true(got.find("set nkey 0 0 5") == 0, cut_message("the master in force got [%s]", got.c_str()));
+		cut_assert_equal_boolean(false, q->is_skipped());
+	}
+
+
 	// the second handler: takes what reaches it, counts it and releases a
 	// waiting sender (so the old code fails the count instead of hanging)
 	AtomicCounter* delivered_to_new_handler = NULL;

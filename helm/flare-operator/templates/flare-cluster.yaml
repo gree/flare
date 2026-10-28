@@ -18,6 +18,13 @@
        from a release predating this key) falls back to 60. */}}
 {{- $drain := 60 }}
 {{- if hasKey $c "drainSeconds" }}{{- $drain = $c.drainSeconds }}{{- end }}
+{{- /* drainSeconds 0 = no preStop: a Terminating master is stopped before
+       the ordered handover can move it, so a planned switch of it is NOT
+       lossless. Allowed only with the explicit allowAbruptStop (review of
+       f1cd7aa). */}}
+{{- if and (le (int $drain) 0) (not $c.allowAbruptStop) }}
+{{- fail (printf "cluster %s: drainSeconds 0 disables the preStop drain, so a planned master switch is not lossless; set allowAbruptStop: true to accept that" $c.name) }}
+{{- end }}
 {{- /* Storage mode: PVC (persistence.enabled) | tmpfs (memory emptyDir) |
        ephemeral (node disk /tmp). tmpfs guarded for values without the key. */}}
 {{- $tmpfsEnabled := false }}
@@ -257,14 +264,13 @@ spec:
               cluster: {{ $c.name }}
         {{- end }}
       {{- end }}
-      {{- if gt (int $drain) 0 }}
       # Room for the preStop drain (below) + flared's own graceful shutdown after
       # SIGTERM: its budget is max(shutdown-forward-drain-msec 30 s, the
       # forward hold 60 s + 5 s) = 65 s for client requests still executing and
       # the forwards still queued, + 10 s headroom. Less, and K8s SIGKILLs a
-      # client write that waits on a held forward (review of 09624ee).
-      terminationGracePeriodSeconds: {{ add (int $drain) 75 }}
-      {{- end }}
+      # client write that waits on a held forward (review of 09624ee). Set with
+      # drainSeconds 0 too: the stop budget does not depend on the preStop.
+      terminationGracePeriodSeconds: {{ add (max (int $drain) 0) 75 }}
       {{- /* ALWAYS render serviceAccountName (falling back to "default"):
              `kubectl apply` / ArgoCD cannot UNSET a field that the desired
              manifest merely omits, so gating this line left a live STS

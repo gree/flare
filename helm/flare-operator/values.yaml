@@ -159,8 +159,12 @@ cluster:
   # drainSeconds + 75 (flared's own graceful shutdown after SIGTERM: up to 65 s
   # for executing client requests and queued forwards, + 10 s headroom).
   # Cost: each pod takes ~drainSeconds longer to roll — a full 6-pod rolling
-  # restart is +6×drainSeconds. Set 0 to disable the hook (abrupt stop).
+  # restart is +6×drainSeconds. 0 disables the hook (abrupt stop): a
+  # Terminating master then stops before the ordered handover can move it,
+  # so a planned switch is NOT lossless — the chart refuses 0 unless
+  # allowAbruptStop: true is set as well.
   drainSeconds: 60
+  # allowAbruptStop: false
   persistence:
     # PVC-backed data dirs: REQUIRED for production. Survives pod loss and
     # enables the backup/restore flow (docs/BACKUP_RESTORE.md).

@@ -72,7 +72,9 @@ def worker(w):
             if s is None:
                 ip = socket.gethostbyname(host)
                 s = socket.create_connection((ip, port), timeout=3)
-                s.settimeout(3)
+                # the approved client timeout Tc (plan A7, 2026-10-26): a write
+                # waiting for a master (W, up to 20 s) is a delay, not an error
+                s.settimeout(30)
                 peer = ip
                 buf = b''
             s.sendall(('set %s 0 0 %d\\r\\n%s\\r\\n' % (k, len(v), v)).encode())

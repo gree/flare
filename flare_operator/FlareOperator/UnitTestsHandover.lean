@@ -64,7 +64,8 @@ def results : List (String × Bool) := Id.run do
   let (e5, _) := step cfg e3 { okObs 1300 with droppedToSuccessor := some 4 }
   r := r ++ [("handover: a drop to the successor since the start never promotes (in flight 0 is not delivery)", e5.phase == .draining)]
   let (e6, a6) := step cfg e3 (okObs 1300)
-  r := r ++ [("handover: drained clean → promoting (send V2)", e6.phase == .promoting && a6 == .send)]
+  r := r ++ [("handover: drained clean → promoting (send V2), the drain recorded as proven",
+              e6.phase == .promoting && a6 == .send && e6.drainProven)]
   -- V2: successor master, old master proxy, partition master = successor
   let e6s := recordSent e6 43
   let s2 := apply pair e6s
@@ -102,6 +103,7 @@ def results : List (String × Bool) := Id.run do
   r := r ++ [("handover: the ledger survives a JSON round trip",
               match back with
               | some b => b.entries.length == 2 && (b.entries.map (·.phase)) == [.promoting, .aborted]
+                            && (b.entries.map (·.drainProven)) == [true, false]
                             && (b.entries.map (·.v2)) == [some 43, none] && (b.entries.map (·.vBack)) == [none, some 44]
               | none => false)]
   r := r ++ [("handover: a malformed entry fails the whole ledger",
@@ -110,8 +112,15 @@ def results : List (String × Bool) := Id.run do
   -- preStop window ran out; a new pod took the name and the handover read
   -- the NEW process): promote an eligible successor, never roll back to it
   let (eg, ag) := step cfg e3 { okObs 1300 with oldSameProcess := false }
-  r := r ++ [("handover: the old master pod gone mid-way + an eligible successor → promoting (send V2)",
-              eg.phase == .promoting && ag == .send)]
+  r := r ++ [("handover: the old master pod gone mid-way + an eligible successor → promoting (send V2), NOT proven (the normal promotion rules apply)",
+              eg.phase == .promoting && ag == .send && !eg.drainProven)]
+  -- gone before the drain was clean (draining, forwards still in flight): no proof either
+  let (eg2, _) := step cfg e3 { okObs 1300 with oldSameProcess := false, inFlightToSuccessor := some 3, droppedToSuccessor := some 9 }
+  r := r ++ [("handover: the old master pod gone before a clean drain → promoting without the proof",
+              eg2.phase == .promoting && !eg2.drainProven)]
+  let (eg3, _) := step cfg e1s { okObs 1200 with oldSameProcess := false }
+  r := r ++ [("handover: the old master pod gone while demoting → promoting without the proof",
+              eg3.phase == .promoting && !eg3.drainProven)]
   let (eh, ah) := step cfg e3 { okObs 1300 with oldSameProcess := false, successorEligible := false }
   let ehs := recordSent eh 50
   r := r ++ [("handover: the old master pod gone mid-way, no eligible successor → aborted WITHOUT a rollback map",

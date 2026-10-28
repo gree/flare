@@ -83,6 +83,13 @@ structure Entry where
   /-- the old master's pod was gone or replaced mid-way: no rollback map (it
       would make the new, possibly empty, process the master) -/
   noRollback : Bool := false
+  /-- the promotion follows a drain proven clean (old master at ≥ V1, the
+      same process, nothing in flight to the successor, no new drop or
+      failure). Only such a promotion may use the lossless exception of the
+      promotion gate (PromotionEvidence.handoverCommitAllows); a promotion
+      after the old master's pod went away was not drained and takes the
+      normal rules. -/
+  drainProven : Bool := false
   phase : Phase := .requested
   /-- node map versions of the demote / promote / rollback maps once sent -/
   v1 : Option Nat := none
@@ -200,7 +207,7 @@ def step (cfg : Config) (e : Entry) (o : Obs) : Entry × Action :=
       | _, none => (e, .none)
     else
       if o.inFlightToSuccessor == some 0 && drainClean e o then
-        (toPhase e .promoting o.nowMs, .send)
+        ({ toPhase e .promoting o.nowMs with drainProven := true }, .send)
       else (e, .none)
   | .promoting =>
     match e.v2 with
@@ -286,6 +293,7 @@ def Entry.toJson (e : Entry) : Json :=
     ([("partition", Json.num e.partition), ("oldMaster", Json.str e.oldMaster),
       ("successor", Json.str e.successor), ("phase", Json.str e.phase.toString),
       ("oldUid", Json.str e.oldUid), ("noRollback", Json.bool e.noRollback),
+      ("drainProven", Json.bool e.drainProven),
       ("startedMs", Json.num e.startedMs), ("demotedMs", Json.num e.demotedMs),
       ("phaseMs", Json.num e.phaseMs),
       ("reason", Json.str e.reason)] : List (String × Json))
@@ -302,6 +310,7 @@ def Entry.fromJson? (j : Json) : Option Entry := do
   pure { partition, oldMaster, successor, phase,
          oldUid := (j.getObjValAs? String "oldUid").toOption.getD "",
          noRollback := (j.getObjValAs? Bool "noRollback").toOption.getD false,
+         drainProven := (j.getObjValAs? Bool "drainProven").toOption.getD false,
          v1 := o "v1", v2 := o "v2", vBack := o "vBack",
          oldBoot := o "oldBoot", dropped0 := o "dropped0", failed0 := o "failed0",
          startedMs := (o "startedMs").getD 0, demotedMs := (o "demotedMs").getD 0,

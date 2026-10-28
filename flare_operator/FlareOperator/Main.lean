@@ -474,7 +474,7 @@ private def statDest (out name dest : String) : Option Nat :=
     nothing refused it). -/
 private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterState)
     (repairLed : ReplicaRepair.Ledger) (publish : String → IO Bool)
-    (commitPromote : String → FlareClusterState → IO Bool) : IO (List String) := do
+    (commitPromote : Option String → FlareClusterState → IO Bool) : IO (List String) := do
   if !(← handoverLoadedRef.get) then
     match ← Bridge.readHandovers crName ns with
     | .ok l =>
@@ -598,9 +598,28 @@ private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterSta
       -- rules).
       let mut e1 := e1
       let mut act := act
+      -- DURABILITY: a map is committed only after the ledger holds the phase
+      -- that asks for it (its version is recorded afterwards; a restart in
+      -- between finds the phase with no version and sends the map again).
+      -- Not saved = nothing committed this tick: the entry stays as it was.
+      let durable := fun (x : Handover.Entry) => do
+        let l : Handover.Ledger := { entries := out.entries ++ [x] ++ (led.entries.filter fun y =>
+          y.partition != x.partition && !(out.entries.any (·.partition == y.partition))) }
+        match ← Bridge.writeHandovers crName ns l with
+        | .ok _ =>
+          handoverDirtyRef.set false
+          pure true
+        | .error err =>
+          handoverDirtyRef.set true
+          IO.eprintln s!"[flare-operator] HANDOVER p{x.partition}: the ledger could not be saved ({err}); its {x.phase} map is NOT committed this tick"
+          pure false
+      if act == .send && e1.phase == .promoting && e1.v2.isNone && !(← durable e1) then
+        e1 := e
+        act := .none
       if act == .send && e1.phase == .promoting && e1.v2.isNone then
         let before ← stateRef.get
-        let ok ← commitPromote e1.successor (Handover.apply before e1)
+        -- the lossless exception only after a drain proven clean
+        let ok ← commitPromote (if e1.drainProven then some e1.successor else none) (Handover.apply before e1)
         let after ← stateRef.get
         let promoted := (after.lookupNode e1.successor).any (·.role == FlareRole.Master)
           && after.nodeMapVersion != before.nodeMapVersion
@@ -618,6 +637,9 @@ private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterSta
             e1 := { e1 with phase := .aborted, phaseMs := now, noRollback := true,
                             reason := "the promotion gates refused the successor and the old master is gone: the failover rules apply" }
             act := .finish
+      if act == .send && !(← durable e1) then
+        e1 := e
+        act := .none
       let e2 ← if act == .send then do
           let v ← stateRef.modifyGet fun cur =>
             let v := cur.nodeMapVersion + 1
@@ -636,7 +658,8 @@ private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterSta
         transit := true
       out := { entries := out.entries ++ [e2] }
     led := out
-    -- the ledger is durable before the map it records reaches any pod
+    -- the versions just sent and the other phase changes (the phase that
+    -- asked for each map was saved before it was committed)
     if out != before || (← handoverDirtyRef.get) then
       match ← Bridge.writeHandovers crName ns out with
       | .ok _ => handoverDirtyRef.set false
@@ -2886,7 +2909,7 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
       -- judged by a read at commit, not the previous pass's evidence (the
       -- pass resets this flag when it reads again)
       promotionRiskPassRef.set false
-      handoverProvenRef.set [proven]
+      handoverProvenRef.set proven.toList
       try
         -- standby keys are the pass's; [] here only affects read balances
         -- until the next pass's commit

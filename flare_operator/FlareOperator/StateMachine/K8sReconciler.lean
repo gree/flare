@@ -1574,7 +1574,11 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
         -- Grace period over - normal dead-node detection + graceful drain of
         -- any Terminating (deletionTimestamp) master/slave that is still alive.
         let deadKeys := detectDeadNodesPure clusterState pods unhealthy
-        let drainKeys := detectDrainingNodesPure clusterState terminating
+        -- a node held by a ledger (replica repair, or the old master of an
+        -- ordered handover in progress) is moved by that ledger, never by the
+        -- one-map drain (local kind 2026-10-28, S7: with the handover's phase
+        -- unsaved, the same pass drained its master in one map)
+        let drainKeys := detectDrainingNodesPure clusterState (terminating.filter (!repairHeld.contains ·))
         ({ s with reconcileStep := .AfterDetectDead,
                   livePodKeys := pods,
                   podZones := zones,

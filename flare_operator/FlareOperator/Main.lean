@@ -466,15 +466,17 @@ private def statDest (out name dest : String) : Option Nat :=
     handover for every Terminating Active master that has an Active slave,
     read the observations, step each handover once and commit the map a step
     asks for directly to stateRef (its version is recorded as V1 / V2 / V1′).
-    Returns the successors held out of assignment while their handover
-    runs. The FSM's own drain leaves the old master alone from V1 on (a
+    Returns the successors held out of assignment and the old masters held
+    out of the one-map drain while their handover runs. The FSM's own drain leaves the old master alone from V1 on (a
     Down node is not drained; after V2 it is a Proxy). `publish` sends the
     live map at once (the pass's lease, persist and publication fences);
     `commitPromote` commits V2 through the pass's promotion gates (true =
-    nothing refused it). -/
+    nothing refused it); `route` points the partition Services at the
+    masters of the live map. -/
 private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterState)
     (repairLed : ReplicaRepair.Ledger) (publish : String → IO Bool)
-    (commitPromote : Option String → FlareClusterState → IO Bool) : IO (List String) := do
+    (commitPromote : Option (String × String) → FlareClusterState → IO Bool)
+    (route : IO Unit) : IO (List String) := do
   if !(← handoverLoadedRef.get) then
     match ← Bridge.readHandovers crName ns with
     | .ok l =>
@@ -494,7 +496,7 @@ private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterSta
     | .ok ps => pure ps
     | .error e =>
       IO.eprintln s!"[flare-operator] handover: pods unreadable ({e}); handovers held this pass"
-      return Handover.blockedKeys led0
+      return Handover.blockedKeys led0 ++ Handover.drainHeldKeys led0
   let cfg : Handover.Config := {}
   let now ← IO.monoMsNow
   let state0 ← stateRef.get
@@ -529,6 +531,7 @@ private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterSta
   let mut pods := pods
   let mut out : Handover.Ledger := {}
   let mut first := true
+  let mut routed := false
   repeat
     if !first then
       IO.sleep 100
@@ -605,7 +608,15 @@ private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterSta
       let durable := fun (x : Handover.Entry) => do
         let l : Handover.Ledger := { entries := out.entries ++ [x] ++ (led.entries.filter fun y =>
           y.partition != x.partition && !(out.entries.any (·.partition == y.partition))) }
-        match ← Bridge.writeHandovers crName ns l with
+        -- TEST SEAM (FLARE_TEST_HANDOVER_SAVE_FAIL_FILE, unset in
+        -- production): while the named file exists in this container, the
+        -- save fails as an API error would (node-ops-switch-*-savefail)
+        let seamFail ← match ← IO.getEnv "FLARE_TEST_HANDOVER_SAVE_FAIL_FILE" with
+          | some f => System.FilePath.pathExists f
+          | none => pure false
+        let saved ← if seamFail then pure (Except.error "TEST SEAM: FLARE_TEST_HANDOVER_SAVE_FAIL_FILE is present")
+          else Bridge.writeHandovers crName ns l
+        match saved with
         | .ok _ =>
           handoverDirtyRef.set false
           pure true
@@ -619,7 +630,7 @@ private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterSta
       if act == .send && e1.phase == .promoting && e1.v2.isNone then
         let before ← stateRef.get
         -- the lossless exception only after a drain proven clean
-        let ok ← commitPromote (if e1.drainProven then some e1.successor else none) (Handover.apply before e1)
+        let ok ← commitPromote (if e1.drainProven then some (e1.successor, (succPod.map (·.uid)).getD "") else none) (Handover.apply before e1)
         let after ← stateRef.get
         let promoted := (after.lookupNode e1.successor).any (·.role == FlareRole.Master)
           && after.nodeMapVersion != before.nodeMapVersion
@@ -668,10 +679,16 @@ private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterSta
         IO.eprintln s!"[flare-operator] WARNING: could not persist the handover ledger ({e}); will retry: {out.summary}"
     if sent then
       let _ ← publish "handover"
+      -- a promotion published: the partition Service goes to the new master
+      -- now, not a pass later (local kind 2026-10-28: per-request clients got
+      -- ECONNREFUSED for ~1.3 s after the old master's preStop ended)
+      if !routed && out.entries.any (fun x => x.phase == .promoting && x.v2.isSome) then
+        route
+        routed := true
     if !transit || now >= bound then break
   handoverRef.set out
   handoverActiveRef.set (out.entries.any fun e => e.phase != .aborted)
-  return Handover.blockedKeys out
+  return Handover.blockedKeys out ++ Handover.drainHeldKeys out
 
 /-- Ensure K8s Service selectors point to the current Master for each partition. -/
 private def ensureServiceRouting (state : FlareClusterState) (crName ns : String)
@@ -2909,7 +2926,17 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
       -- judged by a read at commit, not the previous pass's evidence (the
       -- pass resets this flag when it reads again)
       promotionRiskPassRef.set false
-      handoverProvenRef.set proven.toList
+      handoverProvenRef.set (proven.map (·.1)).toList
+      -- the incarnation the commit's identity check compares with: the pod
+      -- the drain was proven against (same UID), read now — a fresh operator
+      -- has no pass observation yet (local kind 2026-10-28, S7: "observed
+      -- none" refused the promotion after a restart)
+      if let some (k, uid) := proven then
+        match ← podIdentityNow (extractPodName k) ns with
+        | some (u, rc) =>
+          if !uid.isEmpty && u == uid then
+            podIdentityRef.modify fun l => (k, (u, rc)) :: l.filter (·.1 != k)
+        | none => pure ()
       try
         -- standby keys are the pass's; [] here only affects read balances
         -- until the next pass's commit
@@ -2917,6 +2944,7 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
       finally
         handoverProvenRef.set []
       pure !(← promotionAbortedRef.get))
+    (do ensureServiceRouting (← stateRef.get) crName ns)
   let heldKeys := heldKeys ++ handoverHeld.filter (fun k => !heldKeys.contains k)
 
   let drainBlockedRef ← IO.mkRef 0

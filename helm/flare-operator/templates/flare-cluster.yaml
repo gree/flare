@@ -496,7 +496,8 @@ spec:
                 # this node's OWN view says it is a proxy AND none of its
                 # in-cluster forwards to replicas is still in flight (they carry
                 # writes a client was told STORED: NODE-OPS-LOSSLESS-PLAN L2),
-                # then 2 s more; at most drainSeconds. A flared that does not
+                # then until no new client connection arrives for 3 s; at most
+                # drainSeconds. A flared that does not
                 # report proxy_write_in_flight (older build) waits the whole
                 # window, as the plain sleep did. See cluster.drainSeconds.
                 command:
@@ -517,7 +518,19 @@ spec:
                         else
                           echo "flare preStop: proxy and nothing in flight, but forward drain NOT LOSSLESS (dropped $d0 -> $d, refused $f0 -> $f)" > /proc/1/fd/1
                         fi
-                        sleep 2
+                        # then until no new client connection has arrived for
+                        # 3 s: the operator moved the partition Service to the
+                        # new master and kube-proxy applied it, so no client
+                        # is still sent here (each read below is one
+                        # connection of its own: +1 per read is quiet)
+                        c0=$(st "$out" total_connections); q=0
+                        while [ "$(date +%s)" -lt "$end" ] && [ "$q" -lt 15 ]; do
+                          sleep 0.2
+                          c=$(st "$(rd)" total_connections)
+                          if [ -n "$c" ] && [ -n "$c0" ] && [ "$c" -le $((c0 + 1)) ]; then q=$((q + 1)); else q=0; fi
+                          c0=$c
+                        done
+                        echo "flare preStop: no new client connection for $((q / 5)) s" > /proc/1/fd/1
                         exit 0
                       fi
                       sleep 0.2

@@ -197,17 +197,24 @@ def step (cfg : Config) (e : Entry) (o : Obs) : Entry × Action :=
       (toPhase e .aborted o.nowMs "the successor is no longer eligible", .send)
     else if restarted then
       (toPhase e .aborted o.nowMs "the old master restarted (its counters are not comparable)", .send)
-    else if expired then
-      (toPhase e .aborted o.nowMs s!"not drained within {cfg.handoverMs} ms ({e.phase})", .send)
+    -- progress before the bound: a step observed complete is taken even when
+    -- the observation came after Th (local kind 2026-10-28: under load one
+    -- tick took ~3 s, the drain was clean at the first read past 10 s, and
+    -- the handover aborted into the one-map drain)
     else if e.phase == .demoting then
       match e.v1, o.oldMapVersion with
       | some v1, some ov =>
-        if ov >= v1 then (toPhase e .draining o.nowMs, .none) else (e, .none)
+        if ov >= v1 then (toPhase e .draining o.nowMs, .none)
+        else if expired then (toPhase e .aborted o.nowMs s!"not drained within {cfg.handoverMs} ms ({e.phase})", .send)
+        else (e, .none)
       | none, _ => (e, .send)       -- V1 not recorded as sent yet: send it
-      | _, none => (e, .none)
+      | _, none =>
+        if expired then (toPhase e .aborted o.nowMs s!"not drained within {cfg.handoverMs} ms ({e.phase})", .send)
+        else (e, .none)
     else
       if o.inFlightToSuccessor == some 0 && drainClean e o then
         ({ toPhase e .promoting o.nowMs with drainProven := true }, .send)
+      else if expired then (toPhase e .aborted o.nowMs s!"not drained within {cfg.handoverMs} ms ({e.phase})", .send)
       else (e, .none)
   | .promoting =>
     match e.v2 with
@@ -265,6 +272,12 @@ def apply (s : FlareClusterState) (e : Entry) : FlareClusterState :=
     runs: the successor waits for the drain, then the handover promotes it. -/
 def blockedKeys (l : Ledger) : List String :=
   (l.entries.filter fun e => e.phase == .requested || e.phase.oldIsDown).map (·.successor)
+
+/-- Old masters the one-map drain must leave alone: their handover is in
+    progress (requested … promoting). An aborted handover gives its master
+    back to the drain (the old behaviour, logged as not loss-free). -/
+def drainHeldKeys (l : Ledger) : List String :=
+  (l.entries.filter fun e => e.phase == .requested || e.phase.oldIsDown || e.phase == .promoting).map (·.oldMaster)
 
 /-- Old masters a running handover owns: the plain drain path leaves them. -/
 def ownedMasters (l : Ledger) : List String :=

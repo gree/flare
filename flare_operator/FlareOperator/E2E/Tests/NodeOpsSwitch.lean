@@ -7,9 +7,10 @@
   error, timeout, connection error) and NO acknowledged write missing on the
   final master or the replica; a delay is allowed and is measured.
 
-  Load: 4 kept-open connections through the partition Service (the client
-  path) and 2 to the other pod (the proxy path), 200 requests/s each, closed
-  loop (one request per connection at a time) — the rate actually achieved
+  Load: 4 writers through the partition Service (the client path) and 2 to
+  the other pod (the proxy path), 200 requests/s each, a new connection per
+  request (clients connect for each use, a connection lasts seconds at most:
+  user decision 2026-10-28), closed loop (one request at a time per writer) — the rate actually achieved
   and the lowest rate in any second are reported with the result.
 
   Each test also records, so a failure can be attributed and not only
@@ -154,6 +155,11 @@ inductive SwitchOp where
   | rollBoth
   /-- `kubectl drain` of the master's worker (Eviction API, PDB honoured) -/
   | drainMaster
+  /-- `kubectl delete pod` of the master while the operator cannot save its
+      handover ledger (test seam), then a restart of the operator: no
+      handover map may be committed before its phase is saved, and the new
+      operator completes the switch (review of af85899) -/
+  | deleteMasterSaveFail
   deriving BEq, Repr
 
 def SwitchOp.label : SwitchOp → String
@@ -161,6 +167,10 @@ def SwitchOp.label : SwitchOp → String
   | .rollingRestart => "kubectl rollout restart statefulset"
   | .rollBoth => "operator Deployment + StatefulSet rollout restart together (helm-upgrade-like, not a helm upgrade)"
   | .drainMaster => "kubectl drain of the master's worker"
+  | .deleteMasterSaveFail => "kubectl delete pod (master) while the handover ledger cannot be saved, then an operator restart"
+
+/-- The file the operator's FLARE_TEST_HANDOVER_SAVE_FAIL_FILE names. -/
+def saveFailFile : String := "/tmp/handover-save-fail"
 
 structure SwitchObs where
   opOk : Bool
@@ -176,6 +186,8 @@ structure SwitchObs where
   missingReplicaLater : Option Nat
   redundant : Bool
   newMaster : Option String
+  /-- a safety check of the scenario itself failed (not a precondition) -/
+  checkFail : Option String := none
 
 /-- The target: the operation happened, 0 errors on both loads, 0
     acknowledged writes missing on the final master and on the replica
@@ -183,6 +195,7 @@ structure SwitchObs where
 def switchVerdict (o : SwitchObs) : Option String :=
   if !o.opOk then some (notSetUp s!"the operation did not complete: {o.opDetail}")
   else if !o.moved then some (notSetUp s!"no pod moved: {o.movedDetail}")
+  else if let some why := o.checkFail then some s!"SAFETY: {why}"
   else match o.missingMaster, o.missingReplicaLater with
   | none, _ => some (unobservable "the final master's copy could not be read")
   | _, none => some (unobservable "the replica's copy could not be read")
@@ -201,7 +214,7 @@ private def switchRun (c : Ctx) (op : SwitchOp) : IO (Except String SwitchObs) :
     -- replica on an older history): wait for it, else it is a precondition failure
     if !(← waitForCondition "the pair is redundant with the replica on the master's history" 300 (redundant c none)) then
       return .error (notSetUp "the cluster did not start this test with a master and a replica on its history (left by the previous test?)")
-    c.conditions [s!"scenario: {op.label} under a client-like load (4 x 200/s via the partition Service, 2 x 200/s via the other pod; kept-open connections, closed loop)"]
+    c.conditions [s!"scenario: {op.label} under a client-like load (4 x 200/s via the partition Service, 2 x 200/s via the other pod; a new connection per request, closed loop)"]
     match ← c.ensureLoadWriter with
     | .error e => return .error (notSetUp e)
     | .ok () => pure ()
@@ -219,6 +232,7 @@ private def switchRun (c : Ctx) (op : SwitchOp) : IO (Except String SwitchObs) :
     let mut opOk := true
     let mut opDetail := ""
     let mut drained : Option String := none
+    let mut checkFail : Option String := none
     match op with
     | .deleteMaster =>
       match ← kubectlLong 180 ["delete", "pod", p.master.name, "-n", ns, "--wait=false"] with
@@ -244,6 +258,34 @@ private def switchRun (c : Ctx) (op : SwitchOp) : IO (Except String SwitchObs) :
         if rc != "0" then opOk := false
       | none => opOk := false; opDetail := "drain did not finish within 660 s"
       drained := some p.master.node
+    | .deleteMasterSaveFail =>
+      let opNames ← match ← kubectl ["get", "pods", "-n", ns, "-l", s!"app={c.cfg.operatorName}", "-o", "jsonpath={.items[*].metadata.name}"] with
+        | .ok o => pure (some ((o.trim.splitOn " ").filter (!·.isEmpty)))
+        | .error _ => pure none
+      match opNames with
+      | some [opPod] =>
+        match ← kubectl ["exec", opPod, "-n", ns, "--", "touch", saveFailFile] with
+        | .error e => opOk := false; opDetail := s!"could not arm the save failure in {opPod}: {e.take 200}"
+        | .ok _ =>
+          c.event s!"handover ledger saves fail in {opPod} ({saveFailFile})"
+          match ← kubectlLong 180 ["delete", "pod", p.master.name, "-n", ns, "--wait=false"] with
+          | .error e => opOk := false; opDetail := s!"delete failed: {e.take 200}"
+          | .ok _ =>
+            -- the operator asks for the demote map and cannot save its phase
+            let refused ← waitForCondition "the operator refused a handover map it could not save" 90 do
+              return containsSubstr (← kubectlLogs opPod ns 2000) "is NOT committed this tick"
+            let logs ← kubectlLogs opPod ns 5000
+            for l in (logs.splitOn "\n").filter (fun l => containsSubstr l "HANDOVER") do c.art "operator-before-restart.txt" l
+            if !refused then
+              opOk := false; opDetail := "delete accepted, but the operator never asked for a handover map (no save was refused within 90 s)"
+            else
+              if containsSubstr logs "map committed as" then
+                checkFail := some s!"the operator {opPod} committed a handover map although its phase could not be saved (see operator-before-restart.txt)"
+              c.event s!"save refused, no map committed={!containsSubstr logs "map committed as"}; restarting the operator"
+              match ← kubectl ["delete", "pod", opPod, "-n", ns, "--wait=false"] with
+              | .ok _ => opDetail := "delete accepted; the save was refused; operator pod deleted"
+              | .error e => opOk := false; opDetail := s!"the operator pod could not be deleted: {e.take 200}"
+      | other => opOk := false; opDetail := s!"expected exactly one operator pod, saw {other}"
     c.event s!"operation: ok={opOk} {opDetail}"
     if opOk && (op == .rollingRestart || op == .rollBoth) then
       let ok ← kubectlRolloutStatus s!"statefulset/{c.cfg.name}-nodes" ns 900
@@ -268,7 +310,7 @@ private def switchRun (c : Ctx) (op : SwitchOp) : IO (Except String SwitchObs) :
       | some b, some a => b.uid != a.uid && a.ready && !a.deleting
       | _, _ => false
     let (moved, movedDetail) := match op with
-      | .deleteMaster => (uidChanged p.master.name, s!"master pod {p.master.name} replaced={uidChanged p.master.name}")
+      | .deleteMaster | .deleteMasterSaveFail => (uidChanged p.master.name, s!"master pod {p.master.name} replaced={uidChanged p.master.name}")
       | .rollingRestart | .rollBoth =>
         let all := before.all fun (b : PodRow) => uidChanged b.name
         (all, s!"every pod replaced={all} ({before.map fun (b : PodRow) => (b.name, uidChanged b.name)})")
@@ -303,7 +345,7 @@ private def switchRun (c : Ctx) (op : SwitchOp) : IO (Except String SwitchObs) :
     let o : SwitchObs := { opOk, opDetail, moved, movedDetail, svc := loadStats svcRes, peer := loadStats peerRes,
                            svcByPod := errorsByPod ips svcRs, peerByPod := errorsByPod ips peerRs,
                            missingMaster := mm, missingReplica := mr, missingReplicaLater := mrLater,
-                           redundant := red, newMaster := newM }
+                           redundant := red, newMaster := newM, checkFail }
     c.art "report.txt" (o.svc.summary "svc")
     c.art "report.txt" (o.peer.summary "peer")
     return .ok o
@@ -455,6 +497,7 @@ def Scenario.slug : Scenario → String
   | .op .rollingRestart => "rolling"
   | .op .rollBoth => "rollboth"
   | .op .drainMaster => "drain"
+  | .op .deleteMasterSaveFail => "savefail"
   | .gate => "gate"
   | .sigtermHold => "sigterm-hold"
 
@@ -463,13 +506,19 @@ def Scenario.title : Scenario → String
   | .op .rollingRestart => "(S2) rolling restart of the StatefulSet under a client-like load: every pod is replaced; 0 write errors, 0 missing"
   | .op .rollBoth => "(S3) operator Deployment + StatefulSet rollout restart together (helm-upgrade-like, not a helm upgrade) under a client-like load: 0 write errors, 0 missing"
   | .op .drainMaster => "(S4) kubectl drain of the MASTER's worker (no eviction guard) under a client-like load: the drain completes and no flared pod is left there; 0 write errors, 0 missing"
+  | .op .deleteMasterSaveFail => "(S7) kubectl delete pod of the MASTER while the operator cannot save its handover ledger, then an operator restart, under a client-like load: no handover map before its phase is saved; the new operator completes the switch; 0 write errors, 0 missing"
   | .gate => "(S5) the old master is cut from the replica and deleted under a write load: preStop / flared report the drain as NOT lossless, never as lossless (gate test)"
   | .sigtermHold => "(S6) a sync client write held on a cut replica across a SIGTERM (cut removed 40 s after it): the client gets STORED and the replica holds the value"
 
 private def scenarioSuite (sc : Scenario) (tmpfs : Bool) : TestSuite :=
   let short := if tmpfs then s!"swt-{sc.slug}" else s!"sw-{sc.slug}"
   let suite := s!"node-ops-switch{if tmpfs then "-tmpfs" else ""}-{sc.slug}"
-  let cfg := cfgOf s!"node-{short}" tmpfs (!tmpfs)
+  let cfg0 := cfgOf s!"node-{short}" tmpfs (!tmpfs)
+  -- S7: the save-failure seam, and a preStop window that outlasts the
+  -- operator's restart (its startup is not what S7 measures)
+  let cfg := if sc == .op .deleteMasterSaveFail then
+      { cfg0 with operatorEnv := [("FLARE_TEST_HANDOVER_SAVE_FAIL_FILE", saveFailFile)], drainSeconds := 180 }
+    else cfg0
   let c : Ctx := { cfg, suite, test := s!"s-{sc.slug}" }
   { name := suite
     setup := do deployCluster cfg; IO.sleep 50000
@@ -480,7 +529,7 @@ private def scenarioSuite (sc : Scenario) (tmpfs : Bool) : TestSuite :=
     afterEach := fun i => saveFullLogs cfg.«namespace» s!"after-test-{i}"
     tests := [{ name := sc.title, run := match sc with | .op o => switchTest c o | .gate => gateTest c | .sigtermHold => sigtermHoldTest c }] }
 
-def scenarios : List Scenario := [.op .deleteMaster, .op .rollingRestart, .op .rollBoth, .op .drainMaster, .gate, .sigtermHold]
+def scenarios : List Scenario := [.op .deleteMaster, .op .rollingRestart, .op .rollBoth, .op .drainMaster, .gate, .sigtermHold, .op .deleteMasterSaveFail]
 
 /-- node-ops-switch-<scenario> (PVC) and node-ops-switch-tmpfs-<scenario>. -/
 def switchSuites : List TestSuite :=

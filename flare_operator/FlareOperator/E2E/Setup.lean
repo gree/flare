@@ -388,7 +388,8 @@ def statefulSetYaml (cfg : ClusterConfig) : String :=
   let graceSeconds := if cfg.drainSeconds > 0 then cfg.drainSeconds + 75 else 5
   -- the chart's hook (helm/flare-operator/templates/flare-cluster.yaml): wait
   -- until the node's own role is proxy and no in-cluster forward is in flight
-  -- (NODE-OPS-LOSSLESS-PLAN L2), then 2 s; at most drainSeconds
+  -- (NODE-OPS-LOSSLESS-PLAN L2), then until no new client connection has
+  -- arrived for 3 s (the Service moved away); at most drainSeconds
   let preStopBlock := if cfg.drainSeconds > 0 then
       s!"
           lifecycle:
@@ -412,7 +413,14 @@ def statefulSetYaml (cfg : ClusterConfig) : String :=
                         else
                           echo \"flare preStop: proxy and nothing in flight, but forward drain NOT LOSSLESS (dropped $d0 -> $d, refused $f0 -> $f)\" > /proc/1/fd/1
                         fi
-                        sleep 2
+                        c0=$(st \"$out\" total_connections); q=0
+                        while [ \"$(date +%s)\" -lt \"$end\" ] && [ \"$q\" -lt 15 ]; do
+                          sleep 0.2
+                          c=$(st \"$(rd)\" total_connections)
+                          if [ -n \"$c\" ] && [ -n \"$c0\" ] && [ \"$c\" -le $((c0 + 1)) ]; then q=$((q + 1)); else q=0; fi
+                          c0=$c
+                        done
+                        echo \"flare preStop: no new client connection for $((q / 5)) s\" > /proc/1/fd/1
                         exit 0
                       fi
                       sleep 0.2

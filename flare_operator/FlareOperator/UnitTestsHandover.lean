@@ -86,6 +86,13 @@ def results : List (String × Bool) := Id.run do
               ea.phase == .aborted && aa == .send)]
   let (eb, _) := step cfg e3 { okObs (1100 + cfg.handoverMs) with inFlightToSuccessor := some 1 }
   r := r ++ [("handover: not drained within Th aborts", eb.phase == .aborted)]
+  let (eb2, ab2) := step cfg e3 (okObs (1100 + cfg.handoverMs + 3000))
+  r := r ++ [("handover: a drain first observed clean after Th still promotes (progress before the bound)",
+              eb2.phase == .promoting && ab2 == .send && eb2.drainProven)]
+  let (eb3, _) := step cfg e1s { okObs (1100 + cfg.handoverMs + 3000) with oldMapVersion := some 42 }
+  r := r ++ [("handover: V1 first observed applied after Th still moves to draining", eb3.phase == .draining)]
+  let (eb4, _) := step cfg e1s { okObs (1100 + cfg.handoverMs) with oldMapVersion := some 41 }
+  r := r ++ [("handover: V1 not applied by Th aborts", eb4.phase == .aborted)]
   let (ec, _) := step cfg e3 { okObs 1300 with oldBoot := some 8 }
   r := r ++ [("handover: the old master restarted aborts", ec.phase == .aborted)]
   let eas := recordSent ea 44
@@ -136,6 +143,13 @@ def results : List (String × Bool) := Id.run do
               K8sReconciler.breakerCountedKeys s4 [] live ["m:12121"] == ["x:12121"]
                 && (let all := K8sReconciler.breakerCountedKeys s4 [] live []
                     all.length == 2 && all.contains "m:12121" && all.contains "x:12121"))]
+  -- the one-map drain leaves the old master of a handover in progress alone
+  -- (requested … promoting, the phase saved or not), and gets it back when
+  -- the handover aborted
+  r := r ++ [("handover: the one-map drain is held off the old master from requested to promoting, not after an abort",
+              drainHeldKeys { entries := [fresh] } == ["m:12121"] && drainHeldKeys { entries := [e1s] } == ["m:12121"]
+                && drainHeldKeys { entries := [e3] } == ["m:12121"] && drainHeldKeys { entries := [e6s] } == ["m:12121"]
+                && drainHeldKeys { entries := [eas] } == [] && drainHeldKeys { entries := [{ e9 with phase := .done }] } == [])]
   -- the commit gate: `lagging` (re-validating while the partition has only
   -- the Master/Down placeholder, the recorded history) is enough for a
   -- handover's proven successor, and for nothing else

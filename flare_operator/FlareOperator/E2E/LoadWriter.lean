@@ -44,6 +44,10 @@ def loadWriterPod (c : Ctx) : String := s!"lw-{c.cfg.name}"
     alignment with the timeline, m = monotonic for latency and stalls), then `END n wallus monous`. -/
 def loadWriterScript : String := "import os, socket, sys, threading, time
 name, host, port, workers, prefix, rate = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), sys.argv[5], float(sys.argv[6])
+# per-request (default): a new connection for every request, closed after its
+# reply — the clients' model (user decision 2026-10-28: clients connect for
+# each use, a connection lasts seconds at most); keep: one kept-open connection
+per_request = (sys.argv[7] if len(sys.argv) > 7 else 'per-request') == 'per-request'
 stop = '/tmp/lw-stop-' + name
 
 def us():
@@ -68,17 +72,25 @@ def worker(w):
         t0 = us()
         m0 = mus()
         broken = False
+        # Tc (plan A7, 2026-10-26): one deadline for the whole request, from
+        # its start (connect included) to the reply; a write waiting for a
+        # master (W, up to 20 s) is a delay, not an error
+        deadline = time.monotonic() + 30.0
+        def left():
+            d = deadline - time.monotonic()
+            if d <= 0:
+                raise socket.timeout('Tc')
+            return d
         try:
             if s is None:
                 ip = socket.gethostbyname(host)
-                s = socket.create_connection((ip, port), timeout=3)
-                # the approved client timeout Tc (plan A7, 2026-10-26): a write
-                # waiting for a master (W, up to 20 s) is a delay, not an error
-                s.settimeout(30)
+                s = socket.create_connection((ip, port), timeout=left())
                 peer = ip
                 buf = b''
+            s.settimeout(left())
             s.sendall(('set %s 0 0 %d\\r\\n%s\\r\\n' % (k, len(v), v)).encode())
             while b'\\r\\n' not in buf:
+                s.settimeout(left())
                 d = s.recv(4096)
                 if not d:
                     raise ConnectionError('EOF')
@@ -92,20 +104,33 @@ def worker(w):
             reply = 'TIMEOUT'
             broken = True
         except Exception as e:
-            reply = 'CONNERR:' + type(e).__name__
+            reply = 'CONNERR:' + type(e).__name__ + (':%s' % e.errno if getattr(e, 'errno', None) else '')
             broken = True
         t1 = us()
         m1 = mus()
         out.write('%d %d %s %s %s %d %d %s %d %d\\n' % (w, n, k, v, reply, t0, t1, peer, m0, m1))
-        if broken:
+        if broken or per_request:
             if s is not None:
+                try:
+                    if not broken:
+                        # the server closes first (quit), so TIME_WAIT is on
+                        # its side: ~1000 new connections/s from one pod would
+                        # otherwise run out of local ports in under a minute
+                        # (EADDRNOTAVAIL, local kind 2026-10-28)
+                        s.settimeout(2)
+                        s.sendall(b'quit\\r\\n')
+                        while s.recv(4096):
+                            pass
+                except Exception:
+                    pass
                 try:
                     s.close()
                 except Exception:
                     pass
             s = None
             peer = '-'
-            time.sleep(0.02)
+            if broken:
+                time.sleep(0.02)
         if interval > 0:
             nxt += interval
             d = nxt - time.monotonic()
@@ -140,14 +165,17 @@ def Ctx.ensureLoadWriter (c : Ctx) : IO (Except String Unit) := do
   | .ok o => if containsSubstr o "LW_OK" then return .ok () else return .error s!"the writer program did not install: {o.take 200}"
   | .error e => return .error s!"the writer program did not install: {e.take 200}"
 
-/-- Start `workers` connections against `host` (a DNS name, resolved on each
-    (re)connect) at `rate` requests/s per connection. -/
-def Ctx.startLoad (c : Ctx) (name host : String) (workers : Nat) (rate : Nat) : IO Bool := do
+/-- Start `workers` writers against `host` (a DNS name, resolved on each
+    connect) at `rate` requests/s each. `perRequest` (default): a new
+    connection per request, closed after its reply (the clients' model, user
+    decision 2026-10-28); false: one kept-open connection per writer. -/
+def Ctx.startLoad (c : Ctx) (name host : String) (workers : Nat) (rate : Nat) (perRequest : Bool := true) : IO Bool := do
   let ns ← IO.monoNanosNow
   let pfx := s!"lw{name}{(← epochNow)}{ns % 1000000}"
-  let cmd := s!"rm -f /tmp/lw-stop-{name} /tmp/lw-{name}-*.log; nohup python3 /tmp/lw.py {name} {host} {c.cfg.flarePort} {workers} {pfx} {rate} >/tmp/lw-{name}.out 2>&1 &"
+  let mode := if perRequest then "per-request" else "keep"
+  let cmd := s!"rm -f /tmp/lw-stop-{name} /tmp/lw-{name}-*.log; nohup python3 /tmp/lw.py {name} {host} {c.cfg.flarePort} {workers} {pfx} {rate} {mode} >/tmp/lw-{name}.out 2>&1 &"
   match ← kubectl ["exec", loadWriterPod c, "-n", c.cfg.«namespace», "--", "sh", "-c", cmd] with
-  | .ok _ => c.event s!"load {name}: {workers} connection(s) x {rate}/s against {host} (keys {pfx}_<w>_<n>)"; return true
+  | .ok _ => c.event s!"load {name}: {workers} writer(s) x {rate}/s against {host}, {mode} connections (keys {pfx}_<w>_<n>)"; return true
   | .error e => c.event s!"load {name} could not start: {e.take 200}"; return false
 
 structure LoadRec where

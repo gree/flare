@@ -706,6 +706,66 @@ the follower repairs them from the WAL. That repair needs WAL retention, so
   [Seeding via cluster replication](#replication-seeding) — in particular
   its backup ordering.
 
+## Restarting, deleting and upgrading flared pods (node guard) {#node-guard}
+
+Pod replacement is lossless when it goes through the operator:
+
+- **helm upgrade / `kubectl rollout restart`**: the flared StatefulSet uses
+  `updateStrategy: OnDelete`, so a template change replaces nothing by
+  itself. The operator replaces the pods on an old revision one at a time
+  (the highest ordinal first, a master last, through the ordered handover),
+  and only while every replica is caught up. Progress is in the operator log
+  (`ROLLING`). `FLARE_OPERATOR_ROLLING=off` on the operator stops it; then
+  delete pods by hand, one at a time, as below.
+- **`kubectl delete pod <pod>`** (with its grace period): allowed. A master
+  is handed over to a caught-up replica first (operator log
+  `HANDOVER p<N> done`); writes wait briefly, none fail.
+
+The node-guard webhook (`nodeGuard.enabled`, default true) refuses what
+skips that path. The refusal message says why:
+
+| Refused | Why | What to do |
+|---|---|---|
+| `kubectl delete pod --force --grace-period=0` of a master or a replica | no preStop, no handover: acknowledged writes can be lost | delete without `--force` |
+| delete of a master whose partition has no Active, Ready replica | nothing to hand over to (on tmpfs the data is lost) | wait until the replica is Active (`stats nodes`) |
+| `kubectl scale` / a StatefulSet edit removing ordinals that hold data | the removed pods are masters or replicas | reduce partitions or replicas in the FlareCluster spec (the operator moves the data first) |
+
+The operator, Kubernetes' own controllers and the kubelet are never refused.
+
+### Break-glass: deleting a pod anyway
+
+Use this only when you accept losing that pod's unreplicated writes (for
+example the pod is stuck and its data is already gone). It is recorded: the
+operator logs `NODE GUARD: allowed DELETE pods <pod> (uid ...)` with "delete-override names this pod".
+
+```sh
+UID=$(kubectl get pod <pod> -n <ns> -o jsonpath='{.metadata.uid}')
+kubectl annotate pod <pod> -n <ns> --overwrite flare.gree.net/delete-override=$UID
+kubectl delete pod <pod> -n <ns> --force --grace-period=0
+```
+
+The annotation names one pod by UID: the pod the StatefulSet creates in its
+place has a new UID and is guarded again. `kubectl delete --force` may print
+an error naming that new pod after the old one is already gone; check with
+`kubectl get pod <pod> -o jsonpath='{.metadata.uid}'`.
+
+### The operator is down (the webhook fails closed)
+
+`failurePolicy: Fail`: with no operator leader answering, deletes of flared
+pods and StatefulSet updates are refused (`failed calling webhook
+"pods.node-guard.flare.gree.net"`). Bring the operator back first. If that
+is not possible, either use the override above per pod, or turn the guard
+off and back on after the work:
+
+```sh
+helm upgrade <release> ... --set nodeGuard.enabled=false   # removes the webhook
+# ... the operation ...
+helm upgrade <release> ... --set nodeGuard.enabled=true
+```
+
+Without the guard nothing stops a force delete of a master: do one pod at a
+time and only graceful deletes.
+
 ## Seeding a new cluster via cluster replication {#replication-seeding}
 
 Standing up a cluster whose data comes from another flare (classic or

@@ -56,6 +56,24 @@ def us():
 def mus():
     return time.monotonic_ns() // 1000
 
+def resolve(h, limit):
+    # name resolution inside the request's Tc deadline (gethostbyname has no
+    # timeout of its own): a lookup still running at the deadline is TIMEOUT
+    box = {}
+    def run():
+        try:
+            box['ip'] = socket.gethostbyname(h)
+        except Exception as e:
+            box['err'] = e
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(limit)
+    if t.is_alive():
+        raise socket.timeout('resolve')
+    if 'err' in box:
+        raise box['err']
+    return box['ip']
+
 def worker(w):
     out = open('/tmp/lw-%s-%d.log' % (name, w), 'w', buffering=1 << 16)
     out.write('START %d %d\\n' % (us(), mus()))
@@ -83,7 +101,7 @@ def worker(w):
             return d
         try:
             if s is None:
-                ip = socket.gethostbyname(host)
+                ip = resolve(host, left())
                 s = socket.create_connection((ip, port), timeout=left())
                 peer = ip
                 buf = b''

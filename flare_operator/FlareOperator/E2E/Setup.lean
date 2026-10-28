@@ -416,11 +416,16 @@ def statefulSetYaml (cfg : ClusterConfig) : String :=
                         c0=$(st \"$out\" total_connections); q=0
                         while [ \"$(date +%s)\" -lt \"$end\" ] && [ \"$q\" -lt 15 ]; do
                           sleep 0.2
-                          c=$(st \"$(rd)\" total_connections)
-                          if [ -n \"$c\" ] && [ -n \"$c0\" ] && [ \"$c\" -le $((c0 + 1)) ]; then q=$((q + 1)); else q=0; fi
+                          out=$(rd); c=$(st \"$out\" total_connections); busy=$(st \"$out\" requests_in_progress)
+                          # quiet = no new client connection (each read is one
+                          # of its own: +1) AND no client request still
+                          # executing besides this read's own stats (a write
+                          # waiting for a master or on a forward can outlast
+                          # the 3 s: review of 7450ce3)
+                          if [ -n \"$c\" ] && [ -n \"$c0\" ] && [ \"$c\" -le $((c0 + 1)) ] && [ -n \"$busy\" ] && [ \"$busy\" -le 1 ]; then q=$((q + 1)); else q=0; fi
                           c0=$c
                         done
-                        echo \"flare preStop: no new client connection for $((q / 5)) s\" > /proc/1/fd/1
+                        echo \"flare preStop: no new client connection and no request executing for $((q / 5)) s (requests in progress $busy)\" > /proc/1/fd/1
                         exit 0
                       fi
                       sleep 0.2

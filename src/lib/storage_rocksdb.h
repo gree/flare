@@ -646,6 +646,7 @@ public:
 	int _apply_batch_with_lsn_locked(const rocksdb::WriteBatch& batch, uint64_t master_lsn);
 	static bool validate_batch_rep(const rocksdb::WriteBatch& batch);
 	uint64_t get_repl_last_lsn();
+	uint64_t _get_repl_last_lsn_locked();
 	// Durably overwrite the replication cursor (kReplLastLsnKey). Used to
 	// seed the cursor after a full-dump reconstruction so the next WAL
 	// sync can be incremental. Returns 0 on success, -1 on write failure.
@@ -726,6 +727,7 @@ public:
 	bool is_switch_unresolved() { string w; return this->switch_unresolved_snapshot(w); }
 	// receipts of completed bulks, "<pred> <succ> <epoch>" per line
 	string get_bulk_chain();
+	string _get_bulk_chain_locked();
 	int recover_bulk_pending();
 	bool has_bulk_pending();
 	bool promotion_forbidden(std::string& why);

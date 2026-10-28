@@ -1895,6 +1895,55 @@ void test_switch_to_staging_retains_the_old_copy() {
 	drop_rocksdb(s, wal_master_dir);
 }
 
+// The stats / metrics / follower paths read the storage without any storage
+// lock. A copy switch closes the live handle and reopens it under the
+// whole-lock for write: readers must wait, never touch the closed handle
+// (CI 40729559672: flared died right after "copy closed" under load).
+struct switch_readers_arg {
+	storage_rocksdb* s;
+	volatile bool stop;
+};
+
+static void* switch_readers_main(void* p) {
+	switch_readers_arg* a = static_cast<switch_readers_arg*>(p);
+	string last;
+	uint32_t scanned = 0, reaped = 0;
+	bool more = false;
+	while (!a->stop) {
+		a->s->get_repl_last_lsn();
+		a->s->size();
+		a->s->get_bulk_chain();
+		a->s->has_bulk_pending();
+		a->s->get_latest_sequence_number();
+		a->s->reap_expired(time(NULL), 100, "", last, more, scanned, reaped, NULL);
+	}
+	return NULL;
+}
+
+void test_switch_to_staging_under_concurrent_readers() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	storage_set_string(s, "k", "old");
+	switch_readers_arg a;
+	a.s = s;
+	a.stop = false;
+	pthread_t th[4];
+	for (int i = 0; i < 4; i++) {
+		pthread_create(&th[i], NULL, switch_readers_main, &a);
+	}
+	for (int i = 0; i < 20; i++) {
+		char at[16];
+		snprintf(at, sizeof(at), "c%d", i);
+		const string new_id = make_staging_copy(wal_master_dir, at, "k", "new");
+		cut_assert_equal_int(0, s->switch_to_staging(at, new_id));
+	}
+	a.stop = true;
+	for (int i = 0; i < 4; i++) {
+		pthread_join(th[i], NULL);
+	}
+	cut_assert_equal_string("new", get_value(s, "k").c_str());
+	drop_rocksdb(s, wal_master_dir);
+}
+
 // IN-PLACE RESTORE (docs/plan-inplace-restore-retention.md): the hook left
 // staging-restore-<ts> (RESTORED marker) named in RESTORE.switch; the open
 // switches it in and RETAINS the live copy, with no record (never reaped)

@@ -373,6 +373,14 @@ int storage_rocksdb::set_master_id(const string& id) {
 }
 
 string storage_rocksdb::get_bulk_chain() {
+	// stats scrape: outside the storage locks, so read under the whole-lock (a copy switch closes the handle)
+	pthread_rwlock_rdlock(&this->_mutex_wholelock);
+	const string v = this->_get_bulk_chain_locked();
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	return v;
+}
+
+string storage_rocksdb::_get_bulk_chain_locked() {
 	if (this->_db == NULL) {
 		return "";
 	}
@@ -401,7 +409,7 @@ int storage_rocksdb::_finalize_bulk_receipt(const string& pred, const string& su
 	}
 	vector<string> lines;
 	{
-		istringstream in(this->get_bulk_chain());
+		istringstream in(this->_get_bulk_chain_locked());
 		string l;
 		while (getline(in, l)) {
 			if (!l.empty()) lines.push_back(l);
@@ -437,9 +445,14 @@ int storage_rocksdb::_finalize_bulk_receipt(const string& pred, const string& su
  *	-1 the receipt could not be written.
  */
 bool storage_rocksdb::has_bulk_pending() {
-	if (this->_db == NULL) return false;
-	string v;
-	return this->_db->Get(this->_read_options, kBulkPendingKey, &v).ok() && !v.empty();
+	pthread_rwlock_rdlock(&this->_mutex_wholelock);
+	bool r = false;
+	if (this->_db != NULL) {
+		string v;
+		r = this->_db->Get(this->_read_options, kBulkPendingKey, &v).ok() && !v.empty();
+	}
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	return r;
 }
 
 int storage_rocksdb::recover_bulk_pending() {
@@ -3992,17 +4005,23 @@ int storage_rocksdb::reap_expired(time_t now, uint32_t max_scan, const string& a
 	// blocking compaction from reclaiming space between chunks. A fresh
 	// iterator per chunk sees a slightly newer view each time, which is fine:
 	// reaping is idempotent and re-scanning a key is cheap.
+	// The scan runs under the whole-lock for read (a copy switch closes and
+	// reopens the handle under it for write); the deletes run after it is
+	// released because remove() takes the whole-lock itself.
+	vector<entry> expired;
+	pthread_rwlock_rdlock(&this->_mutex_wholelock);
 	if (this->_db == NULL) {
+		pthread_rwlock_unlock(&this->_mutex_wholelock);
 		return -1;
 	}
 	rocksdb::ReadOptions ro = this->_read_options;
 	ro.fill_cache = false;                 // a full sweep must not thrash the block cache
 	rocksdb::Iterator* it = this->_db->NewIterator(ro);
 	if (it == NULL) {
+		pthread_rwlock_unlock(&this->_mutex_wholelock);
 		log_err("reap_expired: NewIterator returned NULL", 0);
 		return -1;
 	}
-
 	if (after_key.empty()) {
 		it->SeekToFirst();
 	} else {
@@ -4033,28 +4052,10 @@ int storage_rocksdb::reap_expired(time_t now, uint32_t max_scan, const string& a
 			const uint8_t* value_ptr = reinterpret_cast<const uint8_t*>(value.data());
 			this->_unserialize_header(value_ptr, value.size(), hdr);
 			if (hdr.expire > 0 && hdr.expire <= now) {
-				// Delete only if the version is unchanged since we read the header
-				// (a concurrent set may have refreshed / un-expired the key).
-				// remove() is a LOCAL storage write (it lands in this node's WAL,
-				// which live slaves do NOT consume — WAL sync is reconstruction-
-				// only); replication is the caller's job via reaped_entries.
-				// remove() takes its own per-slot lock.
 				entry del;
 				del.key = key;
 				del.version = hdr.version;
-				result r;
-				// behavior_skip_timestamp: we already know it is expired and want
-				// the delete to REPORT result_deleted. Without it, remove() treats
-				// an expired entry as already-gone and returns result_not_found
-				// (even though it deletes), which would under-count the reap.
-				if (this->remove(del, r, behavior_skip_timestamp | behavior_version_equal) == 0
-						&& r == result_deleted) {
-					reaped++;
-					this->_expire_reaped.incr();
-					if (reaped_entries != NULL) {
-						reaped_entries->push_back(del);   // key + the version we deleted at
-					}
-				}
+				expired.push_back(del);
 			}
 		}
 
@@ -4062,6 +4063,30 @@ int storage_rocksdb::reap_expired(time_t now, uint32_t max_scan, const string& a
 	}
 
 	delete it;
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+
+	for (size_t i = 0; i < expired.size(); i++) {
+		// Delete only if the version is unchanged since we read the header
+		// (a concurrent set may have refreshed / un-expired the key).
+		// remove() is a LOCAL storage write (it lands in this node's WAL,
+		// which live slaves do NOT consume — WAL sync is reconstruction-
+		// only); replication is the caller's job via reaped_entries.
+		// remove() takes its own per-slot lock.
+		entry del = expired[i];
+		result r;
+		// behavior_skip_timestamp: we already know it is expired and want
+		// the delete to REPORT result_deleted. Without it, remove() treats
+		// an expired entry as already-gone and returns result_not_found
+		// (even though it deletes), which would under-count the reap.
+		if (this->remove(del, r, behavior_skip_timestamp | behavior_version_equal) == 0
+				&& r == result_deleted) {
+			reaped++;
+			this->_expire_reaped.incr();
+			if (reaped_entries != NULL) {
+				reaped_entries->push_back(del);   // key + the version we deleted at
+			}
+		}
+	}
 	return 0;
 }
 
@@ -4101,14 +4126,13 @@ uint64_t storage_rocksdb::size() {
 	uint64_t size = 0;
 	std::string value;
 
-	if (this->_db == NULL) {
-		return 0;
-	}
-
-	// Get approximate size from RocksDB property
-	if (this->_db->GetProperty("rocksdb.total-sst-files-size", &value)) {
+	// a copy switch closes the handle under the whole-lock for write
+	pthread_rwlock_rdlock(&this->_mutex_wholelock);
+	if (this->_db != NULL && this->_db->GetProperty("rocksdb.total-sst-files-size", &value)) {
+		// Get approximate size from RocksDB property
 		size = boost::lexical_cast<uint64_t>(value);
 	}
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
 
 	return size;
 }
@@ -4640,7 +4664,7 @@ storage_rocksdb::apply_outcome storage_rocksdb::apply_forwarded_change(const str
 		}
 		// Read INSIDE the critical section: the applier may have advanced it
 		// while this change was waiting for a connection, a retry or a lock.
-		const uint64_t cursor = this->get_repl_last_lsn();
+		const uint64_t cursor = this->_get_repl_last_lsn_locked();
 		outcome = this->_decide_change(source_epoch, label, mr == 0, current, cursor);
 		if (outcome != apply_applied) {
 			break;
@@ -4794,7 +4818,7 @@ uint64_t storage_rocksdb::_collect_tombstones_locked(uint64_t budget) {
 	if (this->_db == NULL || this->_cf_meta == NULL || budget == 0) {
 		return 0;
 	}
-	const uint64_t cursor = this->get_repl_last_lsn();
+	const uint64_t cursor = this->_get_repl_last_lsn_locked();
 	rocksdb::ReadOptions ro = this->_read_options;
 	ro.fill_cache = false;
 	rocksdb::Iterator* it = this->_db->NewIterator(ro, this->_cf_meta);
@@ -5061,7 +5085,7 @@ int storage_rocksdb::apply_wal_batch(const string& source_epoch, const string& i
 			refusal = apply_refused_stale_follower;
 			break;
 		}
-		const uint64_t cursor = this->get_repl_last_lsn();
+		const uint64_t cursor = this->_get_repl_last_lsn_locked();
 		// Contiguity: the stream must continue where this node stopped. The
 		// batch that CONTAINS the cursor is re-delivered by design (RocksDB
 		// starts at the batch holding the requested sequence), so a base at
@@ -5268,6 +5292,15 @@ int storage_rocksdb::_apply_batch_with_lsn_locked(const rocksdb::WriteBatch& bat
 }
 
 uint64_t storage_rocksdb::get_repl_last_lsn() {
+	// stats / follower / cluster callers hold no storage lock: a copy switch
+	// closes and reopens the handle under the whole-lock for write
+	pthread_rwlock_rdlock(&this->_mutex_wholelock);
+	const uint64_t v = this->_get_repl_last_lsn_locked();
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	return v;
+}
+
+uint64_t storage_rocksdb::_get_repl_last_lsn_locked() {
 	string value;
 
 	if (this->_db == NULL) {
@@ -5283,6 +5316,11 @@ uint64_t storage_rocksdb::get_repl_last_lsn() {
 }
 
 int storage_rocksdb::set_repl_last_lsn(uint64_t lsn) {
+	struct wl_reader {
+		pthread_rwlock_t* l;
+		explicit wl_reader(pthread_rwlock_t* x) : l(x) { pthread_rwlock_rdlock(l); }
+		~wl_reader() { pthread_rwlock_unlock(l); }
+	} guard(&this->_mutex_wholelock);
 	if (this->_db == NULL) {
 		return -1;
 	}
@@ -5291,7 +5329,7 @@ int storage_rocksdb::set_repl_last_lsn(uint64_t lsn) {
 	// is how a slave reconstructed by full dump acquires a nonzero
 	// replication cursor (seeded from the master's latest_lsn) so that a
 	// *subsequent* WAL sync can be incremental. See handler_reconstruction.
-	uint64_t old_lsn = this->get_repl_last_lsn();
+	uint64_t old_lsn = this->_get_repl_last_lsn_locked();
 	string lsn_value = boost::lexical_cast<string>(lsn);
 
 	rocksdb::WriteOptions wo;

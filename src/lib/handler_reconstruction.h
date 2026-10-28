@@ -103,13 +103,21 @@ public:
 		map<string, string> role, state, partition;
 		source_map_view(): version_found(false), version(0) {}
 	};
-	// 1 = both replies complete, 0 = not readable now
-	static int probe_source_map(const string& host, int port, source_map_view& out);
+	// 1 = both replies complete, 0 = not readable now; the whole probe
+	// (connect, writes, reads) ends within budget_ms
+	static int probe_source_map(const string& host, int port, source_map_view& out, int budget_ms = 8000);
 	// The source forwards its writes for `partition` to `self`: its map is not
 	// older than this node's (`mine`), names `self` a slave (prepare/active)
 	// of `partition` and `src` that partition's master. Anything unknown is
 	// not proof. `why` describes what was seen.
 	static bool source_forwards_here(const source_map_view& v, const string& self, const string& src, int partition, uint64_t mine, string& why);
+	// Polls the source until it proves source_forwards_here, against one
+	// monotonic deadline of budget_ms for the whole wait (each probe capped
+	// by the time left). `cl` gives this node's map version, re-read every
+	// round (NULL: 0, for the cutter test). `last` = what was seen last.
+	static bool wait_source_forwards_here(const string& host, int port, const string& self, const string& src,
+		int partition, cluster* cl, int budget_ms, shared_thread owner, string& last);
+	static int source_proof_wait_ms;
 	handler_reconstruction(shared_thread t, cluster* cl, storage* st, string node_server_name, int node_server_port, int partition, int partition_size, cluster::role r, int reconstruction_interval, int reconstruction_bwlimit);
 	virtual ~handler_reconstruction();
 

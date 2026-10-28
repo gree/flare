@@ -14,9 +14,11 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <pthread.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
+#include <vector>
 
 using namespace std;
 using namespace gree::flare;
@@ -363,5 +365,104 @@ namespace test_copy_protection {
 		cut_assert_equal_int(1, rc);
 		cut_assert_equal_boolean(false, v.version_found);
 		cut_assert_equal_boolean(false, forwards(v));
+	}
+
+	// review of 163f674: the whole wait has ONE deadline; a source that
+	// accepts and never answers must not stretch it (each probe gets only
+	// the time left)
+	struct silent_source {
+		int port;
+		volatile int ready;
+		volatile int stop;
+		int accepted;
+	};
+
+	void* silent_source_run(void* arg) {
+		silent_source* ss = static_cast<silent_source*>(arg);
+		int fd = socket(AF_INET, SOCK_STREAM, 0);
+		int one = 1;
+		setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+		struct sockaddr_in a;
+		memset(&a, 0, sizeof(a));
+		a.sin_family = AF_INET;
+		a.sin_port = htons(ss->port);
+		a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+		if (::bind(fd, (struct sockaddr*)&a, sizeof(a)) < 0 || listen(fd, 16) < 0) {
+			close(fd);
+			ss->ready = -1;
+			return NULL;
+		}
+		ss->ready = 1;
+		vector<int> held;
+		while (!ss->stop) {
+			fd_set rf;
+			FD_ZERO(&rf);
+			FD_SET(fd, &rf);
+			struct timeval tv = {0, 50 * 1000};
+			if (select(fd + 1, &rf, NULL, NULL, &tv) > 0) {
+				int c = accept(fd, NULL, NULL);
+				if (c >= 0) {
+					ss->accepted++;
+					held.push_back(c);		// read nothing, answer nothing
+				}
+			}
+		}
+		for (size_t i = 0; i < held.size(); i++) {
+			close(held[i]);
+		}
+		close(fd);
+		return NULL;
+	}
+
+	void test_the_proof_wait_ends_within_its_budget_on_a_silent_source() {
+		stats_object = new stats();
+		silent_source ss;
+		ss.port = 20000 + rand() % 20000;
+		ss.ready = 0;
+		ss.stop = 0;
+		ss.accepted = 0;
+		pthread_t th;
+		pthread_create(&th, NULL, silent_source_run, &ss);
+		for (int i = 0; i < 100 && ss.ready == 0; i++) {
+			usleep(10 * 1000);
+		}
+		string last;
+		const uint64_t t0 = now_ms();
+		const bool ok = handler_reconstruction::wait_source_forwards_here("localhost", ss.port, "me:12121", "src:12121",
+			0, NULL, 1500, shared_thread(), last);
+		const uint64_t took = now_ms() - t0;
+		ss.stop = 1;
+		pthread_join(th, NULL);
+		delete stats_object;
+		stats_object = NULL;
+		cut_notify("silent source: %s after %llu ms (%d connection(s) accepted; last: %s)", ok ? "proof" : "no proof",
+			(unsigned long long)took, ss.accepted, last.c_str());
+		cut_assert_equal_boolean(false, ok);
+		cut_assert(ss.accepted >= 1, cut_message("the source was never reached"));
+		cut_assert(took >= 1400 && took <= 1800, cut_message("a 1500 ms wait took %llu ms", (unsigned long long)took));
+	}
+
+	void test_the_proof_wait_returns_on_a_source_that_proves_it() {
+		stats_object = new stats();
+		map_source ms;
+		ms.port = 20000 + rand() % 20000;
+		ms.with_version = true;
+		ms.ready = 0;
+		pthread_t th;
+		pthread_create(&th, NULL, map_source_run, &ms);
+		for (int i = 0; i < 100 && ms.ready == 0; i++) {
+			usleep(10 * 1000);
+		}
+		string last;
+		const uint64_t t0 = now_ms();
+		const bool ok = handler_reconstruction::wait_source_forwards_here("localhost", ms.port, "me:12121", "src:12121",
+			0, NULL, 5000, shared_thread(), last);
+		const uint64_t took = now_ms() - t0;
+		pthread_join(th, NULL);
+		delete stats_object;
+		stats_object = NULL;
+		cut_notify("proving source: %s after %llu ms (%s)", ok ? "proof" : "no proof", (unsigned long long)took, last.c_str());
+		cut_assert_equal_boolean(true, ok);
+		cut_assert(took < 2000, cut_message("took %llu ms", (unsigned long long)took));
 	}
 }

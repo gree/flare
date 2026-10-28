@@ -253,19 +253,9 @@ int handler_reconstruction::_run_once() {
 		// review of 492aff7 — every flared since 1.3.1 reports them).
 		const string self = this->_cluster->get_own_node_key();
 		const string src = this->_cluster->to_node_key(this->_node_server_name, this->_node_server_port);
-		bool ok = false;
-		string last = "not readable";
-		for (int i = 0; i < 150 && !this->_thread->is_shutdown_request(); i++) {		// ~15 s
-			const uint64_t mine = this->_cluster->get_node_map_version();
-			source_map_view v;
-			if (probe_source_map(this->_node_server_name, this->_node_server_port, v) == 1) {
-				if (source_forwards_here(v, self, src, this->_partition, mine, last)) {
-					ok = true;
-					break;
-				}
-			}
-			usleep(100 * 1000);
-		}
+		string last;
+		const bool ok = wait_source_forwards_here(this->_node_server_name, this->_node_server_port, self, src,
+			this->_partition, this->_cluster, source_proof_wait_ms, this->_thread, last);
 		if (!ok) {
 			log_warning("the source %s:%d is not proven to forward its writes here for partition %d (its map: %s): no catch-up target is taken this attempt",
 				this->_node_server_name.c_str(), this->_node_server_port, this->_partition, last.c_str());
@@ -698,17 +688,34 @@ void handler_reconstruction::probe_source_identity(const string& host, int port,
 // nodes`: role, state, partition of every node key; both in every flared
 // since 1.3.1) over one bounded connection: 1 = both replies complete,
 // 0 = not readable now.
-int handler_reconstruction::probe_source_map(const string& host, int port, source_map_view& out) {
+namespace {
+	uint64_t mono_ms() {
+		struct timespec ts;
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+	}
+}
+
+int handler_reconstruction::probe_source_map(const string& host, int port, source_map_view& out, int budget_ms) {
 	out = source_map_view();
+	if (budget_ms <= 0) {
+		return 0;
+	}
+	const uint64_t end = mono_ms() + (uint64_t)budget_ms;
 	connection_tcp* t = new connection_tcp(host, port);
-	t->set_connect_timeout_ms(3000);
+	t->set_connect_timeout_ms(budget_ms < 3000 ? budget_ms : 3000);
 	t->set_connect_retry_limit(1);
-	t->set_read_timeout(5000);
+	t->set_read_timeout(budget_ms < 5000 ? budget_ms : 5000);
 	shared_connection c(t);
 	if (c->open() < 0) {
 		return 0;
 	}
-	t->set_deadline_from_now(8000);
+	const uint64_t now = mono_ms();
+	if (now >= end) {
+		return 0;
+	}
+	t->set_deadline_from_now((int)(end - now));
+	t->set_write_deadline_from_now((int)(end - now));
 	const char* reqs[] = {"stats\r\n", "stats nodes\r\n"};
 	for (int r = 0; r < 2; r++) {
 		if (c->write(reqs[r], strlen(reqs[r])) < 0) {
@@ -795,6 +802,33 @@ bool handler_reconstruction::source_forwards_here(const source_map_view& v, cons
 	return v.version_found && v.version >= mine
 		&& my_role == "slave" && my_part == part.str() && (my_state == "prepare" || my_state == "active")
 		&& src_role == "master" && src_part == part.str();
+}
+
+int handler_reconstruction::source_proof_wait_ms = 15000;
+
+bool handler_reconstruction::wait_source_forwards_here(const string& host, int port, const string& self, const string& src,
+		int partition, cluster* cl, int budget_ms, shared_thread owner, string& last) {
+	const uint64_t end = mono_ms() + (uint64_t)(budget_ms > 0 ? budget_ms : 0);
+	last = "not readable";
+	for (;;) {
+		const uint64_t now = mono_ms();
+		if (now >= end || (owner && owner->is_shutdown_request())) {
+			return false;
+		}
+		const uint64_t mine = cl != NULL ? cl->get_node_map_version() : 0;
+		source_map_view v;
+		if (probe_source_map(host, port, v, (int)(end - now)) == 1) {
+			if (source_forwards_here(v, self, src, partition, mine, last)) {
+				return true;
+			}
+		}
+		const uint64_t after = mono_ms();
+		if (after >= end) {
+			return false;
+		}
+		const uint64_t nap = end - after < 100 ? end - after : 100;
+		usleep(nap * 1000);
+	}
 }
 
 namespace {

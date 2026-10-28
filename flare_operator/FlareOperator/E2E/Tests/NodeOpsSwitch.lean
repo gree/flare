@@ -169,6 +169,11 @@ inductive SwitchOp where
       handover map may be committed before its phase is saved, and the new
       operator completes the switch (review of af85899) -/
   | deleteMasterSaveFail
+  /-- `kubectl delete pod` of the master while it is cut from its successor:
+      the first handover cannot drain and aborts (rollback), the cut is
+      removed, and the retry (attempt 2, L7) completes the switch; the
+      one-map drain never takes the master (review of 9c4b2e1) -/
+  | deleteMasterAbortRetry
   deriving BEq, Repr
 
 def SwitchOp.label : SwitchOp → String
@@ -177,6 +182,7 @@ def SwitchOp.label : SwitchOp → String
   | .rollBoth => "operator Deployment + StatefulSet rollout restart together (helm-upgrade-like, not a helm upgrade)"
   | .drainMaster => "kubectl drain of the master's worker"
   | .deleteMasterSaveFail => "kubectl delete pod (master) while the handover ledger cannot be saved, then an operator restart"
+  | .deleteMasterAbortRetry => "kubectl delete pod (master) while it is cut from its successor: the handover aborts, then retries after the cut is removed"
 
 /-- The file the operator's FLARE_TEST_HANDOVER_SAVE_FAIL_FILE names. -/
 def saveFailFile : String := "/tmp/handover-save-fail"
@@ -233,7 +239,12 @@ private def switchRun (c : Ctx) (op : SwitchOp) : IO (Except String SwitchObs) :
     -- the clients' all-pods Service (the chart's <cluster>-nodes-external):
     -- the writes that land on a non-master pod take the proxy path. A pod's
     -- own DNS name would keep sending to a pod the switch replaces.
-    if !(← c.startLoad "peer" s!"{c.cfg.name}-nodes-external.{c.cfg.«namespace»}.svc.cluster.local" 2 200) then return .error (notSetUp "the proxy-path load did not start")
+    -- (S8 cuts the master from the replica on purpose: a write landing on the
+    -- replica could not reach the master for that reason alone, so both loads
+    -- go through the partition Service there)
+    let peerHost := if op == .deleteMasterAbortRetry then svcHost c
+      else s!"{c.cfg.name}-nodes-external.{c.cfg.«namespace»}.svc.cluster.local"
+    if !(← c.startLoad "peer" peerHost 2 200) then return .error (notSetUp "the proxy-path load did not start")
     let before := (← c.pods).getD []
     let opUids := fun (_ : Unit) => do
       match ← kubectl ["get", "pods", "-n", c.cfg.«namespace», "-l", s!"app={c.cfg.operatorName}", "-o", "jsonpath={.items[*].metadata.uid}"] with
@@ -300,6 +311,33 @@ private def switchRun (c : Ctx) (op : SwitchOp) : IO (Except String SwitchObs) :
               | .ok _ => opDetail := "delete accepted; the save was refused; operator pod deleted"
               | .error e => opOk := false; opDetail := s!"the operator pod could not be deleted: {e.take 200}"
       | other => opOk := false; opDetail := s!"expected exactly one operator pod, saw {other}"
+    | .deleteMasterAbortRetry =>
+      let opLogs := fun (_ : Unit) => kubectlLogsLabel s!"app={c.cfg.operatorName}" ns 20000
+      let rules := podCutRules (← kindNodes) p.master.ip p.replica.ip
+      match ← installCuts rules with
+      | .error (why, part) => removeCuts part; opOk := false; opDetail := s!"could not cut master <-> replica: {why}"
+      | .ok installed =>
+        c.event s!"cut {p.master.ip} <-> {p.replica.ip}; deleting the master {p.master.name}"
+        match ← kubectlLong 180 ["delete", "pod", p.master.name, "-n", ns, "--wait=false"] with
+        | .error e => removeCuts installed; opOk := false; opDetail := s!"delete failed: {e.take 200}"
+        | .ok _ =>
+          let aborted ← waitForCondition "the first handover aborted (forwards to the cut successor do not drain)" 90 do
+            return containsSubstr (← opLogs ()) "-> aborted"
+          removeCuts installed
+          c.event s!"first handover aborted={aborted}; cut removed"
+          if !aborted then
+            opOk := false; opDetail := "delete accepted, but the handover never aborted under the cut (the forced abort was not produced)"
+          else
+            let retried ← waitForCondition "the handover is retried (attempt 2) and completes" 120 do
+              let l ← opLogs ()
+              return containsSubstr l "(attempt 2 of" && containsSubstr l "HANDOVER p0 done"
+            let l ← opLogs ()
+            for x in (l.splitOn "\n").filter (fun x => containsSubstr x "HANDOVER" || containsSubstr x "graceful drain") do c.art "operator-handover.txt" x
+            if containsSubstr l s!"graceful drain: demoting Terminating node(s) to live proxy + promoting replacement(s): [{p.master.name}" then
+              checkFail := some "the one-map drain took the master while its handover could still be retried (see operator-handover.txt)"
+            if !retried then
+              checkFail := some ((checkFail.map (· ++ "; ")).getD "" ++ "no retry (attempt 2) completed the handover within 120 s after the abort (see operator-handover.txt)")
+            opDetail := s!"delete accepted; first handover aborted; retry completed={retried}"
     c.event s!"operation: ok={opOk} {opDetail}"
     if opOk && (op == .rollingRestart || op == .rollBoth) then
       let ok ← kubectlRolloutStatus s!"statefulset/{c.cfg.name}-nodes" ns 900
@@ -324,7 +362,7 @@ private def switchRun (c : Ctx) (op : SwitchOp) : IO (Except String SwitchObs) :
       | some b, some a => b.uid != a.uid && a.ready && !a.deleting
       | _, _ => false
     let (moved, movedDetail) := match op with
-      | .deleteMaster | .deleteMasterSaveFail => (uidChanged p.master.name, s!"master pod {p.master.name} replaced={uidChanged p.master.name}")
+      | .deleteMaster | .deleteMasterSaveFail | .deleteMasterAbortRetry => (uidChanged p.master.name, s!"master pod {p.master.name} replaced={uidChanged p.master.name}")
       | .rollingRestart | .rollBoth =>
         let all := before.all fun (b : PodRow) => uidChanged b.name
         (all, s!"every pod replaced={all} ({before.map fun (b : PodRow) => (b.name, uidChanged b.name)})")
@@ -518,6 +556,7 @@ def Scenario.slug : Scenario → String
   | .op .rollBoth => "rollboth"
   | .op .drainMaster => "drain"
   | .op .deleteMasterSaveFail => "savefail"
+  | .op .deleteMasterAbortRetry => "abortretry"
   | .gate => "gate"
   | .sigtermHold => "sigterm-hold"
 
@@ -526,6 +565,7 @@ def Scenario.title : Scenario → String
   | .op .rollingRestart => "(S2) rolling restart of the StatefulSet under a client-like load: every pod is replaced; 0 write errors, 0 missing"
   | .op .rollBoth => "(S3) operator Deployment + StatefulSet rollout restart together (helm-upgrade-like, not a helm upgrade) under a client-like load: 0 write errors, 0 missing"
   | .op .drainMaster => "(S4) kubectl drain of the MASTER's worker (no eviction guard) under a client-like load: the drain completes and no flared pod is left there; 0 write errors, 0 missing"
+  | .op .deleteMasterAbortRetry => "(S8) kubectl delete pod of the MASTER while it is cut from its successor, under a client-like load: the first handover aborts and rolls back, the cut is removed, the retry (attempt 2) completes; the one-map drain never takes the master; 0 write errors, 0 missing"
   | .op .deleteMasterSaveFail => "(S7) kubectl delete pod of the MASTER while the operator cannot save its handover ledger, then an operator restart, under a client-like load: no handover map before its phase is saved; the new operator completes the switch; 0 write errors, 0 missing"
   | .gate => "(S5) the old master is cut from the replica and deleted under a write load: preStop / flared report the drain as NOT lossless, never as lossless (gate test)"
   | .sigtermHold => "(S6) a sync client write held on a cut replica across a SIGTERM (cut removed 40 s after it): the client gets STORED and the replica holds the value"
@@ -549,7 +589,7 @@ private def scenarioSuite (sc : Scenario) (tmpfs : Bool) : TestSuite :=
     afterEach := fun i => saveFullLogs cfg.«namespace» s!"after-test-{i}"
     tests := [{ name := sc.title, run := match sc with | .op o => switchTest c o | .gate => gateTest c | .sigtermHold => sigtermHoldTest c }] }
 
-def scenarios : List Scenario := [.op .deleteMaster, .op .rollingRestart, .op .rollBoth, .op .drainMaster, .gate, .sigtermHold, .op .deleteMasterSaveFail]
+def scenarios : List Scenario := [.op .deleteMaster, .op .rollingRestart, .op .rollBoth, .op .drainMaster, .gate, .sigtermHold, .op .deleteMasterSaveFail, .op .deleteMasterAbortRetry]
 
 /-- node-ops-switch-<scenario> (PVC) and node-ops-switch-tmpfs-<scenario>. -/
 def switchSuites : List TestSuite :=

@@ -103,6 +103,7 @@ jobs:
             {"group":"node-ops-switch-b","suites":"node-ops-switch-rollboth,node-ops-switch-gate"},
             {"group":"node-ops-switch-c","suites":"node-ops-switch-drain,node-ops-switch-savefail"},
             {"group":"node-ops-switch-d","suites":"node-ops-switch-sigterm-hold,node-ops-switch-tmpfs-sigterm-hold"},
+            {"group":"node-ops-switch-e","suites":"node-ops-switch-abortretry,node-ops-switch-tmpfs-abortretry"},
             {"group":"node-ops-switch-tmpfs-a","suites":"node-ops-switch-tmpfs-delete,node-ops-switch-tmpfs-rolling"},
             {"group":"node-ops-switch-tmpfs-b","suites":"node-ops-switch-tmpfs-rollboth,node-ops-switch-tmpfs-gate"},
             {"group":"node-ops-switch-tmpfs-c","suites":"node-ops-switch-tmpfs-drain,node-ops-switch-tmpfs-savefail"},

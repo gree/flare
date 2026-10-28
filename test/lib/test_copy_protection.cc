@@ -214,4 +214,154 @@ namespace test_copy_protection {
 		cut_assert_equal_boolean(false, out.size_known);
 		cut_assert(took < 10000, cut_message("an unreachable probe took %llu ms", (unsigned long long)took));
 	}
+
+	// review of 492aff7: a slave takes a catch-up target only with proof,
+	// read from the source, that the source forwards its writes here (its
+	// map names this node a slave of the partition and itself the master,
+	// at a version not older than this node's). Anything else is no proof.
+	handler_reconstruction::source_map_view view(bool version_found, uint64_t version,
+			const string& my_role, const string& my_state, const string& my_part,
+			const string& src_role = "master", const string& src_part = "0") {
+		handler_reconstruction::source_map_view v;
+		v.version_found = version_found;
+		v.version = version;
+		if (!my_role.empty()) {
+			v.role["me:12121"] = my_role;
+			v.state["me:12121"] = my_state;
+			v.partition["me:12121"] = my_part;
+		}
+		if (!src_role.empty()) {
+			v.role["src:12121"] = src_role;
+			v.state["src:12121"] = "active";
+			v.partition["src:12121"] = src_part;
+		}
+		return v;
+	}
+
+	bool forwards(const handler_reconstruction::source_map_view& v, uint64_t mine = 7) {
+		string why;
+		const bool r = handler_reconstruction::source_forwards_here(v, "me:12121", "src:12121", 0, mine, why);
+		cut_notify("%s -> %s", why.c_str(), r ? "proof" : "no proof");
+		return r;
+	}
+
+	void test_source_forwarding_proof_rules() {
+		// the proof: the source's map at this node's version names it a slave
+		cut_assert_equal_boolean(true, forwards(view(true, 7, "slave", "prepare", "0")));
+		cut_assert_equal_boolean(true, forwards(view(true, 9, "slave", "active", "0")));
+		// an older source (no node_map_version reported) is NOT proof: fail closed
+		cut_assert_equal_boolean(false, forwards(view(false, 0, "slave", "prepare", "0")));
+		// the source has not applied this node's map yet
+		cut_assert_equal_boolean(false, forwards(view(true, 6, "slave", "prepare", "0")));
+		// a version at least this node's, but its map does not name this node
+		// a slave of the partition (absent, a proxy, another partition, down):
+		// the version alone proves nothing
+		cut_assert_equal_boolean(false, forwards(view(true, 7, "", "", "")));
+		cut_assert_equal_boolean(false, forwards(view(true, 7, "proxy", "active", "-1")));
+		cut_assert_equal_boolean(false, forwards(view(true, 7, "slave", "prepare", "1")));
+		cut_assert_equal_boolean(false, forwards(view(true, 7, "slave", "down", "0")));
+		// the source is not the partition's master in its own map
+		cut_assert_equal_boolean(false, forwards(view(true, 7, "slave", "prepare", "0", "proxy", "-1")));
+		cut_assert_equal_boolean(false, forwards(view(true, 7, "slave", "prepare", "0", "", "")));
+		// a newer local map raises the bar (the caller re-reads it every round)
+		cut_assert_equal_boolean(false, forwards(view(true, 7, "slave", "prepare", "0"), 8));
+	}
+
+	// the probe reads `stats` and `stats nodes` on one connection, in the
+	// format flared sends them
+	struct map_source {
+		int port;
+		bool with_version;
+		int ready;
+	};
+
+	void* map_source_run(void* arg) {
+		map_source* ms = static_cast<map_source*>(arg);
+		int fd = socket(AF_INET, SOCK_STREAM, 0);
+		int one = 1;
+		setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+		struct sockaddr_in a;
+		memset(&a, 0, sizeof(a));
+		a.sin_family = AF_INET;
+		a.sin_port = htons(ms->port);
+		a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+		if (::bind(fd, (struct sockaddr*)&a, sizeof(a)) < 0 || listen(fd, 4) < 0) {
+			close(fd);
+			ms->ready = -1;
+			return NULL;
+		}
+		ms->ready = 1;
+		int c = accept(fd, NULL, NULL);
+		if (c >= 0) {
+			const char* replies[2];
+			replies[0] = ms->with_version
+				? "STAT pid 1\r\nSTAT node_map_version 7\r\nSTAT curr_items 3\r\nEND\r\n"
+				: "STAT pid 1\r\nSTAT curr_items 3\r\nEND\r\n";
+			replies[1] = "STAT src:12121:role master\r\nSTAT src:12121:state active\r\nSTAT src:12121:partition 0\r\n"
+				"STAT src:12121:balance 100\r\nSTAT src:12121:thread_type 16\r\n"
+				"STAT me:12121:role slave\r\nSTAT me:12121:state prepare\r\nSTAT me:12121:partition 0\r\n"
+				"STAT me:12121:balance 0\r\nSTAT me:12121:thread_type 17\r\nEND\r\n";
+			for (int r = 0; r < 2; r++) {
+				// one request line each ("stats", "stats nodes")
+				string line;
+				char ch;
+				while (read(c, &ch, 1) == 1) {
+					line += ch;
+					if (ch == '\n') {
+						break;
+					}
+				}
+				ssize_t w = write(c, replies[r], strlen(replies[r]));
+				(void)w;
+			}
+			close(c);
+		}
+		close(fd);
+		return NULL;
+	}
+
+	void probe_map_source(bool with_version, handler_reconstruction::source_map_view& v, int& rc) {
+		map_source ms;
+		ms.port = 20000 + rand() % 20000;
+		ms.with_version = with_version;
+		ms.ready = 0;
+		pthread_t th;
+		pthread_create(&th, NULL, map_source_run, &ms);
+		for (int i = 0; i < 100 && ms.ready == 0; i++) {
+			usleep(10 * 1000);
+		}
+		rc = handler_reconstruction::probe_source_map("localhost", ms.port, v);
+		pthread_join(th, NULL);
+	}
+
+	void test_probe_reads_the_sources_version_and_map() {
+		stats_object = new stats();
+		handler_reconstruction::source_map_view v;
+		int rc = 0;
+		probe_map_source(true, v, rc);
+		delete stats_object;
+		stats_object = NULL;
+		cut_assert_equal_int(1, rc);
+		cut_assert_equal_boolean(true, v.version_found);
+		cut_assert_equal_int(7, (int)v.version);
+		cut_assert_equal_string("slave", v.role["me:12121"].c_str());
+		cut_assert_equal_string("prepare", v.state["me:12121"].c_str());
+		cut_assert_equal_string("0", v.partition["me:12121"].c_str());
+		cut_assert_equal_string("master", v.role["src:12121"].c_str());
+		cut_assert_equal_boolean(true, forwards(v));
+	}
+
+	// an older source that answers `stats` without node_map_version: the
+	// reply is complete, but it is no proof — no catch-up target is taken
+	void test_an_older_source_without_a_map_version_is_no_proof() {
+		stats_object = new stats();
+		handler_reconstruction::source_map_view v;
+		int rc = 0;
+		probe_map_source(false, v, rc);
+		delete stats_object;
+		stats_object = NULL;
+		cut_assert_equal_int(1, rc);
+		cut_assert_equal_boolean(false, v.version_found);
+		cut_assert_equal_boolean(false, forwards(v));
+	}
 }

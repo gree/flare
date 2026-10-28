@@ -227,10 +227,6 @@ int handler_reconstruction::run() {
 	return result;
 }
 
-namespace {
-int probe_source_map_version(const string& host, int port, uint64_t& version, bool& found);
-}
-
 int handler_reconstruction::_run_once() {
 	this->_thread->set_peer(this->_node_server_name, this->_node_server_port);
 	this->_thread->set_state("connect");
@@ -249,18 +245,21 @@ int handler_reconstruction::_run_once() {
 	// S2 rolling: 4 acknowledged writes lost when a rebuilt replica was later
 	// promoted).
 	if (this->_role == cluster::role_slave) {
-		const uint64_t mine = this->_cluster->get_node_map_version();
+		// Proof, read from the source itself, that it forwards here: its own
+		// map names this node a slave of this partition and itself that
+		// partition's master, at a map version not older than this node's
+		// (re-read every round: a newer local map raises the bar). An answer
+		// without these facts is no proof: nothing is started (fail closed;
+		// review of 492aff7 — every flared since 1.3.1 reports them).
+		const string self = this->_cluster->get_own_node_key();
+		const string src = this->_cluster->to_node_key(this->_node_server_name, this->_node_server_port);
 		bool ok = false;
-		uint64_t theirs = 0;
-		bool found = false;
+		string last = "not readable";
 		for (int i = 0; i < 150 && !this->_thread->is_shutdown_request(); i++) {		// ~15 s
-			if (probe_source_map_version(this->_node_server_name, this->_node_server_port, theirs, found) == 1) {
-				if (!found) {
-					log_warning("the source does not report node_map_version (an older flared): the catch-up starts without proof that it forwards here", 0);
-					ok = true;
-					break;
-				}
-				if (theirs >= mine) {
+			const uint64_t mine = this->_cluster->get_node_map_version();
+			source_map_view v;
+			if (probe_source_map(this->_node_server_name, this->_node_server_port, v) == 1) {
+				if (source_forwards_here(v, self, src, this->_partition, mine, last)) {
 					ok = true;
 					break;
 				}
@@ -268,8 +267,8 @@ int handler_reconstruction::_run_once() {
 			usleep(100 * 1000);
 		}
 		if (!ok) {
-			log_warning("the source %s:%d has not applied map version %llu (it reports %llu%s): it may not forward its writes here yet, so no catch-up target is taken this attempt",
-				this->_node_server_name.c_str(), this->_node_server_port, (unsigned long long)mine, (unsigned long long)theirs, found ? "" : ", or nothing");
+			log_warning("the source %s:%d is not proven to forward its writes here for partition %d (its map: %s): no catch-up target is taken this attempt",
+				this->_node_server_name.c_str(), this->_node_server_port, this->_partition, last.c_str());
 			return -1;
 		}
 	}
@@ -695,12 +694,12 @@ void handler_reconstruction::probe_source_identity(const string& host, int port,
 	}
 }
 
-namespace {
-// The source's node_map_version from one bounded `stats`: 1 = read (found
-// tells whether the source reports it), 0 = not readable now.
-int probe_source_map_version(const string& host, int port, uint64_t& version, bool& found) {
-	version = 0;
-	found = false;
+// The source's node_map_version (`stats`) and its own node map (`stats
+// nodes`: role, state, partition of every node key; both in every flared
+// since 1.3.1) over one bounded connection: 1 = both replies complete,
+// 0 = not readable now.
+int handler_reconstruction::probe_source_map(const string& host, int port, source_map_view& out) {
+	out = source_map_view();
 	connection_tcp* t = new connection_tcp(host, port);
 	t->set_connect_timeout_ms(3000);
 	t->set_connect_retry_limit(1);
@@ -710,36 +709,95 @@ int probe_source_map_version(const string& host, int port, uint64_t& version, bo
 		return 0;
 	}
 	t->set_deadline_from_now(8000);
-	const char* req = "stats\r\n";
-	if (c->write(req, strlen(req)) < 0) {
-		return 0;
-	}
-	for (int i = 0; i < 2000; i++) {
-		char* p = NULL;
-		if (c->readline(&p) < 0) {
+	const char* reqs[] = {"stats\r\n", "stats nodes\r\n"};
+	for (int r = 0; r < 2; r++) {
+		if (c->write(reqs[r], strlen(reqs[r])) < 0) {
 			return 0;
 		}
-		string line(p);
-		delete[] p;
-		while (!line.empty() && (line[line.size() - 1] == '\n' || line[line.size() - 1] == '\r')) {
-			line.erase(line.size() - 1);
-		}
-		if (line == "END") {
-			return 1;
-		}
-		const string key = "STAT node_map_version ";
-		if (line.compare(0, key.size(), key) == 0) {
-			try {
-				version = boost::lexical_cast<uint64_t>(line.substr(key.size()));
-				found = true;
-			} catch (boost::bad_lexical_cast&) {
+		bool ended = false;
+		for (int i = 0; i < 4000; i++) {
+			char* p = NULL;
+			if (c->readline(&p) < 0) {
 				return 0;
 			}
+			string line(p);
+			delete[] p;
+			while (!line.empty() && (line[line.size() - 1] == '\n' || line[line.size() - 1] == '\r')) {
+				line.erase(line.size() - 1);
+			}
+			if (line == "END") {
+				ended = true;
+				break;
+			}
+			if (line.compare(0, 5, "STAT ") != 0) {
+				continue;
+			}
+			const string rest = line.substr(5);
+			const size_t sp = rest.find(' ');
+			if (sp == string::npos) {
+				continue;
+			}
+			const string key = rest.substr(0, sp);
+			const string value = rest.substr(sp + 1);
+			if (r == 0) {
+				if (key == "node_map_version") {
+					try {
+						out.version = boost::lexical_cast<uint64_t>(value);
+						out.version_found = true;
+					} catch (boost::bad_lexical_cast&) {
+						return 0;
+					}
+				}
+				continue;
+			}
+			// "<host>:<port>:<field>"
+			const size_t colon = key.rfind(':');
+			if (colon == string::npos) {
+				continue;
+			}
+			const string node = key.substr(0, colon);
+			const string field = key.substr(colon + 1);
+			if (field == "role") {
+				out.role[node] = value;
+			} else if (field == "state") {
+				out.state[node] = value;
+			} else if (field == "partition") {
+				out.partition[node] = value;
+			}
+		}
+		if (!ended) {
+			return 0;
 		}
 	}
-	return 0;
+	return 1;
 }
 
+bool handler_reconstruction::source_forwards_here(const source_map_view& v, const string& self, const string& src, int partition, uint64_t mine, string& why) {
+	ostringstream part;
+	part << partition;
+	map<string, string>::const_iterator r, st, pt;
+	const string my_role = (r = v.role.find(self)) != v.role.end() ? r->second : string("");
+	const string my_state = (st = v.state.find(self)) != v.state.end() ? st->second : string("");
+	const string my_part = (pt = v.partition.find(self)) != v.partition.end() ? pt->second : string("");
+	const string src_role = (r = v.role.find(src)) != v.role.end() ? r->second : string("");
+	const string src_part = (pt = v.partition.find(src)) != v.partition.end() ? pt->second : string("");
+	ostringstream o;
+	o << "version ";
+	if (v.version_found) {
+		o << v.version;
+	} else {
+		o << "not reported";
+	}
+	o << " (this node's " << mine << "), this node "
+		<< (my_role.empty() ? string("absent") : my_role + "/" + my_state + " of " + my_part)
+		<< ", itself " << (src_role.empty() ? string("absent") : src_role + " of " + src_part);
+	why = o.str();
+	return v.version_found && v.version >= mine
+		&& my_role == "slave" && my_part == part.str() && (my_state == "prepare" || my_state == "active")
+		&& src_role == "master" && src_part == part.str();
+}
+
+namespace {
 void probe_source_identity_once(const string& host, int port, copy_identity& out) {
 	out = copy_identity();
 	connection_tcp* t = new connection_tcp(host, port);

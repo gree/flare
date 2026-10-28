@@ -37,6 +37,7 @@
 #include "storage.h"
 #include "copy_protection.h"
 
+#include <map>
 using namespace std;
 
 namespace gree {
@@ -93,6 +94,22 @@ public:
 	static void probe_source_identity(const string& host, int port, copy_identity& out, shared_thread owner = shared_thread());
 	static int probe_attempts;
 	static int probe_retry_wait_ms;
+	// What a slave reads from its source before it takes a catch-up target
+	// (public for the cutter test): the source's node_map_version and its own
+	// node map (`stats` + `stats nodes`).
+	struct source_map_view {
+		bool version_found;
+		uint64_t version;
+		map<string, string> role, state, partition;
+		source_map_view(): version_found(false), version(0) {}
+	};
+	// 1 = both replies complete, 0 = not readable now
+	static int probe_source_map(const string& host, int port, source_map_view& out);
+	// The source forwards its writes for `partition` to `self`: its map is not
+	// older than this node's (`mine`), names `self` a slave (prepare/active)
+	// of `partition` and `src` that partition's master. Anything unknown is
+	// not proof. `why` describes what was seen.
+	static bool source_forwards_here(const source_map_view& v, const string& self, const string& src, int partition, uint64_t mine, string& why);
 	handler_reconstruction(shared_thread t, cluster* cl, storage* st, string node_server_name, int node_server_port, int partition, int partition_size, cluster::role r, int reconstruction_interval, int reconstruction_bwlimit);
 	virtual ~handler_reconstruction();
 

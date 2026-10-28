@@ -227,6 +227,10 @@ int handler_reconstruction::run() {
 	return result;
 }
 
+namespace {
+int probe_source_map_version(const string& host, int port, uint64_t& version, bool& found);
+}
+
 int handler_reconstruction::_run_once() {
 	this->_thread->set_peer(this->_node_server_name, this->_node_server_port);
 	this->_thread->set_state("connect");
@@ -235,6 +239,39 @@ int handler_reconstruction::_run_once() {
 	// the source while the whole attempt waits (a slave only)
 	if (this->_role == cluster::role_slave && !this->_test_hold("FLARE_TEST_RECONSTRUCTION_START_HOLD_FILE", "reconstruction start")) {
 		return -1;
+	}
+
+	// A slave's catch-up target (WAL sync end, snapshot position, dump) must
+	// not be taken before the source applied the map that names this node
+	// its slave: only from that map on does the source forward its writes
+	// here (its write section, L1). A write the source acknowledged before
+	// it applied that map, after the target, was in neither (CI 40729547855,
+	// S2 rolling: 4 acknowledged writes lost when a rebuilt replica was later
+	// promoted).
+	if (this->_role == cluster::role_slave) {
+		const uint64_t mine = this->_cluster->get_node_map_version();
+		bool ok = false;
+		uint64_t theirs = 0;
+		bool found = false;
+		for (int i = 0; i < 150 && !this->_thread->is_shutdown_request(); i++) {		// ~15 s
+			if (probe_source_map_version(this->_node_server_name, this->_node_server_port, theirs, found) == 1) {
+				if (!found) {
+					log_warning("the source does not report node_map_version (an older flared): the catch-up starts without proof that it forwards here", 0);
+					ok = true;
+					break;
+				}
+				if (theirs >= mine) {
+					ok = true;
+					break;
+				}
+			}
+			usleep(100 * 1000);
+		}
+		if (!ok) {
+			log_warning("the source %s:%d has not applied map version %llu (it reports %llu%s): it may not forward its writes here yet, so no catch-up target is taken this attempt",
+				this->_node_server_name.c_str(), this->_node_server_port, (unsigned long long)mine, (unsigned long long)theirs, found ? "" : ", or nothing");
+			return -1;
+		}
 	}
 
 #ifdef HAVE_LIBROCKSDB
@@ -659,6 +696,50 @@ void handler_reconstruction::probe_source_identity(const string& host, int port,
 }
 
 namespace {
+// The source's node_map_version from one bounded `stats`: 1 = read (found
+// tells whether the source reports it), 0 = not readable now.
+int probe_source_map_version(const string& host, int port, uint64_t& version, bool& found) {
+	version = 0;
+	found = false;
+	connection_tcp* t = new connection_tcp(host, port);
+	t->set_connect_timeout_ms(3000);
+	t->set_connect_retry_limit(1);
+	t->set_read_timeout(5000);
+	shared_connection c(t);
+	if (c->open() < 0) {
+		return 0;
+	}
+	t->set_deadline_from_now(8000);
+	const char* req = "stats\r\n";
+	if (c->write(req, strlen(req)) < 0) {
+		return 0;
+	}
+	for (int i = 0; i < 2000; i++) {
+		char* p = NULL;
+		if (c->readline(&p) < 0) {
+			return 0;
+		}
+		string line(p);
+		delete[] p;
+		while (!line.empty() && (line[line.size() - 1] == '\n' || line[line.size() - 1] == '\r')) {
+			line.erase(line.size() - 1);
+		}
+		if (line == "END") {
+			return 1;
+		}
+		const string key = "STAT node_map_version ";
+		if (line.compare(0, key.size(), key) == 0) {
+			try {
+				version = boost::lexical_cast<uint64_t>(line.substr(key.size()));
+				found = true;
+			} catch (boost::bad_lexical_cast&) {
+				return 0;
+			}
+		}
+	}
+	return 0;
+}
+
 void probe_source_identity_once(const string& host, int port, copy_identity& out) {
 	out = copy_identity();
 	connection_tcp* t = new connection_tcp(host, port);

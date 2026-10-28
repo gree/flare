@@ -727,10 +727,13 @@ skips that path. The refusal message says why:
 | Refused | Why | What to do |
 |---|---|---|
 | `kubectl delete pod --force --grace-period=0` of a master or a replica | no preStop, no handover: acknowledged writes can be lost | delete without `--force` |
-| delete of a master whose partition has no Active, Ready replica | nothing to hand over to (on tmpfs the data is lost) | wait until the replica is Active (`stats nodes`) |
-| `kubectl scale` / a StatefulSet edit removing ordinals that hold data | the removed pods are masters or replicas | reduce partitions or replicas in the FlareCluster spec (the operator moves the data first) |
+| delete of a master whose partition has no caught-up replica (Active, Ready, `repl_read_source_eligible 1`, no replica repair pending — read at the delete) | nothing the handover can promote (on tmpfs the data is lost) | wait until the replica has caught up |
+| delete of a pod the operator's node map does not know (for example still starting) | it may hold data on its volume | wait until it registered, or use the override |
+| any data-pod delete or scale-down right after the operator started or a new leader took over | the operator has not read the cluster yet | retry after a few seconds |
+| `kubectl scale` / a StatefulSet edit removing ordinals that hold data | the removed pods are masters or replicas (or not in the map) | reduce partitions or replicas in the FlareCluster spec (the operator moves the data first) |
 
-The operator, Kubernetes' own controllers and the kubelet are never refused.
+The operator and Kubernetes' own controllers are never refused; the kubelet
+only when it confirms the removal of a pod already terminating on its node.
 
 ### Break-glass: deleting a pod anyway
 

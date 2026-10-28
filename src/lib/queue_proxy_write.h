@@ -64,6 +64,10 @@ protected:
 	bool										_in_flight;
 	// in-cluster replicas this forward is counted in flight for (stats' per-destination gauge)
 	vector<string>					_repl_dests;
+	// never sent: the forwarding thread found its destination a proxy (a map
+	// changed while it was queued). A client write forwarded to its master
+	// is then routed again (cluster::pre_proxy_write), not failed.
+	bool										_skipped;
 
 public:
 	static const int max_retry = 4;
@@ -113,6 +117,8 @@ public:
 	string get_result_message() { return this->_result_message; };
 	int set_post_proxy(bool post_proxy) { this->_post_proxy = post_proxy; return 0; };
 	bool is_post_proxy() { return this->_post_proxy; };
+	void set_skipped(bool b) { this->_skipped = b; };
+	bool is_skipped() { return this->_skipped; };
 	void set_foreign(bool foreign);
 	bool is_foreign() { return this->_foreign; };
 	void set_owner(shared_thread t) { this->_owner = t; };

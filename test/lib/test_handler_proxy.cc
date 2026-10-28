@@ -706,6 +706,9 @@ namespace test_handler_proxy {
 		proxy_request(t, pre, "STORED");
 		cut_assert_equal_boolean(false, pre->is_success());
 		cut_assert_equal_int((int)dropped0, (int)stats_object->get_proxy_write_dropped());
+		// the client write was never sent: marked so its sender routes it
+		// again by the map in force (cluster::pre_proxy_write)
+		cut_assert_equal_boolean(true, pre->is_skipped());
 		shared_queue_proxy_write post = get_proxy_queue_write();
 		post->set_post_proxy(true);
 		post->sync_ref();
@@ -714,6 +717,9 @@ namespace test_handler_proxy {
 		post->sync();
 		cut_assert_equal_boolean(false, post->is_success());
 		cut_assert_equal_int((int)dropped0 + 1, (int)stats_object->get_proxy_write_dropped());
+		// a replica forward is a counted drop, never routed again (the master
+		// already applied it)
+		cut_assert_equal_boolean(false, post->is_skipped());
 	}
 
 	// forwards still QUEUED when their thread shuts down are counted as drops

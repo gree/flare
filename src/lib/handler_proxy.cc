@@ -128,6 +128,10 @@ int handler_proxy::run() {
 					// the repair path takes it (it was only a notice before)
 					if (r->is_post_proxy()) {
 						stats_object->increment_proxy_write_dropped(this->_node_server_name + ":" + boost::lexical_cast<string>(this->_node_server_port));
+					} else {
+						// a client write on its way to the master: never sent,
+						// so the sender routes it again by the map in force
+						r->set_skipped(true);
 					}
 				}
 			}

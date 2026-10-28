@@ -1905,6 +1905,10 @@ cluster::proxy_request cluster::pre_proxy_write(op_proxy_write* op, shared_queue
 	bool waiting = false;
 	partition p, p_prepare;
 	bool is_prepare;
+	// a forward to the master that was never sent (its destination turned
+	// proxy while it was queued: a handover's promote map) is routed again
+	int reroutes = 0;
+reroute:
 	for (;;) {
 	const uint64_t generation = this->get_map_generation();
 	// the role decision and, for a local apply, everything up to queueing the
@@ -2006,6 +2010,16 @@ cluster::proxy_request cluster::pre_proxy_write(op_proxy_write* op, shared_queue
 	}
 	if (sync) {
 		q->sync();
+		// never sent (local kind 2026-10-28: a write queued to the old master
+		// 9 ms before the demote map waited behind writes held at the old
+		// master, and when the promote map made it a proxy the forwarding
+		// thread skipped it: "SERVER_ERROR proxy error" although this node
+		// was the new master). Nothing was applied anywhere: decide again.
+		if (q->is_skipped() && reroutes < 5) {
+			reroutes++;
+			log_notice("forward to %s was not sent (it is a proxy now) -> routing the write again by the map in force (key=%s, attempt %d)", p.master.node_key.c_str(), e.key.c_str(), reroutes);
+			goto reroute;
+		}
 		q_result = q;
 	}
 	

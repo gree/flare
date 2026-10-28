@@ -68,7 +68,8 @@ queue_proxy_write::queue_proxy_write(cluster* cl, storage* st, vector<string> pr
 		_post_proxy(false),
 		_generic_value(0),
 		_foreign(false),
-		_in_flight(false) {
+		_in_flight(false),
+		_skipped(false) {
 }
 
 /**

@@ -37,6 +37,7 @@ import FlareOperator.StateMachine.CopyDiscardApproval
 import FlareOperator.StateMachine.PromotionEvidence
 import FlareOperator.UnitTestsHandover
 import FlareOperator.UnitTestsRolling
+import FlareOperator.UnitTestsNodeGuard
 
 open FlareOperator.K8s
 open FlareOperator.ReplicaRepair
@@ -2695,6 +2696,8 @@ def run : IO UInt32 := do
   for (name, ok) in FlareOperator.UnitTestsHandover.results do
     check ctx name ok
   for (name, ok) in FlareOperator.UnitTestsRolling.results do
+    check ctx name ok
+  for (name, ok) in FlareOperator.UnitTestsNodeGuard.results do
     check ctx name ok
   checkObserve ctx
   checkRequestResolve ctx

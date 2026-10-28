@@ -27,6 +27,9 @@ import FlareOperator.StateMachine.K8sReconciler
 import FlareOperator.StateMachine.ReplicaRepair
 import FlareOperator.StateMachine.Handover
 import FlareOperator.StateMachine.Rolling
+import FlareOperator.StateMachine.NodeGuard
+import FlareOperator.K8s.Admission
+import FlareOperator.Server.WebhookServer
 import FlareOperator.StateMachine.SyncEvidence
 import FlareOperator.StateMachine.StatsObservation
 import FlareOperator.StateMachine.FollowEvidence
@@ -750,6 +753,48 @@ private def runRolling (crName ns : String) (stateRef : IO.Ref FlareClusterState
     | .error e => IO.eprintln s!"[flare-operator] ROLLING: delete of {c.name} not confirmed ({e}); the next pass reads it again"
     rollingStablePassesRef.set 0
   | _ => pure ()
+
+/-- A0 stage 6b: the node-guard webhook's answer to one AdmissionReview
+    (StateMachine/NodeGuard). Pods DELETE of this cluster's flared pods and
+    UPDATE of its StatefulSet / scale subresource; anything else is allowed.
+    It writes nothing (sideEffects: None); a review it cannot judge (pods
+    unreadable) is refused (fail closed). -/
+private def nodeGuardAnswer (crName ns : String) (stateRef : IO.Ref FlareClusterState)
+    (_path body : String) : IO String := do
+  match Admission.parseReview body with
+  | .error e => return Admission.malformedResponse body e
+  | .ok r =>
+    let opAccount := match ← IO.getEnv "FLARE_OPERATOR_SERVICE_ACCOUNT" with
+      | some sa => if sa.isEmpty then "" else s!"system:serviceaccount:{ns}:{sa}"
+      | none => ""
+    let st ← stateRef.get
+    let verdict ← if r.«namespace» != ns then
+        pure (NodeGuard.Verdict.allow "not this cluster's namespace")
+      else match r.resource, r.operation with
+      | "pods", "DELETE" =>
+        let key := if r.podHostname.isEmpty || r.podSubdomain.isEmpty then ""
+          else FlareClusterState.toNodeKey s!"{r.podHostname}.{r.podSubdomain}.{ns}.svc.cluster.local" 12121
+        match ← Bridge.listFlaredPodsE crName ns with
+        | .error e => pure (NodeGuard.Verdict.deny s!"flare: the pods could not be read to judge this delete ({e}); retry")
+        | .ok pods =>
+          let readyKeys := (pods.filter fun p => p.ready && !p.terminating).map Bridge.PodInfo.toNodeKey
+          pure (NodeGuard.podDelete st readyKeys r.username opAccount key r.podUid
+                  (r.podAnnotation NodeGuard.overrideAnnotation) r.gracePeriodSeconds)
+      | "statefulsets", "UPDATE" =>
+        if r.name != s!"{crName}-nodes" then pure (NodeGuard.Verdict.allow "another StatefulSet")
+        else match r.replicas with
+          | (some new, some old) =>
+            pure (NodeGuard.scale st r.username opAccount old new fun i =>
+              FlareClusterState.toNodeKey s!"{crName}-nodes-{i}.{crName}-nodes.{ns}.svc.cluster.local" 12121)
+          | _ => pure (NodeGuard.Verdict.allow "replicas not changed")
+      | _, _ => pure (NodeGuard.Verdict.allow "not gated")
+    match verdict with
+    | .deny why =>
+      IO.eprintln s!"[flare-operator] NODE GUARD: REFUSED {r.operation} {r.resource}{if r.subResource.isEmpty then "" else "/" ++ r.subResource} {r.name} by {r.username}{if r.dryRun then " (dry run)" else ""}: {why}"
+    | .allow why =>
+      if r.resource == "pods" || r.subResource == "scale" || r.resource == "statefulsets" then
+        IO.eprintln s!"[flare-operator] NODE GUARD: allowed {r.operation} {r.resource}{if r.subResource.isEmpty then "" else "/" ++ r.subResource} {r.name} by {r.username}: {why}"
+    return Admission.reviewResponse r.uid verdict.allowed verdict.message
 
 /-- Ensure K8s Service selectors point to the current Master for each partition. -/
 private def ensureServiceRouting (state : FlareClusterState) (crName ns : String)
@@ -4027,6 +4072,14 @@ def main (args : List String) : IO Unit := do
 
   -- Initialize shared state
   let stateRef ← IO.mkRef FlareClusterState.default
+
+  -- A0 stage 6b: the node-guard webhook (plain HTTP on 127.0.0.1; the
+  -- chart's sidecar terminates TLS). Leader only: its Service selects the
+  -- leader pod.
+  if (← IO.getEnv "FLARE_NODE_GUARD") == some "on" then
+    let port := ((← IO.getEnv "FLARE_WEBHOOK_PORT").bind (·.toNat?)).getD 9444
+    Server.WebhookServer.serveBackground port.toUInt16 (nodeGuardAnswer crName ns stateRef)
+    IO.eprintln s!"[flare-operator] node guard webhook serving on 127.0.0.1:{port}"
 
   -- SAF-09 (review 2026-10-05): running the operator and initialising a data
   -- cluster are separate. With NO FlareCluster (a confirmed NotFound) the

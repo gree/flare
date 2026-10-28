@@ -64,6 +64,17 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            # the node guard trusts the operator's own deletes (rolling, repair)
+            - name: FLARE_OPERATOR_SERVICE_ACCOUNT
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.serviceAccountName
+            {{- if .Values.nodeGuard.enabled }}
+            - name: FLARE_NODE_GUARD
+              value: "on"
+            - name: FLARE_WEBHOOK_PORT
+              value: "9444"
+            {{- end }}
             {{- if .Values.clusterName }}
             - name: FLARE_CLUSTER_NAME
               value: {{ .Values.clusterName | quote }}
@@ -87,6 +98,29 @@ spec:
             {{- toYaml .Values.readinessProbe | nindent 12 }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+        {{- if .Values.nodeGuard.enabled }}
+        # TLS for the node-guard admission webhook (A0 stage 6b): the operator
+        # serves it in plain HTTP on 127.0.0.1:9444; this sidecar terminates
+        # TLS with the chart-generated certificate.
+        - name: webhook-tls
+          image: {{ .Values.nodeGuard.tlsImage }}
+          imagePullPolicy: IfNotPresent
+          args: ["OPENSSL-LISTEN:9443,reuseaddr,fork,cert=/tls/tls.crt,key=/tls/tls.key,verify=0", "TCP:127.0.0.1:9444"]
+          ports:
+            - name: webhook
+              containerPort: 9443
+              protocol: TCP
+          volumeMounts:
+            - name: webhook-tls
+              mountPath: /tls
+              readOnly: true
+          resources:
+            {{- toYaml .Values.nodeGuard.tlsResources | nindent 12 }}
+      volumes:
+        - name: webhook-tls
+          secret:
+            secretName: {{ include "flare-operator.fullname" . }}-webhook-tls
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

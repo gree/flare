@@ -420,6 +420,26 @@ cluster:
       memory: 1Gi
 
 # Monitoring objects (require the Prometheus Operator CRDs).
+# Node guard (A0 stage 6b): a validating admission webhook served by the
+# leader operator. It refuses what skips the ordered handover: a force delete
+# (grace period 0) of a flared pod that holds data, the delete of a master
+# with no caught-up replica to hand over to, and a StatefulSet scale-down
+# that removes ordinals still holding data. A graceful `kubectl delete pod`
+# of a master with a caught-up replica is allowed (the handover moves it).
+# failurePolicy Fail: with no operator answering, those operations are
+# refused; the escape hatches are the pod annotation
+# flare.gree.net/delete-override=<pod uid> (audited) or enabled=false.
+nodeGuard:
+  enabled: true
+  tlsImage: alpine/socat:1.8.0.0
+  timeoutSeconds: 5
+  tlsResources:
+    requests:
+      cpu: 10m
+      memory: 16Mi
+    limits:
+      memory: 64Mi
+
 monitoring:
   serviceMonitor:
     enabled: false

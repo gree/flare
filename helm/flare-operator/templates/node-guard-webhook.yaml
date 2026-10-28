@@ -1,0 +1,99 @@
+{{- if and .Values.operator.enabled .Values.nodeGuard.enabled }}
+{{- /*
+  Node guard (A0 stage 6b, flare-ci-inputs/decisions/A0-DESIGN-rc68.md): the
+  leader operator judges deletes of this cluster's flared pods and UPDATEs of
+  its StatefulSet (and the scale subresource). It writes nothing
+  (sideEffects: None). failurePolicy Fail: with no operator answering, these
+  operations are refused — the escape hatches are the delete-override
+  annotation or nodeGuard.enabled=false.
+  The certificate is generated per render (as the SAF-10 eviction webhook):
+  the Secret and the caBundle always change together.
+*/}}
+{{- $svc := printf "%s-webhook" (include "flare-operator.fullname" .) }}
+{{- $ns := .Values.namespace }}
+{{- $ca := genCA "flare-node-guard-ca" 3650 }}
+{{- $cert := genSignedCert (printf "%s.%s.svc" $svc $ns) nil (list (printf "%s.%s.svc" $svc $ns) (printf "%s.%s.svc.cluster.local" $svc $ns)) 3650 $ca }}
+apiVersion: v1
+kind: Secret
+type: kubernetes.io/tls
+metadata:
+  name: {{ include "flare-operator.fullname" . }}-webhook-tls
+  namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.labels" . | nindent 4 }}
+data:
+  tls.crt: {{ $cert.Cert | b64enc }}
+  tls.key: {{ $cert.Key | b64enc }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $svc }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.labels" . | nindent 4 }}
+spec:
+  ports:
+    - port: 443
+      targetPort: webhook
+      protocol: TCP
+      name: webhook
+  selector:
+    {{- include "flare-operator.selectorLabels" . | nindent 4 }}
+    flare.gree.net/role: leader
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: {{ include "flare-operator.fullname" . }}-node-guard-{{ $ns }}
+  labels:
+    {{- include "flare-operator.labels" . | nindent 4 }}
+webhooks:
+  - name: pods.node-guard.flare.gree.net
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Fail
+    timeoutSeconds: {{ .Values.nodeGuard.timeoutSeconds }}
+    matchPolicy: Equivalent
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ $ns }}
+    objectSelector:
+      matchLabels:
+        app: flare
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["DELETE"]
+        resources: ["pods"]
+        scope: Namespaced
+    clientConfig:
+      caBundle: {{ $ca.Cert | b64enc }}
+      service:
+        name: {{ $svc }}
+        namespace: {{ $ns }}
+        path: /pods
+        port: 443
+  - name: statefulsets.node-guard.flare.gree.net
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Fail
+    timeoutSeconds: {{ .Values.nodeGuard.timeoutSeconds }}
+    matchPolicy: Equivalent
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ $ns }}
+    rules:
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["UPDATE"]
+        resources: ["statefulsets", "statefulsets/scale"]
+        scope: Namespaced
+    clientConfig:
+      caBundle: {{ $ca.Cert | b64enc }}
+      service:
+        name: {{ $svc }}
+        namespace: {{ $ns }}
+        path: /statefulsets
+        port: 443
+{{- end }}

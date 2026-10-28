@@ -2753,29 +2753,47 @@ bool cluster::_is_local_proxy_request(op_proxy_write* op) {
 	return known;
 }
 
+int cluster::enqueue_retry_ms = 2000;
+
 int cluster::_enqueue(shared_thread_queue q, string node_key, int key_hash, bool sync) {
 	log_debug("enqueue (ident=%s, node_key=%s, key_hash=%d)", q->get_ident().c_str(), node_key.c_str(), key_hash);
 
-	shared_thread t;
-	unsigned int t_id = 0;		// the id the thread had in the map copy it was found in
-	if (this->_get_proxy_thread(node_key, key_hash, t, t_id) < 0) {
-		return -1;
-	}
+	// A forwarding thread found in the active map may be ending (its handler
+	// returned: the queue is closed) or already reused for another handler.
+	// It does not take the forward (review 2026-10-13, finding 2), but the
+	// destination is still there: look the thread up again — the ended one
+	// leaves the map when it is cleaned and a new one is started for the
+	// destination — for a bounded time instead of dropping the forward
+	// (local kind 2026-10-28: one forward lost this way at load start sent
+	// the replica to a full rebuild).
+	const int retry_ms = 10;
+	const int retry_limit = cluster::enqueue_retry_ms / retry_ms;
+	for (int attempt = 0; ; attempt++) {
+		shared_thread t;
+		unsigned int t_id = 0;		// the id the thread had in the map copy it was found in
+		if (this->_get_proxy_thread(node_key, key_hash, t, t_id) < 0) {
+			return -1;
+		}
 
-	if (sync) {
-		q->sync_ref();
-	}
-	// refused if the thread was cleaned and reused (a new id) since it was
-	// found: never handed to the new handler (review 2026-10-13, finding 2)
-	if (t->enqueue(q, this->_max_total_thread_queue, t_id) < 0) {
-		log_warning("enqueue failed (the thread is exiting or was reused)", 0);
+		if (sync) {
+			q->sync_ref();
+		}
+		const int r = t->enqueue(q, this->_max_total_thread_queue, t_id);
+		if (r == 0) {
+			if (attempt > 0) {
+				log_notice("enqueue to %s succeeded after %d retr%s (the thread found first was ending or reused)", node_key.c_str(), attempt, attempt == 1 ? "y" : "ies");
+			}
+			return 0;
+		}
 		if (sync) {
 			q->sync_unref();
 		}
-		return -1;
+		if (r != -2 || attempt >= retry_limit) {
+			log_warning("enqueue failed (%s) [node_key=%s, attempts=%d]", r == -2 ? "the thread is exiting or was reused" : "the total queue limit", node_key.c_str(), attempt + 1);
+			return -1;
+		}
+		usleep(retry_ms * 1000);
 	}
-
-	return 0;
 }
 
 int cluster::_enqueue(shared_thread_queue q, thread_pool::thread_type type, bool sync) {

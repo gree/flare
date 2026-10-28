@@ -1041,9 +1041,10 @@ namespace test_handler_cluster_replication {
 		thread::enqueue_before_lock_hook = NULL;
 		cut_assert(hook_fired);
 		cut_notify("enqueue after the handler returned: r=%d queued=%d", r, (int)stats_object->get_total_thread_queue());
-		// refused, so the caller counts forward_dropped_unqueued (not an
-		// enqueued forward) — nothing left behind on the thread
-		cut_assert_equal_int(-1, r);
+		// refused as "not this run" (-2, thread.h), so the caller counts
+		// forward_dropped_unqueued (not an enqueued forward) — nothing left
+		// behind on the thread
+		cut_assert_equal_int(-2, r);
 		cut_assert_equal_int(0, (int)stats_object->get_total_thread_queue());
 		sq.reset();
 		q.reset();

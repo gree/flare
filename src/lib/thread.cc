@@ -489,7 +489,9 @@ int thread::enqueue(shared_thread_queue& q, const uint32_t max_total_thread_queu
 		} else {
 			log_warning("trying to enqueue to a thread whose handler is not running [id=%u, thread_id=%u, ident=%s]", this->_id, this->_thread_id, q->get_ident().c_str());
 		}
-		return -1;
+		// -2: not taken by THIS run (closed or reused); another thread of the
+		// same kind may take it (-1 below: the total queue limit refused it)
+		return -2;
 	}
 	if (max_total_thread_queue > 0) {
 		size = static_cast<uint32_t>(stats_object->get_total_thread_queue());

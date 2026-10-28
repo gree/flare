@@ -132,6 +132,9 @@ public:
 	// expected_id: the id this thread had where the caller found it (the
 	// get_active map key); non-zero = refused unless the queue was opened by
 	// that same run (a thread reused for another handler has a new id)
+	// 0 = queued; -2 = this run of the thread does not take it (its handler is
+	// not running, or the thread was reused since `expected_id`); -1 = the
+	// total queue limit refused it
 	int enqueue(shared_thread_queue& q, uint32_t max_total_thread_queue = 0, unsigned int expected_id = 0);
 	thread_info get_thread_info();
 

@@ -860,7 +860,17 @@ namespace test_handler_proxy {
 			int operator()() { *r = pc->enqueue_node(tq, k, 7); return *r; } };
 		call c = { &pc, tq, node_key, &r };
 		assert_refused_after_reuse(n.node_thread_type, c, "_enqueue(node_key)");
-		cut_assert_equal_int(-1, r);
+		// never the reused thread (checked above), but not dropped either: the
+		// destination is still in the map, so the forward is offered again
+		// and a fresh forwarding thread of the destination takes it
+		cut_assert_equal_int(0, r, cut_message("_enqueue(node_key) dropped a forward whose destination is still there"));
+		thread_pool::local_map m = tp->get_active(n.node_thread_type);
+		cut_assert_equal_int(1, (int)m.size());
+		shared_thread fresh = m.begin()->second;
+		fresh->shutdown(true, false);
+		for (int i = 0; i < 50 && fresh->is_running(); i++) {
+			usleep(100 * 1000);
+		}
 	}
 
 	void test_typed_enqueue_is_not_handed_to_a_reused_thread() {

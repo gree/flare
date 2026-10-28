@@ -311,6 +311,9 @@ private:
 	int _reconstruct_node(vector<node> v, uint64_t node_map_version);
 	proxy_request _post_proxy_write(op_proxy_write* op, bool sync);
 public:
+	// how long a forward is offered again when the forwarding thread found
+	// for its destination was ending or reused (_enqueue); a test seam
+	static int enqueue_retry_ms;
 	// TEST SEAM (FLARE_TEST_READ_TRACE_PREFIX): is `key` traced, and log the
 	// ANSWER a traced read got (hit / miss / unavailable + why), on the same
 	// connection identity as the decision line.

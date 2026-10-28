@@ -45,6 +45,9 @@
 #include "copy_switch_fs.h"
 #endif
 #include <sstream>
+#include <errno.h>
+#include <pthread.h>
+#include <time.h>
 
 namespace gree {
 namespace flare {
@@ -686,8 +689,9 @@ void handler_reconstruction::probe_source_identity(const string& host, int port,
 
 // The source's node_map_version (`stats`) and its own node map (`stats
 // nodes`: role, state, partition of every node key; both in every flared
-// since 1.3.1) over one bounded connection: 1 = both replies complete,
-// 0 = not readable now.
+// since 1.3.1) over one connection: 1 = both replies complete, 0 = not
+// readable now. Connect, writes and reads end within budget_ms; the name
+// lookup does not (the waiter bounds it).
 namespace {
 	uint64_t mono_ms() {
 		struct timespec ts;
@@ -703,8 +707,11 @@ int handler_reconstruction::probe_source_map(const string& host, int port, sourc
 	}
 	const uint64_t end = mono_ms() + (uint64_t)budget_ms;
 	connection_tcp* t = new connection_tcp(host, port);
+	// one connect attempt (a retry would get the full timeout again); the
+	// name lookup inside open() has no timeout of its own: the waiter bounds
+	// the whole probe (wait_source_forwards_here)
 	t->set_connect_timeout_ms(budget_ms < 3000 ? budget_ms : 3000);
-	t->set_connect_retry_limit(1);
+	t->set_connect_retry_limit(0);
 	t->set_read_timeout(budget_ms < 5000 ? budget_ms : 5000);
 	shared_connection c(t);
 	if (c->open() < 0) {
@@ -805,6 +812,93 @@ bool handler_reconstruction::source_forwards_here(const source_map_view& v, cons
 }
 
 int handler_reconstruction::source_proof_wait_ms = 15000;
+handler_reconstruction::source_map_probe_fn handler_reconstruction::source_map_probe = handler_reconstruction::probe_source_map;
+
+namespace {
+	// One probe on its own detached thread: the waiter takes the result if it
+	// comes before the deadline and otherwise leaves (the thread ends on its
+	// own; the job is freed by whoever lets go of it last).
+	struct probe_job {
+		string host;
+		int port;
+		int budget_ms;
+		handler_reconstruction::source_map_probe_fn fn;
+		handler_reconstruction::source_map_view view;
+		int rc;
+		bool done;
+		pthread_mutex_t mutex;
+		pthread_cond_t cond;
+		probe_job(): port(0), budget_ms(0), fn(NULL), rc(0), done(false) {
+			pthread_mutex_init(&mutex, NULL);
+			pthread_condattr_t a;
+			pthread_condattr_init(&a);
+			pthread_condattr_setclock(&a, CLOCK_MONOTONIC);
+			pthread_cond_init(&cond, &a);
+			pthread_condattr_destroy(&a);
+		}
+		~probe_job() {
+			pthread_cond_destroy(&cond);
+			pthread_mutex_destroy(&mutex);
+		}
+	};
+
+	void* probe_job_run(void* arg) {
+		boost::shared_ptr<probe_job>* holder = static_cast<boost::shared_ptr<probe_job>*>(arg);
+		boost::shared_ptr<probe_job> job = *holder;
+		delete holder;
+		handler_reconstruction::source_map_view v;
+		const int rc = job->fn(job->host, job->port, v, job->budget_ms);
+		pthread_mutex_lock(&job->mutex);
+		job->view = v;
+		job->rc = rc;
+		job->done = true;
+		pthread_cond_signal(&job->cond);
+		pthread_mutex_unlock(&job->mutex);
+		return NULL;
+	}
+
+	// 1 = a complete reply within `budget_ms` of now, else 0
+	int probe_until(const string& host, int port, handler_reconstruction::source_map_view& out, int budget_ms,
+			handler_reconstruction::source_map_probe_fn fn) {
+		boost::shared_ptr<probe_job> job(new probe_job());
+		job->host = host;
+		job->port = port;
+		job->budget_ms = budget_ms;
+		job->fn = fn;
+		pthread_attr_t attr;
+		pthread_attr_init(&attr);
+		pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+		pthread_t th;
+		boost::shared_ptr<probe_job>* holder = new boost::shared_ptr<probe_job>(job);
+		const int cr = pthread_create(&th, &attr, probe_job_run, holder);
+		pthread_attr_destroy(&attr);
+		if (cr != 0) {
+			delete holder;
+			return 0;
+		}
+		struct timespec until;
+		clock_gettime(CLOCK_MONOTONIC, &until);
+		until.tv_sec += budget_ms / 1000;
+		until.tv_nsec += (long)(budget_ms % 1000) * 1000000L;
+		if (until.tv_nsec >= 1000000000L) {
+			until.tv_sec += 1;
+			until.tv_nsec -= 1000000000L;
+		}
+		int rc = 0;
+		pthread_mutex_lock(&job->mutex);
+		while (!job->done) {
+			if (pthread_cond_timedwait(&job->cond, &job->mutex, &until) == ETIMEDOUT) {
+				break;
+			}
+		}
+		if (job->done) {
+			out = job->view;
+			rc = job->rc;
+		}
+		pthread_mutex_unlock(&job->mutex);
+		return rc;
+	}
+}
 
 bool handler_reconstruction::wait_source_forwards_here(const string& host, int port, const string& self, const string& src,
 		int partition, cluster* cl, int budget_ms, shared_thread owner, string& last) {
@@ -817,7 +911,7 @@ bool handler_reconstruction::wait_source_forwards_here(const string& host, int p
 		}
 		const uint64_t mine = cl != NULL ? cl->get_node_map_version() : 0;
 		source_map_view v;
-		if (probe_source_map(host, port, v, (int)(end - now)) == 1) {
+		if (probe_until(host, port, v, (int)(end - now), source_map_probe) == 1) {
 			if (source_forwards_here(v, self, src, partition, mine, last)) {
 				return true;
 			}

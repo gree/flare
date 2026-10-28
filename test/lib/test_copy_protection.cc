@@ -12,6 +12,7 @@
 #include <stats.h>
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <pthread.h>
 #include <sys/select.h>
@@ -464,5 +465,68 @@ namespace test_copy_protection {
 		cut_notify("proving source: %s after %llu ms (%s)", ok ? "proof" : "no proof", (unsigned long long)took, last.c_str());
 		cut_assert_equal_boolean(true, ok);
 		cut_assert(took < 2000, cut_message("took %llu ms", (unsigned long long)took));
+	}
+
+	// review of 3fa77f0: the deadline also holds through connect (no second
+	// attempt) and through anything else that blocks in the probe — the name
+	// lookup has no timeout of its own — because the waiter leaves at the
+	// deadline. A blackholed connect: a listener whose accept queue is full
+	// and never accepts (Linux drops the SYN, the connect hangs).
+	void test_the_proof_wait_ends_within_its_budget_on_a_blackholed_connect() {
+		stats_object = new stats();
+		const int port = 20000 + rand() % 20000;
+		int lfd = socket(AF_INET, SOCK_STREAM, 0);
+		int one = 1;
+		setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+		struct sockaddr_in a;
+		memset(&a, 0, sizeof(a));
+		a.sin_family = AF_INET;
+		a.sin_port = htons(port);
+		a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+		cut_assert_equal_int(0, ::bind(lfd, (struct sockaddr*)&a, sizeof(a)));
+		cut_assert_equal_int(0, listen(lfd, 0));
+		// fill the accept queue (never accepted)
+		vector<int> fillers;
+		for (int i = 0; i < 4; i++) {
+			int f = socket(AF_INET, SOCK_STREAM, 0);
+			fcntl(f, F_SETFL, O_NONBLOCK);
+			int r = connect(f, (struct sockaddr*)&a, sizeof(a));
+			(void)r;
+			fillers.push_back(f);
+		}
+		usleep(200 * 1000);
+		string last;
+		const uint64_t t0 = now_ms();
+		const bool ok = handler_reconstruction::wait_source_forwards_here("127.0.0.1", port, "me:12121", "src:12121",
+			0, NULL, 1500, shared_thread(), last);
+		const uint64_t took = now_ms() - t0;
+		for (size_t i = 0; i < fillers.size(); i++) {
+			close(fillers[i]);
+		}
+		close(lfd);
+		delete stats_object;
+		stats_object = NULL;
+		cut_notify("blackholed connect: %s after %llu ms", ok ? "proof" : "no proof", (unsigned long long)took);
+		cut_assert_equal_boolean(false, ok);
+		cut_assert(took >= 1400 && took <= 1800, cut_message("a 1500 ms wait took %llu ms", (unsigned long long)took));
+	}
+
+	int blocking_probe(const string&, int, handler_reconstruction::source_map_view&, int) {
+		sleep(5);		// as a name lookup that hangs: no budget is honoured inside
+		return 0;
+	}
+
+	void test_the_proof_wait_ends_within_its_budget_when_the_probe_blocks() {
+		handler_reconstruction::source_map_probe_fn saved = handler_reconstruction::source_map_probe;
+		handler_reconstruction::source_map_probe = blocking_probe;
+		string last;
+		const uint64_t t0 = now_ms();
+		const bool ok = handler_reconstruction::wait_source_forwards_here("unresolvable.invalid", 12121, "me:12121", "src:12121",
+			0, NULL, 1000, shared_thread(), last);
+		const uint64_t took = now_ms() - t0;
+		handler_reconstruction::source_map_probe = saved;
+		cut_notify("blocking probe: %s after %llu ms", ok ? "proof" : "no proof", (unsigned long long)took);
+		cut_assert_equal_boolean(false, ok);
+		cut_assert(took >= 900 && took <= 1300, cut_message("a 1000 ms wait took %llu ms", (unsigned long long)took));
 	}
 }

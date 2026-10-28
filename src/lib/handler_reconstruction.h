@@ -118,6 +118,10 @@ public:
 	static bool wait_source_forwards_here(const string& host, int port, const string& self, const string& src,
 		int partition, cluster* cl, int budget_ms, shared_thread owner, string& last);
 	static int source_proof_wait_ms;
+	// the probe the wait runs (the cutter test replaces it with one that
+	// blocks, as a name lookup can: the wait must still end on time)
+	typedef int (*source_map_probe_fn)(const string& host, int port, source_map_view& out, int budget_ms);
+	static source_map_probe_fn source_map_probe;
 	handler_reconstruction(shared_thread t, cluster* cl, storage* st, string node_server_name, int node_server_port, int partition, int partition_size, cluster::role r, int reconstruction_interval, int reconstruction_bwlimit);
 	virtual ~handler_reconstruction();
 

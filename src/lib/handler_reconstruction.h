@@ -122,6 +122,11 @@ public:
 	// blocks, as a name lookup can: the wait must still end on time)
 	typedef int (*source_map_probe_fn)(const string& host, int port, source_map_view& out, int budget_ms);
 	static source_map_probe_fn source_map_probe;
+	// probe workers not finished yet (some may be stuck in a name lookup the
+	// waiters gave up on): at most one per source, and at most
+	// max_probe_workers in all — no new worker beyond that (cutter test)
+	static int outstanding_probe_workers();
+	static int max_probe_workers;
 	handler_reconstruction(shared_thread t, cluster* cl, storage* st, string node_server_name, int node_server_port, int partition, int partition_size, cluster::role r, int reconstruction_interval, int reconstruction_bwlimit);
 	virtual ~handler_reconstruction();
 

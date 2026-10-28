@@ -813,6 +813,7 @@ bool handler_reconstruction::source_forwards_here(const source_map_view& v, cons
 
 int handler_reconstruction::source_proof_wait_ms = 15000;
 handler_reconstruction::source_map_probe_fn handler_reconstruction::source_map_probe = handler_reconstruction::probe_source_map;
+int handler_reconstruction::max_probe_workers = 8;
 
 namespace {
 	// One probe on its own detached thread: the waiter takes the result if it
@@ -842,6 +843,13 @@ namespace {
 		}
 	};
 
+	// The workers not finished yet, by source ("host:port"). A waiter for a
+	// source whose worker is still running waits on that worker instead of
+	// starting another: a stuck name lookup holds one thread per source, not
+	// one per attempt (review of a0070dd).
+	pthread_mutex_t probe_registry_mutex = PTHREAD_MUTEX_INITIALIZER;
+	map<string, boost::shared_ptr<probe_job> > probe_registry;
+
 	void* probe_job_run(void* arg) {
 		boost::shared_ptr<probe_job>* holder = static_cast<boost::shared_ptr<probe_job>*>(arg);
 		boost::shared_ptr<probe_job> job = *holder;
@@ -852,30 +860,53 @@ namespace {
 		job->view = v;
 		job->rc = rc;
 		job->done = true;
-		pthread_cond_signal(&job->cond);
+		pthread_cond_broadcast(&job->cond);
 		pthread_mutex_unlock(&job->mutex);
+		ostringstream key;
+		key << job->host << ":" << job->port;
+		pthread_mutex_lock(&probe_registry_mutex);
+		map<string, boost::shared_ptr<probe_job> >::iterator it = probe_registry.find(key.str());
+		if (it != probe_registry.end() && it->second == job) {
+			probe_registry.erase(it);
+		}
+		pthread_mutex_unlock(&probe_registry_mutex);
 		return NULL;
 	}
 
 	// 1 = a complete reply within `budget_ms` of now, else 0
 	int probe_until(const string& host, int port, handler_reconstruction::source_map_view& out, int budget_ms,
 			handler_reconstruction::source_map_probe_fn fn) {
-		boost::shared_ptr<probe_job> job(new probe_job());
-		job->host = host;
-		job->port = port;
-		job->budget_ms = budget_ms;
-		job->fn = fn;
-		pthread_attr_t attr;
-		pthread_attr_init(&attr);
-		pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-		pthread_t th;
-		boost::shared_ptr<probe_job>* holder = new boost::shared_ptr<probe_job>(job);
-		const int cr = pthread_create(&th, &attr, probe_job_run, holder);
-		pthread_attr_destroy(&attr);
-		if (cr != 0) {
-			delete holder;
-			return 0;
+		ostringstream key;
+		key << host << ":" << port;
+		boost::shared_ptr<probe_job> job;
+		pthread_mutex_lock(&probe_registry_mutex);
+		map<string, boost::shared_ptr<probe_job> >::iterator it = probe_registry.find(key.str());
+		if (it != probe_registry.end()) {
+			job = it->second;		// still running: wait on it, start nothing
+		} else if ((int)probe_registry.size() >= handler_reconstruction::max_probe_workers) {
+			pthread_mutex_unlock(&probe_registry_mutex);
+			return 0;				// at the cap: no new worker (not readable now)
+		} else {
+			job.reset(new probe_job());
+			job->host = host;
+			job->port = port;
+			job->budget_ms = budget_ms;
+			job->fn = fn;
+			pthread_attr_t attr;
+			pthread_attr_init(&attr);
+			pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+			pthread_t th;
+			boost::shared_ptr<probe_job>* holder = new boost::shared_ptr<probe_job>(job);
+			const int cr = pthread_create(&th, &attr, probe_job_run, holder);
+			pthread_attr_destroy(&attr);
+			if (cr != 0) {
+				delete holder;
+				pthread_mutex_unlock(&probe_registry_mutex);
+				return 0;
+			}
+			probe_registry[key.str()] = job;
 		}
+		pthread_mutex_unlock(&probe_registry_mutex);
 		struct timespec until;
 		clock_gettime(CLOCK_MONOTONIC, &until);
 		until.tv_sec += budget_ms / 1000;
@@ -898,6 +929,13 @@ namespace {
 		pthread_mutex_unlock(&job->mutex);
 		return rc;
 	}
+}
+
+int handler_reconstruction::outstanding_probe_workers() {
+	pthread_mutex_lock(&probe_registry_mutex);
+	const int n = (int)probe_registry.size();
+	pthread_mutex_unlock(&probe_registry_mutex);
+	return n;
 }
 
 bool handler_reconstruction::wait_source_forwards_here(const string& host, int port, const string& self, const string& src,

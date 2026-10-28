@@ -20,6 +20,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 #include <vector>
+#include <sstream>
 
 using namespace std;
 using namespace gree::flare;
@@ -511,9 +512,21 @@ namespace test_copy_protection {
 		cut_assert(took >= 1400 && took <= 1800, cut_message("a 1500 ms wait took %llu ms", (unsigned long long)took));
 	}
 
+	volatile int blocking_ms = 5000;
+
 	int blocking_probe(const string&, int, handler_reconstruction::source_map_view&, int) {
-		sleep(5);		// as a name lookup that hangs: no budget is honoured inside
+		usleep(blocking_ms * 1000);		// as a name lookup that hangs: no budget is honoured inside
 		return 0;
+	}
+
+	bool wait_drained(int ms) {
+		for (int i = 0; i < ms / 50; i++) {
+			if (handler_reconstruction::outstanding_probe_workers() == 0) {
+				return true;
+			}
+			usleep(50 * 1000);
+		}
+		return handler_reconstruction::outstanding_probe_workers() == 0;
 	}
 
 	void test_the_proof_wait_ends_within_its_budget_when_the_probe_blocks() {
@@ -528,5 +541,52 @@ namespace test_copy_protection {
 		cut_notify("blocking probe: %s after %llu ms", ok ? "proof" : "no proof", (unsigned long long)took);
 		cut_assert_equal_boolean(false, ok);
 		cut_assert(took >= 900 && took <= 1300, cut_message("a 1000 ms wait took %llu ms", (unsigned long long)took));
+		// the worker the wait left ends by itself
+		cut_assert(wait_drained(6000), cut_message("%d probe worker(s) still running", handler_reconstruction::outstanding_probe_workers()));
+	}
+
+	// review of a0070dd: repeated timeouts on a stuck source do not pile up
+	// workers — a wait attaches to the source's running worker — and the
+	// total is capped; all of them end when the stuck lookups do
+	void test_repeated_timeouts_keep_probe_workers_bounded() {
+		cut_assert(wait_drained(6000), cut_message("left over: %d", handler_reconstruction::outstanding_probe_workers()));
+		handler_reconstruction::source_map_probe_fn saved = handler_reconstruction::source_map_probe;
+		handler_reconstruction::source_map_probe = blocking_probe;
+		blocking_ms = 2000;
+		string last;
+		int most = 0;
+		// one source, six attempts that each time out
+		for (int i = 0; i < 6; i++) {
+			const bool ok = handler_reconstruction::wait_source_forwards_here("stuck-a.invalid", 12121, "me:12121", "src:12121",
+				0, NULL, 150, shared_thread(), last);
+			cut_assert_equal_boolean(false, ok);
+			const int n = handler_reconstruction::outstanding_probe_workers();
+			most = n > most ? n : most;
+		}
+		cut_notify("one stuck source, 6 timed-out waits: at most %d worker(s)", most);
+		cut_assert_equal_int(1, most);
+		// many sources: never more than the cap
+		int most_many = 0;
+		for (int i = 0; i < handler_reconstruction::max_probe_workers + 6; i++) {
+			ostringstream h;
+			h << "stuck-" << i << ".invalid";
+			const uint64_t t0 = now_ms();
+			const bool ok = handler_reconstruction::wait_source_forwards_here(h.str(), 12121, "me:12121", "src:12121",
+				0, NULL, 100, shared_thread(), last);
+			const uint64_t took = now_ms() - t0;
+			cut_assert_equal_boolean(false, ok);
+			cut_assert(took <= 400, cut_message("a 100 ms wait took %llu ms", (unsigned long long)took));
+			const int n = handler_reconstruction::outstanding_probe_workers();
+			most_many = n > most_many ? n : most_many;
+		}
+		cut_notify("%d stuck sources: at most %d worker(s) (cap %d)", handler_reconstruction::max_probe_workers + 6, most_many,
+			handler_reconstruction::max_probe_workers);
+		cut_assert(most_many <= handler_reconstruction::max_probe_workers,
+			cut_message("%d workers over the cap %d", most_many, handler_reconstruction::max_probe_workers));
+		// every stuck worker ends on its own; nothing is left behind
+		const bool drained = wait_drained(5000);
+		handler_reconstruction::source_map_probe = saved;
+		blocking_ms = 5000;
+		cut_assert(drained, cut_message("%d probe worker(s) still running", handler_reconstruction::outstanding_probe_workers()));
 	}
 }

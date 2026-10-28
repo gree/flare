@@ -37,6 +37,21 @@ def results : List (String × Bool) := Id.run do
   r := r ++ [("rolling: with only the master left, the master is deleted (the handover moves it)",
               match decide "new" [m0, pod "nodes-1" "s:12121" "new"] masters 5 2 with | .delete c _ => c.name == "nodes-0" | _ => false)]
   r := r ++ [("rolling: no update revision → idle", match decide "" [m0, s1] masters 5 2 with | .idle _ => true | _ => false)]
+  -- ordinal order is numeric (review of 97c487f)
+  let many := (List.range 12).map fun i => pod s!"node-sw-nodes-{i}" s!"n{i}:12121" "old"
+  r := r ++ [("rolling: the highest StatefulSet ordinal goes first, numerically (nodes-11 before nodes-9)",
+              match decide "new" many ["n0:12121"] 5 2 with | .delete c _ => c.name == "node-sw-nodes-11" | _ => false)]
+  let tenNine := [pod "x-nodes-9" "a:1" "old", pod "x-nodes-10" "b:1" "old"]
+  r := r ++ [("rolling: nodes-10 is replaced before nodes-9",
+              match decide "new" tenNine [] 5 2 with | .delete c _ => c.name == "x-nodes-10" | _ => false)]
+  r := r ++ [("rolling: ordinal parses the trailing number", ordinal "a-b-nodes-12" == some 12 && ordinal "nope" == none)]
+  -- a pod whose revision is unknown blocks the rollout explicitly (review of 97c487f)
+  let unk := pod "nodes-1" "s:12121" ""
+  r := r ++ [("rolling: current + unknown revision → wait (never idle, never deleted)",
+              match decide "new" [pod "nodes-0" "m:12121" "new", unk] masters 5 2 with
+              | .wait why => why.startsWith "the revision of" | _ => false)]
+  r := r ++ [("rolling: outdated + unknown revision → wait, the unknown pod is not deleted",
+              match decide "new" [m0, unk] masters 5 2 with | .wait _ => true | _ => false)]
   -- stability
   let ready := ["m:12121", "s:12121"]
   r := r ++ [("rolling: stable = Active master + Active, Ready, eligible slave, nothing busy",

@@ -53,6 +53,17 @@ def Decision.label : Decision → String
 def outdated (updateRev : String) (pods : List Candidate) : List Candidate :=
   pods.filter fun p => !p.revision.isEmpty && p.revision != updateRev
 
+/-- The pods whose revision is not known (no controller-revision-hash label):
+    never deleted, and the rollout does not call itself done while any is
+    left (it waits, saying which). -/
+def unknownRevision (pods : List Candidate) : List Candidate :=
+  pods.filter fun p => p.revision.isEmpty
+
+/-- The StatefulSet ordinal of a pod `<name>-<n>` (none when the name does not
+    end in a number). -/
+def ordinal (name : String) : Option Nat :=
+  ((name.splitOn "-").getLast?).bind (·.toNat?)
+
 /-- Stable enough to take one pod down: every partition of the map has an
     Active master and `slavesPerPartition` Active slaves, every slave is
     eligible (R3, not rebuilding), every pod is Ready, and no handover or
@@ -75,13 +86,22 @@ def stable (s : FlareClusterState) (slavesPerPartition : Nat) (readyKeys eligibl
 def decide (updateRev : String) (pods : List Candidate) (masterKeys : List String)
     (stablePasses needPasses : Nat) : Decision :=
   let old := outdated updateRev pods
+  let unknown := unknownRevision pods
   if updateRev.isEmpty then .idle "the StatefulSet has no update revision"
+  else if !unknown.isEmpty then
+    .wait s!"the revision of {unknown.map (·.name)} is not known (no controller-revision-hash): nothing is replaced and the rollout is not done until it is"
   else if old.isEmpty then .idle "every pod is on the update revision"
   else if pods.any (·.terminating) then .wait "a pod is terminating"
   else if stablePasses < needPasses then .wait s!"the cluster has been stable for {stablePasses} of {needPasses} pass(es)"
   else
-    -- highest ordinal first, as the StatefulSet controller would
-    let byName := fun (l : List Candidate) => (l.toArray.qsort (fun a b => a.name > b.name)).toList
+    -- highest StatefulSet ordinal first, as the StatefulSet controller would
+    -- (numerically: nodes-10 before nodes-9); a name without one sorts last
+    let byName := fun (l : List Candidate) => (l.toArray.qsort (fun a b =>
+      match ordinal a.name, ordinal b.name with
+      | some x, some y => x > y
+      | some _, none => true
+      | none, some _ => false
+      | none, none => a.name > b.name)).toList
     match byName (old.filter fun p => !masterKeys.contains p.nodeKey) with
     | c :: _ => .delete c s!"{old.length} pod(s) not on revision {updateRev}; not a master first"
     | [] =>

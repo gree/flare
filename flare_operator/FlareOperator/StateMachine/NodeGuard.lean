@@ -41,52 +41,86 @@ def overrideAnnotation : String := "flare.gree.net/delete-override"
 /-- Requests the guard never stands in the way of: the operator itself, and
     Kubernetes' own controllers (namespace deletion, garbage collection, the
     node lifecycle; the StatefulSet controller removes pods only after a
-    scale-down this guard already allowed), and the kubelet's confirmation of
-    a pod that already terminated. -/
+    scale-down this guard already allowed). The kubelet is NOT here: see
+    `kubeletConfirms` (review of 262fde9: every system:node:* was trusted). -/
 def trustedRequester (username operatorAccount : String) : Bool :=
   (!operatorAccount.isEmpty && username == operatorAccount)
   || username == "system:kube-controller-manager"
   || username.startsWith "system:serviceaccount:kube-system:"
-  -- the kubelet confirms a terminated pod's removal with its own DELETE
-  -- (grace 0) once the containers stopped: refusing it would leave every
-  -- deleted pod Terminating
-  || username.startsWith "system:node:"
 
-/-- An Active, Ready replica of `partition` other than `except`. -/
-def hasSuccessor (s : FlareClusterState) (readyKeys : List String) (partition : Int) (except : String) : Bool :=
+/-- The kubelet's own DELETE that confirms a pod already terminating (it has
+    a deletionTimestamp: a delete this guard judged earlier) — and only by the
+    kubelet of the node the pod runs on. Refusing it would leave every
+    deleted pod Terminating. -/
+def kubeletConfirms (username podNodeName : String) (podTerminating : Bool) : Bool :=
+  podTerminating && !podNodeName.isEmpty && username == s!"system:node:{podNodeName}"
+
+/-- A replica of `partition` other than `except` that the handover can
+    promote now: an Active Slave in the map that is in `caughtUp` — the keys
+    Main proved for this review (pod Ready and not Terminating, R3
+    `repl_read_source_eligible=1` read now, no replica repair pending). Map
+    roles alone are not enough (review of 262fde9: a stale replica let the
+    delete through while the handover could not promote it). -/
+def hasSuccessor (s : FlareClusterState) (caughtUp : List String) (partition : Int) (except : String) : Bool :=
   s.nodeMap.any fun (k, n) =>
     k != except && n.role == FlareRole.Slave && n.state == FlareState.Active
-      && n.partition == partition && readyKeys.contains k
+      && n.partition == partition && caughtUp.contains k
 
-/-- DELETE of the flared pod whose node key is `nodeKey`. -/
-def podDelete (s : FlareClusterState) (readyKeys : List String) (requester operatorAccount : String)
-    (nodeKey podUid : String) (overrideUid : Option String) (gracePeriod : Option Nat) : Verdict :=
+/-- What the guard needs to know about the deleted pod besides the map. -/
+structure PodFacts where
+  nodeKey : String
+  uid : String
+  /-- the override annotation's value, if any -/
+  overrideUid : Option String := none
+  gracePeriod : Option Nat := none
+  /-- spec.nodeName -/
+  nodeName : String := ""
+  /-- metadata.deletionTimestamp is set -/
+  terminating : Bool := false
+  deriving Repr
+
+/-- DELETE of the flared pod `pod`. `initialized` = the operator finished a
+    full pass on its persisted map; before that (startup, a fresh leader) the
+    map may be the empty default and nothing can be judged: refused (review
+    of 262fde9: the webhook started before the map was loaded failed open). -/
+def podDelete (initialized : Bool) (s : FlareClusterState) (caughtUp : List String)
+    (requester operatorAccount : String) (pod : PodFacts) : Verdict :=
   if trustedRequester requester operatorAccount then .allow s!"requested by {requester}"
-  else if !podUid.isEmpty && overrideUid == some podUid then
-    .allow s!"{overrideAnnotation} names this pod (uid {podUid}): allowed as an explicit exception"
-  else match s.lookupNode nodeKey with
-  | none => .allow "the pod is not in the flare node map (it holds no data)"
+  else if kubeletConfirms requester pod.nodeName pod.terminating then
+    .allow s!"the kubelet of {pod.nodeName} confirms the removal of a pod already terminating"
+  else if !pod.uid.isEmpty && pod.overrideUid == some pod.uid then
+    .allow s!"{overrideAnnotation} names this pod (uid {pod.uid}): allowed as an explicit exception"
+  else if !initialized then
+    .deny s!"flare: the operator has not finished reading the cluster yet (just started or just became leader), so it cannot tell what this pod holds. Retry in a few seconds, or annotate the pod {overrideAnnotation}=<its uid> to accept the risk explicitly"
+  else match s.lookupNode pod.nodeKey with
+  | none =>
+    .deny s!"flare: this pod is not in the operator's node map, so it cannot tell what the pod holds (it may be starting with data on its volume). Retry once it has registered, or annotate the pod {overrideAnnotation}=<its uid> to accept the risk explicitly"
   | some n =>
     if n.role == FlareRole.Proxy then .allow "the pod is a proxy (it holds no data)"
-    else if gracePeriod == some 0 then
+    else if pod.gracePeriod == some 0 then
       .deny s!"flare: a force delete (grace period 0) of a {roleName n.role} skips its preStop and the ordered handover, so acknowledged writes can be lost. Delete it without --force / --grace-period=0 (the operator hands a master over first), or annotate the pod {overrideAnnotation}=<its uid> to accept the risk explicitly"
-    else if n.role == FlareRole.Master && !hasSuccessor s readyKeys n.partition nodeKey then
-      .deny s!"flare: this pod is the master of partition {n.partition} and no Active, Ready replica can take it over now, so deleting it loses the partition's master (and its data on tmpfs). Wait until a replica has caught up, or annotate the pod {overrideAnnotation}=<its uid> to accept the risk explicitly"
+    else if n.role == FlareRole.Master && !hasSuccessor s caughtUp n.partition pod.nodeKey then
+      .deny s!"flare: this pod is the master of partition {n.partition} and no replica is caught up enough to take it over now (Active, Ready, eligible as a read source, no repair pending), so deleting it can lose the partition's master (and its data on tmpfs). Wait until a replica has caught up, or annotate the pod {overrideAnnotation}=<its uid> to accept the risk explicitly"
     else if n.role == FlareRole.Master then
       .allow "a graceful delete of a master with a caught-up replica: the ordered handover moves its partition"
     else .allow s!"a graceful delete of a {roleName n.role}: its partition keeps its master"
 
 /-- UPDATE of the flared StatefulSet (or its scale subresource) from
     `oldReplicas` to `newReplicas`; `keyOf i` is the node key of ordinal `i`. -/
-def scale (s : FlareClusterState) (requester operatorAccount : String)
+def scale (initialized : Bool) (s : FlareClusterState) (requester operatorAccount : String)
     (oldReplicas newReplicas : Nat) (keyOf : Nat → String) : Verdict :=
   if newReplicas >= oldReplicas then .allow "replicas are not reduced"
   else if trustedRequester requester operatorAccount then .allow s!"requested by {requester}"
+  else if !initialized then
+    .deny "flare: the operator has not finished reading the cluster yet (just started or just became leader), so it cannot tell what the removed ordinals hold. Retry in a few seconds"
   else
     let removed := (List.range (oldReplicas - newReplicas)).map (· + newReplicas)
+    -- not in the map = unknown, not empty (it may hold data on its volume)
     let holding := removed.filter fun i =>
-      (s.lookupNode (keyOf i)).any fun n => n.role != FlareRole.Proxy
-    if holding.isEmpty then .allow s!"the removed ordinals {removed} hold no data (proxies or not in the map)"
-    else .deny s!"flare: scaling {oldReplicas} -> {newReplicas} removes ordinal(s) {holding} that still hold data (a master or a replica). Move their data first (the operator does this when the FlareCluster's replicas are reduced), or scale down only ordinals that are proxies"
+      match s.lookupNode (keyOf i) with
+      | some n => n.role != FlareRole.Proxy
+      | none => true
+    if holding.isEmpty then .allow s!"the removed ordinals {removed} hold no data (proxies)"
+    else .deny s!"flare: scaling {oldReplicas} -> {newReplicas} removes ordinal(s) {holding} that still hold data (a master or a replica) or that the operator does not know. Move their data first (the operator does this when the FlareCluster's replicas are reduced), or scale down only ordinals that are proxies"
 
 end FlareOperator.NodeGuard

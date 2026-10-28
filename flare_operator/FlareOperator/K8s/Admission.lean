@@ -63,6 +63,17 @@ def Review.podHostname (r : Review) : String :=
 def Review.podSubdomain (r : Review) : String :=
   ((r.oldObject.getObjValD "spec").getObjValAs? String "subdomain").toOption.getD ""
 
+/-- spec.nodeName of the deleted pod. -/
+def Review.podNodeName (r : Review) : String :=
+  ((r.oldObject.getObjValD "spec").getObjValAs? String "nodeName").toOption.getD ""
+
+/-- The deleted pod already has a deletionTimestamp (it is terminating). -/
+def Review.podTerminating (r : Review) : Bool :=
+  match (r.oldObject.getObjValD "metadata").getObjVal? "deletionTimestamp" with
+  | .ok Lean.Json.null => false
+  | .ok _ => true
+  | .error _ => false
+
 /-- An annotation of the deleted pod. -/
 def Review.podAnnotation (r : Review) (key : String) : Option String :=
   (((r.oldObject.getObjValD "metadata").getObjValD "annotations").getObjValAs? String key).toOption

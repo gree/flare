@@ -21,55 +21,74 @@ private def st : FlareClusterState :=
                 ("p:12121", node "p" .Proxy .Active (-1))],
     partitionMap := [(0, { master := some "m:12121", slaves := ["s:12121"] })] }
 
-private def ready : List String := ["m:12121", "s:12121", "p:12121"]
+/-- the replicas Main proved caught up (Ready, R3 eligible, no repair) -/
+private def caughtUp : List String := ["s:12121"]
 private def op : String := "system:serviceaccount:ns:flare-operator"
 private def user : String := "kubernetes-admin"
+
+private def pod (key uid : String) (grace : Option Nat := none) (ov : Option String := none)
+    (nodeName : String := "w1") (terminating : Bool := false) : PodFacts :=
+  { nodeKey := key, uid, overrideUid := ov, gracePeriod := grace, nodeName, terminating }
+
+private def del (p : PodFacts) (cu : List String := caughtUp) (who : String := user) (init : Bool := true) : Verdict :=
+  podDelete init st cu who op p
 
 def results : List (String × Bool) := Id.run do
   let mut r : List (String × Bool) := []
   r := r ++ [("node guard: a graceful delete of a master with a caught-up replica is allowed (the handover moves it)",
-              (podDelete st ready user op "m:12121" "u1" none none).allowed)]
+              (del (pod "m:12121" "u1")).allowed)]
   r := r ++ [("node guard: a force delete (grace 0) of the master is refused",
-              !(podDelete st ready user op "m:12121" "u1" none (some 0)).allowed)]
+              !(del (pod "m:12121" "u1" (some 0))).allowed)]
   r := r ++ [("node guard: a force delete of a replica is refused too (no preStop)",
-              !(podDelete st ready user op "s:12121" "u2" none (some 0)).allowed)]
+              !(del (pod "s:12121" "u2" (some 0))).allowed)]
   r := r ++ [("node guard: a force delete of a proxy is allowed (no data)",
-              (podDelete st ready user op "p:12121" "u3" none (some 0)).allowed)]
-  r := r ++ [("node guard: a pod not in the map is allowed", (podDelete st ready user op "x:12121" "u4" none (some 0)).allowed)]
-  r := r ++ [("node guard: the master with its replica not Ready is refused (no successor)",
-              !(podDelete st ["m:12121"] user op "m:12121" "u1" none none).allowed)]
+              (del (pod "p:12121" "u3" (some 0))).allowed)]
+  r := r ++ [("node guard: a pod not in the map is refused (unknown is not empty: it may hold data on its volume)",
+              !(del (pod "x:12121" "u4")).allowed)]
+  r := r ++ [("node guard: a pod not in the map is let through by its override",
+              (del (pod "x:12121" "u4" (some 0) (some "u4"))).allowed)]
+  r := r ++ [("node guard: before the operator's first full pass every data-pod delete is refused (the map may be the empty default)",
+              !(podDelete false {} [] user op (pod "m:12121" "u1")).allowed
+                && !(podDelete false st caughtUp user op (pod "s:12121" "u2")).allowed)]
+  r := r ++ [("node guard: before the first pass the override and the operator still pass",
+              (podDelete false {} [] user op (pod "m:12121" "u1" (some 0) (some "u1"))).allowed
+                && (podDelete false {} [] op op (pod "m:12121" "u1" (some 0))).allowed)]
+  r := r ++ [("node guard: the master with no caught-up replica is refused (Active Slave in the map is not enough)",
+              !(del (pod "m:12121" "u1") []).allowed)]
+  r := r ++ [("node guard: a caught-up key that is not an Active Slave of the partition does not count",
+              !(del (pod "m:12121" "u1") ["p:12121"]).allowed)]
   let rebuilding := st.addNode "s:12121" (node "s" .Slave .Prepare 0)
   r := r ++ [("node guard: the master with its replica still rebuilding (Prepare) is refused",
-              !(podDelete rebuilding ready user op "m:12121" "u1" none none).allowed)]
+              !(podDelete true rebuilding caughtUp user op (pod "m:12121" "u1")).allowed)]
   r := r ++ [("node guard: the override annotation with the pod's UID lets it through",
-              (podDelete st ready user op "m:12121" "u1" (some "u1") (some 0)).allowed)]
+              (del (pod "m:12121" "u1" (some 0) (some "u1"))).allowed)]
   r := r ++ [("node guard: an override naming another UID does not",
-              !(podDelete st ready user op "m:12121" "u1" (some "other") (some 0)).allowed)]
-  r := r ++ [("node guard: the operator's own delete is allowed", (podDelete st ["m:12121"] op op "m:12121" "u1" none (some 0)).allowed)]
-  r := r ++ [("node guard: the kubelet's final delete of a terminated pod is allowed",
-              (podDelete st [] "system:node:worker-1" op "m:12121" "u1" none (some 0)).allowed)]
+              !(del (pod "m:12121" "u1" (some 0) (some "other"))).allowed)]
+  r := r ++ [("node guard: the operator's own delete is allowed", (del (pod "m:12121" "u1" (some 0)) [] op).allowed)]
+  r := r ++ [("node guard: the kubelet of the pod's node confirming a pod already terminating is allowed",
+              (del (pod "m:12121" "u1" (some 0) none "worker-1" true) [] "system:node:worker-1").allowed)]
+  r := r ++ [("node guard: the kubelet of ANOTHER node is not trusted",
+              !(del (pod "m:12121" "u1" (some 0) none "worker-1" true) [] "system:node:worker-2").allowed)]
+  r := r ++ [("node guard: the kubelet deleting a pod that is NOT terminating yet is judged like anyone",
+              !(del (pod "m:12121" "u1" (some 0) none "worker-1" false) [] "system:node:worker-1").allowed)]
   r := r ++ [("node guard: Kubernetes controllers are allowed",
-              (podDelete st [] "system:serviceaccount:kube-system:namespace-controller" op "m:12121" "u1" none (some 0)).allowed
-                && (podDelete st [] "system:kube-controller-manager" op "m:12121" "u1" none none).allowed)]
-  -- scale
-  let keyOf := fun (i : Nat) => s!"n{i}:12121"
-  let sts : FlareClusterState :=
-    { nodeMap := [("n0:12121", node "n0" .Master .Active 0), ("n1:12121", node "n1" .Slave .Active 0),
-                  ("n2:12121", node "n2" .Proxy .Active (-1)), ("n3:12121", node "n3" .Slave .Active 0)] }
-  r := r ++ [("node guard: scaling up or unchanged is allowed", (scale sts user op 3 4 keyOf).allowed && (scale sts user op 3 3 keyOf).allowed)]
-  r := r ++ [("node guard: removing a proxy ordinal is allowed", (scale { sts with nodeMap := sts.nodeMap.take 3 } user op 3 2 keyOf).allowed)]
-  r := r ++ [("node guard: removing an ordinal that holds data is refused (4 -> 2 removes n2 proxy and n3 slave)",
-              match scale sts user op 4 2 keyOf with | .deny why => has why "[3]" | _ => false)]
-  r := r ++ [("node guard: the operator may scale down", (scale sts op op 4 1 keyOf).allowed)]
+              (del (pod "m:12121" "u1" (some 0)) [] "system:serviceaccount:kube-system:namespace-controller").allowed
+                && (del (pod "m:12121" "u1") [] "system:kube-controller-manager").allowed)]
   -- codec
-  let body := "{\"request\":{\"uid\":\"r1\",\"operation\":\"DELETE\",\"resource\":{\"group\":\"\",\"version\":\"v1\",\"resource\":\"pods\"},\"name\":\"n-0\",\"namespace\":\"ns\",\"userInfo\":{\"username\":\"kubernetes-admin\"},\"oldObject\":{\"metadata\":{\"name\":\"n-0\",\"uid\":\"u9\",\"annotations\":{\"flare.gree.net/delete-override\":\"u9\"}},\"spec\":{\"hostname\":\"n-0\",\"subdomain\":\"n\"}},\"options\":{\"gracePeriodSeconds\":0}}}"
+  let body := "{\"request\":{\"uid\":\"r1\",\"operation\":\"DELETE\",\"resource\":{\"group\":\"\",\"version\":\"v1\",\"resource\":\"pods\"},\"name\":\"n-0\",\"namespace\":\"ns\",\"userInfo\":{\"username\":\"kubernetes-admin\"},\"oldObject\":{\"metadata\":{\"name\":\"n-0\",\"uid\":\"u9\",\"annotations\":{\"flare.gree.net/delete-override\":\"u9\"}},\"spec\":{\"hostname\":\"n-0\",\"subdomain\":\"n\",\"nodeName\":\"w7\"}},\"options\":{\"gracePeriodSeconds\":0}}}"
   r := r ++ [("admission: a pod DELETE review is read (uid, user, pod uid, hostname, override, grace 0)",
               match FlareOperator.Admission.parseReview body with
               | .ok v => v.uid == "r1" && v.operation == "DELETE" && v.resource == "pods" && v.username == "kubernetes-admin"
                   && v.podUid == "u9" && v.podHostname == "n-0" && v.podSubdomain == "n"
                   && v.podAnnotation overrideAnnotation == some "u9" && v.gracePeriodSeconds == some 0
+                  && v.podNodeName == "w7" && !v.podTerminating
               | .error _ => false)]
   let scaleBody := "{\"request\":{\"uid\":\"r2\",\"operation\":\"UPDATE\",\"resource\":{\"group\":\"apps\",\"version\":\"v1\",\"resource\":\"statefulsets\"},\"subResource\":\"scale\",\"name\":\"c-nodes\",\"namespace\":\"ns\",\"object\":{\"spec\":{\"replicas\":1}},\"oldObject\":{\"spec\":{\"replicas\":2}}}}"
+  let termBody := "{\"request\":{\"uid\":\"r3\",\"operation\":\"DELETE\",\"resource\":{\"resource\":\"pods\"},\"name\":\"n-0\",\"namespace\":\"ns\",\"oldObject\":{\"metadata\":{\"name\":\"n-0\",\"deletionTimestamp\":\"2026-10-29T00:00:00Z\"}}}}"
+  r := r ++ [("admission: a pod with a deletionTimestamp reads as terminating",
+              match FlareOperator.Admission.parseReview termBody with
+              | .ok v => v.podTerminating
+              | .error _ => false)]
   r := r ++ [("admission: a statefulsets/scale review reads the new and old replicas",
               match FlareOperator.Admission.parseReview scaleBody with
               | .ok v => v.subResource == "scale" && v.replicas == (some 1, some 2)

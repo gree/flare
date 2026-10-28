@@ -174,6 +174,12 @@ inductive SwitchOp where
       removed, and the retry (attempt 2, L7) completes the switch; the
       one-map drain never takes the master (review of 9c4b2e1) -/
   | deleteMasterAbortRetry
+  /-- `kubectl delete pod` of the master while it is cut from its successor,
+      and the operator's lease taken by another identity while the handover
+      is in its fast loop: the rest of that pass is skipped (no FSM step,
+      rolling or send), the process exits, and the next leader resumes the
+      handover from its ledger (review of 262fde9) -/
+  | deleteMasterLeaseTakeover
   deriving BEq, Repr
 
 def SwitchOp.label : SwitchOp → String
@@ -183,6 +189,7 @@ def SwitchOp.label : SwitchOp → String
   | .drainMaster => "kubectl drain of the master's worker"
   | .deleteMasterSaveFail => "kubectl delete pod (master) while the handover ledger cannot be saved, then an operator restart"
   | .deleteMasterAbortRetry => "kubectl delete pod (master) while it is cut from its successor: the handover aborts, then retries after the cut is removed"
+  | .deleteMasterLeaseTakeover => "kubectl delete pod (master) while it is cut from its successor, and the operator's lease taken by another identity mid-handover"
 
 /-- The file the operator's FLARE_TEST_HANDOVER_SAVE_FAIL_FILE names. -/
 def saveFailFile : String := "/tmp/handover-save-fail"
@@ -203,6 +210,10 @@ structure SwitchObs where
   newMaster : Option String
   /-- a safety check of the scenario itself failed (not a precondition) -/
   checkFail : Option String := none
+  /-- write errors are reported, not a failure: the operator is away longer
+      than the clients' wait (approved category (a), 2026-10-26: errors
+      possible, no acknowledged write lost) -/
+  errorsAllowed : Bool := false
 
 /-- The target: the operation happened, 0 errors on both loads, 0
     acknowledged writes missing on the final master and on the replica
@@ -217,7 +228,7 @@ def switchVerdict (o : SwitchObs) : Option String :=
   | some mm, some mr =>
     let errs := o.svc.errors + o.peer.errors
     if mm != 0 || mr != 0 then some s!"DATA: {mm} acknowledged write(s) missing on the final master, {mr} on the replica 120 s after the switch settled ({o.missingReplica} when it settled; see missing.txt); {errs} write error(s)"
-    else if errs != 0 then some s!"WRITE ERRORS: {o.svc.errors} on the client path {o.svc.errorKinds} by pod {o.svcByPod}, {o.peer.errors} on the proxy path {o.peer.errorKinds} by pod {o.peerByPod} (a planned switch must only delay)"
+    else if errs != 0 && !o.errorsAllowed then some s!"WRITE ERRORS: {o.svc.errors} on the client path {o.svc.errorKinds} by pod {o.svcByPod}, {o.peer.errors} on the proxy path {o.peer.errorKinds} by pod {o.peerByPod} (a planned switch must only delay)"
     else if !o.redundant then some "redundancy (master + active replica) was not restored within the bound"
     else none
 
@@ -242,7 +253,7 @@ private def switchRun (c : Ctx) (op : SwitchOp) : IO (Except String SwitchObs) :
     -- (S8 cuts the master from the replica on purpose: a write landing on the
     -- replica could not reach the master for that reason alone, so both loads
     -- go through the partition Service there)
-    let peerHost := if op == .deleteMasterAbortRetry then svcHost c
+    let peerHost := if op == .deleteMasterAbortRetry || op == .deleteMasterLeaseTakeover then svcHost c
       else s!"{c.cfg.name}-nodes-external.{c.cfg.«namespace»}.svc.cluster.local"
     if !(← c.startLoad "peer" peerHost 2 200) then return .error (notSetUp "the proxy-path load did not start")
     let before := (← c.pods).getD []
@@ -357,6 +368,73 @@ private def switchRun (c : Ctx) (op : SwitchOp) : IO (Except String SwitchObs) :
             if !retried then
               checkFail := some ((checkFail.map (· ++ "; ")).getD "" ++ "no retry (attempt 2) completed the handover within 120 s after the abort (see operator-handover.txt)")
             opDetail := s!"delete accepted; first handover aborted; retry completed={retried}"
+    | .deleteMasterLeaseTakeover =>
+      let opPodOf := fun (_ : Unit) => do
+        match ← kubectl ["get", "pods", "-n", ns, "-l", s!"app={c.cfg.operatorName}", "-o", "jsonpath={.items[*].metadata.name}"] with
+        | .ok o => pure ((o.trim.splitOn " ").filter (!·.isEmpty))
+        | .error _ => pure []
+      let restartsOf := fun (pod : String) => do
+        match ← kubectl ["get", "pod", pod, "-n", ns, "-o", "jsonpath={.status.containerStatuses[?(@.name==\"flare-operator\")].restartCount}"] with
+        | .ok o => pure o.trim.toNat?
+        | .error _ => pure none
+      let leaseName := s!"{c.cfg.name}-operator-lease"
+      match ← opPodOf () with
+      | [opPod] =>
+        let r0 := (← restartsOf opPod).getD 0
+        let rules := podCutRules (← kindNodes) p.master.ip p.replica.ip
+        match ← installCuts rules with
+        | .error (why, part) => removeCuts part; opOk := false; opDetail := s!"could not cut master <-> replica: {why}"
+        | .ok installed =>
+          c.event s!"cut {p.master.ip} <-> {p.replica.ip}; deleting the master {p.master.name}"
+          match ← kubectlLong 180 ["delete", "pod", p.master.name, "-n", ns, "--wait=false"] with
+          | .error e => removeCuts installed; opOk := false; opDetail := s!"delete failed: {e.take 200}"
+          | .ok _ =>
+            -- the handover is in its fast loop once V1 is committed (the cut
+            -- keeps it draining until Th)
+            let demoted ← waitForCondition "the demoting map is committed (the fast loop runs)" 60 do
+              return containsSubstr (← kubectlLogs opPod ns 5000) "demoting map committed as v"
+            let patch := "{\"spec\":{\"holderIdentity\":\"e2e-foreign-holder\",\"leaseDurationSeconds\":600,\"renewTime\":\"2999-01-01T00:00:00.000000Z\"}}"
+            let took ← if demoted then pure ((← kubectlPatch "lease" leaseName ns patch) matches .ok _) else pure false
+            c.event s!"handover demoted={demoted}; lease taken by another identity={took}"
+            -- the process must notice and exit (the kubelet restarts it)
+            let exited ← if took then waitForCondition "the operator exits on the lost lease" 90 do
+                return ((← restartsOf opPod).getD 0) > r0
+              else pure false
+            let prev ← match ← kubectl ["logs", opPod, "-n", ns, "-c", "flare-operator", "--previous", "--tail=20000"] with
+              | .ok o => pure o
+              | .error _ => pure ""
+            for x in (prev.splitOn "\n").filter (fun x => containsSubstr x "HANDOVER" || containsSubstr x "PASS STOPPED" || containsSubstr x "LEASE" || containsSubstr x "ROLLING" || containsSubstr x "committed as" || containsSubstr x "graceful drain") do
+              c.art "operator-before-takeover.txt" x
+            -- authority back (this harness runs one operator replica): the
+            -- restarted process waits on the foreign holder until it is gone
+            discard <| kubectl ["delete", "lease", leaseName, "-n", ns]
+            removeCuts installed
+            c.event s!"operator exited={exited}; lease deleted; cut removed"
+            if !demoted || !took || !exited then
+              opOk := false; opDetail := s!"the takeover was not produced as intended (demoted={demoted}, lease taken={took}, operator exited={exited})"
+            else
+              -- in the process that lost the lease: after the failed renewal,
+              -- nothing more is decided or sent before it exits
+              let tail := match (prev.splitOn "HANDOVER: the lease could not be renewed").drop 1 with
+                | [] => none
+                | rest => some (String.intercalate "" rest)
+              match tail with
+              | none => checkFail := some "the handover's fast loop never reported the failed lease renewal (see operator-before-takeover.txt)"
+              | some t =>
+                let after := (t.splitOn "LOST LEASE").head!
+                let acted := ["map committed as", "ROLLING: deleted", "graceful drain:", "), broadcasting"].filter (containsSubstr after ·)
+                if !containsSubstr after "PASS STOPPED" then
+                  checkFail := some "after the failed renewal the pass did not report that it stopped (see operator-before-takeover.txt)"
+                else if !acted.isEmpty then
+                  checkFail := some s!"after the failed renewal the old leader still acted: {acted} (see operator-before-takeover.txt)"
+              let done ← waitForCondition "the next leader finishes the handover from its ledger" 240 do
+                return containsSubstr (← kubectlLogsLabel s!"app={c.cfg.operatorName}" ns 20000) "HANDOVER p0 done"
+              let l ← kubectlLogsLabel s!"app={c.cfg.operatorName}" ns 20000
+              for x in (l.splitOn "\n").filter (fun x => containsSubstr x "HANDOVER" || containsSubstr x "graceful drain" || containsSubstr x "ledger restored") do c.art "operator-handover.txt" x
+              if !done then
+                checkFail := some ((checkFail.map (· ++ "; ")).getD "" ++ "the next leader did not finish the handover within 240 s (see operator-handover.txt)")
+              opDetail := s!"delete accepted; lease taken mid-handover; old leader stopped and exited; handover finished by the next leader={done}"
+      | other => opOk := false; opDetail := s!"expected exactly one operator pod, saw {other}"
     c.event s!"operation: ok={opOk} {opDetail}"
     if opOk && (op == .rollingRestart || op == .rollBoth) then
       let ok ← kubectlRolloutStatus s!"statefulset/{c.cfg.name}-nodes" ns 900
@@ -381,7 +459,7 @@ private def switchRun (c : Ctx) (op : SwitchOp) : IO (Except String SwitchObs) :
       | some b, some a => b.uid != a.uid && a.ready && !a.deleting
       | _, _ => false
     let (moved, movedDetail) := match op with
-      | .deleteMaster | .deleteMasterSaveFail | .deleteMasterAbortRetry => (uidChanged p.master.name, s!"master pod {p.master.name} replaced={uidChanged p.master.name}")
+      | .deleteMaster | .deleteMasterSaveFail | .deleteMasterAbortRetry | .deleteMasterLeaseTakeover => (uidChanged p.master.name, s!"master pod {p.master.name} replaced={uidChanged p.master.name}")
       | .rollingRestart | .rollBoth =>
         let all := before.all fun (b : PodRow) => uidChanged b.name
         (all, s!"every pod replaced={all} ({before.map fun (b : PodRow) => (b.name, uidChanged b.name)})")
@@ -416,7 +494,8 @@ private def switchRun (c : Ctx) (op : SwitchOp) : IO (Except String SwitchObs) :
     let o : SwitchObs := { opOk, opDetail, moved, movedDetail, svc := loadStats svcRes, peer := loadStats peerRes,
                            svcByPod := errorsByPod ips svcRs, peerByPod := errorsByPod ips peerRs,
                            missingMaster := mm, missingReplica := mr, missingReplicaLater := mrLater,
-                           redundant := red, newMaster := newM, checkFail }
+                           redundant := red, newMaster := newM, checkFail,
+                           errorsAllowed := op == .deleteMasterLeaseTakeover }
     c.art "report.txt" (o.svc.summary "svc")
     c.art "report.txt" (o.peer.summary "peer")
     return .ok o
@@ -449,7 +528,11 @@ def gateTest (c : Ctx) : IO TestResult := do
     | .ok () => pure ()
     let ns := c.cfg.«namespace»
     let logFile := s!"/tmp/s5-{ns}-{p.master.name}-{← epochNow}.log"
-    discard <| IO.Process.output { cmd := "sh", args := #["-c", s!"(kubectl logs -f {p.master.name} -n {ns} > {logFile} 2>&1 &) >/dev/null 2>&1"] }
+    discard <| IO.Process.output { cmd := "sh", args := #["-c", s!"(kubectl logs -f {p.master.name} -n {ns} -c flared > {logFile} 2>&1 &) >/dev/null 2>&1"] }
+    -- and a snapshot every second while the pod exists: a follow can end
+    -- early (40729612644: the runner ran out of inotify instances)
+    let snapFile := logFile ++ ".snap"
+    discard <| IO.Process.output { cmd := "sh", args := #["-c", s!"(while kubectl get pod {p.master.name} -n {ns} -o jsonpath='\{.metadata.uid}' 2>/dev/null | grep -qx {p.master.uid}; do kubectl logs {p.master.name} -n {ns} -c flared > {snapFile}.tmp 2>/dev/null && mv {snapFile}.tmp {snapFile}; sleep 1; done &) >/dev/null 2>&1"] }
     if !(← c.startLoad "svc" (svcHost c) 4 200) then return .fail (notSetUp "the load did not start")
     let (_, _) ← observe c 10 (pure false)
     let rules := podCutRules (← kindNodes) p.master.ip p.replica.ip
@@ -464,7 +547,10 @@ def gateTest (c : Ctx) : IO TestResult := do
     removeCuts installed
     c.event s!"old master gone={gone}; cut removed"
     discard <| c.stopLoad "svc" 4
-    let log ← (try IO.FS.readFile logFile catch _ => pure "")
+    let followed ← (try IO.FS.readFile logFile catch _ => pure "")
+    let snap ← (try IO.FS.readFile (logFile ++ ".snap") catch _ => pure "")
+    -- the longer of the two (both are the same log from its start)
+    let log := if snap.length > followed.length then snap else followed
     -- the whole followed log is kept: PVC 40449082661 had a log without any
     -- verdict line, and the file under /tmp was not uploaded to tell why
     c.art "old-master.log" log
@@ -700,6 +786,7 @@ def Scenario.slug : Scenario → String
   | .op .drainMaster => "drain"
   | .op .deleteMasterSaveFail => "savefail"
   | .op .deleteMasterAbortRetry => "abortretry"
+  | .op .deleteMasterLeaseTakeover => "leasetakeover"
   | .gate => "gate"
   | .sigtermHold => "sigterm-hold"
   | .abortExhaust => "abortexhaust"
@@ -712,6 +799,7 @@ def Scenario.title : Scenario → String
   | .op .drainMaster => "(S4) kubectl drain of the MASTER's worker (no eviction guard) under a client-like load: the drain completes and no flared pod is left there; 0 write errors, 0 missing"
   | .op .deleteMasterAbortRetry => "(S8) kubectl delete pod of the MASTER while it is cut from its successor, under a client-like load: the first handover aborts and rolls back, the cut is removed, the retry (attempt 2) completes; the one-map drain never takes the master; 0 write errors, 0 missing"
   | .op .deleteMasterSaveFail => "(S7) kubectl delete pod of the MASTER while the operator cannot save its handover ledger, then an operator restart, under a client-like load: no handover map before its phase is saved; the new operator completes the switch; 0 write errors, 0 missing"
+  | .op .deleteMasterLeaseTakeover => "(S10) kubectl delete pod of the MASTER while it is cut from its successor, and the operator's lease taken by another identity mid-handover, under a client-like load: the old leader stops the pass (no FSM step, rolling or send) and exits; the next leader finishes the handover from its ledger; 0 acknowledged writes missing (write errors reported: the operator is away longer than the clients' wait, approved category (a))"
   | .gate => "(S5) the old master is cut from the replica and deleted under a write load: preStop / flared report the drain as NOT lossless, never as lossless (gate test)"
   | .nodeGuard => "(G1) node guard webhook: a force delete of the master and a scale-down over a data-holding ordinal are refused; the delete-override annotation and a graceful delete of the master are allowed (the handover moves it)"
   | .abortExhaust => "(S9) the master stays cut from its successor and is deleted: attempts 2 and 3 start, and only after the third abort does the one-map drain take the master (orchestration test, not a data verdict)"
@@ -726,7 +814,7 @@ private def scenarioSuite (sc : Scenario) (tmpfs : Bool) : TestSuite :=
   let cfg := if sc == .op .deleteMasterSaveFail then
       { cfg0 with operatorEnv := [("FLARE_TEST_HANDOVER_SAVE_FAIL_FILE", saveFailFile)], drainSeconds := 180 }
     -- S9: three attempts (Th + rollback + retry delay each) outlast 60 s
-    else if sc == .abortExhaust then { cfg0 with drainSeconds := 180 }
+    else if sc == .abortExhaust || sc == .op .deleteMasterLeaseTakeover then { cfg0 with drainSeconds := 180 }
     else if sc == .nodeGuard then { cfg0 with nodeGuard := true }
     else cfg0
   let c : Ctx := { cfg, suite, test := s!"s-{sc.slug}" }
@@ -739,7 +827,7 @@ private def scenarioSuite (sc : Scenario) (tmpfs : Bool) : TestSuite :=
     afterEach := fun i => saveFullLogs cfg.«namespace» s!"after-test-{i}"
     tests := [{ name := sc.title, run := match sc with | .op o => switchTest c o | .gate => gateTest c | .sigtermHold => sigtermHoldTest c | .abortExhaust => abortExhaustTest c | .nodeGuard => nodeGuardTest c }] }
 
-def scenarios : List Scenario := [.op .deleteMaster, .op .rollingRestart, .op .rollBoth, .op .drainMaster, .gate, .sigtermHold, .op .deleteMasterSaveFail, .op .deleteMasterAbortRetry, .abortExhaust, .nodeGuard]
+def scenarios : List Scenario := [.op .deleteMaster, .op .rollingRestart, .op .rollBoth, .op .drainMaster, .gate, .sigtermHold, .op .deleteMasterSaveFail, .op .deleteMasterAbortRetry, .abortExhaust, .nodeGuard, .op .deleteMasterLeaseTakeover]
 
 /-- node-ops-switch-<scenario> (PVC) and node-ops-switch-tmpfs-<scenario>. -/
 def switchSuites : List TestSuite :=

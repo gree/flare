@@ -451,6 +451,14 @@ initialize handoverLoadedRef : IO.Ref Bool ← IO.mkRef false
 initialize handoverDirtyRef : IO.Ref Bool ← IO.mkRef false
 /-- a handover is running: the leader loop does not wait the full interval -/
 initialize handoverActiveRef : IO.Ref Bool ← IO.mkRef false
+/-- the handover's fast loop could not renew the lease: the rest of the
+    pass (FSM, rolling, the send) is skipped and the leader loop decides
+    (review of 262fde9: only the fast loop stopped) -/
+initialize passLeaseLostRef : IO.Ref Bool ← IO.mkRef false
+/-- the node guard may judge: a full pass on the persisted map completed -/
+initialize nodeGuardInitRef : IO.Ref Bool ← IO.mkRef false
+/-- replicas with a replica repair pending, as of the last pass -/
+initialize nodeGuardRepairRef : IO.Ref (List String) ← IO.mkRef []
 
 /-- A complete `stats` reply of the pod behind `key`, or none. -/
 private def podStatsOf (key ns : String) : IO (Option String) := do
@@ -556,7 +564,8 @@ private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterSta
       -- maps were fenced. Renew every 2 s; on a lost lease stop here.
       if (← IO.monoMsNow) >= renewedMs + 2000 then
         if !(← renew) then
-          IO.eprintln "[flare-operator] HANDOVER: the lease could not be renewed (not the holder, or the API refused); the fast loop stops — the leader loop decides"
+          IO.eprintln "[flare-operator] HANDOVER: the lease could not be renewed (not the holder, or the API refused); the fast loop stops and the rest of this pass is skipped — the leader loop decides"
+          passLeaseLostRef.set true
           break
         renewedMs ← IO.monoMsNow
       match ← Bridge.listFlaredPodsE crName ns with
@@ -724,7 +733,7 @@ initialize rollingLastRef : IO.Ref String ← IO.mkRef ""
     at most one pod per pass (UID precondition). FLARE_OPERATOR_ROLLING=off
     turns it off (pods are then replaced by hand, one at a time). -/
 private def runRolling (crName ns : String) (stateRef : IO.Ref FlareClusterState)
-    (replicas : Nat) (busy : Bool) : IO Unit := do
+    (replicas : Nat) (busy : Bool) (leaseHeld : IO Bool) : IO Unit := do
   if (← IO.getEnv "FLARE_OPERATOR_ROLLING") == some "off" then return
   let rev ← match ← Bridge.statefulSetUpdateRevision s!"{crName}-nodes" ns with
     | .ok r => pure r
@@ -759,6 +768,11 @@ private def runRolling (crName ns : String) (stateRef : IO.Ref FlareClusterState
     IO.eprintln s!"[flare-operator] ROLLING: {label}"
   match d with
   | .delete c _ =>
+    -- a pod is deleted only by the lease holder, checked right before
+    if !(← leaseHeld) then
+      IO.eprintln s!"[flare-operator] ROLLING: the lease could not be confirmed; {c.name} is not deleted this pass"
+      passLeaseLostRef.set true
+      return
     match ← Bridge.deletePodWithUidPrecondition c.name ns c.uid with
     | .ok () => IO.eprintln s!"[flare-operator] ROLLING: deleted {c.name} (uid {c.uid}, revision {c.revision} -> {rev})"
     | .error e => IO.eprintln s!"[flare-operator] ROLLING: delete of {c.name} not confirmed ({e}); the next pass reads it again"
@@ -785,17 +799,38 @@ private def nodeGuardAnswer (crName ns : String) (stateRef : IO.Ref FlareCluster
       | "pods", "DELETE" =>
         let key := if r.podHostname.isEmpty || r.podSubdomain.isEmpty then ""
           else FlareClusterState.toNodeKey s!"{r.podHostname}.{r.podSubdomain}.{ns}.svc.cluster.local" 12121
-        match ← Bridge.listFlaredPodsE crName ns with
-        | .error e => pure (NodeGuard.Verdict.deny s!"flare: the pods could not be read to judge this delete ({e}); retry")
-        | .ok pods =>
-          let readyKeys := (pods.filter fun p => p.ready && !p.terminating).map Bridge.PodInfo.toNodeKey
-          pure (NodeGuard.podDelete st readyKeys r.username opAccount key r.podUid
-                  (r.podAnnotation NodeGuard.overrideAnnotation) r.gracePeriodSeconds)
+        let facts : NodeGuard.PodFacts := {
+          nodeKey := key, uid := r.podUid, overrideUid := r.podAnnotation NodeGuard.overrideAnnotation,
+          gracePeriod := r.gracePeriodSeconds, nodeName := r.podNodeName, terminating := r.podTerminating }
+        -- the successor evidence is read now, only for a master's delete:
+        -- the replica's pod Ready and not Terminating, R3 eligible in its
+        -- own stats, no replica repair pending
+        let caughtUp ← match st.lookupNode key with
+          | some n =>
+            if n.role != FlareRole.Master then pure (some [])
+            else match ← Bridge.listFlaredPodsE crName ns with
+              | .error _ => pure none
+              | .ok pods =>
+                let repairs ← nodeGuardRepairRef.get
+                let mut ok : List String := []
+                for (k, m) in st.nodeMap do
+                  if k == key || m.role != FlareRole.Slave || m.state != FlareState.Active || m.partition != n.partition then continue
+                  if repairs.contains k then continue
+                  if !(pods.any fun p => p.toNodeKey == k && p.ready && !p.terminating) then continue
+                  if let some out ← podStatsOf k ns then
+                    if statNat out "repl_read_source_eligible" == some 1 then
+                      ok := ok ++ [k]
+                      break
+                pure (some ok)
+          | none => pure (some [])
+        match caughtUp with
+        | none => pure (NodeGuard.Verdict.deny "flare: the pods could not be read to judge this delete; retry")
+        | some cu => pure (NodeGuard.podDelete (← nodeGuardInitRef.get) st cu r.username opAccount facts)
       | "statefulsets", "UPDATE" =>
         if r.name != s!"{crName}-nodes" then pure (NodeGuard.Verdict.allow "another StatefulSet")
         else match r.replicas with
           | (some new, some old) =>
-            pure (NodeGuard.scale st r.username opAccount old new fun i =>
+            pure (NodeGuard.scale (← nodeGuardInitRef.get) st r.username opAccount old new fun i =>
               FlareClusterState.toNodeKey s!"{crName}-nodes-{i}.{crName}-nodes.{ns}.svc.cluster.local" 12121)
           | _ => pure (NodeGuard.Verdict.allow "replicas not changed")
       | _, _ => pure (NodeGuard.Verdict.allow "not gated")
@@ -3033,6 +3068,18 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
       persistLedger crName ns led0 led3 metrics ledgerDirtyRef
       pure (ReplicaRepair.heldKeys led3)
 
+  -- the lease, renewed and confirmed now (the handover's fast loop and a
+  -- rolling delete act between the leader loop's renewals)
+  let leaseHeldNow : IO Bool := do
+    match ← getLease leaseName ns with
+    | .ok l =>
+      if l.holderIdentity != identity then pure false
+      else match ← renewLease leaseName ns identity with
+        | .ok () => pure true
+        | .error _ => pure false
+    | .error _ => pure false
+  passLeaseLostRef.set false
+
   -- 2b. ORDERED HANDOVER of planned master switches (before the FSM, like
   -- the repair demotions above): its successors are held like repairs.
   let handoverHeld ← runHandovers crName ns stateRef (← ledgerRef.get)
@@ -3062,22 +3109,24 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
         handoverProvenRef.set []
       pure !(← promotionAbortedRef.get))
     (do ensureServiceRouting (← stateRef.get) crName ns)
-    (do
-      match ← getLease leaseName ns with
-      | .ok l =>
-        if l.holderIdentity != identity then pure false
-        else match ← renewLease leaseName ns identity with
-          | .ok () => pure true
-          | .error _ => pure false
-      | .error _ => pure false)
+    leaseHeldNow
+  if ← passLeaseLostRef.get then
+    IO.eprintln "[flare-operator] PASS STOPPED: the lease was not renewed during the handover; no FSM step, rolling or send this pass"
+    return
   let heldKeys := heldKeys ++ handoverHeld.filter (fun k => !heldKeys.contains k)
+  nodeGuardRepairRef.set ((← ledgerRef.get).entries.filterMap (·.nodeKey))
 
   let drainBlockedRef ← IO.mkRef 0
   runReconcileDriver stateRef migrationRef graceCyclesRef trippedRef drainBlockedRef unreadyCyclesRef podKeysRef podAddrsRef heldKeys crName ns
   -- A0: the operator replaces the pods not on the StatefulSet's update
   -- revision, one at a time, while the cluster is stable
   let busyNow := !(← ledgerRef.get).entries.isEmpty || (← handoverActiveRef.get) || !heldKeys.isEmpty
-  runRolling crName ns stateRef (← crdRef.get).spec.replicas busyNow
+  runRolling crName ns stateRef (← crdRef.get).spec.replicas busyNow leaseHeldNow
+  if ← passLeaseLostRef.get then
+    IO.eprintln "[flare-operator] PASS STOPPED: the lease could not be confirmed before a rolling delete; no send this pass"
+    return
+  -- the map this pass read and committed is the guard's input from now on
+  nodeGuardInitRef.set true
   metrics.circuitBreakerTripped.set (if ← trippedRef.get then 1.0 else 0.0)
   -- CRITICAL drain-guard gauge: >0 pages a human — a draining master has no
   -- promotable successor and its partition dies with the pod (see RUNBOOK

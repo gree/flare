@@ -106,6 +106,7 @@ jobs:
             {"group":"node-ops-switch-e","suites":"node-ops-switch-abortretry,node-ops-switch-tmpfs-abortretry"},
             {"group":"node-ops-switch-f","suites":"node-ops-switch-abortexhaust,node-ops-switch-tmpfs-abortexhaust"},
             {"group":"node-ops-switch-g","suites":"node-ops-switch-node-guard,node-ops-switch-tmpfs-node-guard"},
+            {"group":"node-ops-switch-h","suites":"node-ops-switch-leasetakeover,node-ops-switch-tmpfs-leasetakeover"},
             {"group":"node-ops-switch-tmpfs-a","suites":"node-ops-switch-tmpfs-delete,node-ops-switch-tmpfs-rolling"},
             {"group":"node-ops-switch-tmpfs-b","suites":"node-ops-switch-tmpfs-rollboth,node-ops-switch-tmpfs-gate"},
             {"group":"node-ops-switch-tmpfs-c","suites":"node-ops-switch-tmpfs-drain,node-ops-switch-tmpfs-savefail"},
@@ -321,6 +322,11 @@ jobs:
           SUITE_GROUP: ${{ matrix.group }}
           SUITES: ${{ matrix.suites }}
         run: |
+          # kind's known-issues limits: every kind node and every `kubectl
+          # logs -f` takes inotify instances; the runner's default (128) ran
+          # out on the multinode cluster (40729612644: "failed to create
+          # fsnotify watcher: too many open files" cut the S5 log follow)
+          sudo sysctl -w fs.inotify.max_user_instances=1024 fs.inotify.max_user_watches=524288
           case "$SUITE_GROUP" in node-ops*) multi=1 ;; *) multi=0 ;; esac
           if [ "$SUITE_GROUP" = single-suite ] && echo ",$SUITES," | grep -q ',node-ops-'; then multi=1; fi
           if [ "$multi" = 1 ]; then

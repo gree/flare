@@ -167,6 +167,16 @@ def selfHealComparand (state : FlareClusterState) (partition : Int) (repairKeys 
     kv.2.role == FlareRole.Slave && kv.2.state == FlareState.Active
       && kv.2.partition == partition && !keys.contains kv.1
 
+/-- The self-heal's successor `slaveKey`, re-checked against the repair
+    ledger read after the fresh stats: clean only when the ledger is
+    available (`some`) and has no repair for it. `none` (unavailable) is
+    never clean; another replica's repair does not block it (review of
+    698d77b: one explicit gate instead of an inline `Option.any`). -/
+def successorRepairClean (repairKeys : Option (List String)) (slaveKey : String) : Bool :=
+  match repairKeys with
+  | none => false
+  | some keys => !keys.contains slaveKey
+
 /-- The final gate before deleting an empty master's pod (SAF-06). Every
     input is a re-check made AFTER the fresh stats reads, so the decision
     rests on the state the delete will act on, not on the streak's snapshot:

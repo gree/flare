@@ -4070,8 +4070,7 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
                 -- makes it no successor (4a52e0d empty-source)
                 -- (availability re-checked too: unavailable = no delete)
                 let repairNow ← repairKeysIfAvailable ledgerAvailableRef ledgerRef
-                let successorClean := (StatsObservation.selfHealComparand liveState mNode.partition repairNow).isSome
-                  && repairNow.any (!·.contains sKey)
+                let successorClean := StatsObservation.successorRepairClean repairNow sKey
                 if !successorClean then
                   IO.eprintln s!"[flare-operator] EMPTY-MASTER SELF-HEAL: successor {sKey} has a replica repair pending (it missed the master's writes) or the repair ledger is unavailable; not deleting {mPod}"
                 let successorOk := StatsObservation.successorStillValid liveState mKey sKey dataBearing

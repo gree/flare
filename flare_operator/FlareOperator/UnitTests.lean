@@ -497,6 +497,12 @@ def checkStatsObservation (ctx : Ctx) : IO Unit := do
       && (selfHealComparand threeState 1 (some [])).isNone)
   check ctx "self-heal comparand (review of 7738d8f): an unavailable repair ledger gives no comparand, with or without a repair it might hold (fail closed)"
     ((selfHealComparand state 0 none).isNone && (selfHealComparand threeState 0 none).isNone)
+  check ctx "self-heal successor gate (review of 698d77b): unavailable ledger → not clean; its own repair → not clean; another replica's repair → clean (a clean comparand exists); no repairs → clean"
+    (successorRepairClean none sk == false
+      && successorRepairClean (some [sk]) sk == false
+      && successorRepairClean (some ["n2:12121"]) sk == true
+      && (selfHealComparand threeState 0 (some ["n2:12121"])).map (·.1) == some sk
+      && successorRepairClean (some []) sk == true)
 
 def okB : Except String Unit → Bool | .ok _ => true | .error _ => false
 

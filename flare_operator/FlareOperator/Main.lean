@@ -3982,10 +3982,10 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
     let mut maxKeyGap : Float := 0.0
     for (mKey, mNode) in finalState.nodeMap do
       if mNode.role == FlareRole.Master && mNode.state == FlareState.Active then
-        -- an Active slave of the same partition to compare against / promote
-        match finalState.nodeMap.find? (fun kv =>
-            kv.2.role == FlareRole.Slave && kv.2.state == FlareState.Active
-              && kv.2.partition == mNode.partition) with
+        -- an Active slave of the same partition to compare against / promote,
+        -- none with a replica repair pending (it missed the master's writes)
+        let repairKeys := (← ledgerRef.get).entries.filterMap (·.nodeKey)
+        match StatsObservation.selfHealComparand finalState mNode.partition repairKeys with
         | some (sKey, sNode) =>
           let mOut ← Bridge.queryPodStats (extractPodName mNode.serverName) ns "stats"
           let sOut ← Bridge.queryPodStats (extractPodName sNode.serverName) ns "stats"
@@ -4055,7 +4055,14 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
                 let sNow := match freshS with | .ok o => StatsObservation.parseCurrItems o | .error _ => .unknown
                 let dataBearing := match sNow with | .known n => if n > 0 then [sKey] else [] | .unknown => []
                 let verdictNow := StatsObservation.emptyMasterVerdict mNow sNow
+                -- the repair ledger re-read AFTER the fresh stats: a repair
+                -- opened for the successor in this pass (its drops counted)
+                -- makes it no successor (4a52e0d empty-source)
+                let repairNow := (← ledgerRef.get).entries.filterMap (·.nodeKey)
+                if repairNow.contains sKey then
+                  IO.eprintln s!"[flare-operator] EMPTY-MASTER SELF-HEAL: successor {sKey} has a replica repair pending (it missed the master's writes); not deleting {mPod}"
                 let successorOk := StatsObservation.successorStillValid liveState mKey sKey dataBearing
+                  && !repairNow.contains sKey
                 -- SAF-10c: if the survivor is a continuous-replication
                 -- follower, it must be proven current from the SAME fresh
                 -- stats (following the master's history, fresh, within the

@@ -151,6 +151,19 @@ def successorStillValid (state : FlareClusterState) (masterKey slaveKey : String
     dataBearing.contains slaveKey
   | _, _ => false
 
+/-- The slave the empty-master check compares against and would hand the
+    partition to: an Active slave of `partition` with no replica repair
+    pending (`repairKeys`, the repair ledger's node keys). A slave under
+    repair missed writes the master took (4a52e0d empty-source: deletes were
+    dropped towards it, it still held the keys, and the self-heal deleted
+    the master that had legitimately emptied, taking it as the data-bearing
+    copy); it is neither evidence that the master lost data nor a successor. -/
+def selfHealComparand (state : FlareClusterState) (partition : Int) (repairKeys : List String)
+    : Option (String × FlareNode) :=
+  state.nodeMap.find? fun kv =>
+    kv.2.role == FlareRole.Slave && kv.2.state == FlareState.Active
+      && kv.2.partition == partition && !repairKeys.contains kv.1
+
 /-- The final gate before deleting an empty master's pod (SAF-06). Every
     input is a re-check made AFTER the fresh stats reads, so the decision
     rests on the state the delete will act on, not on the streak's snapshot:

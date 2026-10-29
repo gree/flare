@@ -485,6 +485,16 @@ def checkStatsObservation (ctx : Ctx) : IO Unit := do
     { state with nodeMap := [(mk, node .Slave .Active 0 "n0.svc"), (sk, node .Slave .Active 0 "n1.svc")] }
   check ctx "successor INVALID when the target is no longer an Active master (leadership lost)"
     (successorStillValid noMaster mk sk [sk] == false)
+  -- 4a52e0d empty-source: a slave under replica repair missed the master's
+  -- writes (deletes dropped towards it); it is no comparand / successor
+  let threeState : FlareClusterState :=
+    { state with nodeMap := [(mk, node .Master .Active 0 "n0.svc"), (sk, node .Slave .Active 0 "n1.svc"),
+                             ("n2:12121", node .Slave .Active 0 "n2.svc")] }
+  check ctx "self-heal comparand: a slave with a replica repair pending is skipped; another clean slave is taken; none when all are under repair"
+    ((selfHealComparand state 0 []).map (·.1) == some sk
+      && (selfHealComparand state 0 [sk]).isNone
+      && (selfHealComparand threeState 0 [sk]).map (·.1) == some "n2:12121"
+      && (selfHealComparand threeState 1 []).isNone)
 
 def okB : Except String Unit → Bool | .ok _ => true | .error _ => false
 

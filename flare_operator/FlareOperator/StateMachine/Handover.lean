@@ -365,6 +365,16 @@ def retryable (cfg : Config) (e : Entry) : Bool :=
   e.phase == .aborted && !e.noRollback && e.attempt < cfg.maxAttempts
     && (e.v1.isNone || e.vBack.isSome)
 
+/-- A retry that is due finds no successor the handover accepts: the attempt
+    is used up as aborted without sending a map (3dcfc5c S9: the cut kept
+    the replica's history unvalidated, no attempt 3 was opened, and the
+    retryable entry held the drain with no end). After the last attempt the
+    one-map drain takes the master, as after any exhausted handover. -/
+def noSuccessorAttempt (e : Entry) (now : Nat) : Entry :=
+  { e with attempt := e.attempt + 1, phase := .aborted, v1 := none, v2 := none, vBack := none,
+           drainProven := false, successorBinding := "", startedMs := now, phaseMs := now,
+           reason := s!"attempt {e.attempt + 1}: no replica the handover accepts (eligible, complete binding) when the retry was due" }
+
 /-- Old masters the one-map drain must leave alone: their handover is in
     progress (requested … promoting), or aborted and still to be retried.
     Once the attempts are used up the drain gets the master back (the old

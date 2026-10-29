@@ -683,7 +683,14 @@ private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterSta
               led := Handover.upsert led { partition := pIdx, oldMaster := k, successor := succ,
                                            oldUid := p.uid, attempt, startedMs := now, phaseMs := now }
               IO.eprintln s!"[flare-operator] HANDOVER requested: partition {pIdx} master {k} is Terminating; successor {succ}{if retry then s!" (attempt {attempt} of {cfg.maxAttempts}, after: {(prev.map (·.reason)).getD ""})" else ""}"
-            | none => pure ()
+            | none =>
+              -- a due retry with no acceptable successor uses up its attempt
+              -- (else the retryable entry holds the drain indefinitely)
+              if retry then
+                if let some e := prev then
+                  let e' := Handover.noSuccessorAttempt e now
+                  led := Handover.upsert led e'
+                  IO.eprintln s!"[flare-operator] HANDOVER p{pIdx} {k}: retry due, no replica the handover accepts -> aborted after 0 ms without a map (attempt {e'.attempt} of {cfg.maxAttempts}){if Handover.retryable cfg e' then "" else "; attempts used up, the one-map drain applies"}"
           | none => pure ()
     | none => pure ()
   -- step. A handover in transit (V1 sent, not yet promoted or rolled back)

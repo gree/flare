@@ -740,7 +740,9 @@ def abortExhaustTest (c : Ctx) : IO TestResult := do
     let count := fun (l n : String) => (l.splitOn n).length - 1
     -- an attempt ends in an abort from any phase: attempt 1 from draining,
     -- 2 and 3 from requested (the R3 precheck never demotes towards a copy
-    -- that cannot re-validate while it is cut; 998dc30 S9)
+    -- that cannot re-validate while it is cut; 998dc30 S9), or, when no
+    -- replica is acceptable as the retry falls due, as an abort without a
+    -- map (3dcfc5c S9: attempt 3 was never opened and the drain was held)
     let abortMark := "-> aborted after"
     let done ← waitForCondition "three handover attempts aborted, then the one-map drain took the master" 170 do
       let l ← opLogs ()

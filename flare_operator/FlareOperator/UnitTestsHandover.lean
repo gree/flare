@@ -220,6 +220,14 @@ def results : List (String × Bool) := Id.run do
               !retryable cfg ehs && drainHeldKeys { entries := [ehs] } == [])]
   r := r ++ [("handover: an abort before any map was sent is retryable (nothing to roll back)",
               retryable cfg e1c)]
+  -- 3dcfc5c S9: a retry due with no acceptable successor uses up its
+  -- attempt, so the drain is not held without end
+  let ns1 := noSuccessorAttempt { eas with attempt := 1 } 9000
+  let ns2 := noSuccessorAttempt ns1 9500
+  r := r ++ [("handover (3dcfc5c S9): a due retry without an acceptable successor is an abort without a map that uses up its attempt; after the last the drain gets the master back",
+              ns1.attempt == 2 && ns1.phase == .aborted && ns1.v1.isNone && ns1.phaseMs == 9000
+                && retryable cfg ns1 && drainHeldKeys { entries := [ns1] } == ["m:12121"]
+                && ns2.attempt == cfg.maxAttempts && !retryable cfg ns2 && drainHeldKeys { entries := [ns2] } == [])]
   r := r ++ [("handover: the attempt survives the JSON round trip",
               (Ledger.fromJson? ({ entries := [{ eas with attempt := 2 }] } : Ledger).toJson).map (·.entries.map (·.attempt)) == some [2])]
   -- the commit gate: `lagging` (re-validating while the partition has only

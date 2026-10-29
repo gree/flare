@@ -464,6 +464,12 @@ initialize rollingHandoverRef : IO.Ref (List (String × String)) ← IO.mkRef []
     in `requested` logs it when it changes, not on every tick (review of
     644b3b8). -/
 initialize handoverHeldLogRef : IO.Ref (List (Nat × String)) ← IO.mkRef []
+/-- Active masters whose pod was NOT Terminating when this pass's handover
+    step read the pods. The FSM reads the pods again later in the pass; a
+    master deleted in between must not be taken by the one-map drain before
+    the handover has seen it (CI 40862342948, S8: the delete landed between
+    the two reads and the drain promoted the successor with no handover). -/
+initialize handoverSeenAliveRef : IO.Ref (List String) ← IO.mkRef []
 initialize handoverLoadedRef : IO.Ref Bool ← IO.mkRef false
 initialize handoverDirtyRef : IO.Ref Bool ← IO.mkRef false
 /-- a handover is running: the leader loop does not wait the full interval -/
@@ -598,6 +604,8 @@ private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterSta
     (repairLed : ReplicaRepair.Ledger) (publish : String → IO Bool)
     (commitPromote : Option (String × String) → FlareClusterState → IO Bool)
     (route : IO Unit) (renew : IO Bool) : IO (List String) := do
+  -- set below from this pass's pod read; an early return leaves it empty
+  handoverSeenAliveRef.set []
   if !(← handoverLoadedRef.get) then
     match ← Bridge.readHandovers crName ns with
     | .ok l =>
@@ -623,6 +631,9 @@ private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterSta
   let state0 ← stateRef.get
   let mut led := led0
   let repairDests0 := repairLed.entries.filterMap (·.nodeKey)
+  handoverSeenAliveRef.set ((pods.filter fun p => !p.terminating).filterMap fun p =>
+    let k := p.toNodeKey
+    if (state0.lookupNode k).any (fun n => n.role == FlareRole.Master && n.state == FlareState.Active) then some k else none)
   -- planned handovers still wanted: the same pod, still the Active master,
   -- and its handover not given up
   -- (modify: the node guard adds to it from the webhook's thread)
@@ -2063,7 +2074,13 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       -- Topology for zone-aware placement; [] on unlabeled clusters.
       let nodeZones ← Bridge.listNodeZones
       -- Terminating (deletionTimestamp) pods → graceful drain in the FSM.
-      let termKeys := Bridge.terminatingPodKeys pods
+      -- a master the handover step saw alive this pass is not Terminating to
+      -- the FSM until the next pass, when its handover has started
+      let seenAlive ← handoverSeenAliveRef.get
+      let lateMasters := (Bridge.terminatingPodKeys pods).filter seenAlive.contains
+      if !lateMasters.isEmpty then
+        IO.eprintln s!"[flare-operator] HANDOVER: master(s) {lateMasters} became Terminating after this pass's handover step; the drain leaves them to the next pass's handover"
+      let termKeys := (Bridge.terminatingPodKeys pods).filter (!lateMasters.contains ·)
       -- Data-bearing probe (curr_items > 0 per pod) for the masterless
       -- refill's empty-master guard. GATED: per-pod execs cost seconds on a
       -- loaded node, and running them EVERY tick stretched the reconcile

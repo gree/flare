@@ -178,6 +178,18 @@ def drainClean (e : Entry) (o : Obs) : Bool :=
   | some b0, some b, some d0, some d, some f0, some f => b0 == b && d <= d0 && f <= f0
   | _, _, _, _, _, _ => false
 
+/-- The slaves of a partition that may succeed `oldMaster` before their own
+    precheck (R3 eligible, complete binding) is read: an Active Slave of the
+    partition in the map, its pod Ready and not Terminating, no replica
+    repair pending. Map order. The handover's per-tick successor check and
+    the successor picker share it (review of 92a73e6: the picker ignored the
+    repair ledger and kept choosing a slave the check refused). -/
+def successorCandidates (s : FlareClusterState) (slaves : List String) (partIdx : Int) (oldMaster : String)
+    (readyKeys repairDests : List String) : List String :=
+  slaves.filter fun k =>
+    k != oldMaster && readyKeys.contains k && !repairDests.contains k
+      && (s.lookupNode k).any fun n => n.role == FlareRole.Slave && n.partition == partIdx && n.state == FlareState.Active
+
 def allApplied (vs : List (String × Option Nat)) (v : Nat) : Bool :=
   !vs.isEmpty && vs.all fun (_, r) => match r with | some x => x >= v | none => false
 

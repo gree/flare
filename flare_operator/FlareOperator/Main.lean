@@ -537,15 +537,16 @@ private def handoverSuccessorOk (cs : FlareClusterState) (k podUid : String) (re
     other one was ready (1f92e17 copy-identity 2: the old master's pod was
     gone before the restarted one read eligible). -/
 private def pickHandoverSuccessor (cs : FlareClusterState) (part : FlarePartition) (partIdx : Int)
-    (oldMaster : String) (pods : List Bridge.PodInfo) (ns : String) : IO (Option String) := do
-  for k in part.slaves do
-    if k == oldMaster then continue
-    let some n := cs.lookupNode k | continue
-    if n.role != FlareRole.Slave || n.partition != partIdx || n.state != FlareState.Active then continue
-    let some sp := pods.find? fun p => p.toNodeKey == k && p.ready && !p.terminating | continue
+    (oldMaster : String) (pods : List Bridge.PodInfo) (repairDests : List String) (ns : String) : IO (Option String) := do
+  let readyKeys := (pods.filter fun p => p.ready && !p.terminating).map Bridge.PodInfo.toNodeKey
+  let cands := Handover.successorCandidates cs part.slaves partIdx oldMaster readyKeys repairDests
+  for k in cands do
+    let some sp := pods.find? fun p => p.toNodeKey == k | continue
     let .ok out ← Bridge.queryPodStats sp.name ns "stats" | continue
     if ← handoverSuccessorOk cs k sp.uid (some out) then return some k
-  return K8sReconciler.findActiveSuccessor cs part partIdx
+  -- none accepted now: the first candidate (the handover waits on it in
+  -- `requested` and re-picks), else the map's first Active slave
+  return cands.head? <|> K8sReconciler.findActiveSuccessor cs part partIdx
 
 /-- The pod UID, boot id and copy id of a reading, as the handover ledger
     records its successor's (Handover.Entry.successorBinding). -/
@@ -617,6 +618,7 @@ private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterSta
   let now ← IO.monoMsNow
   let state0 ← stateRef.get
   let mut led := led0
+  let repairDests0 := repairLed.entries.filterMap (·.nodeKey)
   -- planned handovers still wanted: the same pod, still the Active master,
   -- and its handover not given up
   -- (modify: the node guard adds to it from the webhook's thread)
@@ -644,7 +646,7 @@ private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterSta
         if prev.isNone || retry then
           match state0.partitionMap.find? (fun (i, _) => i == pIdx) with
           | some (_, part) =>
-            match ← pickHandoverSuccessor state0 part n.partition k pods ns with
+            match ← pickHandoverSuccessor state0 part n.partition k pods repairDests0 ns with
             | some succ =>
               let attempt := (prev.map (·.attempt + 1)).getD 1
               led := Handover.upsert led { partition := pIdx, oldMaster := k, successor := succ,
@@ -731,11 +733,9 @@ private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterSta
           let b := PromotionEvidence.bindingOf (some sp.uid) (some out)
           if b.complete then some (handoverBinding b) else none
         | _, _ => none
-      let succEligible := match st.lookupNode e.successor, succPod with
-        | some n, some sp =>
-          n.role == FlareRole.Slave && n.state == FlareState.Active && n.partition == Int.ofNat e.partition
-            && sp.ready && !sp.terminating && !repairDests.contains e.successor
-        | _, _ => false
+      let readyNow := (pods.filter fun p => p.ready && !p.terminating).map Bridge.PodInfo.toNodeKey
+      let succEligible := (Handover.successorCandidates st [e.successor] (Int.ofNat e.partition) e.oldMaster
+        readyNow repairDests).contains e.successor
       let obs : Handover.Obs := {
         nowMs := now, successorEligible := succEligible, oldSameProcess,
         oldMapVersion := oldOut.bind (statNat · "node_map_version"),
@@ -751,7 +751,7 @@ private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterSta
       -- Active slave the precheck accepts takes its place (nothing was sent)
       if e.phase == .requested && (!succEligible || !succR3 || succBinding.isNone) then
         if let some (_, part) := st.partitionMap.find? (fun (i, _) => i == e.partition) then
-          if let some alt ← pickHandoverSuccessor st part (Int.ofNat e.partition) e.oldMaster pods ns then
+          if let some alt ← pickHandoverSuccessor st part (Int.ofNat e.partition) e.oldMaster pods repairDests ns then
             if alt != e.successor && (← handoverSuccessorOk st alt ((pods.find? (·.toNodeKey == alt)).map (·.uid) |>.getD "") (← podStatsOf alt ns)) then
               IO.eprintln s!"[flare-operator] HANDOVER p{e.partition}: successor {e.successor} is not accepted now ({succCls.label}); {alt} is, and takes its place"
               out := { entries := out.entries ++ [{ e with successor := alt }] }

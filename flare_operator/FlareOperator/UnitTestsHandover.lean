@@ -69,6 +69,19 @@ def results : List (String × Bool) := Id.run do
   r := r ++ [("handover: the same binding before V2 → V2 sent", ep2.phase == .promoting && ap2 == .send)]
   r := r ++ [("handover: the successor binding survives the ledger JSON",
               (Entry.fromJson? (Entry.toJson e1)).map (·.successorBinding) == some "u1|b1|c1")]
+  -- review of 92a73e6: the picker and the per-tick check share one candidate
+  -- predicate — a repair-pending first slave is skipped for a healthy second
+  let three : FlareClusterState :=
+    { nodeMap := [("m:12121", node "m" .Master .Active 0), ("s:12121", node "s" .Slave .Active 0),
+                  ("t:12121", node "t" .Slave .Active 0), ("u:12121", node "u" .Slave .Prepare 0),
+                  ("x:12121", node "x" .Slave .Active 1)],
+      partitionMap := [(0, { master := some "m:12121", slaves := ["s:12121", "t:12121", "u:12121"] })] }
+  let all := ["s:12121", "t:12121", "u:12121", "x:12121", "m:12121"]
+  r := r ++ [("handover: successor candidates skip a slave with a replica repair pending (the healthy second one remains)",
+              successorCandidates three ["s:12121", "t:12121", "u:12121"] 0 "m:12121" all ["s:12121"] == ["t:12121"])]
+  r := r ++ [("handover: successor candidates are Active slaves of the partition, Ready, in map order (not Prepare, not another partition, not the old master)",
+              successorCandidates three ["s:12121", "t:12121", "u:12121", "x:12121", "m:12121"] 0 "m:12121" all [] == ["s:12121", "t:12121"]
+                && successorCandidates three ["s:12121", "t:12121"] 0 "m:12121" ["t:12121"] [] == ["t:12121"])]
   -- V1: old master master/down, successor still slave; blocked from refill
   let e1s := recordSent e1 42
   let s1 := apply pair e1s

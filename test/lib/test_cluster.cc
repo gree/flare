@@ -25,6 +25,7 @@
 
 #include <cppcutter.h>
 #include "op_set.h"
+#include "op_get.h"
 
 #include <fstream>
 
@@ -602,6 +603,98 @@ namespace test_cluster
 		// without W (0) it fails at once, as before
 		cluster.set_master_wait_ms(0);
 		run_ppw(&a);
+		cut_assert_equal_int(cluster::proxy_request_error_partition, a.result);
+		cut_assert(a.ms < 200, cut_message("W off still waited %ld ms", a.ms));
+	}
+
+	struct ppr_arg {
+		cluster_test* c;
+		std::string key;
+		int result;
+		long ms;
+		int done;
+	};
+
+	static void* run_ppr(void* a) {
+		ppr_arg* x = static_cast<ppr_arg*>(a);
+		op_get o(shared_connection(), x->c, NULL);
+		storage::entry e;
+		e.key = x->key;
+		shared_queue_proxy_read q;
+		const long t0 = now_ms();
+		x->result = x->c->pre_proxy_read(&o, e, NULL, q);
+		x->ms = now_ms() - t0;
+		st(&x->done, 1);
+		return NULL;
+	}
+
+	// W for reads (998dc30 copy-identity 11): a slave whose copy is not
+	// eligible forwards reads to the master; while the map names none (a
+	// handover's demote map) the read waits for the next map instead of
+	// failing as "no partition" (answered as a miss). The map that ends the
+	// wait names a master again; the read is then decided from the start and
+	// forwarded (here to an address with no transport: an enqueue error, not
+	// the partition error). Checks after the join, as for the write.
+	void test_a_read_waits_for_a_master_while_the_partition_has_none()
+	{
+		const std::string _tmp_dir = tmp_dir + std::string("/read_master_wait");
+		mkdir(_tmp_dir.c_str(), 0700);
+		cluster_test cluster(_tmp_dir);
+		cluster._type = cluster::type_node;
+		cluster.set_master_wait_ms(5000);
+		uint64_t ver = cluster.get_node_map_version() + 10;
+		vector<cluster::node> v;
+		v.push_back(mk("old", 12121, cluster::role_master, cluster::state_down, 0));
+		v.push_back(mk("localhost", 11211, cluster::role_slave, cluster::state_active, 0));
+		cppcut_assert_equal(0, cluster.reconstruct_node(v, ver));
+		const uint64_t waited0 = stats_object->get_reads_waited_for_master();
+		ppr_arg a;
+		a.c = &cluster;
+		a.key = "k";
+		a.result = -100;
+		st(&a.done, 0);
+		pthread_t t;
+		cut_assert_equal_int(0, pthread_create(&t, NULL, run_ppr, &a));
+		usleep(300 * 1000);
+		const int done_early = ld(&a.done);
+		v[0] = mk("old", 12121, cluster::role_master, cluster::state_active, 0);
+		const int rc = cluster.reconstruct_node(v, ++ver);
+		const bool finished = wait_flag(&a.done, 5000);
+		if (!finished) {
+			cluster.set_master_wait_ms(0);
+		}
+		pthread_join(t, NULL);
+		cut_assert_equal_int(0, done_early, cut_message("the read did not wait for a master"));
+		cppcut_assert_equal(0, rc);
+		cut_assert_true(finished);
+		cut_assert(a.result != cluster::proxy_request_error_partition, cut_message("the read failed as no partition after the master came back (%d)", a.result));
+		cut_assert(a.ms >= 250, cut_message("answered after %ld ms", a.ms));
+		cut_assert_equal_int(1, (int)(stats_object->get_reads_waited_for_master() - waited0));
+	}
+
+	// ... and fails with the partition error when no master comes within the
+	// wait; with W off (0) at once, as before
+	void test_a_read_waiting_for_a_master_fails_at_the_bound()
+	{
+		const std::string _tmp_dir = tmp_dir + std::string("/read_master_wait_bound");
+		mkdir(_tmp_dir.c_str(), 0700);
+		cluster_test cluster(_tmp_dir);
+		cluster._type = cluster::type_node;
+		cluster.set_master_wait_ms(400);
+		uint64_t ver = cluster.get_node_map_version() + 10;
+		vector<cluster::node> v;
+		v.push_back(mk("old", 12121, cluster::role_master, cluster::state_down, 0));
+		v.push_back(mk("localhost", 11211, cluster::role_slave, cluster::state_active, 0));
+		cppcut_assert_equal(0, cluster.reconstruct_node(v, ver));
+		ppr_arg a;
+		a.c = &cluster;
+		a.key = "k";
+		st(&a.done, 0);
+		run_ppr(&a);
+		cut_assert_equal_int(cluster::proxy_request_error_partition, a.result);
+		cut_assert(a.ms >= 350 && a.ms < 2000, cut_message("failed after %ld ms (bound 400)", a.ms));
+		cluster.set_master_wait_ms(0);
+		run_ppr(&a);
 		cut_assert_equal_int(cluster::proxy_request_error_partition, a.result);
 		cut_assert(a.ms < 200, cut_message("W off still waited %ld ms", a.ms));
 	}

@@ -1168,6 +1168,27 @@ namespace {
 	}
 }
 
+/**
+ *	a read that has no master to go to: wait (once per read, up to
+ *	_master_wait_ms in all) for the next map; true = decide the read again
+ */
+bool cluster::_read_wait_for_master(uint64_t generation, bool& waiting, uint64_t& deadline, int n, const string& key) {
+	if (this->_master_wait_ms <= 0) {
+		return false;
+	}
+	const uint64_t now = monotonic_ms();
+	if (!waiting) {
+		waiting = true;
+		deadline = now + (uint64_t)this->_master_wait_ms;
+		stats_object->increment_reads_waited_for_master();
+	}
+	if (now >= deadline || !this->wait_map_change(generation, deadline)) {
+		log_warning("read: no master for partition %d within %d msec (key=%s) -> error", n, this->_master_wait_ms, key.c_str());
+		return false;
+	}
+	return true;
+}
+
 bool cluster::wait_map_change(uint64_t seen, uint64_t deadline_ms) {
 	struct timespec ts;
 	ts.tv_sec = deadline_ms / 1000;
@@ -1783,6 +1804,17 @@ cluster::proxy_request cluster::pre_proxy_read(op_proxy_read* op, storage::entry
 		}
 	}
 
+	// W for reads (plan: "writes to a partition with no master, and reads
+	// sent to its master, wait for a map that names one"): a read that would
+	// fail only because the partition has no master in the map (a planned
+	// handover between its demote and promote maps) waits for the next map,
+	// up to _master_wait_ms, and is decided again from the start. Answered as
+	// a miss instead, a key that exists looked absent for the whole handover
+	// (998dc30 copy-identity 11: ~4.5 s of misses on both slaves).
+	uint64_t read_wait_deadline = 0;
+	bool read_waiting = false;
+read_retry:
+	const uint64_t read_generation = this->get_map_generation();
 	partition p;
 	bool dummy;
 	int n = this->_determine_partition(e, p, false, dummy);
@@ -1832,6 +1864,9 @@ cluster::proxy_request cluster::pre_proxy_read(op_proxy_read* op, storage::entry
 
 	// select one (rand() will do)
 	if (p.balance.size() == 0 && !follow_proxy_to_master && !source_gated) {
+		if (p.master.node_key.empty() && this->_read_wait_for_master(read_generation, read_waiting, read_wait_deadline, n, e.key)) {
+			goto read_retry;
+		}
 		log_err("no node is available for this partition (all balances are set to 0)", 0);
 		if (!read_trace_prefix().empty()) this->_trace_read(e.key, conn, via, "error", "no_balance", p, n, "", describe_follow(follow_read ? &follow_seen : NULL));
 		return proxy_request_error_partition;
@@ -1843,6 +1878,9 @@ cluster::proxy_request cluster::pre_proxy_read(op_proxy_read* op, storage::entry
 		// started with), never another replica
 		node_key = this->get_partition_master_key(n);
 		if (node_key.empty() || node_key == this->_node_key) {
+			if (this->_read_wait_for_master(read_generation, read_waiting, read_wait_deadline, n, e.key)) {
+				goto read_retry;
+			}
 			if (!read_trace_prefix().empty()) this->_trace_read(e.key, conn, via, "error", "source_unverified_no_master", p, n, "", describe_follow(follow_read ? &follow_seen : NULL) + describe_source(read_source));
 			return proxy_request_error_partition;
 		}
@@ -1850,6 +1888,9 @@ cluster::proxy_request cluster::pre_proxy_read(op_proxy_read* op, storage::entry
 		// Do not select this stale replica again from an old balance map.
 		// Keep its Slave role so the follower can continue catching up.
 		if (p.master.node_key.empty()) {
+			if (this->_read_wait_for_master(read_generation, read_waiting, read_wait_deadline, n, e.key)) {
+				goto read_retry;
+			}
 			if (!read_trace_prefix().empty()) this->_trace_read(e.key, conn, via, "error", "follow_guard_no_master", p, n, "", describe_follow(follow_read ? &follow_seen : NULL));
 			return proxy_request_error_partition;
 		}

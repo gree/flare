@@ -72,6 +72,7 @@ protected:
 	// waits ended (a master came / the wait timed out with an error)
 	AtomicCounter _writes_waiting_for_master;
 	AtomicCounter _master_waits_ok;
+	AtomicCounter _reads_waited_for_master;
 	AtomicCounter _master_waits_timeout;
 	// The same drops broken down BY DESTINATION, so a controller can tell
 	// WHICH replica is now behind and resync only that one. The aggregate
@@ -204,6 +205,8 @@ public:
 	inline uint64_t get_writes_waiting_for_master() { return this->_writes_waiting_for_master.fetch(); };
 	inline uint64_t get_master_waits_ok() { return this->_master_waits_ok.fetch(); };
 	inline uint64_t get_master_waits_timeout() { return this->_master_waits_timeout.fetch(); };
+	inline void increment_reads_waited_for_master() { this->_reads_waited_for_master.incr(); };
+	inline uint64_t get_reads_waited_for_master() { return this->_reads_waited_for_master.fetch(); };
 	int increment_proxy_write_dropped(const string& dest);
 	bool diag_enabled() const { return this->_diag_enabled; };
 	void diag_incr(const string& name);

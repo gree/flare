@@ -52,6 +52,7 @@ stats::stats():
 		_requests_in_progress(0),
 		_writes_waiting_for_master(0),
 		_master_waits_ok(0),
+		_reads_waited_for_master(0),
 		_master_waits_timeout(0),
 		_reconstruction_started(0),
 		_reconstruction_completed(0),

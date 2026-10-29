@@ -288,6 +288,7 @@ public:
 	// wait until the map generation moves past `seen` or the monotonic
 	// `deadline_ms` passes; true = it moved
 	bool wait_map_change(uint64_t seen, uint64_t deadline_ms);
+	bool _read_wait_for_master(uint64_t generation, bool& waiting, uint64_t& deadline, int n, const string& key);
 	// enter only if the section is free of a queued swap (tryrdlock); false =
 	// not entered. Used by the tests to observe the swap's priority.
 	bool write_section_try_enter();

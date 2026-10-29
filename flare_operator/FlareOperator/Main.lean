@@ -460,6 +460,10 @@ initialize plannedHandoverRef : IO.Ref (List (String × String)) ← IO.mkRef []
 /-- Old masters rolling asked to hand over: rolling deletes them once their
     handover is done (they are a proxy then, holding no data). -/
 initialize rollingHandoverRef : IO.Ref (List (String × String)) ← IO.mkRef []
+/-- The last "NO promotable successor" line per partition: a handover held
+    in `requested` logs it when it changes, not on every tick (review of
+    644b3b8). -/
+initialize handoverHeldLogRef : IO.Ref (List (Nat × String)) ← IO.mkRef []
 initialize handoverLoadedRef : IO.Ref Bool ← IO.mkRef false
 initialize handoverDirtyRef : IO.Ref Bool ← IO.mkRef false
 /-- a handover is running: the leader loop does not wait the full interval -/
@@ -758,15 +762,25 @@ private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterSta
               -- the fast loop ticks again at once (the new successor is ready)
               transit := true
               continue
+      let mut heldMsg : Option String := none
       if e.phase == .requested && !succEligible then
         -- not even a candidate (replaced, not Ready, repair pending, not an
         -- Active slave) and no other slave accepted (the re-pick above):
         -- logged like the drain's own safe stop (CI 40858711976, copy-identity 13)
-        IO.eprintln s!"[flare-operator] CRITICAL: HANDOVER p{e.partition}: draining master {e.oldMaster} has NO promotable successor yet — {e.successor} is not an Active, Ready slave without a pending repair and no other slave is accepted; the master is kept (no demote)"
+        heldMsg := some s!"[flare-operator] CRITICAL: HANDOVER p{e.partition}: draining master {e.oldMaster} has NO promotable successor yet — {e.successor} is not an Active, Ready slave without a pending repair and no other slave is accepted; the master is kept (no demote)"
       else if e.phase == .requested && succEligible && !succR3 then
-        IO.eprintln s!"[flare-operator] CRITICAL: HANDOVER p{e.partition}: draining master {e.oldMaster} has NO promotable successor yet — {e.successor} reads {succCls.label}; the master is kept (no demote) until it reads eligible"
+        heldMsg := some s!"[flare-operator] CRITICAL: HANDOVER p{e.partition}: draining master {e.oldMaster} has NO promotable successor yet — {e.successor} reads {succCls.label}; the master is kept (no demote) until it reads eligible"
       else if e.phase == .requested && succEligible && succBinding.isNone then
-        IO.eprintln s!"[flare-operator] CRITICAL: HANDOVER p{e.partition}: draining master {e.oldMaster} has NO promotable successor yet — {e.successor} does not report a complete identity (pod UID, boot id, copy id); no lossless handover without it"
+        heldMsg := some s!"[flare-operator] CRITICAL: HANDOVER p{e.partition}: draining master {e.oldMaster} has NO promotable successor yet — {e.successor} does not report a complete identity (pod UID, boot id, copy id); no lossless handover without it"
+      -- logged once per change of the reason, per partition
+      let prevHeld := ((← handoverHeldLogRef.get).lookup e.partition)
+      match heldMsg with
+      | some m =>
+        if prevHeld != some m then
+          IO.eprintln m
+          handoverHeldLogRef.modify fun l => (e.partition, m) :: l.filter (·.1 != e.partition)
+      | none =>
+        if prevHeld.isSome then handoverHeldLogRef.modify (·.filter (·.1 != e.partition))
       let (e1, act) := Handover.step cfg e obs
       if e.phase == .requested && e1.phase == .demoting then
         let demoteBoot := (PromotionEvidence.bindingOf none succOut).bootId.getD "?"

@@ -204,15 +204,20 @@ def oldMasterCanHandOver (reply : Option String) : Bool :=
     let lines := (out.splitOn "\n").map fun l => (l.replace "\r" "").trim
     lines.contains "END" && lines.any (·.startsWith "STAT reconstruction_boot_id ")
       && lines.any (·.startsWith "STAT proxy_write_failed ")
+      && lines.any (·.startsWith "STAT proxy_write_in_flight ")
 
-/-- The old master's reply is complete and lacks those keys: a flared from an
-    older release (distinguished from an unreadable reply). -/
+/-- The old master's reply is complete and has NEITHER of the two forward
+    gauges this release always reports (proxy_write_in_flight,
+    proxy_write_failed): a flared from an older release. A reply with only
+    one of them, or without END, is not classified as older (it is a modern
+    reply that is incomplete: fail closed, wait) (review of 7ae666c). -/
 def oldMasterPredatesHandover (reply : Option String) : Bool :=
   match reply with
   | none => false
   | some out =>
     let lines := (out.splitOn "\n").map fun l => (l.replace "\r" "").trim
-    lines.contains "END" && !oldMasterCanHandOver reply
+    lines.contains "END" && !lines.any (·.startsWith "STAT proxy_write_failed ")
+      && !lines.any (·.startsWith "STAT proxy_write_in_flight ")
 
 def allApplied (vs : List (String × Option Nat)) (v : Nat) : Bool :=
   !vs.isEmpty && vs.all fun (_, r) => match r with | some x => x >= v | none => false

@@ -69,6 +69,12 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.serviceAccountName
+            {{- if .Values.legacyMasterSwitch }}
+            # accepted explicitly: masters on a flared from before the ordered
+            # handover are switched by the drain (NOT loss-free)
+            - name: FLARE_OPERATOR_LEGACY_MASTER_SWITCH
+              value: "allow"
+            {{- end }}
             {{- if .Values.nodeGuard.enabled }}
             - name: FLARE_NODE_GUARD
               value: "on"

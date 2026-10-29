@@ -944,6 +944,7 @@ private def runRolling (crName ns : String) (stateRef : IO.Ref FlareClusterState
     let reply ← podStatsOf c.nodeKey ns
     if Handover.oldMasterPredatesHandover reply then
       toHand := none
+      let allowed := (← IO.getEnv "FLARE_OPERATOR_LEGACY_MASTER_SWITCH") == some "allow"
       let mut safe := false
       if let some n := st.lookupNode c.nodeKey then
         if let some (_, part) := st.partitionMap.find? (fun (i, _) => Int.ofNat i == n.partition) then
@@ -952,7 +953,9 @@ private def runRolling (crName ns : String) (stateRef : IO.Ref FlareClusterState
             if safe then break
             if let some sp := pods.find? (·.toNodeKey == k) then
               safe ← handoverSuccessorOk st k sp.uid (← podStatsOf k ns)
-      d := if safe then
+      d := if !allowed then
+          Rolling.Decision.wait s!"master {c.name} runs a flared from before the ordered handover, which cannot be handed over without possible loss; it is not deleted until the operator's legacyMasterSwitch (FLARE_OPERATOR_LEGACY_MASTER_SWITCH=allow) accepts that"
+        else if safe then
           Rolling.Decision.delete c s!"master {c.name} runs a flared from before the ordered handover (no boot id / forward counters): deleted for the drain's promotion — NOT loss-free (the one-time upgrade from that release)"
         else Rolling.Decision.wait s!"master {c.name} runs a flared from before the ordered handover and no successor is accepted now; it is not deleted"
   if let some c := toHand then
@@ -1005,7 +1008,8 @@ private def nodeGuardAnswer (crName ns : String) (stateRef : IO.Ref FlareCluster
         let facts : NodeGuard.PodFacts := {
           nodeKey := key, uid := r.podUid, overrideUid := r.podAnnotation NodeGuard.overrideAnnotation,
           gracePeriod := r.gracePeriodSeconds, nodeName := r.podNodeName, terminating := r.podTerminating,
-          predatesHandover := legacyMaster }
+          predatesHandover := legacyMaster,
+          legacySwitchAllowed := (← IO.getEnv "FLARE_OPERATOR_LEGACY_MASTER_SWITCH") == some "allow" }
         -- the successor evidence is read now, only for a master's delete:
         -- the replica's pod Ready and not Terminating, R3 eligible in its
         -- own stats, no replica repair pending

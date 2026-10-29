@@ -425,10 +425,20 @@ cluster:
 # (grace period 0) of a flared pod that holds data, the delete of a master
 # with no caught-up replica to hand over to, and a StatefulSet scale-down
 # that removes ordinals still holding data. A graceful `kubectl delete pod`
-# of a master with a caught-up replica is allowed (the handover moves it).
+# of a master is refused first; the refusal starts its ordered handover and
+# the same delete passes once the handover is done (the pod is a proxy).
 # failurePolicy Fail: with no operator answering, those operations are
 # refused; the escape hatches are the pod annotation
 # flare.gree.net/delete-override=<pod uid> (audited) or enabled=false.
+# Masters whose flared predates the ordered handover (rc68 and older: no boot
+# id / forward counters) cannot be handed over without possible loss. By
+# default the operator does not replace them (rolling waits, the node guard
+# refuses their delete). true accepts that risk for the upgrade from such a
+# release: they are replaced by the drain's promotion (NOT loss-free), only
+# with a caught-up replica. Set it back to false once every pod runs this
+# release.
+legacyMasterSwitch: false
+
 nodeGuard:
   enabled: true
   tlsImage: alpine/socat:1.8.0.0

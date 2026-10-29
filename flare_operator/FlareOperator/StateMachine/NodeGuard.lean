@@ -81,6 +81,9 @@ structure PodFacts where
       boot id / forward counters), so it can never be handed over losslessly
       (Handover.oldMasterPredatesHandover) -/
   predatesHandover : Bool := false
+  /-- the operator is configured to accept that NOT loss-free switch
+      (legacyMasterSwitch, FLARE_OPERATOR_LEGACY_MASTER_SWITCH=allow) -/
+  legacySwitchAllowed : Bool := false
   deriving Repr
 
 /-- DELETE of the flared pod `pod`. `initialized` = the operator finished a
@@ -105,10 +108,12 @@ def podDelete (initialized : Bool) (s : FlareClusterState) (caughtUp : List Stri
       .deny s!"flare: a force delete (grace period 0) of a {roleName n.role} skips its preStop and the ordered handover, so acknowledged writes can be lost. Delete it without --force / --grace-period=0 (the operator hands a master over first), or annotate the pod {overrideAnnotation}=<its uid> to accept the risk explicitly"
     else if n.role == FlareRole.Master && !hasSuccessor s caughtUp n.partition pod.nodeKey then
       .deny s!"flare: this pod is the master of partition {n.partition} and no replica is caught up enough to take it over now (Active, Ready, eligible as a read source, no repair pending), so deleting it can lose the partition's master (and its data on tmpfs). Wait until a replica has caught up, or annotate the pod {overrideAnnotation}=<its uid> to accept the risk explicitly"
+    else if n.role == FlareRole.Master && pod.predatesHandover && pod.legacySwitchAllowed then
+      -- the one-time upgrade from a release before the handover, accepted
+      -- explicitly by the operator's configuration
+      .allow "a graceful delete of a master running a flared from before the ordered handover, with a caught-up replica, accepted by legacyMasterSwitch: the drain promotes it — NOT loss-free"
     else if n.role == FlareRole.Master && pod.predatesHandover then
-      -- the one-time upgrade from a release before the handover: refusing
-      -- would only wait for a handover that can never start
-      .allow "a graceful delete of a master running a flared from before the ordered handover, with a caught-up replica: the drain promotes it — NOT loss-free (the one-time upgrade from that release)"
+      .deny s!"flare: this pod is the master of partition {n.partition} and runs a flared from before the ordered handover, which cannot be handed over without possible loss. Set the operator's legacyMasterSwitch (FLARE_OPERATOR_LEGACY_MASTER_SWITCH=allow) to accept that for this upgrade, or annotate the pod {overrideAnnotation}=<its uid>"
     else if n.role == FlareRole.Master then
       -- review of 9756855 (TOCTOU): a delete is irreversible, and the
       -- successor read now can change before a handover that starts from the

@@ -1417,6 +1417,10 @@ def upgradeSuite : TestSuite := {
           -- Ready ~40 s before the replica rolled (60 s drain).
           let ns := upgradeCfg.«namespace»
           discard <| kubectl ["set", "image", s!"deployment/{upgradeCfg.operatorName}", "-n", ns, "flare-operator=flare-operator:test"]
+          -- the release procedure's explicit acceptance (legacyMasterSwitch):
+          -- rc56's master cannot be handed over losslessly, so without it the
+          -- operator would not replace it (review of 7ae666c, decision pending)
+          discard <| kubectl ["set", "env", s!"deployment/{upgradeCfg.operatorName}", "-n", ns, "FLARE_OPERATOR_LEGACY_MASTER_SWITCH=allow"]
           if !(← kubectlRolloutStatus s!"deployment/{upgradeCfg.operatorName}" ns 240) then
             return .fail "the operator did not roll to the build under test"
           let opUp ← waitForCondition "the new operator answers node sync" 120 do

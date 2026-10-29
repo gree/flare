@@ -726,6 +726,16 @@ Pod replacement is lossless when it goes through the operator:
   the delete is allowed. The delete never comes before the switch (a delete
   cannot be undone, and the replica could change in between).
 
+**Upgrading from rc68 or older.** A master whose flared predates the
+ordered handover (it reports no `proxy_write_in_flight` / `proxy_write_failed`)
+cannot be handed over without possible loss. By default the operator does not
+replace it: rolling waits (`ROLLING: waiting: master … runs a flared from before
+the ordered handover`) and the node guard refuses its delete. To accept the
+risk for this one upgrade, set `legacyMasterSwitch: true` (operator env
+`FLARE_OPERATOR_LEGACY_MASTER_SWITCH=allow`): such a master is then replaced by
+the drain's promotion, only while a caught-up replica exists, logged NOT
+loss-free. Set it back to false once every pod runs this release.
+
 The node-guard webhook (`nodeGuard.enabled`, default true) refuses what
 skips that path. The refusal message says why:
 

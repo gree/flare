@@ -647,6 +647,9 @@ public:
 	static bool validate_batch_rep(const rocksdb::WriteBatch& batch);
 	uint64_t get_repl_last_lsn();
 	uint64_t _get_repl_last_lsn_locked();
+	// Test only (NULL in production, one pointer test): called by get_repl_last_lsn
+	// between the _db NULL check and its use, to hold a reader inside that window.
+	static void (*_test_hook_reader_checked)();
 	// Durably overwrite the replication cursor (kReplLastLsnKey). Used to
 	// seed the cursor after a full-dump reconstruction so the next WAL
 	// sync can be incremental. Returns 0 on success, -1 on write failure.

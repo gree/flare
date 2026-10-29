@@ -1944,6 +1944,66 @@ void test_switch_to_staging_under_concurrent_readers() {
 	drop_rocksdb(s, wal_master_dir);
 }
 
+// Deterministic form of the above: hold a reader between its _db NULL check
+// and its use (test hook) for 300 ms and run the switch meanwhile. The switch
+// closes the handle under the whole-lock for write, so it must not finish
+// before the reader leaves; a lock-free reader lets it finish in the middle.
+static pthread_t hook_reader_thread;
+static volatile int hook_reader_inside = 0;
+static struct timespec hook_reader_end;
+
+static double ts_ms(const struct timespec& t) {
+	return t.tv_sec * 1000.0 + t.tv_nsec / 1e6;
+}
+
+static void switch_reader_hook() {
+	if (!pthread_equal(pthread_self(), hook_reader_thread) || hook_reader_inside) {
+		return;
+	}
+	hook_reader_inside = 1;
+	usleep(300 * 1000);
+}
+
+static void* held_reader_main(void* p) {
+	storage_rocksdb* s = static_cast<storage_rocksdb*>(p);
+	hook_reader_thread = pthread_self();
+	s->get_repl_last_lsn();
+	clock_gettime(CLOCK_MONOTONIC, &hook_reader_end);
+	return NULL;
+}
+
+void test_switch_to_staging_waits_for_a_reader_inside_the_handle() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	storage_set_string(s, "k", "old");
+	const string new_id = make_staging_copy(wal_master_dir, "held", "k", "new");
+
+	hook_reader_inside = 0;
+	pthread_t th;
+	hook_reader_thread = pthread_self();   // not the reader until it sets its own id
+	storage_rocksdb::_test_hook_reader_checked = switch_reader_hook;
+	pthread_create(&th, NULL, held_reader_main, s);
+	for (int i = 0; i < 5000 && !hook_reader_inside; i++) {
+		usleep(1000);
+	}
+	const int inside = hook_reader_inside;
+
+	const int r = s->switch_to_staging("held", new_id);
+	struct timespec switched;
+	clock_gettime(CLOCK_MONOTONIC, &switched);
+	pthread_join(th, NULL);
+	storage_rocksdb::_test_hook_reader_checked = NULL;
+	const string after = get_value(s, "k");
+	// clean up before asserting: a failed assertion must not leave the store
+	// open for the tests that follow
+	drop_rocksdb(s, wal_master_dir);
+
+	cut_assert_equal_int(1, inside);
+	cut_assert_equal_int(0, r);
+	// the switch returned only after the reader left the handle
+	cut_assert_operator_double(ts_ms(switched), >=, ts_ms(hook_reader_end));
+	cut_assert_equal_string("new", after.c_str());
+}
+
 // IN-PLACE RESTORE (docs/plan-inplace-restore-retention.md): the hook left
 // staging-restore-<ts> (RESTORED marker) named in RESTORE.switch; the open
 // switches it in and RETAINS the live copy, with no record (never reaped)

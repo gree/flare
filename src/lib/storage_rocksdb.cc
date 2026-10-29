@@ -5300,11 +5300,16 @@ uint64_t storage_rocksdb::get_repl_last_lsn() {
 	return v;
 }
 
+void (*storage_rocksdb::_test_hook_reader_checked)() = NULL;
+
 uint64_t storage_rocksdb::_get_repl_last_lsn_locked() {
 	string value;
 
 	if (this->_db == NULL) {
 		return 0;
+	}
+	if (_test_hook_reader_checked != NULL) {
+		_test_hook_reader_checked();
 	}
 
 	rocksdb::Status status = this->_db->Get(this->_read_options, kReplLastLsnKey, &value);

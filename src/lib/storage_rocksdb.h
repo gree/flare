@@ -650,6 +650,9 @@ public:
 	// Test only (NULL in production, one pointer test): called by get_repl_last_lsn
 	// between the _db NULL check and its use, to hold a reader inside that window.
 	static void (*_test_hook_reader_checked)();
+	// Test only (NULL in production): called by reap_expired between its scan
+	// and its deletes, with the whole-lock still held for read.
+	static void (*_test_hook_reap_scanned)();
 	// Durably overwrite the replication cursor (kReplLastLsnKey). Used to
 	// seed the cursor after a full-dump reconstruction so the next WAL
 	// sync can be incremental. Returns 0 on success, -1 on write failure.

@@ -1901,7 +1901,7 @@ void test_switch_to_staging_retains_the_old_copy() {
 // (CI 40729559672: flared died right after "copy closed" under load).
 struct switch_readers_arg {
 	storage_rocksdb* s;
-	volatile bool stop;
+	int stop;			// __atomic: set by the test thread, read by the readers
 };
 
 static void* switch_readers_main(void* p) {
@@ -1909,7 +1909,7 @@ static void* switch_readers_main(void* p) {
 	string last;
 	uint32_t scanned = 0, reaped = 0;
 	bool more = false;
-	while (!a->stop) {
+	while (!__atomic_load_n(&a->stop, __ATOMIC_ACQUIRE)) {
 		a->s->get_repl_last_lsn();
 		a->s->size();
 		a->s->get_bulk_chain();
@@ -1925,7 +1925,7 @@ void test_switch_to_staging_under_concurrent_readers() {
 	storage_set_string(s, "k", "old");
 	switch_readers_arg a;
 	a.s = s;
-	a.stop = false;
+	__atomic_store_n(&a.stop, 0, __ATOMIC_RELEASE);
 	pthread_t th[4];
 	for (int i = 0; i < 4; i++) {
 		pthread_create(&th[i], NULL, switch_readers_main, &a);
@@ -1936,7 +1936,7 @@ void test_switch_to_staging_under_concurrent_readers() {
 		const string new_id = make_staging_copy(wal_master_dir, at, "k", "new");
 		cut_assert_equal_int(0, s->switch_to_staging(at, new_id));
 	}
-	a.stop = true;
+	__atomic_store_n(&a.stop, 1, __ATOMIC_RELEASE);
 	for (int i = 0; i < 4; i++) {
 		pthread_join(th[i], NULL);
 	}
@@ -1948,25 +1948,27 @@ void test_switch_to_staging_under_concurrent_readers() {
 // and its use (test hook) for 300 ms and run the switch meanwhile. The switch
 // closes the handle under the whole-lock for write, so it must not finish
 // before the reader leaves; a lock-free reader lets it finish in the middle.
-static pthread_t hook_reader_thread;
-static volatile int hook_reader_inside = 0;
-static struct timespec hook_reader_end;
+// Only the reader thread marks itself (thread-local), so the switch's own
+// internal reads never stop in the hook. hook_reader_inside is __atomic.
+static __thread bool hook_is_held_reader = false;
+static int hook_reader_inside = 0;
+static struct timespec hook_reader_end;	// written by the reader, read after join
 
 static double ts_ms(const struct timespec& t) {
 	return t.tv_sec * 1000.0 + t.tv_nsec / 1e6;
 }
 
 static void switch_reader_hook() {
-	if (!pthread_equal(pthread_self(), hook_reader_thread) || hook_reader_inside) {
+	if (!hook_is_held_reader || __atomic_load_n(&hook_reader_inside, __ATOMIC_ACQUIRE)) {
 		return;
 	}
-	hook_reader_inside = 1;
+	__atomic_store_n(&hook_reader_inside, 1, __ATOMIC_RELEASE);
 	usleep(300 * 1000);
 }
 
 static void* held_reader_main(void* p) {
 	storage_rocksdb* s = static_cast<storage_rocksdb*>(p);
-	hook_reader_thread = pthread_self();
+	hook_is_held_reader = true;
 	s->get_repl_last_lsn();
 	clock_gettime(CLOCK_MONOTONIC, &hook_reader_end);
 	return NULL;
@@ -1977,15 +1979,14 @@ void test_switch_to_staging_waits_for_a_reader_inside_the_handle() {
 	storage_set_string(s, "k", "old");
 	const string new_id = make_staging_copy(wal_master_dir, "held", "k", "new");
 
-	hook_reader_inside = 0;
+	__atomic_store_n(&hook_reader_inside, 0, __ATOMIC_RELEASE);
 	pthread_t th;
-	hook_reader_thread = pthread_self();   // not the reader until it sets its own id
 	storage_rocksdb::_test_hook_reader_checked = switch_reader_hook;
 	pthread_create(&th, NULL, held_reader_main, s);
-	for (int i = 0; i < 5000 && !hook_reader_inside; i++) {
+	for (int i = 0; i < 5000 && !__atomic_load_n(&hook_reader_inside, __ATOMIC_ACQUIRE); i++) {
 		usleep(1000);
 	}
-	const int inside = hook_reader_inside;
+	const int inside = __atomic_load_n(&hook_reader_inside, __ATOMIC_ACQUIRE);
 
 	const int r = s->switch_to_staging("held", new_id);
 	struct timespec switched;
@@ -2002,6 +2003,79 @@ void test_switch_to_staging_waits_for_a_reader_inside_the_handle() {
 	// the switch returned only after the reader left the handle
 	cut_assert_operator_double(ts_ms(switched), >=, ts_ms(hook_reader_end));
 	cut_assert_equal_string("new", after.c_str());
+}
+
+// The expire reaper reads its candidates (key + version) and deletes them
+// version-equal. A copy switch between the two installs another copy that may
+// hold the same key at the same version, not expired (review of a8b9793): the
+// delete must not reach it. The hook holds the reaper between its scan and its
+// deletes for 300 ms while the test thread runs the switch.
+static int reap_hook_inside = 0;	// __atomic
+
+static void reap_scanned_hook() {
+	__atomic_store_n(&reap_hook_inside, 1, __ATOMIC_RELEASE);
+	usleep(300 * 1000);
+}
+
+struct reap_arg {
+	storage_rocksdb* s;
+	time_t now;
+	uint32_t reaped;
+	int rc;
+};
+
+static void* held_reaper_main(void* p) {
+	reap_arg* a = static_cast<reap_arg*>(p);
+	string last;
+	bool more = false;
+	uint32_t scanned = 0;
+	a->rc = a->s->reap_expired(a->now, 100, "", last, more, scanned, a->reaped, NULL);
+	return NULL;
+}
+
+void test_reap_does_not_delete_from_a_copy_switched_in_after_its_scan() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	const time_t now = stats_object->get_timestamp();
+	// live copy: k expired; staging copy: k not expired, at the same version
+	storage_set_string_expire(s, "k", "old", now - 10);
+	storage::entry live;
+	live.key = "k";
+	storage::result lr;
+	s->get(live, lr, storage::behavior_skip_timestamp);
+	const string new_id = make_staging_copy(wal_master_dir, "reap", "k", "new");
+
+	__atomic_store_n(&reap_hook_inside, 0, __ATOMIC_RELEASE);
+	storage_rocksdb::_test_hook_reap_scanned = reap_scanned_hook;
+	reap_arg a;
+	a.s = s;
+	a.now = now;
+	a.reaped = 0;
+	a.rc = -2;
+	pthread_t th;
+	pthread_create(&th, NULL, held_reaper_main, &a);
+	for (int i = 0; i < 5000 && !__atomic_load_n(&reap_hook_inside, __ATOMIC_ACQUIRE); i++) {
+		usleep(1000);
+	}
+	const int inside = __atomic_load_n(&reap_hook_inside, __ATOMIC_ACQUIRE);
+	const int r = s->switch_to_staging("reap", new_id);
+	pthread_join(th, NULL);
+	storage_rocksdb::_test_hook_reap_scanned = NULL;
+
+	storage::entry now_e;
+	now_e.key = "k";
+	storage::result nr;
+	s->get(now_e, nr);
+	const string after = get_value(s, "k");
+	drop_rocksdb(s, wal_master_dir);
+
+	cut_assert_equal_int(1, inside);
+	cut_assert_equal_int(0, r);
+	cut_assert_equal_int(0, a.rc);
+	cut_assert_equal_string("new", after.c_str());
+	// the switched-in entry has the scanned version, so only the copy binding
+	// (not the version check) kept it
+	cppcut_assert_equal(live.version, now_e.version);
+	cut_assert_equal_int(1, static_cast<int>(a.reaped));	// the old copy's k
 }
 
 // IN-PLACE RESTORE (docs/plan-inplace-restore-retention.md): the hook left

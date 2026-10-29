@@ -4005,9 +4005,14 @@ int storage_rocksdb::reap_expired(time_t now, uint32_t max_scan, const string& a
 	// blocking compaction from reclaiming space between chunks. A fresh
 	// iterator per chunk sees a slightly newer view each time, which is fine:
 	// reaping is idempotent and re-scanning a key is cheap.
-	// The scan runs under the whole-lock for read (a copy switch closes and
-	// reopens the handle under it for write); the deletes run after it is
-	// released because remove() takes the whole-lock itself.
+	// The scan AND the deletes run under one hold of the whole-lock for read:
+	// a copy switch closes and reopens the handle under it for write, so the
+	// candidates are deleted from the copy they were read from. Released
+	// between the two, a switch could install a copy holding the same key at
+	// the same version but not expired, and the version-equal delete would
+	// remove that valid entry (review of a8b9793). remove() takes the
+	// whole-lock for read again: the lock has default (reader-preferring)
+	// attributes, so the nested read lock does not wait on a queued switch.
 	vector<entry> expired;
 	pthread_rwlock_rdlock(&this->_mutex_wholelock);
 	if (this->_db == NULL) {
@@ -4063,7 +4068,9 @@ int storage_rocksdb::reap_expired(time_t now, uint32_t max_scan, const string& a
 	}
 
 	delete it;
-	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	if (_test_hook_reap_scanned != NULL) {
+		_test_hook_reap_scanned();
+	}
 
 	for (size_t i = 0; i < expired.size(); i++) {
 		// Delete only if the version is unchanged since we read the header
@@ -4087,6 +4094,7 @@ int storage_rocksdb::reap_expired(time_t now, uint32_t max_scan, const string& a
 			}
 		}
 	}
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
 	return 0;
 }
 
@@ -5301,6 +5309,7 @@ uint64_t storage_rocksdb::get_repl_last_lsn() {
 }
 
 void (*storage_rocksdb::_test_hook_reader_checked)() = NULL;
+void (*storage_rocksdb::_test_hook_reap_scanned)() = NULL;
 
 uint64_t storage_rocksdb::_get_repl_last_lsn_locked() {
 	string value;

@@ -77,6 +77,10 @@ structure PodFacts where
   nodeName : String := ""
   /-- metadata.deletionTimestamp is set -/
   terminating : Bool := false
+  /-- the pod's flared predates the ordered handover (an older release: no
+      boot id / forward counters), so it can never be handed over losslessly
+      (Handover.oldMasterPredatesHandover) -/
+  predatesHandover : Bool := false
   deriving Repr
 
 /-- DELETE of the flared pod `pod`. `initialized` = the operator finished a
@@ -101,6 +105,10 @@ def podDelete (initialized : Bool) (s : FlareClusterState) (caughtUp : List Stri
       .deny s!"flare: a force delete (grace period 0) of a {roleName n.role} skips its preStop and the ordered handover, so acknowledged writes can be lost. Delete it without --force / --grace-period=0 (the operator hands a master over first), or annotate the pod {overrideAnnotation}=<its uid> to accept the risk explicitly"
     else if n.role == FlareRole.Master && !hasSuccessor s caughtUp n.partition pod.nodeKey then
       .deny s!"flare: this pod is the master of partition {n.partition} and no replica is caught up enough to take it over now (Active, Ready, eligible as a read source, no repair pending), so deleting it can lose the partition's master (and its data on tmpfs). Wait until a replica has caught up, or annotate the pod {overrideAnnotation}=<its uid> to accept the risk explicitly"
+    else if n.role == FlareRole.Master && pod.predatesHandover then
+      -- the one-time upgrade from a release before the handover: refusing
+      -- would only wait for a handover that can never start
+      .allow "a graceful delete of a master running a flared from before the ordered handover, with a caught-up replica: the drain promotes it — NOT loss-free (the one-time upgrade from that release)"
     else if n.role == FlareRole.Master then
       -- review of 9756855 (TOCTOU): a delete is irreversible, and the
       -- successor read now can change before a handover that starts from the
@@ -119,7 +127,7 @@ def requestsHandover (initialized : Bool) (s : FlareClusterState) (caughtUp : Li
   initialized && !trustedRequester requester operatorAccount
     && !kubeletConfirms requester pod.nodeName pod.terminating
     && !(!pod.uid.isEmpty && pod.overrideUid == some pod.uid)
-    && pod.gracePeriod != some 0 && !pod.terminating
+    && pod.gracePeriod != some 0 && !pod.terminating && !pod.predatesHandover
     && match s.lookupNode pod.nodeKey with
        | some n => n.role == FlareRole.Master && n.state == FlareState.Active && hasSuccessor s caughtUp n.partition pod.nodeKey
        | none => false

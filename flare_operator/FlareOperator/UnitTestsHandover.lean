@@ -82,6 +82,16 @@ def results : List (String × Bool) := Id.run do
   r := r ++ [("handover: successor candidates are Active slaves of the partition, Ready, in map order (not Prepare, not another partition, not the old master)",
               successorCandidates three ["s:12121", "t:12121", "u:12121", "x:12121", "m:12121"] 0 "m:12121" all [] == ["s:12121", "t:12121"]
                 && successorCandidates three ["s:12121", "t:12121"] 0 "m:12121" ["t:12121"] [] == ["t:12121"])]
+  -- CI 40846298380: a master from before the handover is recognised as such
+  let modern := "STAT reconstruction_boot_id 7\r\nSTAT proxy_write_failed 0\r\nEND\r\n"
+  let rc56 := "STAT curr_items 5\r\nSTAT rocksdb_master_id x\r\nEND\r\n"
+  let rc65 := "STAT reconstruction_boot_id 7\r\nSTAT proxy_write_dropped 0\r\nEND\r\n"
+  r := r ++ [("handover: an old master with a boot id and the forward counters can be handed over",
+              oldMasterCanHandOver (some modern) && !oldMasterPredatesHandover (some modern))]
+  r := r ++ [("handover: a complete reply without them (rc56, rc65-rc68 shapes) predates the handover; unreadable or incomplete is neither",
+              oldMasterPredatesHandover (some rc56) && oldMasterPredatesHandover (some rc65)
+                && !oldMasterPredatesHandover none && !oldMasterPredatesHandover (some "STAT curr_items 5\r\n")
+                && !oldMasterCanHandOver none)]
   -- V1: old master master/down, successor still slave; blocked from refill
   let e1s := recordSent e1 42
   let s1 := apply pair e1s

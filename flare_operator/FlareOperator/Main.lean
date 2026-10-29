@@ -932,7 +932,29 @@ private def runRolling (crName ns : String) (stateRef : IO.Ref FlareClusterState
   -- the successor read before an irreversible delete can change before a
   -- handover that starts from Terminating). It is handed over first; the
   -- pod is deleted above once that is done.
-  let (d, toHand) := Rolling.handOverFirst d0 masterKeys
+  let (d1, toHand0) := Rolling.handOverFirst d0 masterKeys
+  -- an old master from a release before the handover (no boot id, no forward
+  -- counters) can never be handed over losslessly: rolling deletes it as the
+  -- StatefulSet did before (Terminating → the drain's promotion gates), only
+  -- with a successor the handover precheck accepts now, and says it is NOT
+  -- loss-free (the one-time upgrade from such a release)
+  let mut d := d1
+  let mut toHand := toHand0
+  if let some c := toHand0 then
+    let reply ← podStatsOf c.nodeKey ns
+    if Handover.oldMasterPredatesHandover reply then
+      toHand := none
+      let mut safe := false
+      if let some n := st.lookupNode c.nodeKey then
+        if let some (_, part) := st.partitionMap.find? (fun (i, _) => Int.ofNat i == n.partition) then
+          for k in Handover.successorCandidates st part.slaves n.partition c.nodeKey
+              ((pods.filter fun p => p.ready && !p.terminating).map Bridge.PodInfo.toNodeKey) (← nodeGuardRepairRef.get) do
+            if safe then break
+            if let some sp := pods.find? (·.toNodeKey == k) then
+              safe ← handoverSuccessorOk st k sp.uid (← podStatsOf k ns)
+      d := if safe then
+          Rolling.Decision.delete c s!"master {c.name} runs a flared from before the ordered handover (no boot id / forward counters): deleted for the drain's promotion — NOT loss-free (the one-time upgrade from that release)"
+        else Rolling.Decision.wait s!"master {c.name} runs a flared from before the ordered handover and no successor is accepted now; it is not deleted"
   if let some c := toHand then
     plannedHandoverRef.modify fun l => if l.contains (c.nodeKey, c.uid) then l else l ++ [(c.nodeKey, c.uid)]
     if !(handed.contains (c.nodeKey, c.uid)) then
@@ -976,7 +998,10 @@ private def nodeGuardAnswer (crName ns : String) (stateRef : IO.Ref FlareCluster
           else FlareClusterState.toNodeKey s!"{r.podHostname}.{r.podSubdomain}.{ns}.svc.cluster.local" 12121
         let facts : NodeGuard.PodFacts := {
           nodeKey := key, uid := r.podUid, overrideUid := r.podAnnotation NodeGuard.overrideAnnotation,
-          gracePeriod := r.gracePeriodSeconds, nodeName := r.podNodeName, terminating := r.podTerminating }
+          gracePeriod := r.gracePeriodSeconds, nodeName := r.podNodeName, terminating := r.podTerminating,
+          predatesHandover := match st.lookupNode key with
+            | some n => n.role == FlareRole.Master && Handover.oldMasterPredatesHandover (← podStatsOf key ns)
+            | none => false }
         -- the successor evidence is read now, only for a master's delete:
         -- the replica's pod Ready and not Terminating, R3 eligible in its
         -- own stats, no replica repair pending

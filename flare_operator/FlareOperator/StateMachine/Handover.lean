@@ -190,6 +190,30 @@ def successorCandidates (s : FlareClusterState) (slaves : List String) (partIdx 
     k != oldMaster && readyKeys.contains k && !repairDests.contains k
       && (s.lookupNode k).any fun n => n.role == FlareRole.Slave && n.partition == partIdx && n.state == FlareState.Active
 
+/-- The old master's flared reports what the drain proof needs: its process
+    (reconstruction_boot_id) and the per-destination forward counters (a
+    `proxy_write_failed` line is always present since they exist). A complete
+    reply without them is a flared from a release before the handover (rc68
+    and older): it can never be handed over losslessly (CI 40846298380: the
+    rc56 master's handover asked for them on every attempt). `none` /
+    incomplete = not known (false). -/
+def oldMasterCanHandOver (reply : Option String) : Bool :=
+  match reply with
+  | none => false
+  | some out =>
+    let lines := (out.splitOn "\n").map fun l => (l.replace "\r" "").trim
+    lines.contains "END" && lines.any (·.startsWith "STAT reconstruction_boot_id ")
+      && lines.any (·.startsWith "STAT proxy_write_failed ")
+
+/-- The old master's reply is complete and lacks those keys: a flared from an
+    older release (distinguished from an unreadable reply). -/
+def oldMasterPredatesHandover (reply : Option String) : Bool :=
+  match reply with
+  | none => false
+  | some out =>
+    let lines := (out.splitOn "\n").map fun l => (l.replace "\r" "").trim
+    lines.contains "END" && !oldMasterCanHandOver reply
+
 def allApplied (vs : List (String × Option Nat)) (v : Nat) : Bool :=
   !vs.isEmpty && vs.all fun (_, r) => match r with | some x => x >= v | none => false
 

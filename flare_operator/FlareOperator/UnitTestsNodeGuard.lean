@@ -43,6 +43,10 @@ def results : List (String × Bool) := Id.run do
   r := r ++ [("node guard: once handed over (the old master is a proxy) the retried delete is allowed and asks for nothing",
               (podDelete true handedOver caughtUp user op (pod "m:12121" "u1")).allowed
                 && !requestsHandover true handedOver caughtUp user op (pod "m:12121" "u1"))]
+  r := r ++ [("node guard: a master running a flared from before the handover is allowed with a caught-up replica (NOT loss-free, the one-time upgrade) and asks for no handover; without one it is refused",
+              (del { pod "m:12121" "u1" with predatesHandover := true }).allowed
+                && !requestsHandover true st caughtUp user op { pod "m:12121" "u1" with predatesHandover := true }
+                && !(del { pod "m:12121" "u1" with predatesHandover := true } []).allowed)]
   r := r ++ [("node guard: no handover is requested without a caught-up successor, before the first pass, for a force delete, an override, the operator or a terminating pod",
               !requestsHandover true st [] user op (pod "m:12121" "u1")
                 && !requestsHandover false st caughtUp user op (pod "m:12121" "u1")

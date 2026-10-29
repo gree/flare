@@ -996,12 +996,16 @@ private def nodeGuardAnswer (crName ns : String) (stateRef : IO.Ref FlareCluster
       | "pods", "DELETE" =>
         let key := if r.podHostname.isEmpty || r.podSubdomain.isEmpty then ""
           else FlareClusterState.toNodeKey s!"{r.podHostname}.{r.podSubdomain}.{ns}.svc.cluster.local" 12121
+        let legacyMaster ← match st.lookupNode key with
+          | some n => do
+            if n.role != FlareRole.Master then return false
+            let reply ← podStatsOf key ns
+            pure (Handover.oldMasterPredatesHandover reply)
+          | none => pure false
         let facts : NodeGuard.PodFacts := {
           nodeKey := key, uid := r.podUid, overrideUid := r.podAnnotation NodeGuard.overrideAnnotation,
           gracePeriod := r.gracePeriodSeconds, nodeName := r.podNodeName, terminating := r.podTerminating,
-          predatesHandover := match st.lookupNode key with
-            | some n => n.role == FlareRole.Master && Handover.oldMasterPredatesHandover (← podStatsOf key ns)
-            | none => false }
+          predatesHandover := legacyMaster }
         -- the successor evidence is read now, only for a master's delete:
         -- the replica's pod Ready and not Terminating, R3 eligible in its
         -- own stats, no replica repair pending

@@ -415,7 +415,11 @@ def suite : TestSuite := {
     { name := "[harness RESTORE hook path] a backup of ANOTHER partition (P1 of a two-partition source) restored into a one-partition cluster does not act as its master (never mapped, or flared refuses it for its partition binding) — a failure here is a PRODUCT GAP"
       run := do
         if let .error e ← deployOrFail src2Cfg then return .fail s!"precondition: {e}"
-        IO.sleep 30000
+        -- both partitions mastered, waited for (a fixed 30 s was too short
+        -- once: 7738d8f 40965124333 had no P1 master yet)
+        discard <| waitForCondition "a master for both partitions of the two-partition source" 300 do
+          let es ← nodeView src2Cfg
+          return (findMasterPod es 0).isSome && (findMasterPod es 1).isSome
         let ns2 := src2Cfg.«namespace»
         let entries ← nodeView src2Cfg
         let some p0 := findMasterPod entries 0 | return .fail "precondition: no P0 master in the two-partition source"

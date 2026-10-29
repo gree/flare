@@ -219,6 +219,17 @@ def oldMasterPredatesHandover (reply : Option String) : Bool :=
     lines.contains "END" && !lines.any (·.startsWith "STAT proxy_write_failed ")
       && !lines.any (·.startsWith "STAT proxy_write_in_flight ")
 
+/-- The Terminating masters the FSM's one-map drain must leave to the next
+    pass. `seenAlive` = the Active masters the handover step saw not
+    Terminating this pass; `none` = that step had no pod observation (ledger
+    or pods unreadable): then every Terminating Active master is left, fail
+    closed (review of 67e27eb: an empty list let the FSM's own later read
+    drain a master the handover never saw). -/
+def drainDeferred (seenAlive : Option (List String)) (terminating activeMasters : List String) : List String :=
+  match seenAlive with
+  | some seen => terminating.filter seen.contains
+  | none => terminating.filter activeMasters.contains
+
 def allApplied (vs : List (String × Option Nat)) (v : Nat) : Bool :=
   !vs.isEmpty && vs.all fun (_, r) => match r with | some x => x >= v | none => false
 

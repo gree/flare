@@ -107,6 +107,7 @@ jobs:
             {"group":"node-ops-switch-f","suites":"node-ops-switch-abortexhaust,node-ops-switch-tmpfs-abortexhaust"},
             {"group":"node-ops-switch-g","suites":"node-ops-switch-node-guard,node-ops-switch-tmpfs-node-guard"},
             {"group":"node-ops-switch-h","suites":"node-ops-switch-leasetakeover,node-ops-switch-tmpfs-leasetakeover"},
+            {"group":"node-ops-switch-i","suites":"node-ops-switch-observefail,node-ops-switch-tmpfs-observefail"},
             {"group":"node-ops-switch-tmpfs-a","suites":"node-ops-switch-tmpfs-delete,node-ops-switch-tmpfs-rolling"},
             {"group":"node-ops-switch-tmpfs-b","suites":"node-ops-switch-tmpfs-rollboth,node-ops-switch-tmpfs-gate"},
             {"group":"node-ops-switch-tmpfs-c","suites":"node-ops-switch-tmpfs-drain,node-ops-switch-tmpfs-savefail"},

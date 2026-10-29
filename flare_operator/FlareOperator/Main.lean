@@ -469,7 +469,7 @@ initialize handoverHeldLogRef : IO.Ref (List (Nat × String)) ← IO.mkRef []
     master deleted in between must not be taken by the one-map drain before
     the handover has seen it (CI 40862342948, S8: the delete landed between
     the two reads and the drain promoted the successor with no handover). -/
-initialize handoverSeenAliveRef : IO.Ref (List String) ← IO.mkRef []
+initialize handoverSeenAliveRef : IO.Ref (Option (List String)) ← IO.mkRef none
 initialize handoverLoadedRef : IO.Ref Bool ← IO.mkRef false
 initialize handoverDirtyRef : IO.Ref Bool ← IO.mkRef false
 /-- a handover is running: the leader loop does not wait the full interval -/
@@ -604,8 +604,9 @@ private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterSta
     (repairLed : ReplicaRepair.Ledger) (publish : String → IO Bool)
     (commitPromote : Option (String × String) → FlareClusterState → IO Bool)
     (route : IO Unit) (renew : IO Bool) : IO (List String) := do
-  -- set below from this pass's pod read; an early return leaves it empty
-  handoverSeenAliveRef.set []
+  -- set below from this pass's pod read; an early return leaves `none` (no
+  -- observation: the FSM's drain then leaves every Terminating master)
+  handoverSeenAliveRef.set none
   if !(← handoverLoadedRef.get) then
     match ← Bridge.readHandovers crName ns with
     | .ok l =>
@@ -621,7 +622,14 @@ private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterSta
     | .ok _ => handoverDirtyRef.set false
     | .error e => IO.eprintln s!"[flare-operator] WARNING: handover ledger still unsaved ({e})"
   let led0 ← handoverRef.get
-  let pods ← match ← Bridge.listFlaredPodsE crName ns with
+  -- TEST SEAM (FLARE_TEST_HANDOVER_PODS_FAIL_FILE, unset in production):
+  -- while the named file exists, this read fails as an API error would
+  let podsSeam ← match ← IO.getEnv "FLARE_TEST_HANDOVER_PODS_FAIL_FILE" with
+    | some f => System.FilePath.pathExists f
+    | none => pure false
+  let podsRead ← if podsSeam then pure (Except.error "TEST SEAM: FLARE_TEST_HANDOVER_PODS_FAIL_FILE is present")
+    else Bridge.listFlaredPodsE crName ns
+  let pods ← match podsRead with
     | .ok ps => pure ps
     | .error e =>
       IO.eprintln s!"[flare-operator] handover: pods unreadable ({e}); handovers held this pass"
@@ -631,9 +639,9 @@ private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterSta
   let state0 ← stateRef.get
   let mut led := led0
   let repairDests0 := repairLed.entries.filterMap (·.nodeKey)
-  handoverSeenAliveRef.set ((pods.filter fun p => !p.terminating).filterMap fun p =>
+  handoverSeenAliveRef.set (some ((pods.filter fun p => !p.terminating).filterMap fun p =>
     let k := p.toNodeKey
-    if (state0.lookupNode k).any (fun n => n.role == FlareRole.Master && n.state == FlareState.Active) then some k else none)
+    if (state0.lookupNode k).any (fun n => n.role == FlareRole.Master && n.state == FlareState.Active) then some k else none))
   -- planned handovers still wanted: the same pod, still the Active master,
   -- and its handover not given up
   -- (modify: the node guard adds to it from the webhook's thread)
@@ -2077,9 +2085,11 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       -- a master the handover step saw alive this pass is not Terminating to
       -- the FSM until the next pass, when its handover has started
       let seenAlive ← handoverSeenAliveRef.get
-      let lateMasters := (Bridge.terminatingPodKeys pods).filter seenAlive.contains
+      let csNow ← stateRef.get
+      let activeMasters := (csNow.nodeMap.filter fun kv => kv.2.role == FlareRole.Master && kv.2.state == FlareState.Active).map Prod.fst
+      let lateMasters := Handover.drainDeferred seenAlive (Bridge.terminatingPodKeys pods) activeMasters
       if !lateMasters.isEmpty then
-        IO.eprintln s!"[flare-operator] HANDOVER: master(s) {lateMasters} became Terminating after this pass's handover step; the drain leaves them to the next pass's handover"
+        IO.eprintln s!"[flare-operator] HANDOVER: Terminating master(s) {lateMasters} {if seenAlive.isNone then "were not observed by this pass's handover step (ledger or pods unreadable)" else "became Terminating after this pass's handover step"}; the drain leaves them to the next pass's handover"
       let termKeys := (Bridge.terminatingPodKeys pods).filter (!lateMasters.contains ·)
       -- Data-bearing probe (curr_items > 0 per pod) for the masterless
       -- refill's empty-master guard. GATED: per-pod execs cost seconds on a

@@ -98,6 +98,13 @@ def results : List (String × Bool) := Id.run do
                 && !oldMasterCanHandOver (some "STAT reconstruction_boot_id 7\r\nSTAT proxy_write_in_flight 0\r\nEND\r\n")
                 && !oldMasterCanHandOver (some "STAT proxy_write_in_flight 0\r\nSTAT proxy_write_failed 0\r\nEND\r\n")
                 && !oldMasterPredatesHandover (some "STAT proxy_write_in_flight 0\r\nSTAT proxy_write_failed 0\r\nEND\r\n"))]
+  -- review of 67e27eb: the FSM's drain leaves a master the handover step did
+  -- not see Terminating, and every Terminating master when it saw nothing
+  r := r ++ [("handover: a master Terminating after the handover step saw it alive is deferred to the next pass; one it saw Terminating is not",
+              drainDeferred (some ["m:12121"]) ["m:12121"] ["m:12121"] == ["m:12121"]
+                && drainDeferred (some []) ["m:12121"] ["m:12121"] == [])]
+  r := r ++ [("handover: with no observation by the handover step (ledger or pods unreadable), every Terminating Active master is deferred (fail closed); a Terminating slave is not",
+              drainDeferred none ["m:12121", "s:12121"] ["m:12121"] == ["m:12121"])]
   -- V1: old master master/down, successor still slave; blocked from refill
   let e1s := recordSent e1 42
   let s1 := apply pair e1s

@@ -180,6 +180,10 @@ inductive SwitchOp where
       rolling or send), the process exits, and the next leader resumes the
       handover from its ledger (review of 262fde9) -/
   | deleteMasterLeaseTakeover
+  /-- `kubectl delete pod` of the master while the handover step cannot read
+      the pods (test seam) but the FSM can: no drain or promotion while it
+      lasts, then the handover completes the switch (review of 67e27eb) -/
+  | deleteMasterObserveFail
   deriving BEq, Repr
 
 def SwitchOp.label : SwitchOp → String
@@ -190,6 +194,10 @@ def SwitchOp.label : SwitchOp → String
   | .deleteMasterSaveFail => "kubectl delete pod (master) while the handover ledger cannot be saved, then an operator restart"
   | .deleteMasterAbortRetry => "kubectl delete pod (master) while it is cut from its successor: the handover aborts, then retries after the cut is removed"
   | .deleteMasterLeaseTakeover => "kubectl delete pod (master) while it is cut from its successor, and the operator's lease taken by another identity mid-handover"
+  | .deleteMasterObserveFail => "kubectl delete pod (master) while the handover step cannot read the pods"
+
+/-- The file the operator's FLARE_TEST_HANDOVER_PODS_FAIL_FILE names. -/
+def podsFailFile : String := "/tmp/handover-pods-fail"
 
 /-- The file the operator's FLARE_TEST_HANDOVER_SAVE_FAIL_FILE names. -/
 def saveFailFile : String := "/tmp/handover-save-fail"
@@ -321,6 +329,44 @@ private def switchRun (c : Ctx) (op : SwitchOp) : IO (Except String SwitchObs) :
               match ← kubectl ["delete", "pod", opPod, "-n", ns, "--wait=false"] with
               | .ok _ => opDetail := "delete accepted; the save was refused; operator pod deleted"
               | .error e => opOk := false; opDetail := s!"the operator pod could not be deleted: {e.take 200}"
+      | other => opOk := false; opDetail := s!"expected exactly one operator pod, saw {other}"
+    | .deleteMasterObserveFail =>
+      let opNames ← match ← kubectl ["get", "pods", "-n", ns, "-l", s!"app={c.cfg.operatorName}", "-o", "jsonpath={.items[*].metadata.name}"] with
+        | .ok o => pure (some ((o.trim.splitOn " ").filter (!·.isEmpty)))
+        | .error _ => pure none
+      match opNames with
+      | some [opPod] =>
+        match ← kubectl ["exec", opPod, "-n", ns, "--", "touch", podsFailFile] with
+        | .error e => opOk := false; opDetail := s!"could not arm the pods-read failure in {opPod}: {e.take 200}"
+        | .ok _ =>
+          c.event s!"the handover step's pod reads fail in {opPod} ({podsFailFile})"
+          match ← kubectlLong 180 ["delete", "pod", p.master.name, "-n", ns, "--wait=false"] with
+          | .error e =>
+            discard <| kubectl ["exec", opPod, "-n", ns, "--", "rm", "-f", podsFailFile]
+            opOk := false; opDetail := s!"delete failed: {e.take 200}"
+          | .ok _ =>
+            -- held while the handover cannot observe: the FSM sees the
+            -- Terminating master and must leave it
+            let deferred ← waitForCondition "the drain leaves the Terminating master the handover step did not observe" 60 do
+              return containsSubstr (← kubectlLogs opPod ns 3000) "were not observed by this pass's handover step"
+            IO.sleep 20000
+            let held ← kubectlLogs opPod ns 5000
+            for l in (held.splitOn "\n").filter (fun l => containsSubstr l "HANDOVER" || containsSubstr l "graceful drain" || containsSubstr l "PROMOTION committed") do
+              c.art "operator-while-unobserved.txt" l
+            let drained := containsSubstr held "graceful drain: demoting Terminating"
+            let promoted := containsSubstr held "PROMOTION committed"
+            c.event s!"while unobserved: deferral logged={deferred}, one-map drain={drained}, promotion committed={promoted}; reads restored"
+            discard <| kubectl ["exec", opPod, "-n", ns, "--", "rm", "-f", podsFailFile]
+            if !deferred then
+              opOk := false; opDetail := "the operator never logged deferring the unobserved Terminating master (the seam may not have engaged)"
+            else
+              if drained || promoted then
+                checkFail := some s!"while the handover step could not observe, the one-map drain={drained} / a promotion={promoted} took the master (see operator-while-unobserved.txt)"
+              let done ← waitForCondition "the ordered handover completes once the pods are readable" 180 do
+                return containsSubstr (← kubectlLogs opPod ns 20000) "HANDOVER p0 done"
+              opDetail := s!"delete accepted; held while unobserved; handover done after reads restored={done}"
+              if !done then
+                checkFail := some ((checkFail.map (· ++ "; ")).getD "" ++ "no handover completed after the pods became readable")
       | other => opOk := false; opDetail := s!"expected exactly one operator pod, saw {other}"
     | .deleteMasterAbortRetry =>
       let opLogs := fun (_ : Unit) => kubectlLogsLabel s!"app={c.cfg.operatorName}" ns 20000
@@ -470,7 +516,7 @@ private def switchRun (c : Ctx) (op : SwitchOp) : IO (Except String SwitchObs) :
       | some b, some a => b.uid != a.uid && a.ready && !a.deleting
       | _, _ => false
     let (moved, movedDetail) := match op with
-      | .deleteMaster | .deleteMasterSaveFail | .deleteMasterAbortRetry | .deleteMasterLeaseTakeover => (uidChanged p.master.name, s!"master pod {p.master.name} replaced={uidChanged p.master.name}")
+      | .deleteMaster | .deleteMasterSaveFail | .deleteMasterAbortRetry | .deleteMasterLeaseTakeover | .deleteMasterObserveFail => (uidChanged p.master.name, s!"master pod {p.master.name} replaced={uidChanged p.master.name}")
       | .rollingRestart | .rollBoth =>
         let all := before.all fun (b : PodRow) => uidChanged b.name
         (all, s!"every pod replaced={all} ({before.map fun (b : PodRow) => (b.name, uidChanged b.name)})")
@@ -825,6 +871,7 @@ def Scenario.slug : Scenario → String
   | .op .deleteMasterSaveFail => "savefail"
   | .op .deleteMasterAbortRetry => "abortretry"
   | .op .deleteMasterLeaseTakeover => "leasetakeover"
+  | .op .deleteMasterObserveFail => "observefail"
   | .gate => "gate"
   | .sigtermHold => "sigterm-hold"
   | .abortExhaust => "abortexhaust"
@@ -837,6 +884,7 @@ def Scenario.title : Scenario → String
   | .op .drainMaster => "(S4) kubectl drain of the MASTER's worker (no eviction guard) under a client-like load: the drain completes and no flared pod is left there; 0 write errors, 0 missing"
   | .op .deleteMasterAbortRetry => "(S8) kubectl delete pod of the MASTER while it is cut from its successor, under a client-like load: the first handover aborts and rolls back, the cut is removed, the retry (attempt 2) completes; the one-map drain never takes the master; 0 write errors, 0 missing"
   | .op .deleteMasterSaveFail => "(S7) kubectl delete pod of the MASTER while the operator cannot save its handover ledger, then an operator restart, under a client-like load: no handover map before its phase is saved; the new operator completes the switch; 0 write errors, 0 missing"
+  | .op .deleteMasterObserveFail => "(S11) kubectl delete pod of the MASTER while the operator's handover step cannot read the pods (the FSM can), under a client-like load: the one-map drain does not take the master and nothing is promoted while it lasts; once readable, the ordered handover completes the switch; 0 write errors, 0 missing"
   | .op .deleteMasterLeaseTakeover => "(S10) kubectl delete pod of the MASTER while it is cut from its successor, and the operator's lease taken by another identity mid-handover, under a client-like load: the old leader stops the pass (no FSM step, rolling or send) and exits; the next leader finishes the handover from its ledger; 0 acknowledged writes missing (write errors reported: the operator is away longer than the clients' wait, approved category (a))"
   | .gate => "(S5) the old master is cut from the replica and deleted under a write load: preStop / flared report the drain as NOT lossless, never as lossless (gate test)"
   | .nodeGuard => "(G1) node guard webhook: a force delete of the master and a scale-down over a data-holding ordinal are refused; the delete-override annotation is allowed; a graceful delete of the master is refused until the ordered handover has moved it, then allowed"
@@ -849,7 +897,9 @@ private def scenarioSuite (sc : Scenario) (tmpfs : Bool) : TestSuite :=
   let cfg0 := cfgOf s!"node-{short}" tmpfs (!tmpfs)
   -- S7: the save-failure seam, and a preStop window that outlasts the
   -- operator's restart (its startup is not what S7 measures)
-  let cfg := if sc == .op .deleteMasterSaveFail then
+  let cfg := if sc == .op .deleteMasterObserveFail then
+      { cfg0 with operatorEnv := [("FLARE_TEST_HANDOVER_PODS_FAIL_FILE", podsFailFile)], drainSeconds := 120 }
+    else if sc == .op .deleteMasterSaveFail then
       { cfg0 with operatorEnv := [("FLARE_TEST_HANDOVER_SAVE_FAIL_FILE", saveFailFile)], drainSeconds := 180 }
     -- S9: three attempts (Th + rollback + retry delay each) outlast 60 s
     else if sc == .abortExhaust || sc == .op .deleteMasterLeaseTakeover then { cfg0 with drainSeconds := 180 }
@@ -865,7 +915,7 @@ private def scenarioSuite (sc : Scenario) (tmpfs : Bool) : TestSuite :=
     afterEach := fun i => saveFullLogs cfg.«namespace» s!"after-test-{i}"
     tests := [{ name := sc.title, run := match sc with | .op o => switchTest c o | .gate => gateTest c | .sigtermHold => sigtermHoldTest c | .abortExhaust => abortExhaustTest c | .nodeGuard => nodeGuardTest c }] }
 
-def scenarios : List Scenario := [.op .deleteMaster, .op .rollingRestart, .op .rollBoth, .op .drainMaster, .gate, .sigtermHold, .op .deleteMasterSaveFail, .op .deleteMasterAbortRetry, .abortExhaust, .nodeGuard, .op .deleteMasterLeaseTakeover]
+def scenarios : List Scenario := [.op .deleteMaster, .op .rollingRestart, .op .rollBoth, .op .drainMaster, .gate, .sigtermHold, .op .deleteMasterSaveFail, .op .deleteMasterAbortRetry, .abortExhaust, .nodeGuard, .op .deleteMasterLeaseTakeover, .op .deleteMasterObserveFail]
 
 /-- node-ops-switch-<scenario> (PVC) and node-ops-switch-tmpfs-<scenario>. -/
 def switchSuites : List TestSuite :=

@@ -758,7 +758,12 @@ private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterSta
               -- the fast loop ticks again at once (the new successor is ready)
               transit := true
               continue
-      if e.phase == .requested && succEligible && !succR3 then
+      if e.phase == .requested && !succEligible then
+        -- not even a candidate (replaced, not Ready, repair pending, not an
+        -- Active slave) and no other slave accepted (the re-pick above):
+        -- logged like the drain's own safe stop (CI 40858711976, copy-identity 13)
+        IO.eprintln s!"[flare-operator] CRITICAL: HANDOVER p{e.partition}: draining master {e.oldMaster} has NO promotable successor yet — {e.successor} is not an Active, Ready slave without a pending repair and no other slave is accepted; the master is kept (no demote)"
+      else if e.phase == .requested && succEligible && !succR3 then
         IO.eprintln s!"[flare-operator] CRITICAL: HANDOVER p{e.partition}: draining master {e.oldMaster} has NO promotable successor yet — {e.successor} reads {succCls.label}; the master is kept (no demote) until it reads eligible"
       else if e.phase == .requested && succEligible && succBinding.isNone then
         IO.eprintln s!"[flare-operator] CRITICAL: HANDOVER p{e.partition}: draining master {e.oldMaster} has NO promotable successor yet — {e.successor} does not report a complete identity (pod UID, boot id, copy id); no lossless handover without it"

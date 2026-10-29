@@ -206,7 +206,7 @@ def successorIdle (reply : Option String) : Bool :=
   | some out =>
     let s := parseStats out
     s.complete && s.invalid.isEmpty && (s.forbiddenMarker true).isNone
-      && (s.eligible == some 1 || (s.isLegacy && s.items != some 0))
+      && (s.eligible == some 1 || (s.isLegacy && match s.items with | some n => n > 0 | none => false))
 
 /-- What the operator knows besides the stats. -/
 structure Observed where

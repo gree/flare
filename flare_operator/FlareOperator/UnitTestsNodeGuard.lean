@@ -35,8 +35,22 @@ private def del (p : PodFacts) (cu : List String := caughtUp) (who : String := u
 
 def results : List (String × Bool) := Id.run do
   let mut r : List (String × Bool) := []
-  r := r ++ [("node guard: a graceful delete of a master with a caught-up replica is allowed (the handover moves it)",
-              (del (pod "m:12121" "u1")).allowed)]
+  -- review of 9756855 (TOCTOU): the master is handed over BEFORE its delete
+  r := r ++ [("node guard: a graceful delete of a master with a caught-up replica is refused and asks for the handover first",
+              !(del (pod "m:12121" "u1")).allowed
+                && requestsHandover true st caughtUp user op (pod "m:12121" "u1"))]
+  let handedOver := (st.addNode "m:12121" (node "m" .Proxy .Active (-1))).addNode "s:12121" (node "s" .Master .Active 0)
+  r := r ++ [("node guard: once handed over (the old master is a proxy) the retried delete is allowed and asks for nothing",
+              (podDelete true handedOver caughtUp user op (pod "m:12121" "u1")).allowed
+                && !requestsHandover true handedOver caughtUp user op (pod "m:12121" "u1"))]
+  r := r ++ [("node guard: no handover is requested without a caught-up successor, before the first pass, for a force delete, an override, the operator or a terminating pod",
+              !requestsHandover true st [] user op (pod "m:12121" "u1")
+                && !requestsHandover false st caughtUp user op (pod "m:12121" "u1")
+                && !requestsHandover true st caughtUp user op (pod "m:12121" "u1" (some 0))
+                && !requestsHandover true st caughtUp user op (pod "m:12121" "u1" none (some "u1"))
+                && !requestsHandover true st caughtUp op op (pod "m:12121" "u1")
+                && !requestsHandover true st caughtUp user op (pod "m:12121" "u1" none none "w1" true)
+                && !requestsHandover true st caughtUp user op (pod "s:12121" "u2"))]
   r := r ++ [("node guard: a force delete (grace 0) of the master is refused",
               !(del (pod "m:12121" "u1" (some 0))).allowed)]
   r := r ++ [("node guard: a force delete of a replica is refused too (no preStop)",

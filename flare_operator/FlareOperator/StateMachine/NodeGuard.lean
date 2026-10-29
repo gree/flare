@@ -102,8 +102,27 @@ def podDelete (initialized : Bool) (s : FlareClusterState) (caughtUp : List Stri
     else if n.role == FlareRole.Master && !hasSuccessor s caughtUp n.partition pod.nodeKey then
       .deny s!"flare: this pod is the master of partition {n.partition} and no replica is caught up enough to take it over now (Active, Ready, eligible as a read source, no repair pending), so deleting it can lose the partition's master (and its data on tmpfs). Wait until a replica has caught up, or annotate the pod {overrideAnnotation}=<its uid> to accept the risk explicitly"
     else if n.role == FlareRole.Master then
-      .allow "a graceful delete of a master with a caught-up replica: the ordered handover moves its partition"
+      -- review of 9756855 (TOCTOU): a delete is irreversible, and the
+      -- successor read now can change before a handover that starts from the
+      -- pod's Terminating. The master is handed over FIRST (the operator
+      -- starts it on this refusal: requestsHandover); once it is a proxy the
+      -- retried delete is allowed above.
+      .deny s!"flare: this pod is the master of partition {n.partition}. The operator is now handing the partition over to a caught-up replica (an ordered switch, normally seconds); retry the delete once it has — the pod is then a proxy and the delete is allowed. Or annotate the pod {overrideAnnotation}=<its uid> to accept the risk explicitly"
     else .allow s!"a graceful delete of a {roleName n.role}: its partition keeps its master"
+
+/-- The delete refused above asks the operator to hand this master over now:
+    a graceful delete of the Active master of a partition that has a caught-up
+    successor, by a requester the guard judges (not the operator, not an
+    override, the cluster read). -/
+def requestsHandover (initialized : Bool) (s : FlareClusterState) (caughtUp : List String)
+    (requester operatorAccount : String) (pod : PodFacts) : Bool :=
+  initialized && !trustedRequester requester operatorAccount
+    && !kubeletConfirms requester pod.nodeName pod.terminating
+    && !(!pod.uid.isEmpty && pod.overrideUid == some pod.uid)
+    && pod.gracePeriod != some 0 && !pod.terminating
+    && match s.lookupNode pod.nodeKey with
+       | some n => n.role == FlareRole.Master && n.state == FlareState.Active && hasSuccessor s caughtUp n.partition pod.nodeKey
+       | none => false
 
 /-- UPDATE of the flared StatefulSet (or its scale subresource) from
     `oldReplicas` to `newReplicas`; `keyOf i` is the node key of ordinal `i`. -/

@@ -717,8 +717,8 @@ def abortExhaustTest (c : Ctx) : IO TestResult := do
     a force delete (grace 0) of the master is refused and the pod stays;
     a StatefulSet scale-down over an ordinal that holds data is refused;
     the delete-override annotation (the pod's UID) lets a force delete of
-    the replica through; a graceful delete of the master is allowed and the
-    ordered handover moves its partition. -/
+    the replica through; a graceful delete of the master is refused until
+    the ordered handover has moved its partition, then allowed. -/
 def nodeGuardTest (c : Ctx) : IO TestResult := do
   match ← c.placement with
   | .error e => return .fail e
@@ -768,14 +768,37 @@ def nodeGuardTest (c : Ctx) : IO TestResult := do
       fails := fails ++ ["the replica was replaced, but the node guard did not log the override allowing it"]
     if !(← waitForCondition "the replica is back and the pair redundant" 600 (redundant c none)) then
       fails := fails ++ ["the pair did not become redundant again after the replica's force delete"]
-    -- 4. a graceful delete of the master: allowed; the handover moves it
+    -- 4. a graceful delete of the master (review of 9756855): refused first,
+    -- the operator hands the partition over, and the retried delete passes
+    -- only once the old master is no longer the master — the delete never
+    -- precedes the switch
     let r4 ← kubectlLong 60 ["delete", "pod", p.master.name, "-n", ns, "--wait=false"]
-    c.event s!"graceful delete of the master: {match r4 with | .ok _ => "accepted" | .error e => s!"REFUSED {e.take 300}"}"
-    if r4 matches .error _ then fails := fails ++ ["the graceful delete of the master was refused"]
-    else
-      let moved ← waitForCondition "the ordered handover completes" 180 do
-        return containsSubstr (← kubectlLogsLabel s!"app={c.cfg.operatorName}" ns 20000) "HANDOVER p0 done"
-      if !moved then fails := fails ++ ["no handover completed after the graceful delete of the master"]
+    c.event s!"graceful delete of the master (first): {match r4 with | .ok _ => "ACCEPTED" | .error e => s!"refused {e.take 300}"}"
+    match r4 with
+    | .ok _ => fails := fails ++ ["the first graceful delete of the master was accepted (it must be handed over first)"]
+    | .error e =>
+      if !containsSubstr e "handing the partition over" then
+        fails := fails ++ [s!"the first graceful delete of the master was refused, but not as a handover request: {e.take 200}"]
+      else
+        let mut accepted := false
+        let mut tries := 0
+        let mUid4 ← uidOf p.master.name
+        while !accepted && tries < 60 do
+          IO.sleep 3000
+          tries := tries + 1
+          match ← kubectlLong 60 ["delete", "pod", p.master.name, "-n", ns, "--wait=false"] with
+          | .ok _ => accepted := true
+          | .error _ => pure ()
+        let opLog ← kubectlLogsLabel s!"app={c.cfg.operatorName}" ns 20000
+        let lines := opLog.splitOn "\n"
+        let doneIdx := lines.findIdx? (containsSubstr · "HANDOVER p0 done")
+        let allowIdx := lines.findIdx? fun l => containsSubstr l s!"allowed DELETE pods {p.master.name} (uid {mUid4}"
+        c.event s!"graceful delete of the master: accepted after {tries} retries={accepted}; handover done at log line {doneIdx}, delete allowed at line {allowIdx}"
+        if !accepted then fails := fails ++ ["the retried graceful delete of the master was never accepted (no handover completed?)"]
+        else match doneIdx, allowIdx with
+          | some d, some a => if a < d then fails := fails ++ ["the master's delete was allowed before its handover completed"]
+          | none, _ => fails := fails ++ ["no handover completed before the master's delete was allowed"]
+          | _, none => fails := fails ++ ["the node guard did not log allowing the handed-over master's delete"]
     let logs ← kubectlLogsLabel s!"app={c.cfg.operatorName}" ns 20000
     for x in (logs.splitOn "\n").filter (fun x => containsSubstr x "NODE GUARD") do c.art "node-guard.txt" x
     IO.eprintln s!"# [{c.test}] node guard: {if fails.isEmpty then "every check held" else String.intercalate "; " fails}"
@@ -816,7 +839,7 @@ def Scenario.title : Scenario → String
   | .op .deleteMasterSaveFail => "(S7) kubectl delete pod of the MASTER while the operator cannot save its handover ledger, then an operator restart, under a client-like load: no handover map before its phase is saved; the new operator completes the switch; 0 write errors, 0 missing"
   | .op .deleteMasterLeaseTakeover => "(S10) kubectl delete pod of the MASTER while it is cut from its successor, and the operator's lease taken by another identity mid-handover, under a client-like load: the old leader stops the pass (no FSM step, rolling or send) and exits; the next leader finishes the handover from its ledger; 0 acknowledged writes missing (write errors reported: the operator is away longer than the clients' wait, approved category (a))"
   | .gate => "(S5) the old master is cut from the replica and deleted under a write load: preStop / flared report the drain as NOT lossless, never as lossless (gate test)"
-  | .nodeGuard => "(G1) node guard webhook: a force delete of the master and a scale-down over a data-holding ordinal are refused; the delete-override annotation and a graceful delete of the master are allowed (the handover moves it)"
+  | .nodeGuard => "(G1) node guard webhook: a force delete of the master and a scale-down over a data-holding ordinal are refused; the delete-override annotation is allowed; a graceful delete of the master is refused until the ordered handover has moved it, then allowed"
   | .abortExhaust => "(S9) the master stays cut from its successor and is deleted: attempts 2 and 3 start, and only after the third abort does the one-map drain take the master (orchestration test, not a data verdict)"
   | .sigtermHold => "(S6) a sync client write held on a cut replica across a SIGTERM (cut removed 40 s after it): the client gets STORED and the replica holds the value"
 

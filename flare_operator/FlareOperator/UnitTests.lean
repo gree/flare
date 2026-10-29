@@ -2361,6 +2361,7 @@ private def checkPromotionEvidence (ctx : Ctx) : IO Unit := do
       && !idle (some "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state revalidating\r\nEND\r\n")
       && !idle (some "STAT repl_read_source_eligible 0\r\nEND\r\n")
       && !idle (some "STAT curr_items 0\r\nEND\r\n")
+      && !idle (some "STAT reconstruction_current_state succeeded\r\nEND\r\n")
       && !idle (some "STAT repl_read_source_eligible 1\r\n")
       && !idle none)
   let fullB := PromotionEvidence.bindingOf (some "u") (some "STAT reconstruction_boot_id 7\r\nSTAT rocksdb_copy_id c:1\r\nEND\r\n")

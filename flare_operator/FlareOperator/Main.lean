@@ -451,6 +451,15 @@ initialize handoverRef : IO.Ref Handover.Ledger ← IO.mkRef {}
     committed now (set right before commitPromote; the ledger in
     handoverRef is written only at the end of runHandovers). -/
 initialize handoverCommitBindingRef : IO.Ref (List (String × String)) ← IO.mkRef []
+/-- Masters (node key, pod UID) to hand over now although their pod is not
+    Terminating (review of 9756855: a delete is irreversible, so the switch
+    comes first): asked by a refused delete in the node guard or by rolling.
+    Pruned when the pod is another one, no longer the Active master (handed
+    over), or its handover gave up. -/
+initialize plannedHandoverRef : IO.Ref (List (String × String)) ← IO.mkRef []
+/-- Old masters rolling asked to hand over: rolling deletes them once their
+    handover is done (they are a proxy then, holding no data). -/
+initialize rollingHandoverRef : IO.Ref (List (String × String)) ← IO.mkRef []
 initialize handoverLoadedRef : IO.Ref Bool ← IO.mkRef false
 initialize handoverDirtyRef : IO.Ref Bool ← IO.mkRef false
 /-- a handover is running: the leader loop does not wait the full interval -/
@@ -591,9 +600,17 @@ private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterSta
   let now ← IO.monoMsNow
   let state0 ← stateRef.get
   let mut led := led0
+  -- planned handovers still wanted: the same pod, still the Active master,
+  -- and its handover not given up
+  -- (modify: the node guard adds to it from the webhook's thread)
+  plannedHandoverRef.modify fun l => l.filter fun (k, u) =>
+    pods.any (fun p => p.toNodeKey == k && p.uid == u && !p.terminating)
+      && (state0.lookupNode k).any (fun n => n.role == FlareRole.Master && n.state == FlareState.Active)
+      && !(led0.entries.any fun e => e.oldMaster == k && e.oldUid == u && e.phase == .aborted && !Handover.retryable cfg e)
+  let planned ← plannedHandoverRef.get
   -- start
   for p in pods do
-    if !p.terminating then continue
+    if !p.terminating && !(planned.any fun (k, u) => k == p.toNodeKey && u == p.uid) then continue
     let k := p.toNodeKey
     match state0.lookupNode k with
     | some n =>
@@ -798,6 +815,12 @@ private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterSta
         if e2.phase == .done then
           IO.eprintln s!"[flare-operator] HANDOVER p{e.partition} done in {now - e.startedMs} ms: {e.successor} is the master; {e.oldMaster} is a proxy"
           continue
+        -- a planned handover (the pod not Terminating) that gave up: the old
+        -- master keeps serving; its delete stays refused (no marker kept)
+        let oldTerminating := pods.any fun p => p.toNodeKey == e2.oldMaster && p.uid == e2.oldUid && p.terminating
+        if e2.phase == .aborted && !oldTerminating && !Handover.retryable cfg e2 then
+          IO.eprintln s!"[flare-operator] HANDOVER p{e.partition}: the planned handover of {e2.oldMaster} gave up ({e2.reason}); it stays the master and is not deleted"
+          continue
         if e2.v1.isNone then
           IO.eprintln s!"[flare-operator] HANDOVER p{e.partition} not started ({e2.reason}); the one-map drain applies"
       else if e2.phase != .requested then
@@ -864,22 +887,28 @@ private def runRolling (crName ns : String) (stateRef : IO.Ref FlareClusterState
     let ok := Rolling.stable st (replicas - 1) readyKeys eligible busy
     passes := if ok then passes + 1 else 0
     rollingStablePassesRef.set passes
-  let d0 := Rolling.decide rev cands masterKeys passes 2
-  -- a master is deleted only with a successor the ordered handover itself
-  -- accepts (review of ba85535): the stability check above counts a pre-R3
-  -- slave, which the handover refuses — deleting the master then would
-  -- bypass it
-  let d ← match d0 with
-    | .delete c _ =>
-      if !masterKeys.contains c.nodeKey then pure d0 else do
-        let mut safe := false
-        if let some n := st.lookupNode c.nodeKey then
-          for (k, m) in st.nodeMap do
-            if safe || k == c.nodeKey || m.role != FlareRole.Slave || m.state != FlareState.Active || m.partition != n.partition then continue
-            if let some sp := pods.find? fun p => p.toNodeKey == k && p.ready && !p.terminating then
-              safe ← handoverSuccessorOk st k sp.uid (← podStatsOf k ns)
-        pure (Rolling.gateMaster d0 masterKeys safe)
-    | _ => pure d0
+  -- an old master rolling had handed over (review of 9756855): once it is no
+  -- longer the master (a proxy, or a slave not yet rebuilt) its pod is
+  -- deleted first, before anything else, with no stability wait — it holds
+  -- no partition's data now
+  let handed := (← rollingHandoverRef.get).filter fun (k, u) =>
+    cands.any (fun c => c.nodeKey == k && c.uid == u && !c.terminating)
+  rollingHandoverRef.set handed
+  let handedDone := handed.find? fun (k, _) => !masterKeys.contains k
+  let d0 := match handedDone with
+    | some (k, u) => match cands.find? (fun c => c.nodeKey == k && c.uid == u) with
+      | some c => Rolling.Decision.delete c "its partition was handed over; the old master is replaced now"
+      | none => Rolling.decide rev cands masterKeys passes 2
+    | none => Rolling.decide rev cands masterKeys passes 2
+  -- a master is never deleted while it is the master (review of 9756855:
+  -- the successor read before an irreversible delete can change before a
+  -- handover that starts from Terminating). It is handed over first; the
+  -- pod is deleted above once that is done.
+  let (d, toHand) := Rolling.handOverFirst d0 masterKeys
+  if let some c := toHand then
+    plannedHandoverRef.modify fun l => if l.contains (c.nodeKey, c.uid) then l else l ++ [(c.nodeKey, c.uid)]
+    if !(handed.contains (c.nodeKey, c.uid)) then
+      rollingHandoverRef.set (handed ++ [(c.nodeKey, c.uid)])
   let label := d.label
   if label != (← rollingLastRef.get) then
     rollingLastRef.set label
@@ -944,7 +973,16 @@ private def nodeGuardAnswer (crName ns : String) (stateRef : IO.Ref FlareCluster
           | none => pure (some [])
         match caughtUp with
         | none => pure (NodeGuard.Verdict.deny "flare: the pods could not be read to judge this delete; retry")
-        | some cu => pure (NodeGuard.podDelete (← nodeGuardInitRef.get) st cu r.username opAccount facts)
+        | some cu =>
+          let init ← nodeGuardInitRef.get
+          -- the refused delete of a master starts its ordered handover now;
+          -- the retried delete passes once it is a proxy (review of 9756855)
+          if NodeGuard.requestsHandover init st cu r.username opAccount facts then
+            let pl ← plannedHandoverRef.get
+            plannedHandoverRef.modify fun l => if l.contains (key, r.podUid) then l else l ++ [(key, r.podUid)]
+            if !(pl.contains (key, r.podUid)) then
+              IO.eprintln s!"[flare-operator] NODE GUARD: the delete of master {key} (uid {r.podUid}) by {r.username} asks for its ordered handover first"
+          pure (NodeGuard.podDelete init st cu r.username opAccount facts)
       | "statefulsets", "UPDATE" =>
         if r.name != s!"{crName}-nodes" then pure (NodeGuard.Verdict.allow "another StatefulSet")
         else match r.replicas with

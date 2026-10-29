@@ -713,13 +713,18 @@ Pod replacement is lossless when it goes through the operator:
 - **helm upgrade / `kubectl rollout restart`**: the flared StatefulSet uses
   `updateStrategy: OnDelete`, so a template change replaces nothing by
   itself. The operator replaces the pods on an old revision one at a time
-  (the highest ordinal first, a master last, through the ordered handover),
-  and only while every replica is caught up. Progress is in the operator log
+  (the highest ordinal first, a master last), and only while every replica is
+  caught up. A master is handed over first (ordered handover); its pod is
+  deleted only once it is no longer the master. Progress is in the operator log
   (`ROLLING`). `FLARE_OPERATOR_ROLLING=off` on the operator stops it; then
   delete pods by hand, one at a time, as below.
-- **`kubectl delete pod <pod>`** (with its grace period): allowed. A master
-  is handed over to a caught-up replica first (operator log
-  `HANDOVER p<N> done`); writes wait briefly, none fail.
+- **`kubectl delete pod <pod>`** (with its grace period): a replica or a
+  proxy is allowed. A master is refused the first time: the refusal starts
+  its ordered handover to a caught-up replica (operator log
+  `HANDOVER p<N> done`, normally seconds; writes wait briefly, none fail).
+  Run the same delete again once it is done — the pod is then a proxy and
+  the delete is allowed. The delete never comes before the switch (a delete
+  cannot be undone, and the replica could change in between).
 
 The node-guard webhook (`nodeGuard.enabled`, default true) refuses what
 skips that path. The refusal message says why:
@@ -727,7 +732,8 @@ skips that path. The refusal message says why:
 | Refused | Why | What to do |
 |---|---|---|
 | `kubectl delete pod --force --grace-period=0` of a master or a replica | no preStop, no handover: acknowledged writes can be lost | delete without `--force` |
-| delete of a master whose partition has no caught-up replica (Active, Ready, `repl_read_source_eligible 1`, no replica repair pending — read at the delete) | nothing the handover can promote (on tmpfs the data is lost) | wait until the replica has caught up |
+| graceful delete of a master with a caught-up replica | it is handed over first (this refusal starts it) | run the delete again after `HANDOVER p<N> done` |
+| delete of a master whose partition has no caught-up replica (Active, Ready, R3 eligible with a complete pod / boot / copy identity, idle, no replica repair pending) | nothing the handover can promote (on tmpfs the data is lost) | wait until the replica has caught up |
 | delete of a pod the operator's node map does not know (for example still starting) | it may hold data on its volume | wait until it registered, or use the override |
 | any data-pod delete or scale-down right after the operator started or a new leader took over | the operator has not read the cluster yet | retry after a few seconds |
 | `kubectl scale` / a StatefulSet edit removing ordinals that hold data | the removed pods are masters or replicas (or not in the map) | reduce partitions or replicas in the FlareCluster spec (the operator moves the data first) |

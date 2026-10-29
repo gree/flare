@@ -449,7 +449,18 @@ private def switchRun (c : Ctx) (op : SwitchOp) : IO (Except String SwitchObs) :
       c.event s!"operator rollout complete={ok}, operator pods replaced={replaced} ({opBefore} -> {opAfter})"
       if !ok then opOk := false; opDetail := opDetail ++ "; operator rollout did not complete within 600 s"
       if !replaced then opOk := false; opDetail := opDetail ++ s!"; operator pods not replaced ({opBefore} -> {opAfter})"
-    let (ips1, red) ← observe c 600 (redundant c drained)
+    -- PVC on local-path storage: the volume is pinned to the drained node, so
+    -- its pod can only come back there. Check that the drain emptied the node
+    -- now, then uncordon so the replacement can schedule and resync (CI
+    -- 40811206461: the pod sat Pending 10 min and the check could never pass)
+    let mut offAtDrain : Option Bool := none
+    if op == .drainMaster && c.cfg.usePvc then
+      let now := (← c.pods).getD []
+      let off := !(now.any fun (a : PodRow) => some a.node == drained && !a.deleting)
+      offAtDrain := some off
+      c.event s!"pvc: no flared pod running on {drained} after the drain={off}; uncordoning so the pinned volume's pod can return"
+      if let some n := drained then uncordon n
+    let (ips1, red) ← observe c 600 (redundant c (if offAtDrain.isSome then none else drained))
     c.event s!"redundancy restored={red}"
     -- did pods move
     let after := (← c.pods).getD []
@@ -464,8 +475,12 @@ private def switchRun (c : Ctx) (op : SwitchOp) : IO (Except String SwitchObs) :
         let all := before.all fun (b : PodRow) => uidChanged b.name
         (all, s!"every pod replaced={all} ({before.map fun (b : PodRow) => (b.name, uidChanged b.name)})")
       | .drainMaster =>
-        let off := !(after.any fun (a : PodRow) => some a.node == drained)
-        (off && uidChanged p.master.name, s!"no flared pod left on {drained}={off}, master pod replaced={uidChanged p.master.name}")
+        match offAtDrain with
+        | some off =>
+          (off && uidChanged p.master.name, s!"pvc: no flared pod left on {drained} after the drain={off}, master pod replaced (on its pinned node after uncordon)={uidChanged p.master.name}")
+        | none =>
+          let off := !(after.any fun (a : PodRow) => some a.node == drained)
+          (off && uidChanged p.master.name, s!"no flared pod left on {drained}={off}, master pod replaced={uidChanged p.master.name}")
     c.event s!"moved={moved}: {movedDetail}"
     let (ips2, _) ← observe c 10 (pure false)
     if let some n := drained then uncordon n

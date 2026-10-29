@@ -264,10 +264,19 @@ def suite : TestSuite := {
         | .ok _ => pure ()
         if !unacked.isEmpty then
           return .fail s!"the source did not acknowledge {unacked} — the premise does not hold"
+        -- the master is back when the map names it before AND after it
+        -- answered (CI 40811206461: an answer read while the map still named
+        -- the restarted node — it re-registered as a slave a moment later —
+        -- passed this wait and the next read found no master)
+        let backIp ← IO.mkRef (none : Option String)
         let back ← waitForCondition "the destination master answers again" 300 do
           match ← masterIp cfgDst with
           | none => return false
-          | some ip => return (← readKey cfgDst ip "fill_0").isSome
+          | some ip =>
+            if (← readKey cfgDst ip "fill_0").isNone then return false
+            if (← masterIp cfgDst) != some ip then return false
+            backIp.set (some ip)
+            return true
         let t1 ← IO.monoMsNow
         if !back then
           let dl ← kubectlLogsLabel s!"app={cfgDst.operatorName}" cfgDst.«namespace» 400
@@ -275,7 +284,7 @@ def suite : TestSuite := {
             containsSubstr l "FORBIDDEN" || containsSubstr l "CRITICAL" || containsSubstr l "history" || containsSubstr l "copy"
           IO.eprintln s!"# destination operator (filtered, last 30): {keep.reverse.take 30 |>.reverse |>.map String.trim}"
           return .fail "the destination master did not come back within 300 s (a per-key-seeded destination keeps its own history; this is not the snapshot-push finding)"
-        let some dIp ← masterIp cfgDst | return .fail "no destination master after the restart"
+        let some dIp ← backIp.get | return .fail "no destination master after the restart"
         let itemsAfter ← getCurrItems cfgDst.debugPod cfgDst.«namespace» dIp cfgDst.flarePort
         IO.eprintln s!"# destination back after ~{(t1 - t0) / 1000} s at {dIp}; curr_items {itemsBefore} before, {itemsAfter} on return"
         let mut postKeys : List String := []

@@ -201,7 +201,7 @@ jobs:
     concurrency:
       group: ${{ github.event_name == 'workflow_dispatch' && format('e2e-manual-{0}-{1}', github.run_id, matrix.group) || format('e2e-{0}-{1}-{2}', github.head_ref || github.ref, inputs.evaluation || 'none', matrix.group) }}
       cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
-    timeout-minutes: ${{ inputs.evaluation != '' && inputs.evaluation != 'none' && 240 || 120 }}
+    timeout-minutes: ${{ inputs.evaluation != '' && inputs.evaluation != 'none' && 240 || 150 }}
     strategy:
       fail-fast: false
       matrix:

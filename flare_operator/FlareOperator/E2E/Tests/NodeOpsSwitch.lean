@@ -353,15 +353,15 @@ private def switchRun (c : Ctx) (op : SwitchOp) : IO (Except String SwitchObs) :
             let held ← kubectlLogs opPod ns 5000
             for l in (held.splitOn "\n").filter (fun l => containsSubstr l "HANDOVER" || containsSubstr l "graceful drain" || containsSubstr l "PROMOTION committed") do
               c.art "operator-while-unobserved.txt" l
-            let drained := containsSubstr held "graceful drain: demoting Terminating"
+            let oneMapDrain := containsSubstr held "graceful drain: demoting Terminating"
             let promoted := containsSubstr held "PROMOTION committed"
-            c.event s!"while unobserved: deferral logged={deferred}, one-map drain={drained}, promotion committed={promoted}; reads restored"
+            c.event s!"while unobserved: deferral logged={deferred}, one-map drain={oneMapDrain}, promotion committed={promoted}; reads restored"
             discard <| kubectl ["exec", opPod, "-n", ns, "--", "rm", "-f", podsFailFile]
             if !deferred then
               opOk := false; opDetail := "the operator never logged deferring the unobserved Terminating master (the seam may not have engaged)"
             else
-              if drained || promoted then
-                checkFail := some s!"while the handover step could not observe, the one-map drain={drained} / a promotion={promoted} took the master (see operator-while-unobserved.txt)"
+              if oneMapDrain || promoted then
+                checkFail := some s!"while the handover step could not observe, the one-map drain={oneMapDrain} / a promotion={promoted} took the master (see operator-while-unobserved.txt)"
               let done ← waitForCondition "the ordered handover completes once the pods are readable" 180 do
                 return containsSubstr (← kubectlLogs opPod ns 20000) "HANDOVER p0 done"
               opDetail := s!"delete accepted; held while unobserved; handover done after reads restored={done}"

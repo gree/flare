@@ -516,9 +516,20 @@ def suite : TestSuite := {
       run := do
         let ns2 := src2Cfg.«namespace»
         -- the previous test restarted P0's pod: wait until it is P0's master again
-        let mastered ← waitForCondition "a P0 master answering stats in the two-partition source" 300 do
+        -- flared ITSELF must be P0's master on its current history before the
+        -- backup: the operator's map alone named it master ~1 s before flared
+        -- applied the map and minted the promotion's epoch, so the backup
+        -- carried the superseded history and its restore was (correctly)
+        -- refused as rejoining (4a52e0d 40922266804 restore-promotion 7)
+        let mastered ← waitForCondition "P0's master applied its promotion (own_role master, the same source epoch on two reads 2 s apart)" 300 do
           match findMasterPod (← nodeView src2Cfg) 0 with
-          | some p => return (← statOf src2Cfg ((← getPodIp p ns2).getD "") "curr_items").isSome
+          | some p =>
+            let ip := (← getPodIp p ns2).getD ""
+            if (← statOf src2Cfg ip "own_role").map String.trim != some "master" then return false
+            let e1 := ((← statOf src2Cfg ip "rocksdb_source_epoch").getD "").trim
+            IO.sleep 2000
+            let e2 := ((← statOf src2Cfg ip "rocksdb_source_epoch").getD "").trim
+            return !e1.isEmpty && e1 == e2 && (← statOf src2Cfg ip "curr_items").isSome
           | none => return false
         if !mastered then return .fail "precondition: no P0 master in the two-partition source within 300 s"
         let entries ← nodeView src2Cfg

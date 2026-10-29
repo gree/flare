@@ -656,7 +656,15 @@ private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterSta
     let k := p.toNodeKey
     match state0.lookupNode k with
     | some n =>
-      if n.role == FlareRole.Master && n.state == FlareState.Active && n.partition >= 0 then
+      -- a master on a flared from before the handover can never be handed
+      -- over (no boot id / forward counters): no handover is opened for it,
+      -- which would only hold the drain for its three attempts (~105 s)
+      let legacy ← if n.role == FlareRole.Master && p.terminating then
+          Handover.oldMasterPredatesHandover <$> podStatsOf k ns
+        else pure false
+      if legacy then
+        IO.eprintln s!"[flare-operator] HANDOVER: master {k} runs a flared from before the ordered handover; no handover is opened (the drain takes it, NOT loss-free)"
+      else if n.role == FlareRole.Master && n.state == FlareState.Active && n.partition >= 0 then
         let pIdx := n.partition.toNat
         -- a new handover, or the retry of one that aborted and rolled back
         -- (same old master pod, after the retry delay, attempts left): L7 —
@@ -986,6 +994,10 @@ private def runRolling (crName ns : String) (stateRef : IO.Ref FlareClusterState
     if Handover.oldMasterPredatesHandover reply then
       toHand := none
       let allowed := (← IO.getEnv "FLARE_OPERATOR_LEGACY_MASTER_SWITCH") == some "allow"
+      -- the drain that promotes its replica is inactive during the startup
+      -- grace (998dc30 rc56 upgrade: deleted 52 s before the drain was active)
+      let graceS ← startupGraceSeconds
+      let inGrace := ((← IO.monoMsNow) - (← leaderSinceMsRef.get)) / 1000 < graceS
       let mut safe := false
       if let some n := st.lookupNode c.nodeKey then
         if let some (_, part) := st.partitionMap.find? (fun (i, _) => Int.ofNat i == n.partition) then
@@ -994,7 +1006,9 @@ private def runRolling (crName ns : String) (stateRef : IO.Ref FlareClusterState
             if safe then break
             if let some sp := pods.find? (·.toNodeKey == k) then
               safe ← handoverSuccessorOk st k sp.uid (← podStatsOf k ns)
-      d := if !allowed then
+      d := if inGrace then
+          Rolling.Decision.wait s!"master {c.name} runs a flared from before the ordered handover; it is replaced only after the operator's startup grace, when the drain is active"
+        else if !allowed then
           Rolling.Decision.wait s!"master {c.name} runs a flared from before the ordered handover, which cannot be handed over without possible loss; it is not deleted until the operator's legacyMasterSwitch (FLARE_OPERATOR_LEGACY_MASTER_SWITCH=allow) accepts that"
         else if safe then
           Rolling.Decision.delete c s!"master {c.name} runs a flared from before the ordered handover (no boot id / forward counters): deleted for the drain's promotion — NOT loss-free (the one-time upgrade from that release)"
@@ -4683,7 +4697,14 @@ def main (args : List String) : IO Unit := do
 
     -- a running handover is stepped every pass: no full interval between
     -- its steps (Th is 10 s; the default interval is 5 s)
-    IO.sleep (if (← handoverActiveRef.get) then 200 else (interval * 1000).toUInt32)
+    -- a registration that demoted a node (an empty new incarnation of a
+    -- master, Slave/Prepare now) ends the wait: until that map is sent, its
+    -- replicas still take the new empty process for their master (998dc30
+    -- rc56 upgrade: 9 s later the replica had declared needs_rebuild)
+    let sleepMs := if (← handoverActiveRef.get) then 200 else interval * 1000
+    for _ in [0:sleepMs / 100] do
+      IO.sleep 100
+      if !(← leftActiveRef.get).isEmpty then break
 
 end FlareOperator
 

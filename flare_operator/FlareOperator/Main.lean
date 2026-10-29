@@ -530,6 +530,23 @@ private def handoverSuccessorOk (cs : FlareClusterState) (k podUid : String) (re
   let cls ← handoverSuccessorClass cs k reply
   return PromotionEvidence.handoverAccepts cls (PromotionEvidence.bindingOf (some podUid) reply)
 
+/-- The successor a handover of `oldMaster` takes now: the first Active slave
+    of the partition (map order) that the precheck accepts this tick, else
+    the first Active slave (the handover then waits on it in `requested`).
+    Map order alone picked a slave whose flared had just restarted while the
+    other one was ready (1f92e17 copy-identity 2: the old master's pod was
+    gone before the restarted one read eligible). -/
+private def pickHandoverSuccessor (cs : FlareClusterState) (part : FlarePartition) (partIdx : Int)
+    (oldMaster : String) (pods : List Bridge.PodInfo) (ns : String) : IO (Option String) := do
+  for k in part.slaves do
+    if k == oldMaster then continue
+    let some n := cs.lookupNode k | continue
+    if n.role != FlareRole.Slave || n.partition != partIdx || n.state != FlareState.Active then continue
+    let some sp := pods.find? fun p => p.toNodeKey == k && p.ready && !p.terminating | continue
+    let .ok out ← Bridge.queryPodStats sp.name ns "stats" | continue
+    if ← handoverSuccessorOk cs k sp.uid (some out) then return some k
+  return K8sReconciler.findActiveSuccessor cs part partIdx
+
 /-- The pod UID, boot id and copy id of a reading, as the handover ledger
     records its successor's (Handover.Entry.successorBinding). -/
 private def handoverBinding (b : PromotionEvidence.Binding) : String :=
@@ -627,7 +644,7 @@ private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterSta
         if prev.isNone || retry then
           match state0.partitionMap.find? (fun (i, _) => i == pIdx) with
           | some (_, part) =>
-            match K8sReconciler.findActiveSuccessor state0 part n.partition with
+            match ← pickHandoverSuccessor state0 part n.partition k pods ns with
             | some succ =>
               let attempt := (prev.map (·.attempt + 1)).getD 1
               led := Handover.upsert led { partition := pIdx, oldMaster := k, successor := succ,
@@ -730,6 +747,17 @@ private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterSta
         successorOwnRole := succOut.bind (statStr · "own_role"),
         successorR3 := succR3,
         successorBinding := succBinding }
+      -- still requested and this successor is not accepted now: another
+      -- Active slave the precheck accepts takes its place (nothing was sent)
+      if e.phase == .requested && (!succEligible || !succR3 || succBinding.isNone) then
+        if let some (_, part) := st.partitionMap.find? (fun (i, _) => i == e.partition) then
+          if let some alt ← pickHandoverSuccessor st part (Int.ofNat e.partition) e.oldMaster pods ns then
+            if alt != e.successor && (← handoverSuccessorOk st alt ((pods.find? (·.toNodeKey == alt)).map (·.uid) |>.getD "") (← podStatsOf alt ns)) then
+              IO.eprintln s!"[flare-operator] HANDOVER p{e.partition}: successor {e.successor} is not accepted now ({succCls.label}); {alt} is, and takes its place"
+              out := { entries := out.entries ++ [{ e with successor := alt }] }
+              -- the fast loop ticks again at once (the new successor is ready)
+              transit := true
+              continue
       if e.phase == .requested && succEligible && !succR3 then
         IO.eprintln s!"[flare-operator] CRITICAL: HANDOVER p{e.partition}: draining master {e.oldMaster} has NO promotable successor yet — {e.successor} reads {succCls.label}; the master is kept (no demote) until it reads eligible"
       else if e.phase == .requested && succEligible && succBinding.isNone then

@@ -997,10 +997,10 @@ private def nodeGuardAnswer (crName ns : String) (stateRef : IO.Ref FlareCluster
         let key := if r.podHostname.isEmpty || r.podSubdomain.isEmpty then ""
           else FlareClusterState.toNodeKey s!"{r.podHostname}.{r.podSubdomain}.{ns}.svc.cluster.local" 12121
         let legacyMaster ← match st.lookupNode key with
-          | some n => do
-            if n.role != FlareRole.Master then return false
-            let reply ← podStatsOf key ns
-            pure (Handover.oldMasterPredatesHandover reply)
+          | some n =>
+            if n.role == FlareRole.Master then
+              Handover.oldMasterPredatesHandover <$> podStatsOf key ns
+            else pure false
           | none => pure false
         let facts : NodeGuard.PodFacts := {
           nodeKey := key, uid := r.podUid, overrideUid := r.podAnnotation NodeGuard.overrideAnnotation,

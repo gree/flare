@@ -628,13 +628,13 @@ namespace test_cluster
 		return NULL;
 	}
 
-	// W for reads (998dc30 copy-identity 11): a slave whose copy is not
-	// eligible forwards reads to the master; while the map names none (a
-	// handover's demote map) the read waits for the next map instead of
-	// failing as "no partition" (answered as a miss). The map that ends the
-	// wait names a master again; the read is then decided from the start and
-	// forwarded (here to an address with no transport: an enqueue error, not
-	// the partition error). Checks after the join, as for the write.
+	// W for reads (998dc30 copy-identity 11): while the map names no master
+	// for the partition (a handover's demote map: this node the master/down
+	// placeholder) a read waits for the next map instead of failing as "no
+	// partition" (answered as a miss). The map that ends the wait is the
+	// rollback (this node master/active again), so the read is decided from
+	// the start and served here (a forward needs the transport the test
+	// cluster lacks). Checks after the join, as for the write.
 	void test_a_read_waits_for_a_master_while_the_partition_has_none()
 	{
 		const std::string _tmp_dir = tmp_dir + std::string("/read_master_wait");
@@ -644,8 +644,8 @@ namespace test_cluster
 		cluster.set_master_wait_ms(5000);
 		uint64_t ver = cluster.get_node_map_version() + 10;
 		vector<cluster::node> v;
-		v.push_back(mk("old", 12121, cluster::role_master, cluster::state_down, 0));
-		v.push_back(mk("localhost", 11211, cluster::role_slave, cluster::state_active, 0));
+		v.push_back(mk("localhost", 11211, cluster::role_master, cluster::state_down, 0));
+		v.push_back(mk("s1", 12121, cluster::role_slave, cluster::state_active, 0));
 		cppcut_assert_equal(0, cluster.reconstruct_node(v, ver));
 		const uint64_t waited0 = stats_object->get_reads_waited_for_master();
 		ppr_arg a;
@@ -657,7 +657,7 @@ namespace test_cluster
 		cut_assert_equal_int(0, pthread_create(&t, NULL, run_ppr, &a));
 		usleep(300 * 1000);
 		const int done_early = ld(&a.done);
-		v[0] = mk("old", 12121, cluster::role_master, cluster::state_active, 0);
+		v[0] = mk("localhost", 11211, cluster::role_master, cluster::state_active, 0);
 		const int rc = cluster.reconstruct_node(v, ++ver);
 		const bool finished = wait_flag(&a.done, 5000);
 		if (!finished) {
@@ -667,7 +667,7 @@ namespace test_cluster
 		cut_assert_equal_int(0, done_early, cut_message("the read did not wait for a master"));
 		cppcut_assert_equal(0, rc);
 		cut_assert_true(finished);
-		cut_assert(a.result != cluster::proxy_request_error_partition, cut_message("the read failed as no partition after the master came back (%d)", a.result));
+		cut_assert_equal_int(cluster::proxy_request_continue, a.result);
 		cut_assert(a.ms >= 250, cut_message("answered after %ld ms", a.ms));
 		cut_assert_equal_int(1, (int)(stats_object->get_reads_waited_for_master() - waited0));
 	}
@@ -683,8 +683,8 @@ namespace test_cluster
 		cluster.set_master_wait_ms(400);
 		uint64_t ver = cluster.get_node_map_version() + 10;
 		vector<cluster::node> v;
-		v.push_back(mk("old", 12121, cluster::role_master, cluster::state_down, 0));
-		v.push_back(mk("localhost", 11211, cluster::role_slave, cluster::state_active, 0));
+		v.push_back(mk("localhost", 11211, cluster::role_master, cluster::state_down, 0));
+		v.push_back(mk("s1", 12121, cluster::role_slave, cluster::state_active, 0));
 		cppcut_assert_equal(0, cluster.reconstruct_node(v, ver));
 		ppr_arg a;
 		a.c = &cluster;

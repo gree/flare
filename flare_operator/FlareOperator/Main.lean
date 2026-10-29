@@ -464,6 +464,63 @@ initialize nodeGuardInitRef : IO.Ref Bool ← IO.mkRef false
 /-- replicas with a replica repair pending, as of the last pass -/
 initialize nodeGuardRepairRef : IO.Ref (List String) ← IO.mkRef []
 
+/-- The partition's AUTHORITATIVE history (docs/design-authoritative-history.md),
+    reloaded from its ConfigMap at every use: an operator restart or a new
+    leader decides from what is persisted, never from memory. -/
+initialize historyStoreRef : IO.Ref (Option AuthoritativeHistory.Store) ← IO.mkRef none
+/-- The partition count the CR asks for (restore provenance: the layout a
+    candidate's binding must match). -/
+initialize desiredPartitionsRef : IO.Ref Nat ← IO.mkRef 0
+/-- The recorded (authoritative) history of partition `p`, from the loaded
+    store: what "the same history" means for a lagging copy. -/
+private def recordedHistory (p : Int) : IO (Option (String × String)) := do
+  if p < 0 then return none
+  match ← historyStoreRef.get with
+  | none => return none
+  | some st => return (st.recorded p.toNat).map fun h => (h.masterId, h.epoch)
+
+/-- The partition's last master (the map's lastMasterOf, exactly one) when the
+    partition is explicitly UNTRACKED: the source a legacy-bound copy must
+    name to be `lagging` (PromotionEvidence.legacyCopyOfUntrackedLastMaster). -/
+private def untrackedLastMaster (cs : FlareClusterState) (p : Int) : IO (Option String) := do
+  if p < 0 then return none
+  match ← historyStoreRef.get with
+  | none => return none
+  | some st =>
+    if st.tracked p.toNat then return none
+    match (cs.nodeMap.filter fun kv => kv.2.lastMasterOf == p).map Prod.fst with
+    | [k] => return some k
+    | _ => return none
+
+/-- The handover's own precheck of a successor (review of ba85535): the
+    promotion path's classification (markers, history, map; the old master is
+    still the present master) must be `eligible`, and the binding (pod UID,
+    boot id, copy id) complete. The node guard and rolling require the same
+    before a master's delete: a successor the handover would refuse is no
+    successor (a pre-R3 / pre-copy-identity flared included: fail closed). -/
+private def handoverSuccessorClass (cs : FlareClusterState) (k : String) (reply : Option String) :
+    IO PromotionEvidence.Class := do
+  match cs.lookupNode k with
+  | none => pure (PromotionEvidence.Class.unknown "not in the map")
+  | some n =>
+    let part : Int := n.partition
+    let nPartsB ← desiredPartitionsRef.get
+    let obs : PromotionEvidence.Observed := {
+      mapPrepare := n.state == FlareState.Prepare
+      mapActive := n.state == FlareState.Active
+      podReady := true
+      partitionHasMaster := cs.nodeMap.any fun kv => kv.2.role == FlareRole.Master && kv.2.partition == part
+      lastMasterHistory := ← recordedHistory part
+      isLastMasterHolder := part ≥ 0 && n.lastMasterOf == part
+      expectedBinding := if part ≥ 0 then some (PromotionEvidence.bindingFor part.toNat nPartsB cs.partitionSize) else none
+      untrackedLastMaster := ← untrackedLastMaster cs part
+      attributedRejoin := PromotionEvidence.isAttributedRejoin (n.role == FlareRole.Slave) (n.state == FlareState.Prepare) n.partition n.lastMasterOf n.formerSlaveOf }
+    pure (PromotionEvidence.classify reply obs)
+
+private def handoverSuccessorOk (cs : FlareClusterState) (k podUid : String) (reply : Option String) : IO Bool := do
+  let cls ← handoverSuccessorClass cs k reply
+  return PromotionEvidence.handoverAccepts cls (PromotionEvidence.bindingOf (some podUid) reply)
+
 /-- The pod UID, boot id and copy id of a reading, as the handover ledger
     records its successor's (Handover.Entry.successorBinding). -/
 private def handoverBinding (b : PromotionEvidence.Binding) : String :=
@@ -626,12 +683,19 @@ private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterSta
                 else podStatsOf p.toNodeKey ns
         versions := versions ++ [(p.toNodeKey, o.bind (statNat · "node_map_version"))]
       let succPod := pods.find? (·.toNodeKey == e.successor)
-      -- R3 / SAF-08: the successor's own eligible reading, and the pod,
-      -- process and copy it was read from (handoverBinding)
-      let succReading := SourceEligibility.classifyReply succOut
-      let succR3 := SourceEligibility.successorReady succReading
+      -- R3 / SAF-08: the successor is judged by the promotion path's own
+      -- classification (markers, history, map and pod; review of ba85535:
+      -- not just the R3 key), and only `eligible` may start a demote; the
+      -- binding (pod, process, copy) must be complete — a pre-R3 or
+      -- pre-copy-identity flared cannot prove it is the same copy at the
+      -- commit, so it is never handed over losslessly (fail closed)
+      let succCls ← if e.phase == .requested then handoverSuccessorClass st e.successor succOut
+        else pure (PromotionEvidence.Class.unknown "not read after the demote")
+      let succR3 := succCls == .eligible
       let succBinding := match succPod, succOut with
-        | some sp, some out => some (handoverBinding (PromotionEvidence.bindingOf (some sp.uid) (some out)))
+        | some sp, some out =>
+          let b := PromotionEvidence.bindingOf (some sp.uid) (some out)
+          if b.complete then some (handoverBinding b) else none
         | _, _ => none
       let succEligible := match st.lookupNode e.successor, succPod with
         | some n, some sp =>
@@ -650,13 +714,15 @@ private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterSta
         successorR3 := succR3,
         successorBinding := succBinding }
       if e.phase == .requested && succEligible && !succR3 then
-        IO.eprintln s!"[flare-operator] CRITICAL: HANDOVER p{e.partition}: draining master {e.oldMaster} has NO promotable successor yet — {e.successor} R3 reading is {SourceEligibility.readingLabel succReading}; the master is kept (no demote) until it reads eligible"
+        IO.eprintln s!"[flare-operator] CRITICAL: HANDOVER p{e.partition}: draining master {e.oldMaster} has NO promotable successor yet — {e.successor} reads {succCls.label}; the master is kept (no demote) until it reads eligible"
+      else if e.phase == .requested && succEligible && succBinding.isNone then
+        IO.eprintln s!"[flare-operator] CRITICAL: HANDOVER p{e.partition}: draining master {e.oldMaster} has NO promotable successor yet — {e.successor} does not report a complete identity (pod UID, boot id, copy id); no lossless handover without it"
       let (e1, act) := Handover.step cfg e obs
       if e.phase == .requested && e1.phase == .demoting then
         let demoteBoot := (PromotionEvidence.bindingOf none succOut).bootId.getD "?"
         -- the reading the drain then proves current (SAF-08: the successor's
         -- own process; the commit accepts the handover exception only for it)
-        IO.eprintln s!"[flare-operator] PROMOTION EVIDENCE (handover demote, the successor's own R3 reading): {e.successor}={if succReading == .legacy then "legacy" else "eligible"} [boot {demoteBoot}] binding {e1.successorBinding}"
+        IO.eprintln s!"[flare-operator] PROMOTION EVIDENCE (handover demote, the successor's own R3 reading): {e.successor}={succCls.label} [boot {demoteBoot}] binding {e1.successorBinding}"
       if e1.phase != e.phase then
         IO.eprintln s!"[flare-operator] HANDOVER p{e.partition} {e.oldMaster} -> {e.successor}: {e.phase} -> {e1.phase} after {now - e.phaseMs} ms (since start {now - e.startedMs} ms){if e1.reason.isEmpty || e1.reason == e.reason then "" else s!" — {e1.reason}"}"
         if e1.phase == .aborted then
@@ -793,12 +859,27 @@ private def runRolling (crName ns : String) (stateRef : IO.Ref FlareClusterState
       if n.role == FlareRole.Slave && n.state == FlareState.Active then
         -- R3 eligible, or a flared that predates R3 (the promotion path's
         -- compatibility rule): an upgrade from such a release must roll
-        if SourceEligibility.successorReady (SourceEligibility.classifyReply (← podStatsOf k ns)) then
+        if PromotionEvidence.successorIdle (← podStatsOf k ns) then
           eligible := eligible ++ [k]
     let ok := Rolling.stable st (replicas - 1) readyKeys eligible busy
     passes := if ok then passes + 1 else 0
     rollingStablePassesRef.set passes
-  let d := Rolling.decide rev cands masterKeys passes 2
+  let d0 := Rolling.decide rev cands masterKeys passes 2
+  -- a master is deleted only with a successor the ordered handover itself
+  -- accepts (review of ba85535): the stability check above counts a pre-R3
+  -- slave, which the handover refuses — deleting the master then would
+  -- bypass it
+  let d ← match d0 with
+    | .delete c _ =>
+      if !masterKeys.contains c.nodeKey then pure d0 else do
+        let mut safe := false
+        if let some n := st.lookupNode c.nodeKey then
+          for (k, m) in st.nodeMap do
+            if safe || k == c.nodeKey || m.role != FlareRole.Slave || m.state != FlareState.Active || m.partition != n.partition then continue
+            if let some sp := pods.find? fun p => p.toNodeKey == k && p.ready && !p.terminating then
+              safe ← handoverSuccessorOk st k sp.uid (← podStatsOf k ns)
+        pure (Rolling.gateMaster d0 masterKeys safe)
+    | _ => pure d0
   let label := d.label
   if label != (← rollingLastRef.get) then
     rollingLastRef.set label
@@ -853,8 +934,10 @@ private def nodeGuardAnswer (crName ns : String) (stateRef : IO.Ref FlareCluster
                 for (k, m) in st.nodeMap do
                   if k == key || m.role != FlareRole.Slave || m.state != FlareState.Active || m.partition != n.partition then continue
                   if repairs.contains k then continue
-                  if !(pods.any fun p => p.toNodeKey == k && p.ready && !p.terminating) then continue
-                  if SourceEligibility.successorReady (SourceEligibility.classifyReply (← podStatsOf k ns)) then
+                  let some sp := pods.find? fun p => p.toNodeKey == k && p.ready && !p.terminating | continue
+                  -- the successor the ordered handover itself would accept
+                  -- (eligible, complete binding): another one is no successor
+                  if ← handoverSuccessorOk st k sp.uid (← podStatsOf k ns) then
                     ok := ok ++ [k]
                     break
                 pure (some ok)
@@ -1049,10 +1132,6 @@ private def refreshParkedRebuilds (stateRef : IO.Ref FlareClusterState) (ns : St
         parkedIdleRef.set (parked.filter (· != k))
     | .error e => IO.eprintln s!"[flare-operator] rebuild_resume to {k} failed ({e}); it stays parked"
 
-/-- The partition's AUTHORITATIVE history (docs/design-authoritative-history.md),
-    reloaded from its ConfigMap at every use: an operator restart or a new
-    leader decides from what is persisted, never from memory. -/
-initialize historyStoreRef : IO.Ref (Option AuthoritativeHistory.Store) ← IO.mkRef none
 initialize historyRvRef : IO.Ref String ← IO.mkRef ""
 initialize historyApprovedRef : IO.Ref Bool ← IO.mkRef false
 /-- A person's choice of the copy to keep for a partition held with no master
@@ -1093,27 +1172,6 @@ private def utcNowIso : IO String := do
   let out ← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%SZ"] }
   return out.stdout.trim
 
-/-- The recorded (authoritative) history of partition `p`, from the loaded
-    store: what "the same history" means for a lagging copy. -/
-private def recordedHistory (p : Int) : IO (Option (String × String)) := do
-  if p < 0 then return none
-  match ← historyStoreRef.get with
-  | none => return none
-  | some st => return (st.recorded p.toNat).map fun h => (h.masterId, h.epoch)
-
-/-- The partition's last master (the map's lastMasterOf, exactly one) when the
-    partition is explicitly UNTRACKED: the source a legacy-bound copy must
-    name to be `lagging` (PromotionEvidence.legacyCopyOfUntrackedLastMaster). -/
-private def untrackedLastMaster (cs : FlareClusterState) (p : Int) : IO (Option String) := do
-  if p < 0 then return none
-  match ← historyStoreRef.get with
-  | none => return none
-  | some st =>
-    if st.tracked p.toNat then return none
-    match (cs.nodeMap.filter fun kv => kv.2.lastMasterOf == p).map Prod.fst with
-    | [k] => return some k
-    | _ => return none
-
 /-- (persisted text: some (some t) present / some none absent / none unreadable, resourceVersion) -/
 private def readHistory (crName ns : String) : IO (Option (Option String) × String) := do
   match ← kubectl ["get", "configmap", historyCm crName, "-n", ns, "-o", "jsonpath={.metadata.resourceVersion}|{.data.record}"] with
@@ -1125,9 +1183,6 @@ private def readHistory (crName ns : String) : IO (Option (Option String) × Str
     if containsSubstr e "NotFound" || containsSubstr e "not found" then return (some none, "")
     return (none, "")
 
-/-- The partition count the CR asks for (restore provenance: the layout a
-    candidate's binding must match). -/
-initialize desiredPartitionsRef : IO.Ref Nat ← IO.mkRef 0
 
 /-- Each partition's Active master as seen by the last follow probe pass: a
     slave of a partition whose master CHANGED is read at once (a promotion

@@ -36,6 +36,15 @@ def results : List (String × Bool) := Id.run do
               match decide "new" [m0, s1] masters 5 2 with | .delete c _ => c.name == "nodes-1" | _ => false)]
   r := r ++ [("rolling: with only the master left, the master is deleted (the handover moves it)",
               match decide "new" [m0, pod "nodes-1" "s:12121" "new"] masters 5 2 with | .delete c _ => c.name == "nodes-0" | _ => false)]
+  -- review of ba85535: the master's delete waits for a successor the ordered
+  -- handover accepts (a pre-R3 slave counts as stable, not as a successor)
+  let dm := decide "new" [m0, pod "nodes-1" "s:12121" "new"] masters 5 2
+  r := r ++ [("rolling: a master's delete waits without a successor the handover accepts (legacy-only slave)",
+              match gateMaster dm masters false with | .wait _ => true | _ => false)]
+  r := r ++ [("rolling: ... and stands once one exists",
+              match gateMaster dm masters true with | .delete c _ => c.name == "nodes-0" | _ => false)]
+  r := r ++ [("rolling: a replica's delete is not gated on the successor",
+              match gateMaster (decide "new" [m0, s1] masters 5 2) masters false with | .delete c _ => c.name == "nodes-1" | _ => false)]
   r := r ++ [("rolling: no update revision → idle", match decide "" [m0, s1] masters 5 2 with | .idle _ => true | _ => false)]
   -- ordinal order is numeric (review of 97c487f)
   let many := (List.range 12).map fun i => pod s!"node-sw-nodes-{i}" s!"n{i}:12121" "old"

@@ -193,6 +193,21 @@ def Stats.forbiddenMarker (s : Stats) (partitionHasMaster : Bool) : Option Strin
     some "R3: history being re-validated against the present master"
   else none
 
+/-- A slave's reply counts as a caught-up successor for the rolling stability
+    check and the node guard (review of ba85535, P1): complete, valid, and
+    idle by flared's own markers (no reconstruction running, no rebuild in
+    flight or parked, no partial / quarantined / corrupted / unresolved copy,
+    R3 not revalidating or needs_rebuild), and either R3 eligible or a
+    pre-R3 flared that holds data (the promotion path's compatibility rule).
+    Unreadable, incomplete, eligible 0 and empty do not count. -/
+def successorIdle (reply : Option String) : Bool :=
+  match reply with
+  | none => false
+  | some out =>
+    let s := parseStats out
+    s.complete && s.invalid.isEmpty && (s.forbiddenMarker true).isNone
+      && (s.eligible == some 1 || (s.isLegacy && s.items != some 0))
+
 /-- What the operator knows besides the stats. -/
 structure Observed where
   mapPrepare : Bool          -- the map has it in Prepare
@@ -485,6 +500,19 @@ structure Binding where
 def bindingOf (podUid : Option String) (reply : Option String) : Binding :=
   let s := (reply.map parseStats).getD {}
   { podUid := podUid, bootId := s.bootId, copyId := s.copyId }
+
+/-- Every identity field is reported (pod UID, flared boot id, copy id). A
+    handover binds its no-loss exception only to such a binding: a missing
+    field (a pre-copy-identity flared included) cannot show that the copy is
+    the same one, so it fails closed (review of ba85535). -/
+def Binding.complete (b : Binding) : Bool :=
+  (b.podUid.any (!·.isEmpty)) && (b.bootId.any (!·.isEmpty)) && (b.copyId.any (!·.isEmpty))
+
+/-- The ordered handover's successor precheck, and the node guard's and
+    rolling's before a master's delete: `eligible` with a complete binding.
+    `legacy`, `lagging`, `empty` and any incomplete identity are refused. -/
+def handoverAccepts (c : Class) (b : Binding) : Bool :=
+  c == .eligible && b.complete
 
 /-- At commit: promote only a candidate classified promotable on this pass
     whose pod, flared process and copy are still the ones read. -/

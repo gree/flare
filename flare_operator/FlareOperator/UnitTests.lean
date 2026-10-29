@@ -2349,6 +2349,39 @@ private def checkPromotionEvidence (ctx : Ctx) : IO Unit := do
     (FlareOperator.E2E.PromotionTimeline.parseTs "2026-10-08T04:31:08.5Z x" == some ("2026-10-08T04:31:08.500000000", "x")
       && FlareOperator.E2E.PromotionTimeline.parseTs "[flare-operator] x" == none
       && FlareOperator.E2E.PromotionTimeline.parseTs "2026-10-08T04:31:08Z x" == some ("2026-10-08T04:31:08.000000000", "x"))
+  let idle := PromotionEvidence.successorIdle
+  check ctx "rolling / node guard (review of ba85535): a caught-up successor is idle by its own markers and R3 eligible, or a pre-R3 flared holding data"
+    (idle (some "STAT repl_read_source_eligible 1\r\nSTAT curr_items 5\r\nEND\r\n")
+      && idle (some "STAT curr_items 5\r\nSTAT reconstruction_current_state succeeded\r\nEND\r\n"))
+  check ctx "rolling / node guard (review of ba85535): a reconstruction running, a rebuild in flight or parked, eligible 0, empty, incomplete or unreadable is not a caught-up successor"
+    (!idle (some "STAT curr_items 5\r\nSTAT reconstruction_current_state running\r\nEND\r\n")
+      && !idle (some "STAT curr_items 5\r\nSTAT rebuild_in_flight 1\r\nEND\r\n")
+      && !idle (some "STAT repl_read_source_eligible 1\r\nSTAT rebuild_in_flight 1\r\nEND\r\n")
+      && !idle (some "STAT repl_read_source_eligible 1\r\nSTAT rebuild_parked 1\r\nEND\r\n")
+      && !idle (some "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state revalidating\r\nEND\r\n")
+      && !idle (some "STAT repl_read_source_eligible 0\r\nEND\r\n")
+      && !idle (some "STAT curr_items 0\r\nEND\r\n")
+      && !idle (some "STAT repl_read_source_eligible 1\r\n")
+      && !idle none)
+  let fullB := PromotionEvidence.bindingOf (some "u") (some "STAT reconstruction_boot_id 7\r\nSTAT rocksdb_copy_id c:1\r\nEND\r\n")
+  check ctx "handover / node guard / rolling master delete (review of ba85535): only eligible with a complete binding; legacy, lagging, empty or an incomplete identity is refused"
+    (PromotionEvidence.handoverAccepts .eligible fullB
+      && !PromotionEvidence.handoverAccepts .legacy fullB
+      && !PromotionEvidence.handoverAccepts .lagging fullB
+      && !PromotionEvidence.handoverAccepts .empty fullB
+      && !PromotionEvidence.handoverAccepts .eligible { fullB with copyId := none })
+  check ctx "handover precheck: a legacy reply holding data classifies legacy (refused), and with a reconstruction running it is forbidden (refused)"
+    (let rv : PromotionEvidence.Observed := { mapPrepare := false, mapActive := true, podReady := true, partitionHasMaster := true, lastMasterHistory := none }
+     let legacyReply := "STAT curr_items 5\r\nSTAT reconstruction_current_state succeeded\r\nEND\r\n"
+     PromotionEvidence.classify (some legacyReply) rv == .legacy
+       && !PromotionEvidence.handoverAccepts (PromotionEvidence.classify (some legacyReply) rv) (PromotionEvidence.bindingOf (some "u") (some legacyReply))
+       && (match PromotionEvidence.classify (some (legacyReply.replace "succeeded" "running")) rv with | .forbidden _ => true | _ => false))
+  check ctx "handover binding (review of ba85535): complete only with pod UID, boot id and copy id all reported"
+    ((PromotionEvidence.bindingOf (some "u") (some "STAT reconstruction_boot_id 7\r\nSTAT rocksdb_copy_id c:1\r\nEND\r\n")).complete
+      && !(PromotionEvidence.bindingOf (some "u") (some "STAT reconstruction_boot_id 7\r\nEND\r\n")).complete
+      && !(PromotionEvidence.bindingOf (some "u") (some "STAT rocksdb_copy_id c:1\r\nEND\r\n")).complete
+      && !(PromotionEvidence.bindingOf none (some "STAT reconstruction_boot_id 7\r\nSTAT rocksdb_copy_id c:1\r\nEND\r\n")).complete
+      && !(PromotionEvidence.bindingOf (some "u") (some "STAT reconstruction_boot_id 7\r\nSTAT rocksdb_copy_id \r\nEND\r\n")).complete)
   let b := PromotionEvidence.bindingOf (some "uid-1") (reply "")
   check ctx "promotion by reason: the commit refuses when the pod, the flared process or the copy changed since the reading, or it was not read"
     ((PromotionEvidence.commitAllows (some .eligible) b b).1
@@ -2374,13 +2407,6 @@ private def checkSourceEligibility (ctx : Ctx) : IO Unit := do
       && classifyReply (some "STAT curr_items 5\r\nEND\r\n") == .legacy
       && classifyReply (some "STAT rocksdb_copy_id u:1\r\nEND\r\n") == .unknown
       && classifyReply (some "STAT repl_read_source_state revalidating\r\nEND\r\n") == .unknown)
-  check ctx "rolling / node guard: a caught-up successor is R3 eligible or a complete pre-R3 reply (an upgrade from rc56 must roll); eligible 0 and unreadable are not"
-    (successorReady (classifyReply (some "STAT repl_read_source_eligible 1\r\nEND\r\n"))
-      && successorReady (classifyReply (some "STAT curr_items 5\r\nEND\r\n"))
-      && !successorReady (classifyReply (some "STAT repl_read_source_eligible 0\r\nEND\r\n"))
-      && !successorReady (classifyReply (some "STAT curr_items 5\r\n"))
-      && !successorReady (classifyReply none)
-      && !successorReady (classifyReply (some "STAT rocksdb_copy_id u:1\r\nEND\r\n")))
   check ctx "R3: a promotion is possible with a masterless partition, a missing pod, an unhealthy node or a terminating master"
     (promotionRisk true false [] [] [] && promotionRisk false true [] [] []
       && promotionRisk false false ["x"] [] [] && promotionRisk false false [] ["m"] ["m"])

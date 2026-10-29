@@ -477,7 +477,7 @@ private def switchRun (c : Ctx) (op : SwitchOp) : IO (Except String SwitchObs) :
       | .drainMaster =>
         match offAtDrain with
         | some off =>
-          (off && uidChanged p.master.name, s!"pvc: no flared pod left on {drained} after the drain={off}, master pod replaced (on its pinned node after uncordon)={uidChanged p.master.name}")
+          (off && uidChanged p.master.name, s!"pvc: no flared pod left on {drained} after the drain={off}, master pod RECREATED on its pinned node after uncordon={uidChanged p.master.name} (local-path: a recreation, NOT a relocation to another node; cordon-move acceptance needs migratable storage)")
         | none =>
           let off := !(after.any fun (a : PodRow) => some a.node == drained)
           (off && uidChanged p.master.name, s!"no flared pod left on {drained}={off}, master pod replaced={uidChanged p.master.name}")

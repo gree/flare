@@ -55,16 +55,6 @@ def classifyReply (reply : Option String) : Reading :=
           "rocksdb_copy_identity_consistent"]
         if newerKeys.any (fun k => (value k).isSome) then .unknown else .legacy
 
-/-- A slave counts as a caught-up successor for the rolling stability check
-    and the node guard when it is R3 eligible, or its reply is complete from a
-    flared that predates R3 (`legacy`, the compatibility rule the promotion
-    path applies: an upgrade from such a release must be able to roll).
-    Eligible 0 and an unreadable or incomplete reply do not count. -/
-def successorReady : Reading → Bool
-  | .eligible 1 => true
-  | .legacy => true
-  | _ => false
-
 /-- Slaves to withhold from promotion on this pass: not eligible, or
     unreadable / incomplete. A `legacy` reply is not withheld here. -/
 def withheld (readings : List (String × Reading)) : List String :=

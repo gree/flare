@@ -80,6 +80,17 @@ def stable (s : FlareClusterState) (slavesPerPartition : Nat) (readyKeys eligibl
           (s.lookupNode k).any (fun n => n.role == FlareRole.Slave && n.state == FlareState.Active)
             && readyKeys.contains k && eligibleSlaves.contains k).length >= slavesPerPartition)
 
+/-- A master's delete stands only with a successor the ordered handover
+    accepts (`safeSuccessor`); otherwise it waits (review of ba85535: the
+    stability check counts a pre-R3 slave the handover refuses). -/
+def gateMaster (d : Decision) (masterKeys : List String) (safeSuccessor : Bool) : Decision :=
+  match d with
+  | .delete c _ =>
+    if masterKeys.contains c.nodeKey && !safeSuccessor then
+      .wait s!"master {c.name} has no successor the ordered handover accepts (R3 eligible with a complete pod/boot/copy identity); it is not deleted"
+    else d
+  | other => other
+
 /-- The one pod to delete now, if any. `stablePasses` = consecutive passes
     the cluster was stable (≥ `needPasses` before a delete: the previous
     replacement's replica settles first). -/

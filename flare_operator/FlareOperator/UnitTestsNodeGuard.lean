@@ -4,6 +4,7 @@
 -/
 import FlareOperator.StateMachine.NodeGuard
 import FlareOperator.K8s.Admission
+import FlareOperator.StateMachine.Handover
 
 namespace FlareOperator.UnitTestsNodeGuard
 
@@ -52,6 +53,24 @@ def results : List (String × Bool) := Id.run do
   r := r ++ [("node guard (998dc30 G1): a pod whose handover is still completing is refused although the map already shows it as a proxy",
               !(podDelete true handedOver caughtUp user op { pod "m:12121" "u1" with handoverUnfinished := true }).allowed
                 && (podDelete true handedOver caughtUp user op (pod "m:12121" "u1")).allowed)]
+  -- review of 3dcfc5c: a ledger entry without oldUid (older / damaged JSON)
+  -- holds every pod at its key; a known different UID (recreated) is not held
+  let ledgerOf := fun (s : String) =>
+    ((Lean.Json.parse s).toOption.bind Handover.Ledger.fromJson?).getD {}
+  let noUid := ledgerOf "{\"entries\":[{\"partition\":0,\"oldMaster\":\"m:12121\",\"successor\":\"s:12121\",\"phase\":\"promoting\"}]}"
+  let withUid := ledgerOf "{\"entries\":[{\"partition\":0,\"oldMaster\":\"m:12121\",\"successor\":\"s:12121\",\"phase\":\"promoting\",\"oldUid\":\"u0\"}]}"
+  let doneNoUid := ledgerOf "{\"entries\":[{\"partition\":0,\"oldMaster\":\"m:12121\",\"successor\":\"s:12121\",\"phase\":\"done\"}]}"
+  r := r ++ [("node guard (review of 3dcfc5c): a promoting ledger entry with no oldUid refuses the delete of the pod the map already shows as a proxy",
+              noUid.entries.length == 1 && noUid.unfinishedFor "m:12121" "u1"
+                && !(podDelete true handedOver caughtUp user op
+                      { pod "m:12121" "u1" with handoverUnfinished := noUid.unfinishedFor "m:12121" "u1" }).allowed)]
+  r := r ++ [("node guard (review of 3dcfc5c): an entry's known old UID holds that pod and a request without a UID, not a recreated pod with another UID; a done entry holds nothing",
+              withUid.unfinishedFor "m:12121" "u0" && withUid.unfinishedFor "m:12121" ""
+                && !withUid.unfinishedFor "m:12121" "u1"
+                && (podDelete true handedOver caughtUp user op
+                      { pod "m:12121" "u1" with handoverUnfinished := withUid.unfinishedFor "m:12121" "u1" }).allowed
+                && !withUid.unfinishedFor "s:12121" "u0"
+                && !doneNoUid.unfinishedFor "m:12121" "u1")]
   r := r ++ [("node guard: no handover is requested without a caught-up successor, before the first pass, for a force delete, an override, the operator or a terminating pod",
               !requestsHandover true st [] user op (pod "m:12121" "u1")
                 && !requestsHandover false st caughtUp user op (pod "m:12121" "u1")

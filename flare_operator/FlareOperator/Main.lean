@@ -1065,8 +1065,10 @@ private def nodeGuardAnswer (crName ns : String) (stateRef : IO.Ref FlareCluster
           gracePeriod := r.gracePeriodSeconds, nodeName := r.podNodeName, terminating := r.podTerminating,
           predatesHandover := legacyMaster,
           legacySwitchAllowed := (← IO.getEnv "FLARE_OPERATOR_LEGACY_MASTER_SWITCH") == some "allow",
-          handoverUnfinished := (← handoverRef.get).entries.any fun e =>
-            e.oldMaster == key && e.oldUid == r.podUid && e.phase != .done && e.phase != .aborted }
+          -- an unloaded (unreadable) ledger may hold an unfinished handover
+          -- from this pod: held too (fail closed, review of 3dcfc5c)
+          handoverUnfinished := !(← handoverLoadedRef.get)
+            || (← handoverRef.get).unfinishedFor key r.podUid }
         -- the successor evidence is read now, only for a master's delete:
         -- the replica's pod Ready and not Terminating, R3 eligible in its
         -- own stats, no replica repair pending

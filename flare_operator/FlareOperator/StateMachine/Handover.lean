@@ -386,6 +386,17 @@ def upsert (l : Ledger) (e : Entry) : Ledger :=
 def remove (l : Ledger) (partition : Nat) : Ledger :=
   { entries := l.entries.filter (·.partition != partition) }
 
+/-- An ordered handover from pod `uid` at `key` is still running (not done,
+    not aborted): the node guard refuses its delete although the map may
+    already show it as a proxy. An entry without an old UID (an older or a
+    damaged ledger: `Entry.fromJson?` defaults it to "") or a request
+    without one matches every pod at `key` — fail closed (review of
+    3dcfc5c); only a KNOWN different UID (a recreated pod) is not held. -/
+def unfinishedFor (l : Ledger) (key uid : String) : Bool :=
+  l.entries.any fun e =>
+    e.oldMaster == key && (e.oldUid.isEmpty || uid.isEmpty || e.oldUid == uid)
+      && e.phase != .done && e.phase != .aborted
+
 -- ═══════════════════════════════════════════════════════════════════════
 -- Persistence (FlareCluster status.handovers)
 -- ═══════════════════════════════════════════════════════════════════════

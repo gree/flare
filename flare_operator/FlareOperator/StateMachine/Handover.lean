@@ -392,7 +392,7 @@ def remove (l : Ledger) (partition : Nat) : Ledger :=
     damaged ledger: `Entry.fromJson?` defaults it to "") or a request
     without one matches every pod at `key` — fail closed (review of
     3dcfc5c); only a KNOWN different UID (a recreated pod) is not held. -/
-def unfinishedFor (l : Ledger) (key uid : String) : Bool :=
+def Ledger.unfinishedFor (l : Ledger) (key uid : String) : Bool :=
   l.entries.any fun e =>
     e.oldMaster == key && (e.oldUid.isEmpty || uid.isEmpty || e.oldUid == uid)
       && e.phase != .done && e.phase != .aborted

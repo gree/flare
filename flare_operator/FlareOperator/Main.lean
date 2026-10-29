@@ -3984,7 +3984,8 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
       if mNode.role == FlareRole.Master && mNode.state == FlareState.Active then
         -- an Active slave of the same partition to compare against / promote,
         -- none with a replica repair pending (it missed the master's writes)
-        let repairKeys := (← ledgerRef.get).entries.filterMap (·.nodeKey)
+        -- (none while the ledger is unavailable: fail closed)
+        let repairKeys := if (← ledgerAvailableRef.get) then some ((← ledgerRef.get).entries.filterMap (·.nodeKey)) else none
         match StatsObservation.selfHealComparand finalState mNode.partition repairKeys with
         | some (sKey, sNode) =>
           let mOut ← Bridge.queryPodStats (extractPodName mNode.serverName) ns "stats"
@@ -4058,11 +4059,14 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
                 -- the repair ledger re-read AFTER the fresh stats: a repair
                 -- opened for the successor in this pass (its drops counted)
                 -- makes it no successor (4a52e0d empty-source)
-                let repairNow := (← ledgerRef.get).entries.filterMap (·.nodeKey)
-                if repairNow.contains sKey then
-                  IO.eprintln s!"[flare-operator] EMPTY-MASTER SELF-HEAL: successor {sKey} has a replica repair pending (it missed the master's writes); not deleting {mPod}"
+                -- (availability re-checked too: unavailable = no delete)
+                let repairNow := if (← ledgerAvailableRef.get) then some ((← ledgerRef.get).entries.filterMap (·.nodeKey)) else none
+                let successorClean := (StatsObservation.selfHealComparand liveState mNode.partition repairNow).isSome
+                  && repairNow.any (!·.contains sKey)
+                if !successorClean then
+                  IO.eprintln s!"[flare-operator] EMPTY-MASTER SELF-HEAL: successor {sKey} has a replica repair pending (it missed the master's writes) or the repair ledger is unavailable; not deleting {mPod}"
                 let successorOk := StatsObservation.successorStillValid liveState mKey sKey dataBearing
-                  && !repairNow.contains sKey
+                  && successorClean
                 -- SAF-10c: if the survivor is a continuous-replication
                 -- follower, it must be proven current from the SAME fresh
                 -- stats (following the master's history, fresh, within the

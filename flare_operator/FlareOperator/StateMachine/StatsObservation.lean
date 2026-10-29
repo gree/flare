@@ -157,12 +157,15 @@ def successorStillValid (state : FlareClusterState) (masterKey slaveKey : String
     repair missed writes the master took (4a52e0d empty-source: deletes were
     dropped towards it, it still held the keys, and the self-heal deleted
     the master that had legitimately emptied, taking it as the data-bearing
-    copy); it is neither evidence that the master lost data nor a successor. -/
-def selfHealComparand (state : FlareClusterState) (partition : Int) (repairKeys : List String)
+    copy); it is neither evidence that the master lost data nor a successor.
+    `none` = the repair ledger is unavailable (its status read failed): a
+    slave under repair cannot be told apart, so there is no comparand and
+    no delete (fail closed, review of 7738d8f). -/
+def selfHealComparand (state : FlareClusterState) (partition : Int) (repairKeys : Option (List String))
     : Option (String × FlareNode) :=
-  state.nodeMap.find? fun kv =>
+  repairKeys.bind fun keys => state.nodeMap.find? fun kv =>
     kv.2.role == FlareRole.Slave && kv.2.state == FlareState.Active
-      && kv.2.partition == partition && !repairKeys.contains kv.1
+      && kv.2.partition == partition && !keys.contains kv.1
 
 /-- The final gate before deleting an empty master's pod (SAF-06). Every
     input is a re-check made AFTER the fresh stats reads, so the decision

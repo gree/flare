@@ -49,6 +49,9 @@ def results : List (String × Bool) := Id.run do
   r := r ++ [("node guard: with legacyMasterSwitch it is allowed with a caught-up replica (NOT loss-free), and still refused without one",
               (del { pod "m:12121" "u1" with predatesHandover := true, legacySwitchAllowed := true }).allowed
                 && !(del { pod "m:12121" "u1" with predatesHandover := true, legacySwitchAllowed := true } []).allowed)]
+  r := r ++ [("node guard (998dc30 G1): a pod whose handover is still completing is refused although the map already shows it as a proxy",
+              !(podDelete true handedOver caughtUp user op { pod "m:12121" "u1" with handoverUnfinished := true }).allowed
+                && (podDelete true handedOver caughtUp user op (pod "m:12121" "u1")).allowed)]
   r := r ++ [("node guard: no handover is requested without a caught-up successor, before the first pass, for a force delete, an override, the operator or a terminating pod",
               !requestsHandover true st [] user op (pod "m:12121" "u1")
                 && !requestsHandover false st caughtUp user op (pod "m:12121" "u1")

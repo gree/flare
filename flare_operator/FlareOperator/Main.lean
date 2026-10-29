@@ -893,6 +893,9 @@ private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterSta
         transit := true
       out := { entries := out.entries ++ [e2] }
     led := out
+    -- the node guard reads the ledger between ticks (a promote map committed
+    -- here shows the old master as a proxy before the handover is done)
+    handoverRef.set out
     -- the versions just sent and the other phase changes (the phase that
     -- asked for each map was saved before it was committed)
     if out != before || (← handoverDirtyRef.get) then
@@ -1047,7 +1050,9 @@ private def nodeGuardAnswer (crName ns : String) (stateRef : IO.Ref FlareCluster
           nodeKey := key, uid := r.podUid, overrideUid := r.podAnnotation NodeGuard.overrideAnnotation,
           gracePeriod := r.gracePeriodSeconds, nodeName := r.podNodeName, terminating := r.podTerminating,
           predatesHandover := legacyMaster,
-          legacySwitchAllowed := (← IO.getEnv "FLARE_OPERATOR_LEGACY_MASTER_SWITCH") == some "allow" }
+          legacySwitchAllowed := (← IO.getEnv "FLARE_OPERATOR_LEGACY_MASTER_SWITCH") == some "allow",
+          handoverUnfinished := (← handoverRef.get).entries.any fun e =>
+            e.oldMaster == key && e.oldUid == r.podUid && e.phase != .done && e.phase != .aborted }
         -- the successor evidence is read now, only for a master's delete:
         -- the replica's pod Ready and not Terminating, R3 eligible in its
         -- own stats, no replica repair pending

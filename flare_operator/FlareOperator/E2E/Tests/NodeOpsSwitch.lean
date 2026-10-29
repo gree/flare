@@ -738,20 +738,24 @@ def abortExhaustTest (c : Ctx) : IO TestResult := do
     | .ok _ => pure ()
     let drainLine := s!"graceful drain: demoting Terminating node(s) to live proxy + promoting replacement(s): [{p.master.name}"
     let count := fun (l n : String) => (l.splitOn n).length - 1
+    -- an attempt ends in an abort from any phase: attempt 1 from draining,
+    -- 2 and 3 from requested (the R3 precheck never demotes towards a copy
+    -- that cannot re-validate while it is cut; 998dc30 S9)
+    let abortMark := "-> aborted after"
     let done ← waitForCondition "three handover attempts aborted, then the one-map drain took the master" 170 do
       let l ← opLogs ()
-      return count l "draining -> aborted" >= 3 && containsSubstr l drainLine
+      return count l abortMark >= 3 && containsSubstr l drainLine
     removeCuts installed
     discard <| c.stopLoad "svc" 4
     let l ← opLogs ()
     for x in (l.splitOn "\n").filter (fun x => containsSubstr x "HANDOVER" || containsSubstr x "graceful drain") do c.art "operator-handover.txt" x
     -- order: the drain line comes after the third abort
-    let afterThird := match (l.splitOn "draining -> aborted").drop 3 with
+    let afterThird := match (l.splitOn abortMark).drop 3 with
       | rest :: _ => containsSubstr rest drainLine
       | [] => false
-    let beforeThird := match (l.splitOn "draining -> aborted").take 3 with
+    let beforeThird := match (l.splitOn abortMark).take 3 with
       | parts => parts.any (containsSubstr · drainLine)
-    IO.eprintln s!"# [{c.test}] aborts={count l "draining -> aborted"}, attempt 2 started={containsSubstr l "(attempt 2 of"}, attempt 3 started={containsSubstr l "(attempt 3 of"}, drain after the third abort={afterThird}, drain before it={beforeThird}"
+    IO.eprintln s!"# [{c.test}] aborts={count l abortMark}, attempt 2 started={containsSubstr l "(attempt 2 of"}, attempt 3 started={containsSubstr l "(attempt 3 of"}, drain after the third abort={afterThird}, drain before it={beforeThird}"
     if !done then return .fail "three aborts followed by the one-map drain were not seen within 170 s (see operator-handover.txt)"
     if !(containsSubstr l "(attempt 2 of" && containsSubstr l "(attempt 3 of") then
       return .fail "attempt 2 or 3 never started (see operator-handover.txt)"

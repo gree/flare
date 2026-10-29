@@ -84,6 +84,11 @@ structure PodFacts where
   /-- the operator is configured to accept that NOT loss-free switch
       (legacyMasterSwitch, FLARE_OPERATOR_LEGACY_MASTER_SWITCH=allow) -/
   legacySwitchAllowed : Bool := false
+  /-- an ordered handover from this pod (its UID) is still running (not done,
+      not aborted): the map may already show it as a proxy (V2 committed)
+      before every pod has V2 (998dc30 G1: the delete was allowed between the
+      commit and `done`) -/
+  handoverUnfinished : Bool := false
   deriving Repr
 
 /-- DELETE of the flared pod `pod`. `initialized` = the operator finished a
@@ -103,7 +108,9 @@ def podDelete (initialized : Bool) (s : FlareClusterState) (caughtUp : List Stri
   | none =>
     .deny s!"flare: this pod is not in the operator's node map, so it cannot tell what the pod holds (it may be starting with data on its volume). Retry once it has registered, or annotate the pod {overrideAnnotation}=<its uid> to accept the risk explicitly"
   | some n =>
-    if n.role == FlareRole.Proxy then .allow "the pod is a proxy (it holds no data)"
+    if pod.handoverUnfinished then
+      .deny "flare: the ordered handover from this pod is still completing (the promote map is not on every pod yet); retry the delete in a few seconds"
+    else if n.role == FlareRole.Proxy then .allow "the pod is a proxy (it holds no data)"
     else if pod.gracePeriod == some 0 then
       .deny s!"flare: a force delete (grace period 0) of a {roleName n.role} skips its preStop and the ordered handover, so acknowledged writes can be lost. Delete it without --force / --grace-period=0 (the operator hands a master over first), or annotate the pod {overrideAnnotation}=<its uid> to accept the risk explicitly"
     else if n.role == FlareRole.Master && !hasSuccessor s caughtUp n.partition pod.nodeKey then

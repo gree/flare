@@ -3985,7 +3985,9 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
         -- an Active slave of the same partition to compare against / promote,
         -- none with a replica repair pending (it missed the master's writes)
         -- (none while the ledger is unavailable: fail closed)
-        let repairKeys := if (← ledgerAvailableRef.get) then some ((← ledgerRef.get).entries.filterMap (·.nodeKey)) else none
+        let ledAvail ← ledgerAvailableRef.get
+        let ledNow ← ledgerRef.get
+        let repairKeys := if ledAvail then some (ledNow.entries.filterMap (·.nodeKey)) else none
         match StatsObservation.selfHealComparand finalState mNode.partition repairKeys with
         | some (sKey, sNode) =>
           let mOut ← Bridge.queryPodStats (extractPodName mNode.serverName) ns "stats"
@@ -4060,7 +4062,9 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
                 -- opened for the successor in this pass (its drops counted)
                 -- makes it no successor (4a52e0d empty-source)
                 -- (availability re-checked too: unavailable = no delete)
-                let repairNow := if (← ledgerAvailableRef.get) then some ((← ledgerRef.get).entries.filterMap (·.nodeKey)) else none
+                let ledAvailNow ← ledgerAvailableRef.get
+                let ledFresh ← ledgerRef.get
+                let repairNow := if ledAvailNow then some (ledFresh.entries.filterMap (·.nodeKey)) else none
                 let successorClean := (StatsObservation.selfHealComparand liveState mNode.partition repairNow).isSome
                   && repairNow.any (!·.contains sKey)
                 if !successorClean then

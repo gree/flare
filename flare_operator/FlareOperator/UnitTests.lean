@@ -2336,6 +2336,15 @@ private def checkPromotionEvidence (ctx : Ctx) : IO Unit := do
     (!tl opOk "2026-10-08T04:31:12.000000000Z [NTC] read source BOUND to m\n2026-10-08T04:31:12.100000000Z [NTC] node activated\n" "77"
       && !tl opOk "2026-10-08T04:31:08.271249906Z [NTC] read source BOUND to m\n" "77"
       && !tl opOk flOk "78")
+  let hoEl := s!"2026-10-08T04:31:10.000000000Z [flare-operator] PROMOTION EVIDENCE (handover demote, the successor's own R3 reading): {vk}=eligible [boot 77] binding u|77|c\n"
+  let hoLag := fun (boot : String) => s!"2026-10-08T04:31:15.000000000Z [flare-operator] PROMOTION EVIDENCE (read at commit, a pass that did not read the candidates): {vk}=lagging (same history) [boot {boot}]\n2026-10-08T04:31:15.100000000Z [flare-operator] promotion of {vk}: lagging (same history) at commit, accepted for an ordered handover whose drain was proven clean\n2026-10-08T04:31:16.000000000Z [flare-operator] PROMOTION committed: [{vk}]\n"
+  check ctx "timeline (a8b9793 matrix, SAF-08): an ordered handover's lagging commit read stands on the eligible demote-time reading of the same boot"
+    (tl (hoEl ++ hoLag "77") flOk "77")
+  check ctx "timeline: ... but not without an eligible reading of that boot before it, nor when the commit read another boot, nor without the handover acceptance"
+    (!tl (hoLag "77") flOk "77"
+      && !tl (hoEl.replace "boot 77" "boot 76" ++ hoLag "77") flOk "77"
+      && !tl (hoEl ++ hoLag "78") flOk "77"
+      && !tl (hoEl ++ (hoLag "77").replace "accepted for an ordered handover" "x") flOk "77")
   check ctx "timeline (review round 2): timestamps of different precision compare as instants, not as text"
     (FlareOperator.E2E.PromotionTimeline.parseTs "2026-10-08T04:31:08.5Z x" == some ("2026-10-08T04:31:08.500000000", "x")
       && FlareOperator.E2E.PromotionTimeline.parseTs "[flare-operator] x" == none
@@ -2365,6 +2374,13 @@ private def checkSourceEligibility (ctx : Ctx) : IO Unit := do
       && classifyReply (some "STAT curr_items 5\r\nEND\r\n") == .legacy
       && classifyReply (some "STAT rocksdb_copy_id u:1\r\nEND\r\n") == .unknown
       && classifyReply (some "STAT repl_read_source_state revalidating\r\nEND\r\n") == .unknown)
+  check ctx "rolling / node guard: a caught-up successor is R3 eligible or a complete pre-R3 reply (an upgrade from rc56 must roll); eligible 0 and unreadable are not"
+    (successorReady (classifyReply (some "STAT repl_read_source_eligible 1\r\nEND\r\n"))
+      && successorReady (classifyReply (some "STAT curr_items 5\r\nEND\r\n"))
+      && !successorReady (classifyReply (some "STAT repl_read_source_eligible 0\r\nEND\r\n"))
+      && !successorReady (classifyReply (some "STAT curr_items 5\r\n"))
+      && !successorReady (classifyReply none)
+      && !successorReady (classifyReply (some "STAT rocksdb_copy_id u:1\r\nEND\r\n")))
   check ctx "R3: a promotion is possible with a masterless partition, a missing pod, an unhealthy node or a terminating master"
     (promotionRisk true false [] [] [] && promotionRisk false true [] [] []
       && promotionRisk false false ["x"] [] [] && promotionRisk false false [] ["m"] ["m"])

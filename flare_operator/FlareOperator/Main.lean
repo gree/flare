@@ -447,6 +447,10 @@ private def persistLedger (crName ns : String) (before after : ReplicaRepair.Led
 -- ═══════════════════════════════════════════════════════════════════════
 
 initialize handoverRef : IO.Ref Handover.Ledger ← IO.mkRef {}
+/-- The successor and its recorded binding of the handover whose V2 is being
+    committed now (set right before commitPromote; the ledger in
+    handoverRef is written only at the end of runHandovers). -/
+initialize handoverCommitBindingRef : IO.Ref (List (String × String)) ← IO.mkRef []
 initialize handoverLoadedRef : IO.Ref Bool ← IO.mkRef false
 initialize handoverDirtyRef : IO.Ref Bool ← IO.mkRef false
 /-- a handover is running: the leader loop does not wait the full interval -/
@@ -459,6 +463,21 @@ initialize passLeaseLostRef : IO.Ref Bool ← IO.mkRef false
 initialize nodeGuardInitRef : IO.Ref Bool ← IO.mkRef false
 /-- replicas with a replica repair pending, as of the last pass -/
 initialize nodeGuardRepairRef : IO.Ref (List String) ← IO.mkRef []
+
+/-- The pod UID, boot id and copy id of a reading, as the handover ledger
+    records its successor's (Handover.Entry.successorBinding). -/
+private def handoverBinding (b : PromotionEvidence.Binding) : String :=
+  let dash := "-"
+  let u := b.podUid.getD dash
+  let t := b.bootId.getD dash
+  let c := b.copyId.getD dash
+  s!"{u}|{t}|{c}"
+
+/-- The ordered handover's commit exception holds only for the successor's
+    pod, process and copy that were read eligible when the demote started. -/
+private def handoverBindingHolds (k : String) (b : PromotionEvidence.Binding) : IO Bool := do
+  return (← handoverCommitBindingRef.get).any fun (s, rec) => s == k && !rec.isEmpty
+    && rec == handoverBinding b
 
 /-- A complete `stats` reply of the pod behind `key`, or none. -/
 private def podStatsOf (key ns : String) : IO (Option String) := do
@@ -607,6 +626,13 @@ private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterSta
                 else podStatsOf p.toNodeKey ns
         versions := versions ++ [(p.toNodeKey, o.bind (statNat · "node_map_version"))]
       let succPod := pods.find? (·.toNodeKey == e.successor)
+      -- R3 / SAF-08: the successor's own eligible reading, and the pod,
+      -- process and copy it was read from (handoverBinding)
+      let succReading := SourceEligibility.classifyReply succOut
+      let succR3 := SourceEligibility.successorReady succReading
+      let succBinding := match succPod, succOut with
+        | some sp, some out => some (handoverBinding (PromotionEvidence.bindingOf (some sp.uid) (some out)))
+        | _, _ => none
       let succEligible := match st.lookupNode e.successor, succPod with
         | some n, some sp =>
           n.role == FlareRole.Slave && n.state == FlareState.Active && n.partition == Int.ofNat e.partition
@@ -620,8 +646,17 @@ private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterSta
         droppedToSuccessor := oldOut.bind (statDest · "proxy_write_dropped" e.successor),
         failedToSuccessor := oldOut.bind (statDest · "proxy_write_failed" e.successor),
         entryVersions := versions,
-        successorOwnRole := succOut.bind (statStr · "own_role") }
+        successorOwnRole := succOut.bind (statStr · "own_role"),
+        successorR3 := succR3,
+        successorBinding := succBinding }
+      if e.phase == .requested && succEligible && !succR3 then
+        IO.eprintln s!"[flare-operator] CRITICAL: HANDOVER p{e.partition}: draining master {e.oldMaster} has NO promotable successor yet — {e.successor} R3 reading is {SourceEligibility.readingLabel succReading}; the master is kept (no demote) until it reads eligible"
       let (e1, act) := Handover.step cfg e obs
+      if e.phase == .requested && e1.phase == .demoting then
+        let demoteBoot := (PromotionEvidence.bindingOf none succOut).bootId.getD "?"
+        -- the reading the drain then proves current (SAF-08: the successor's
+        -- own process; the commit accepts the handover exception only for it)
+        IO.eprintln s!"[flare-operator] PROMOTION EVIDENCE (handover demote, the successor's own R3 reading): {e.successor}={if succReading == .legacy then "legacy" else "eligible"} [boot {demoteBoot}] binding {e1.successorBinding}"
       if e1.phase != e.phase then
         IO.eprintln s!"[flare-operator] HANDOVER p{e.partition} {e.oldMaster} -> {e.successor}: {e.phase} -> {e1.phase} after {now - e.phaseMs} ms (since start {now - e.startedMs} ms){if e1.reason.isEmpty || e1.reason == e.reason then "" else s!" — {e1.reason}"}"
         if e1.phase == .aborted then
@@ -663,6 +698,7 @@ private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterSta
       if act == .send && e1.phase == .promoting && e1.v2.isNone then
         let before ← stateRef.get
         -- the lossless exception only after a drain proven clean
+        handoverCommitBindingRef.set [(e1.successor, e1.successorBinding)]
         let ok ← commitPromote (if e1.drainProven then some (e1.successor, (succPod.map (·.uid)).getD "") else none) (Handover.apply before e1)
         let after ← stateRef.get
         let promoted := (after.lookupNode e1.successor).any (·.role == FlareRole.Master)
@@ -755,9 +791,10 @@ private def runRolling (crName ns : String) (stateRef : IO.Ref FlareClusterState
     let mut eligible : List String := []
     for (k, n) in st.nodeMap do
       if n.role == FlareRole.Slave && n.state == FlareState.Active then
-        if let some out ← podStatsOf k ns then
-          if statNat out "repl_read_source_eligible" == some 1 then
-            eligible := eligible ++ [k]
+        -- R3 eligible, or a flared that predates R3 (the promotion path's
+        -- compatibility rule): an upgrade from such a release must roll
+        if SourceEligibility.successorReady (SourceEligibility.classifyReply (← podStatsOf k ns)) then
+          eligible := eligible ++ [k]
     let ok := Rolling.stable st (replicas - 1) readyKeys eligible busy
     passes := if ok then passes + 1 else 0
     rollingStablePassesRef.set passes
@@ -817,10 +854,9 @@ private def nodeGuardAnswer (crName ns : String) (stateRef : IO.Ref FlareCluster
                   if k == key || m.role != FlareRole.Slave || m.state != FlareState.Active || m.partition != n.partition then continue
                   if repairs.contains k then continue
                   if !(pods.any fun p => p.toNodeKey == k && p.ready && !p.terminating) then continue
-                  if let some out ← podStatsOf k ns then
-                    if statNat out "repl_read_source_eligible" == some 1 then
-                      ok := ok ++ [k]
-                      break
+                  if SourceEligibility.successorReady (SourceEligibility.classifyReply (← podStatsOf k ns)) then
+                    ok := ok ++ [k]
+                    break
                 pure (some ok)
           | none => pure (some [])
         match caughtUp with
@@ -2455,6 +2491,7 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
         let hist ← recordedHistory part
         let nPartsB ← desiredPartitionsRef.get
         let proven := (← handoverProvenRef.get).contains k
+          && (← handoverBindingHolds k (PromotionEvidence.bindingOf (podNow.map (·.1)) replyNow))
         let obs : PromotionEvidence.Observed := {
           mapPrepare := (n?.map (·.state)) == some FlareState.Prepare
           mapActive := (n?.map (·.state)) == some FlareState.Active
@@ -2608,6 +2645,7 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
           -- to the evidence that chose this candidate (review P1-5)
           let fresh ← readFresh k ns
           let proven := (← handoverProvenRef.get).contains k
+            && (← handoverBindingHolds k (PromotionEvidence.bindingOf (fresh.map (·.1)) (fresh.map (·.2))))
           -- a proven handover is judged at commit alone (no pass evidence:
           -- that was read while the old master was still the present one)
           let passEv0 := (← promotionEvidenceRef.get).find? (·.1 == k)

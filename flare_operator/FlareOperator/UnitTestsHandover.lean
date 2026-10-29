@@ -27,7 +27,8 @@ private def fresh : Entry :=
 
 private def okObs (now : Nat) : Obs :=
   { nowMs := now, successorEligible := true, oldBoot := some 7, droppedToSuccessor := some 3,
-    failedToSuccessor := some 0, inFlightToSuccessor := some 0, oldMapVersion := some 0 }
+    failedToSuccessor := some 0, inFlightToSuccessor := some 0, oldMapVersion := some 0,
+    successorBinding := some "u1|b1|c1" }
 
 private def roleOf (s : FlareClusterState) (k : String) : Option (FlareRole × FlareState) :=
   (s.lookupNode k).map fun n => (n.role, n.state)
@@ -46,6 +47,28 @@ def results : List (String × Bool) := Id.run do
   let (e1c, a1c) := step cfg fresh { okObs 40000 with successorEligible := false }
   r := r ++ [("handover: a successor that never becomes eligible ends it unsent (aborted, finish)",
               e1c.phase == .aborted && a1c == .finish && e1c.v1.isNone)]
+  -- R3 / SAF-08 (review of the a8b9793 matrix): no demote until the
+  -- successor's own reading is eligible and its binding readable; the binding
+  -- read then is what the drain proves, any other one aborts
+  let (e1r, a1r) := step cfg fresh { okObs 1100 with successorR3 := false }
+  r := r ++ [("handover: a successor whose R3 reading is not eligible keeps it requested (no V1, the master is kept)",
+              e1r.phase == .requested && a1r == .none && e1r.v1.isNone)]
+  let (e1u, a1u) := step cfg fresh { okObs 1100 with successorBinding := none }
+  r := r ++ [("handover: an unreadable successor binding keeps it requested", e1u.phase == .requested && a1u == .none)]
+  r := r ++ [("handover: the demote records the successor's binding", e1.successorBinding == "u1|b1|c1")]
+  let e1x := recordSent e1 42
+  let (e1y, a1y) := step cfg e1x { okObs 1200 with oldMapVersion := some 42, successorBinding := some "u1|b2|c1" }
+  r := r ++ [("handover: the successor restarted (another boot) after the demote → aborted, rollback sent",
+              e1y.phase == .aborted && a1y == .send)]
+  let (e1z, _) := step cfg e1x { okObs 1200 with oldMapVersion := some 42, successorBinding := none }
+  r := r ++ [("handover: an unreadable successor binding is not a change", e1z.phase == .draining)]
+  let ep : Entry := { e1x with phase := .promoting, drainProven := true }
+  let (ep1, ap1) := step cfg ep { okObs 1300 with successorBinding := some "u1|b1|c9" }
+  r := r ++ [("handover: another copy before V2 → aborted, no promote", ep1.phase == .aborted && ap1 == .send && ep1.v2.isNone)]
+  let (ep2, ap2) := step cfg ep (okObs 1300)
+  r := r ++ [("handover: the same binding before V2 → V2 sent", ep2.phase == .promoting && ap2 == .send)]
+  r := r ++ [("handover: the successor binding survives the ledger JSON",
+              (Entry.fromJson? (Entry.toJson e1)).map (·.successorBinding) == some "u1|b1|c1")]
   -- V1: old master master/down, successor still slave; blocked from refill
   let e1s := recordSent e1 42
   let s1 := apply pair e1s

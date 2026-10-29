@@ -105,6 +105,12 @@ structure Entry where
       handover started (the drain must not add to them) -/
   dropped0 : Option Nat := none
   failed0 : Option Nat := none
+  /-- the successor's pod UID, process (boot id) and copy id when it was read
+      R3 eligible and the demote started: the drain proves currency only for
+      this process and copy, so another one aborts the handover and the
+      commit accepts the handover exception only for it (review of the
+      a8b9793 matrix: SAF-08 / R3 Unknown) -/
+  successorBinding : String := ""
   startedMs : Nat := 0
   /-- when the demote started (Th is measured from here) -/
   demotedMs : Nat := 0
@@ -148,6 +154,12 @@ structure Obs where
       (including the old master and the successor) -/
   entryVersions : List (String × Option Nat) := []
   successorOwnRole : Option String := none
+  /-- the successor's own R3 reading this tick is eligible (or a complete
+      pre-R3 reply): required before the demote, never inferred -/
+  successorR3 : Bool := true
+  /-- the successor's binding (pod UID, boot id, copy id) read this tick;
+      none = unreadable -/
+  successorBinding : Option String := none
   deriving Repr
 
 /-- What Main does after a step. -/
@@ -169,6 +181,14 @@ def drainClean (e : Entry) (o : Obs) : Bool :=
 def allApplied (vs : List (String × Option Nat)) (v : Nat) : Bool :=
   !vs.isEmpty && vs.all fun (_, r) => match r with | some x => x >= v | none => false
 
+/-- The successor read now is another pod, process or copy than the one the
+    demote was started for. Unreadable is not a change (it does not advance
+    anything either). -/
+def successorChanged (e : Entry) (o : Obs) : Bool :=
+  match o.successorBinding with
+  | some b => !e.successorBinding.isEmpty && b != e.successorBinding
+  | none => false
+
 private def toPhase (e : Entry) (p : Phase) (now : Nat) (why : String := "") : Entry :=
   { e with phase := p, phaseMs := now, reason := if why.isEmpty then e.reason else why }
 
@@ -180,11 +200,11 @@ def step (cfg : Config) (e : Entry) (o : Obs) : Entry × Action :=
     if !o.oldSameProcess then
       (toPhase e .aborted o.nowMs "the old master pod went away before the handover started", .finish)
     else
-    let ready := o.successorEligible && o.oldBoot.isSome
+    let ready := o.successorEligible && o.successorR3 && o.successorBinding.isSome && o.oldBoot.isSome
                    && o.droppedToSuccessor.isSome && o.failedToSuccessor.isSome
     if ready then
       ({ toPhase e .demoting o.nowMs with
-          demotedMs := o.nowMs,
+          demotedMs := o.nowMs, successorBinding := o.successorBinding.getD "",
           oldBoot := o.oldBoot, dropped0 := o.droppedToSuccessor, failed0 := o.failedToSuccessor }, .send)
     else if o.nowMs >= e.startedMs + cfg.startMs then
       -- never demoted: nothing to roll back; the old drain path takes over
@@ -204,6 +224,8 @@ def step (cfg : Config) (e : Entry) (o : Obs) : Entry × Action :=
         ({ toPhase e .aborted o.nowMs "the old master pod went away mid-handover and the successor is not eligible: no rollback (the failover rules apply)" with noRollback := true }, .finish)
     else if !o.successorEligible then
       (toPhase e .aborted o.nowMs "the successor is no longer eligible", .send)
+    else if successorChanged e o then
+      (toPhase e .aborted o.nowMs "the successor's pod, process or copy changed since the demote", .send)
     else if restarted then
       (toPhase e .aborted o.nowMs "the old master restarted (its counters are not comparable)", .send)
     -- progress before the bound: a step observed complete is taken even when
@@ -227,7 +249,10 @@ def step (cfg : Config) (e : Entry) (o : Obs) : Entry × Action :=
       else (e, .none)
   | .promoting =>
     match e.v2 with
-    | none => (e, .send)
+    | none =>
+      if successorChanged e o then
+        (toPhase e .aborted o.nowMs "the successor's pod, process or copy changed before the promote", .send)
+      else (e, .send)
     | some v2 =>
       if allApplied o.entryVersions v2 && o.successorOwnRole == some "master" then
         (toPhase e .done o.nowMs, .finish)
@@ -325,7 +350,7 @@ def Entry.toJson (e : Entry) : Json :=
       ("oldUid", Json.str e.oldUid), ("noRollback", Json.bool e.noRollback),
       ("drainProven", Json.bool e.drainProven), ("attempt", Json.num e.attempt),
       ("startedMs", Json.num e.startedMs), ("demotedMs", Json.num e.demotedMs),
-      ("phaseMs", Json.num e.phaseMs),
+      ("phaseMs", Json.num e.phaseMs), ("successorBinding", Json.str e.successorBinding),
       ("reason", Json.str e.reason)] : List (String × Json))
     ++ optNat "v1" e.v1 ++ optNat "v2" e.v2 ++ optNat "vBack" e.vBack
     ++ optNat "oldBoot" e.oldBoot ++ optNat "dropped0" e.dropped0 ++ optNat "failed0" e.failed0
@@ -346,6 +371,7 @@ def Entry.fromJson? (j : Json) : Option Entry := do
          oldBoot := o "oldBoot", dropped0 := o "dropped0", failed0 := o "failed0",
          startedMs := (o "startedMs").getD 0, demotedMs := (o "demotedMs").getD 0,
          phaseMs := (o "phaseMs").getD 0,
+         successorBinding := (j.getObjValAs? String "successorBinding").toOption.getD "",
          reason := (j.getObjValAs? String "reason").toOption.getD "" }
 
 open Lean in

@@ -57,8 +57,21 @@ def judge (opLog flaredCurrentLog key bootNow : String) : Except String String :
     | throw "no timestamped PROMOTION committed line for it"
   let readings := op.filterMap fun (t, r) =>
     if (r.splitOn "PROMOTION EVIDENCE").length > 1 && decide (t ≤ commitTs) then (evidenceFor r key).map (t, ·) else none
-  let some (readTs, (cls, boot)) := readings.getLast?
+  let some (lastTs, (lastCls, lastBoot)) := readings.getLast?
     | throw s!"no timestamped reading of it at or before the commit ({commitTs})"
+  -- an ordered handover's commit reads the successor `lagging` (the
+  -- partition has no Active master then) and accepts it only after a drain
+  -- proven clean, for the process read eligible when the demote started: the
+  -- reading that stands is then that eligible one, of the same boot
+  let handoverAccepted := lastCls.startsWith "lagging" && lastBoot == bootNow
+    && op.any fun (t, r) => (r.splitOn "accepted for an ordered handover").length > 1
+         && (r.splitOn key).length > 1 && decide (lastTs ≤ t) && decide (t ≤ commitTs)
+  let (readTs, cls, boot) ←
+    if handoverAccepted then
+      match (readings.filter fun (_, (c, b)) => c.startsWith "eligible" && b == bootNow).getLast? with
+      | some (t, (c, b)) => pure (t, c, b)
+      | none => throw s!"the handover's commit read {lastCls} and no eligible reading of boot {bootNow} precedes it"
+    else pure (lastTs, lastCls, lastBoot)
   if !cls.startsWith "eligible" then throw s!"the reading that stood ({readTs}) was {cls}, not eligible"
   if boot != bootNow then throw s!"the reading that stood was of boot {boot}, the promoted process is boot {bootNow}"
   let firstAt := fun (needle : String) => (fl.find? fun (_, r) => (r.splitOn needle).length > 1).map (·.1)

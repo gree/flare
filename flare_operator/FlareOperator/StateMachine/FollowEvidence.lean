@@ -479,4 +479,29 @@ def mastersMoved (before now : List (Int × MasterIdentity)) : List Int :=
     | some a => if a != id then some part else none
     | none => if before.isEmpty then none else some part
 
+/-- What the probe remembers of the partitions' masters between passes: the
+    LAST identity seen for each partition, kept through passes where that
+    partition has no Active master, and whether any pass was observed yet.
+    A pass with every master absent must not erase what was seen before it:
+    a master that comes back under the same key with a new registration epoch
+    or pod UID after a masterless pass is still a move (review of 5c904b2:
+    overwriting with an empty list made the next master a "first pass"). -/
+structure MasterTrack where
+  seeded : Bool := false
+  last : List (Int × MasterIdentity) := []
+  deriving Repr, BEq, Inhabited
+
+/-- One pass: the partitions whose master moved, and the track to keep.
+    Before the first observed pass nothing is a move; after it, a partition
+    whose master differs from its last identity, or that gets a master it
+    never had, is a move. A partition without a master keeps its last
+    identity. -/
+def MasterTrack.step (t : MasterTrack) (now : List (Int × MasterIdentity))
+    : List Int × MasterTrack :=
+  let moved := now.filterMap fun (part, id) => match t.last.lookup part with
+    | some a => if a != id then some part else none
+    | none => if t.seeded then some part else none
+  let kept := t.last.filter fun (part, _) => !(now.any (·.1 == part))
+  (moved, { seeded := true, last := now ++ kept })
+
 end FlareOperator.FollowEvidence

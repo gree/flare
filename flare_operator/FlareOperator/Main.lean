@@ -1370,7 +1370,7 @@ private def readHistory (crName ns : String) : IO (Option (Option String) × Str
     slave of a partition whose master CHANGED is read at once (a promotion
     advances the history, its surviving slaves declare needs_rebuild — read
     only every FLARE_FOLLOW_PROBE_INTERVAL passes before, run 38037230581). -/
-initialize probeMastersRef : IO.Ref (List (Int × FollowEvidence.MasterIdentity)) ← IO.mkRef []
+initialize probeMastersRef : IO.Ref FollowEvidence.MasterTrack ← IO.mkRef {}
 /-- (partition, last tick to read its slaves every pass) after its master
     changed: flared's validator declares needs_rebuild ~2 s after the map, so
     one read on the next pass could miss it. -/
@@ -2220,9 +2220,8 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
         if n.role == FlareRole.Master && n.state == FlareState.Active then
           some (n.partition, (k, n.regEpoch, ((pods.find? (fun p => Bridge.PodInfo.toNodeKey p == k)).map (·.uid)).getD ""))
         else none
-      let mastersBefore ← probeMastersRef.get
-      probeMastersRef.set mastersNow
-      let movedNow := FollowEvidence.mastersMoved mastersBefore mastersNow
+      let (movedNow, track) := (← probeMastersRef.get).step mastersNow
+      probeMastersRef.set track
       let forced := ((← probeForcedUntilRef.get).filter (·.2 ≥ tr.tick)) ++ movedNow.map (·, tr.tick + 5)
       probeForcedUntilRef.set forced
       if !movedNow.isEmpty then

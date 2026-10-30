@@ -1412,6 +1412,27 @@ def checkMasterMoved (ctx : Ctx) : IO Unit := do
     (FollowEvidence.mastersMoved [(0, m "n0" 5 "u1")] [(0, m "n0" 5 "u2")] == [0])
   check ctx "master moved: a partition that gained a master after others were seen is a move; only that partition"
     (FollowEvidence.mastersMoved [(0, m "n0" 5 "u1")] [(0, m "n0" 5 "u1"), (1, m "n2" 5 "u3")] == [1])
+  -- review of 5c904b2: a masterless pass must not erase the last identity
+  let t0 : FollowEvidence.MasterTrack := {}
+  let (mv1, t1) := t0.step [(0, m "n0" 5 "u1")]
+  let (mv2, t2) := t1.step []
+  let (mv3, _) := t2.step [(0, m "n0" 9 "u2")]
+  check ctx "master track: the first observed pass is not a move"
+    (mv1 == [] && t1.seeded)
+  check ctx "master track: a pass with no master keeps the partition's last identity"
+    (mv2 == [] && t2.last == [(0, m "n0" 5 "u1")])
+  check ctx "master track: masterless -> the SAME key back with a new epoch and UID is a move (forced follow probe)"
+    (mv3 == [0])
+  let (mv4, _) := t2.step [(0, m "n0" 5 "u1")]
+  check ctx "master track: masterless -> the same identity back is not a move"
+    (mv4 == [])
+  let (mv5, t5) := t0.step []
+  let (mv6, _) := t5.step [(0, m "n0" 5 "u1")]
+  check ctx "master track: a first pass with no master at all is observed; a master appearing after it is a move"
+    (mv5 == [] && t5.seeded && mv6 == [0])
+  let (mv7, t7) := t1.step [(1, m "n2" 5 "u3")]
+  check ctx "master track: one partition masterless keeps its identity while another moves"
+    (mv7 == [1] && t7.last.lookup 0 == some (m "n0" 5 "u1"))
 
 def checkFollowConfirm (ctx : Ctx) : IO Unit := do
   let off : FollowEvidence.Reading := { complete := true, enabled := some false }

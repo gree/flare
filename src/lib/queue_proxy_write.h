@@ -62,8 +62,11 @@ protected:
 	shared_thread						_owner;
 	// counted in stats' in-flight forwards until this item is destroyed
 	bool										_in_flight;
-	// in-cluster replicas this forward is counted in flight for (stats' per-destination gauge)
+	// in-cluster replicas this forward is counted in flight for (stats' per-destination gauge);
+	// one item is shared by every replica's forwarding thread, so each releases its own
+	// destination when it is done with the item (_mutex_repl_dests), the dtor the rest
 	vector<string>					_repl_dests;
+	pthread_mutex_t					_mutex_repl_dests;
 	// never sent: the forwarding thread found its destination a proxy (a map
 	// changed while it was queued). A client write forwarded to its master
 	// is then routed again (cluster::pre_proxy_write), not failed.
@@ -127,6 +130,7 @@ public:
 	void set_owner(shared_thread t) { this->_owner = t; };
 	void track_in_flight();
 	void track_repl_in_flight(const string& dest);
+	void release_repl_in_flight(const string& dest);
 	virtual void on_abandoned(const string& dest);
 	int set_generic_value(uint64_t generic_value) { this->_generic_value = generic_value; return 0; };
 	uint64_t get_generic_value() { return this->_generic_value; };

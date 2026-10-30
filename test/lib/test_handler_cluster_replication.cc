@@ -928,6 +928,43 @@ namespace test_handler_cluster_replication {
 		cut_assert_equal_int(0, (int)total);
 	}
 
+	// One forward item is shared by every replica's thread: each replica's
+	// thread releases its own destination when it is done with the item, so a
+	// forward stuck toward one replica (Pending, connect retries) does not
+	// keep the others in flight (d0ddf54 41016847026 forward-window S3: 25 in
+	// flight to the handover's successor for 10 s, the handover aborted).
+	// Releasing twice, or a destination never tracked, changes nothing; the
+	// item's destruction releases what is left.
+	void test_repl_in_flight_released_per_destination_before_the_item_goes() {
+		uint64_t total = 1;
+		map<string, uint64_t> snap = stats_object->get_repl_in_flight(total);
+		cut_assert_equal_int(0, (int)total);
+		storage::entry e = get_entry(" rk 0 0 5 3", storage::parse_type_set, "VALUE");
+		vector<string> proxy;
+		shared_queue_proxy_write q(new queue_proxy_write(NULL, NULL, proxy, e, "set"));
+		q->set_post_proxy(true);
+		q->track_repl_in_flight("succ:12121");
+		q->track_repl_in_flight("pending:12121");
+		q->release_repl_in_flight("succ:12121");
+		snap = stats_object->get_repl_in_flight(total);
+		cut_assert_equal_int(1, (int)total);
+		cut_assert_equal_int(0, (int)snap.count("succ:12121"));
+		cut_assert_equal_int(1, (int)snap["pending:12121"]);
+		q->release_repl_in_flight("succ:12121");
+		q->release_repl_in_flight("other:12121");
+		snap = stats_object->get_repl_in_flight(total);
+		cut_assert_equal_int(1, (int)total);
+		// abandoned by the replica's exiting thread: released as well
+		q->on_abandoned("pending:12121");
+		snap = stats_object->get_repl_in_flight(total);
+		cut_assert_equal_int(0, (int)total);
+		q->track_repl_in_flight("late:12121");
+		q.reset();
+		snap = stats_object->get_repl_in_flight(total);
+		cut_assert_equal_int(0, (int)total);
+		cut_assert_equal_int(0, (int)snap.size());
+	}
+
 	// review of 8d64aaf: terminal outcomes of answered in-cluster forwards are
 	// counted per destination (failed / skipped), with totals from one snapshot
 	void test_proxy_write_outcomes_are_counted_per_destination() {

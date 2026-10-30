@@ -156,6 +156,14 @@ int handler_proxy::run() {
 
 		// failover if we need
 
+		// this replica is done with the forward (the item is shared by every
+		// replica's thread): release its in-flight count now
+		if (q->get_ident() == "proxy_write") {
+			shared_queue_proxy_write w = boost::dynamic_pointer_cast<queue_proxy_write, thread_queue>(q);
+			if (w) {
+				w->release_repl_in_flight(this->_node_server_name + ":" + boost::lexical_cast<string>(this->_node_server_port));
+			}
+		}
 		q->sync_unref();
 	}
 

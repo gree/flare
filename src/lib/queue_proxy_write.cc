@@ -28,6 +28,7 @@
  */
 #include "queue_proxy_write.h"
 
+#include <algorithm>
 #include <cctype>
 #include <set>
 #include <pthread.h>
@@ -71,6 +72,7 @@ queue_proxy_write::queue_proxy_write(cluster* cl, storage* st, vector<string> pr
 		_in_flight(false),
 		_skipped(false),
 		_reroutes(0) {
+	pthread_mutex_init(&this->_mutex_repl_dests, NULL);
 }
 
 /**
@@ -83,6 +85,7 @@ queue_proxy_write::~queue_proxy_write() {
 	for (vector<string>::const_iterator it = this->_repl_dests.begin(); it != this->_repl_dests.end(); it++) {
 		stats_object->repl_in_flight_sub(*it);
 	}
+	pthread_mutex_destroy(&this->_mutex_repl_dests);
 }
 
 /**
@@ -92,6 +95,32 @@ queue_proxy_write::~queue_proxy_write() {
 void queue_proxy_write::track_repl_in_flight(const string& dest) {
 	this->_repl_dests.push_back(dest);
 	stats_object->repl_in_flight_add(dest);
+}
+
+/**
+ *	The forwarding thread of replica `dest` is done with this item (answered,
+ *	counted as dropped or skipped, or abandoned): it is no longer in flight
+ *	toward `dest`, whatever the other replicas' threads still do with it.
+ *	The item is shared by every replica's queue and was destroyed only after
+ *	the LAST of them released it, so a forward stuck toward an unreachable
+ *	replica kept every other replica's gauge up (d0ddf54 41016847026 and
+ *	5d4ab32 41046471421 forward-window S3: 25 in flight to the handover's
+ *	successor for 10 s while the replaced slave was Pending; the handover
+ *	aborted "not drained"). A destination not tracked (or already released)
+ *	is left alone.
+ */
+void queue_proxy_write::release_repl_in_flight(const string& dest) {
+	bool found = false;
+	pthread_mutex_lock(&this->_mutex_repl_dests);
+	vector<string>::iterator it = find(this->_repl_dests.begin(), this->_repl_dests.end(), dest);
+	if (it != this->_repl_dests.end()) {
+		this->_repl_dests.erase(it);
+		found = true;
+	}
+	pthread_mutex_unlock(&this->_mutex_repl_dests);
+	if (found) {
+		stats_object->repl_in_flight_sub(dest);
+	}
 }
 
 /**
@@ -132,6 +161,9 @@ void queue_proxy_write::on_abandoned(const string& dest) {
 	}
 	if (stats_object->diag_enabled()) {
 		stats_object->diag_incr("fwd_abandoned:" + dest);
+	}
+	if (!this->_foreign && !dest.empty()) {
+		this->release_repl_in_flight(dest);
 	}
 	static AtomicCounter abandoned_logged(0);
 	if (abandoned_logged.incr() % 100 == 1) {

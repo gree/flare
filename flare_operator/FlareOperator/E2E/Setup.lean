@@ -782,9 +782,9 @@ metadata:
 webhooks:
 " ++ hook "pods.node-guard.flare.gree.net" "/pods"
       "      - apiGroups: [\"\"]\n        apiVersions: [\"v1\"]\n        operations: [\"DELETE\"]\n        resources: [\"pods\"]\n        scope: Namespaced"
-      "\n    objectSelector:\n      matchLabels:\n        app: flare"
+      ""
     ++ hook "statefulsets.node-guard.flare.gree.net" "/statefulsets"
-      "      - apiGroups: [\"apps\"]\n        apiVersions: [\"v1\"]\n        operations: [\"UPDATE\"]\n        resources: [\"statefulsets\", \"statefulsets/scale\"]\n        scope: Namespaced"
+      "      - apiGroups: [\"apps\"]\n        apiVersions: [\"v1\"]\n        operations: [\"UPDATE\", \"DELETE\"]\n        resources: [\"statefulsets\", \"statefulsets/scale\"]\n        scope: Namespaced"
       "")
   IO.eprintln s!"# node guard webhook flare-node-guard-{ns} -> {svc}.{ns}.svc (TLS sidecar {cfg.tlsSidecarImage})"
 

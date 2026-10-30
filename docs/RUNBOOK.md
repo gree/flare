@@ -747,9 +747,25 @@ skips that path. The refusal message says why:
 | delete of a pod the operator's node map does not know (for example still starting) | it may hold data on its volume | wait until it registered, or use the override |
 | any data-pod delete or scale-down right after the operator started or a new leader took over | the operator has not read the cluster yet | retry after a few seconds |
 | `kubectl scale` / a StatefulSet edit removing ordinals that hold data | the removed pods are masters or replicas (or not in the map) | reduce partitions or replicas in the FlareCluster spec (the operator moves the data first) |
+| `kubectl delete statefulset <name>-nodes` (cascading, the default) | every pod goes at once, masters with no handover (on tmpfs their data) | `--cascade=orphan` (the pods stay and each delete is judged), or the teardown below |
 
 The operator and Kubernetes' own controllers are never refused; the kubelet
 only when it confirms the removal of a pod already terminating on its node.
+The guard tells the cluster's flared pods apart by their `spec.subdomain`
+(`<name>-nodes`, immutable), not by a label: removing a label from a pod
+does not hide its delete. Other pods of the namespace are allowed.
+
+### Tearing the whole cluster down
+
+Deleting the FlareCluster or the namespace removes everything through
+Kubernetes' garbage collector, which the guard does not refuse. To delete
+only the StatefulSet with its pods (for example before `helm uninstall`),
+name it by UID:
+
+```sh
+UID=$(kubectl get statefulset <name>-nodes -n <ns> -o jsonpath='{.metadata.uid}')
+kubectl annotate statefulset <name>-nodes -n <ns> --overwrite flare.gree.net/delete-override=$UID
+```
 
 ### Break-glass: deleting a pod anyway
 
@@ -770,8 +786,9 @@ an error naming that new pod after the old one is already gone; check with
 
 ### The operator is down (the webhook fails closed)
 
-`failurePolicy: Fail`: with no operator leader answering, deletes of flared
-pods and StatefulSet updates are refused (`failed calling webhook
+`failurePolicy: Fail`: with no operator leader answering, deletes of every
+pod in the cluster's namespace (the webhook judges which are flared pods)
+and StatefulSet updates and deletes are refused (`failed calling webhook
 "pods.node-guard.flare.gree.net"`). Bring the operator back first. If that
 is not possible, either use the override above per pod, or turn the guard
 off and back on after the work:

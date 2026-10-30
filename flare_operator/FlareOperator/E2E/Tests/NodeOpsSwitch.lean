@@ -805,6 +805,38 @@ def nodeGuardTest (c : Ctx) : IO TestResult := do
       discard <| kubectl ["scale", s!"statefulset/{c.cfg.name}-nodes", "-n", ns, "--replicas=2"]
     | .error e =>
       if !containsSubstr e "flare: scaling" then fails := fails ++ [s!"the scale-down was refused, but not by the node guard: {e.take 200}"]
+    -- 2b. (review of 62dddf9) a label removed from the master does not hide
+    -- its delete from the guard (no label selector; judged by subdomain)
+    let r2b ← match ← kubectl ["label", "pod", p.master.name, "-n", ns, "app-"] with
+      | .error e => pure (Except.error s!"(label removal failed: {e.take 200})")
+      | .ok _ => kubectlLong 60 ["delete", "pod", p.master.name, "-n", ns, "--grace-period=0", "--force", "--wait=false"]
+    discard <| kubectl ["label", "pod", p.master.name, "-n", ns, "--overwrite", "app=flare"]
+    let mUid2b ← uidOf p.master.name
+    c.event s!"force delete of the master with its app label removed: {match r2b with | .ok o => s!"ACCEPTED {o.take 120}" | .error e => s!"refused: {e.take 300}"}"
+    match r2b with
+    | .ok _ => fails := fails ++ ["the force delete of the master was accepted once its app label was removed"]
+    | .error e =>
+      if !containsSubstr e "flare: a force delete" then fails := fails ++ [s!"the force delete of the unlabelled master was refused, but not by the node guard: {e.take 200}"]
+    if mUid2b != mUid then fails := fails ++ ["the master pod was replaced after the refused delete of the unlabelled master"]
+    -- 2c. (review of 62dddf9) a cascading delete of the StatefulSet is
+    -- refused: its garbage collection would delete every pod, the master too
+    let stsUid := fun (_ : Unit) => do
+      match ← kubectl ["get", "statefulset", s!"{c.cfg.name}-nodes", "-n", ns, "-o", "jsonpath={.metadata.uid}"] with
+      | .ok o => pure o.trim
+      | .error _ => pure ""
+    let sUid ← stsUid ()
+    let r2c ← kubectlLong 60 ["delete", "statefulset", s!"{c.cfg.name}-nodes", "-n", ns, "--wait=false"]
+    let sUidAfter ← stsUid ()
+    c.event s!"cascading delete of the StatefulSet: {match r2c with | .ok o => s!"ACCEPTED {o.take 120}" | .error e => s!"refused: {e.take 300}"}; uid {sUid} -> {sUidAfter}"
+    match r2c with
+    | .ok _ => fails := fails ++ ["the cascading delete of the StatefulSet was accepted"]
+    | .error e =>
+      if !containsSubstr e "flare: deleting the flared StatefulSet" then fails := fails ++ [s!"the StatefulSet delete was refused, but not by the node guard: {e.take 200}"]
+    if sUidAfter != sUid || (← uidOf p.master.name) != mUid then
+      fails := fails ++ ["the StatefulSet or the master pod is gone after the refused cascading delete"]
+    if !fails.isEmpty then
+      if !(← waitForCondition "the pair is redundant again" 600 (redundant c none)) then
+        fails := fails ++ ["the pair did not become redundant again"]
     -- 3. the override lets a force delete of the replica through
     let rUid ← uidOf p.replica.name
     discard <| kubectl ["annotate", "pod", p.replica.name, "-n", ns, "--overwrite", s!"flare.gree.net/delete-override={rUid}"]

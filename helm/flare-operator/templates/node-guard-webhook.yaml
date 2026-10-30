@@ -1,8 +1,12 @@
 {{- if and .Values.operator.enabled .Values.nodeGuard.enabled }}
 {{- /*
   Node guard (A0 stage 6b, flare-ci-inputs/decisions/A0-DESIGN-rc68.md): the
-  leader operator judges deletes of this cluster's flared pods and UPDATEs of
-  its StatefulSet (and the scale subresource). It writes nothing
+  leader operator judges deletes of this cluster's flared pods, and UPDATEs
+  and DELETEs of its StatefulSet (and the scale subresource). The pod rule has
+  no label selector: a label can be removed from a live pod, which would hide
+  its delete from the webhook; the operator tells the cluster's flared pods
+  apart by their immutable spec.subdomain and allows every other pod of the
+  namespace (review of 62dddf9). It writes nothing
   (sideEffects: None). failurePolicy Fail: with no operator answering, these
   operations are refused — the escape hatches are the delete-override
   annotation or nodeGuard.enabled=false.
@@ -58,9 +62,6 @@ webhooks:
     namespaceSelector:
       matchLabels:
         kubernetes.io/metadata.name: {{ $ns }}
-    objectSelector:
-      matchLabels:
-        app: flare
     rules:
       - apiGroups: [""]
         apiVersions: ["v1"]
@@ -86,7 +87,7 @@ webhooks:
     rules:
       - apiGroups: ["apps"]
         apiVersions: ["v1"]
-        operations: ["UPDATE"]
+        operations: ["UPDATE", "DELETE"]
         resources: ["statefulsets", "statefulsets/scale"]
         scope: Namespaced
     clientConfig:

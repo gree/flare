@@ -83,6 +83,20 @@ def results : List (String × Bool) := Id.run do
               !(del (pod "m:12121" "u1" (some 0))).allowed)]
   r := r ++ [("node guard: a force delete of a replica is refused too (no preStop)",
               !(del (pod "s:12121" "u2" (some 0))).allowed)]
+  -- review of 62dddf9: pods are told apart by their immutable subdomain, and
+  -- a cascading StatefulSet delete is refused
+  r := r ++ [("node guard (review of 62dddf9): this cluster's flared pods are recognised by subdomain <name>-nodes only",
+              isClusterPod "c" "c-nodes" && !isClusterPod "c" "" && !isClusterPod "c" "other-nodes" && !isClusterPod "c" "c")]
+  r := r ++ [("node guard (review of 62dddf9): a cascading StatefulSet delete is refused (background, foreground or unset); orphan, the operator, the GC (kube-system) and an override naming its UID are allowed",
+              !(statefulSetDelete user op "" "s1" none).allowed
+                && !(statefulSetDelete user op "Background" "s1" none).allowed
+                && !(statefulSetDelete user op "Foreground" "s1" none).allowed
+                && !(statefulSetDelete user op "" "s1" (some "other")).allowed
+                && !(statefulSetDelete user op "" "" (some "")).allowed
+                && (statefulSetDelete user op "Orphan" "s1" none).allowed
+                && (statefulSetDelete op op "" "s1" none).allowed
+                && (statefulSetDelete "system:serviceaccount:kube-system:generic-garbage-collector" op "" "s1" none).allowed
+                && (statefulSetDelete user op "" "s1" (some "s1")).allowed)]
   r := r ++ [("node guard: a force delete of a proxy is allowed (no data)",
               (del (pod "p:12121" "u3" (some 0))).allowed)]
   r := r ++ [("node guard: a pod not in the map is refused (unknown is not empty: it may hold data on its volume)",
@@ -135,6 +149,15 @@ def results : List (String × Bool) := Id.run do
               match FlareOperator.Admission.parseReview scaleBody with
               | .ok v => v.subResource == "scale" && v.replicas == (some 1, some 2)
               | .error _ => false)]
+  let stsDelBody := "{\"request\":{\"uid\":\"r4\",\"operation\":\"DELETE\",\"resource\":{\"group\":\"apps\",\"version\":\"v1\",\"resource\":\"statefulsets\"},\"name\":\"c-nodes\",\"namespace\":\"ns\",\"oldObject\":{\"metadata\":{\"name\":\"c-nodes\",\"uid\":\"s9\",\"annotations\":{\"flare.gree.net/delete-override\":\"s9\"}}},\"options\":{\"propagationPolicy\":\"Orphan\"}}}"
+  r := r ++ [("admission (review of 62dddf9): a statefulsets DELETE review reads its propagation policy, UID and override; a review without options reads no policy",
+              (match FlareOperator.Admission.parseReview stsDelBody with
+               | .ok v => v.resource == "statefulsets" && v.operation == "DELETE" && v.propagationPolicy == "Orphan"
+                   && v.podUid == "s9" && v.podAnnotation overrideAnnotation == some "s9"
+               | .error _ => false)
+              && (match FlareOperator.Admission.parseReview termBody with
+                  | .ok v => v.propagationPolicy == ""
+                  | .error _ => false))]
   r := r ++ [("admission: a refusal carries code 403 and the message; malformed input is refused",
               has (FlareOperator.Admission.reviewResponse "r1" false "no") "\"code\":403"
                 && has (FlareOperator.Admission.malformedResponse "garbage" "x") "\"allowed\":false")]

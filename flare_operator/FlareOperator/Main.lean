@@ -1057,7 +1057,16 @@ private def nodeGuardAnswer (crName ns : String) (stateRef : IO.Ref FlareCluster
     let st ← stateRef.get
     let verdict ← if r.«namespace» != ns then
         pure (NodeGuard.Verdict.allow "not this cluster's namespace")
+      -- the webhook sees every pod delete of the namespace (no label
+      -- selector, review of 62dddf9): judged only for this cluster's flared
+      -- pods, told apart by their immutable subdomain
+      else if r.resource == "pods" && !NodeGuard.isClusterPod crName r.podSubdomain then
+        pure (NodeGuard.Verdict.allow "not a flared pod of this cluster")
       else match r.resource, r.operation with
+      | "statefulsets", "DELETE" =>
+        if r.name != s!"{crName}-nodes" then pure (NodeGuard.Verdict.allow "another StatefulSet")
+        else pure (NodeGuard.statefulSetDelete r.username opAccount r.propagationPolicy r.podUid
+          (r.podAnnotation NodeGuard.overrideAnnotation))
       | "pods", "DELETE" =>
         let key := if r.podHostname.isEmpty || r.podSubdomain.isEmpty then ""
           else FlareClusterState.toNodeKey s!"{r.podHostname}.{r.podSubdomain}.{ns}.svc.cluster.local" 12121

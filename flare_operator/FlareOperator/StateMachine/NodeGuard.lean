@@ -162,4 +162,30 @@ def scale (initialized : Bool) (s : FlareClusterState) (requester operatorAccoun
     if holding.isEmpty then .allow s!"the removed ordinals {removed} hold no data (proxies)"
     else .deny s!"flare: scaling {oldReplicas} -> {newReplicas} removes ordinal(s) {holding} that still hold data (a master or a replica) or that the operator does not know. Move their data first (the operator does this when the FlareCluster's replicas are reduced), or scale down only ordinals that are proxies"
 
+/-- Is the pod one of this cluster's flared pods? Judged from its
+    `spec.subdomain`, which is immutable (set by the StatefulSet controller
+    at creation), not from a label: a label can be removed from a live pod,
+    and a webhook that selects on it then never sees that pod's delete
+    (review of 62dddf9). -/
+def isClusterPod (crName podSubdomain : String) : Bool :=
+  podSubdomain == s!"{crName}-nodes"
+
+/-- DELETE of the flared StatefulSet. A cascading delete removes every pod
+    through the garbage collector, which this guard trusts as a kube-system
+    requester, so a master would go with no handover (review of 62dddf9).
+    Allowed: the operator; a delete that orphans the pods (each pod's own
+    delete is then gated); the delete-override annotation naming the
+    StatefulSet's UID (a deliberate teardown). The garbage collector itself
+    (the FlareCluster deleted, or the namespace) is trusted: that is the
+    whole cluster being removed on purpose. -/
+def statefulSetDelete (requester operatorAccount : String) (propagation : String)
+    (uid : String) (overrideUid : Option String) : Verdict :=
+  if trustedRequester requester operatorAccount then .allow s!"requested by {requester}"
+  else if propagation == "Orphan" then
+    .allow "the pods are orphaned (kept); each pod's own delete is still judged"
+  else if !uid.isEmpty && overrideUid == some uid then
+    .allow s!"{overrideAnnotation} names this StatefulSet (uid {uid}): a deliberate teardown, allowed as an explicit exception"
+  else
+    .deny s!"flare: deleting the flared StatefulSet with cascade deletes every pod at once — the masters with no handover, and on tmpfs their data. Delete it with --cascade=orphan (the pods stay and each delete is judged), or annotate the StatefulSet {overrideAnnotation}=<its uid> to tear the cluster down on purpose"
+
 end FlareOperator.NodeGuard

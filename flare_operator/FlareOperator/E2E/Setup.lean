@@ -146,6 +146,12 @@ structure ClusterConfig where
       ValidatingWebhookConfiguration for this namespace's flared pods DELETE
       and StatefulSet (scale) UPDATE. -/
   nodeGuard : Bool := false
+  /-- The cordon move (as the chart's nodeReplacement, which needs nodeGuard):
+      the clients' Service selects the serving label the operator manages.
+      Off, the operator gets FLARE_NODE_REPLACEMENT=off as the chart renders
+      it disabled. -/
+  nodeReplacement : Bool := false
+  nodeReplacementMinCopies : Nat := 3
   tlsSidecarImage : String := "alpine/socat:1.8.0.0"
   deriving Repr
 
@@ -299,7 +305,9 @@ spec:
 def operatorDeploymentYaml (cfg : ClusterConfig) : String :=
   let env := cfg.operatorEnv ++ (if cfg.nodeGuard then
       [("FLARE_NODE_GUARD", "on"), ("FLARE_WEBHOOK_PORT", "9444"), ("FLARE_OPERATOR_SERVICE_ACCOUNT", "flare-operator")]
-    else [])
+    else []) ++ (if cfg.nodeReplacement then
+      [("FLARE_NODE_REPLACEMENT_MIN_COPIES", toString cfg.nodeReplacementMinCopies)]
+    else [("FLARE_NODE_REPLACEMENT", "off")])
   let envBlock :=
     if env.isEmpty then ""
     else "\n          env:" ++ String.join (env.map (fun (k, v) =>
@@ -498,7 +506,7 @@ metadata:
 spec:
   selector:
     app: flare
-    cluster: {cluster}
+    cluster: {cluster}{if cfg.nodeReplacement then "\n    flare.gree.net/serving: \"true\"" else ""}
   ports:
     - port: {cfg.flarePort}
       targetPort: flare
@@ -745,7 +753,7 @@ def setupNodeGuardWebhook (cfg : ClusterConfig) : IO Unit := do
   let hook := fun (hname path : String) (rules : String) (objSel : String) =>
     s!"  - name: {hname}
     admissionReviewVersions: [\"v1\"]
-    sideEffects: None
+    sideEffects: NoneOnDryRun
     failurePolicy: Fail
     timeoutSeconds: 5
     matchPolicy: Equivalent
@@ -781,7 +789,7 @@ metadata:
   name: flare-node-guard-{ns}
 webhooks:
 " ++ hook "pods.node-guard.flare.gree.net" "/pods"
-      "      - apiGroups: [\"\"]\n        apiVersions: [\"v1\"]\n        operations: [\"DELETE\"]\n        resources: [\"pods\"]\n        scope: Namespaced"
+      "      - apiGroups: [\"\"]\n        apiVersions: [\"v1\"]\n        operations: [\"DELETE\"]\n        resources: [\"pods\"]\n        scope: Namespaced\n      - apiGroups: [\"\"]\n        apiVersions: [\"v1\"]\n        operations: [\"CREATE\"]\n        resources: [\"pods/eviction\"]\n        scope: Namespaced"
       ""
     ++ hook "statefulsets.node-guard.flare.gree.net" "/statefulsets"
       "      - apiGroups: [\"apps\"]\n        apiVersions: [\"v1\"]\n        operations: [\"UPDATE\", \"DELETE\"]\n        resources: [\"statefulsets\", \"statefulsets/scale\"]\n        scope: Namespaced"

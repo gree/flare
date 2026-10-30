@@ -433,7 +433,7 @@ namespace test_copy_protection {
 		const bool ok = handler_reconstruction::wait_source_forwards_here("localhost", ss.port, "me:12121", "src:12121",
 			0, NULL, 1500, shared_thread(), last);
 		const uint64_t took = now_ms() - t0;
-		ss.stop = 1;
+		__atomic_store_n(&ss.stop, 1, __ATOMIC_SEQ_CST);
 		pthread_join(th, NULL);
 		delete stats_object;
 		stats_object = NULL;
@@ -473,10 +473,12 @@ namespace test_copy_protection {
 	// map still names this node a proxy (same version or older): the wait must
 	// not prove, so no catch-up target is taken in that window. It proves only
 	// once the source's map names this node a slave.
+	// every field the two threads share is read and written with __atomic
+	// (review of db60b17: volatile is no synchronization)
 	struct switching_source {
 		int port;
-		volatile int ready;
-		volatile int stop;
+		int ready;
+		int stop;
 		uint64_t switch_at_ms;
 	};
 
@@ -492,11 +494,11 @@ namespace test_copy_protection {
 		a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 		if (::bind(fd, (struct sockaddr*)&a, sizeof(a)) < 0 || listen(fd, 16) < 0) {
 			close(fd);
-			ss->ready = -1;
+			__atomic_store_n(&ss->ready, -1, __ATOMIC_SEQ_CST);
 			return NULL;
 		}
-		ss->ready = 1;
-		while (!ss->stop) {
+		__atomic_store_n(&ss->ready, 1, __ATOMIC_SEQ_CST);
+		while (!__atomic_load_n(&ss->stop, __ATOMIC_SEQ_CST)) {
 			fd_set rf;
 			FD_ZERO(&rf);
 			FD_SET(fd, &rf);
@@ -509,7 +511,7 @@ namespace test_copy_protection {
 				continue;
 			}
 			// the map is decided per connection: proxy before the switch
-			const bool applied = now_ms() >= ss->switch_at_ms;
+			const bool applied = now_ms() >= __atomic_load_n(&ss->switch_at_ms, __ATOMIC_SEQ_CST);
 			const char* replies[2];
 			replies[0] = "STAT pid 1\r\nSTAT node_map_version 7\r\nSTAT curr_items 3\r\nEND\r\n";
 			replies[1] = applied
@@ -541,30 +543,41 @@ namespace test_copy_protection {
 		ss.port = 20000 + rand() % 20000;
 		ss.ready = 0;
 		ss.stop = 0;
-		ss.switch_at_ms = now_ms() + 800;
+		ss.switch_at_ms = ~(uint64_t)0;  // proxy until the deadline is set below
 		pthread_t th;
 		pthread_create(&th, NULL, switching_source_run, &ss);
-		for (int i = 0; i < 100 && ss.ready == 0; i++) {
+		for (int i = 0; i < 500 && __atomic_load_n(&ss.ready, __ATOMIC_SEQ_CST) == 0; i++) {
 			usleep(10 * 1000);
 		}
+		if (__atomic_load_n(&ss.ready, __ATOMIC_SEQ_CST) != 1) {
+			// clean up before failing (a leaked thread or stats breaks later tests)
+			__atomic_store_n(&ss.stop, 1, __ATOMIC_SEQ_CST);
+			pthread_join(th, NULL);
+			delete stats_object;
+			stats_object = NULL;
+			cut_fail("the switching source did not start listening on port %d", ss.port);
+		}
+		// the master applies the map 800 ms after the wait starts: the deadline
+		// is published only once the server is listening, from the same t0
 		string last;
 		const uint64_t t0 = now_ms();
+		__atomic_store_n(&ss.switch_at_ms, t0 + 800, __ATOMIC_SEQ_CST);
 		const bool ok = handler_reconstruction::wait_source_forwards_here("localhost", ss.port, "me:12121", "src:12121",
 			0, NULL, 5000, shared_thread(), last);
 		const uint64_t took = now_ms() - t0;
 		// a budget that ends before the master applies the map: no proof
 		string last2;
-		ss.switch_at_ms = now_ms() + 60000;
+		__atomic_store_n(&ss.switch_at_ms, now_ms() + 60000, __ATOMIC_SEQ_CST);
 		const bool early = handler_reconstruction::wait_source_forwards_here("localhost", ss.port, "me:12121", "src:12121",
 			0, NULL, 600, shared_thread(), last2);
-		ss.stop = 1;
+		__atomic_store_n(&ss.stop, 1, __ATOMIC_SEQ_CST);
 		pthread_join(th, NULL);
 		delete stats_object;
 		stats_object = NULL;
 		cut_notify("proof after %llu ms (%s); within the proxy window: %s (%s)", (unsigned long long)took, last.c_str(),
 			early ? "proof" : "no proof", last2.c_str());
 		cut_assert_equal_boolean(true, ok);
-		cut_assert(took >= 700, cut_message("proved after %llu ms, before the master applied the map", (unsigned long long)took));
+		cut_assert(took >= 800, cut_message("proved after %llu ms, before the master applied the map", (unsigned long long)took));
 		cut_assert_equal_boolean(false, early);
 	}
 

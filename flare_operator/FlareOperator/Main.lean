@@ -2334,8 +2334,11 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
               if n.role == FlareRole.Slave && n.state == FlareState.Active && readyNow.contains key then
                 readings := readings ++ [(key, SourceEligibility.classifyReply reply)]
               let part : Int := if n.partition ≥ 0 then n.partition else n.lastMasterOf
+              -- only Active slaves are ordered: a copy in Prepare is being
+              -- rebuilt, its position proves nothing and must not weaken the
+              -- order of the copies that can be promoted
               if let some out := reply then
-                if n.role == FlareRole.Slave then
+                if n.role == FlareRole.Slave && n.state == FlareState.Active then
                   orderCopies := orderCopies ++ [(part, { key, epoch := statStr out "repl_follow_source_epoch",
                                                           applied := statNat out "repl_applied_lsn" })]
               let hasMaster := cs.nodeMap.any fun kv => kv.2.role == FlareRole.Master && kv.2.partition == part

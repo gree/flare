@@ -74,12 +74,12 @@ def Review.podTerminating (r : Review) : Bool :=
   | .ok _ => true
   | .error _ => false
 
-/-- An annotation of the deleted pod. -/
 /-- DeleteOptions.propagationPolicy of a DELETE ("Orphan", "Background",
     "Foreground"; "" when not given). -/
 def Review.propagationPolicy (r : Review) : String :=
   (r.options.getObjValAs? String "propagationPolicy").toOption.getD ""
 
+/-- An annotation of the deleted object (a pod, or the StatefulSet). -/
 def Review.podAnnotation (r : Review) (key : String) : Option String :=
   (((r.oldObject.getObjValD "metadata").getObjValD "annotations").getObjValAs? String key).toOption
 

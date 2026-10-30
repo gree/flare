@@ -704,6 +704,21 @@ def sigtermHoldTest (c : Ctx) : IO TestResult := do
     if !containsSubstr reply "STORED" then
       return .fail s!"the sync client write did not get its terminal answer STORED across the SIGTERM: {reply}"
     if !onReplica then return .fail s!"the client was told STORED but the replica does not hold {key}"
+    -- masterless -> the same key re-seated (review of 5c904b2): the restarted
+    -- master is re-registered as a slave, the partition has no master for a
+    -- few passes, and the same key is promoted again with a new epoch and UID.
+    -- The probe must still see that as a master change (forced follow reads of
+    -- the surviving replica); before the fix the masterless pass erased the
+    -- last identity and nothing was logged (41074726518).
+    let lines := (← kubectlLogsLabel s!"app={c.cfg.operatorName}" ns 30000).splitOn "\n"
+    -- the LAST promotion of that key is the re-seat (an earlier one may be its first seat)
+    let reseat := lines.reverse.findIdx? fun l => containsSubstr l "PROMOTION committed" && containsSubstr l p.master.name
+    match reseat with
+    | some j =>
+      let after := lines.drop (lines.length - j)
+      if !(after.any (containsSubstr · "master changed on partition(s) [0]")) then
+        return .fail s!"{p.master.name} was re-seated after a masterless pass, but the operator did not see a master change on partition 0 (no forced follow probe of the surviving replica)"
+    | none => c.event "no re-seat of the same key after the SIGTERM (no masterless pass to check)"
     return .pass
 
 /-- S9 (review of 4bdc83b): attempt exhaustion through the real

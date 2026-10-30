@@ -16,6 +16,7 @@
 import FlareOperator.K8s.FlareCluster
 import FlareOperator.Flare.Protocol
 import FlareOperator.StateMachine.Reconciler
+import FlareOperator.StateMachine.FailoverOrder
 
 namespace FlareOperator.K8sReconciler
 
@@ -1318,15 +1319,20 @@ def promoteMasterlessPartition (state : FlareClusterState) (pIdx : Nat)
     (livePodKeys : List String) (standbyKeys : List String := [])
     (dataBearingKeys : List String := []) (excludedKeys : List String := [])
     (holdUnfit : Bool := false) (knownEmptyKeys : List String := [])
-    (blockedKeys : List String := []) (preferKey : Option String := none) : FlareClusterState :=
+    (blockedKeys : List String := []) (preferKey : Option String := none)
+    (rankedKeys : List String := []) : FlareClusterState :=
   if FlareOperator.Reconciler.hasMasterForPartition state pIdx then state
   else
     -- within ONE tier, the recorded history holder first (it still has to
     -- satisfy that tier's own condition); then map order as before
+    -- then the follower of the last master with the largest applied position
+    -- (`rankedKeys`, FailoverOrder: it only orders what `pred` accepts)
     let pick := fun (pred : String × FlareNode → Bool) =>
       (match preferKey with
         | some k => state.nodeMap.find? (fun (kv : String × FlareNode) => kv.1 == k && pred kv)
-        | none => none).orElse (fun _ => state.nodeMap.find? pred)
+        | none => none).orElse (fun _ =>
+          (FlareOperator.FailoverOrder.firstRanked rankedKeys state.nodeMap pred).orElse
+            (fun _ => state.nodeMap.find? pred))
     -- SAF-10c: `excludedKeys` are followers KNOWN to hold an unusable copy
     -- (StateMachine/FollowEvidence); they are not "in sync" whatever their
     -- map state says. The data-bearing last-resort tiers below are left as
@@ -1340,10 +1346,17 @@ def promoteMasterlessPartition (state : FlareClusterState) (pIdx : Nat)
     let partitionHasData := state.nodeMap.any (fun (key, n) =>
       (n.partition == Int.ofNat pIdx || n.lastMasterOf == Int.ofNat pIdx)
         && dataBearingKeys.contains key && livePodKeys.contains key)
+    let holderFirst : Option (String × FlareNode) := match preferKey with
+      | some k => state.nodeMap.find? (fun (kv : String × FlareNode) =>
+          kv.1 == k && isActiveSlave kv && !standbyKeys.contains k)
+      | none => none
+    let activeFirst := holderFirst.orElse (fun _ =>
+      FlareOperator.FailoverOrder.firstRanked rankedKeys state.nodeMap isActiveSlave)
     let candidate :=
       -- standby slaves are the refill choice of LAST resort (availability
       -- still wins over locality when only standby copies survive).
-      ((pick (fun kv => isActiveSlave kv && !standbyKeys.contains kv.1)).orElse
+      -- A ranked follower (newest data) wins over the standby preference.
+      ((activeFirst.orElse (fun _ => pick (fun kv => isActiveSlave kv && !standbyKeys.contains kv.1))).orElse
         (fun _ => pick isActiveSlave)).orElse
       (fun _ => pick (fun (key, n) =>
         n.lastMasterOf == Int.ofNat pIdx && n.state != FlareState.Down
@@ -1405,10 +1418,11 @@ def promoteMasterlessPartitions (state : FlareClusterState) (crd : FlareClusterV
     (dataBearingKeys : List String := []) (excludedKeys : List String := [])
     (holdEnabled : Bool := false) (holdExpiredParts : List Nat := [])
     (knownEmptyKeys : List String := []) (blockedKeys : List String := [])
-    (holders : List (Nat × String) := []) : FlareClusterState :=
+    (holders : List (Nat × String) := []) (rankedKeys : List String := []) : FlareClusterState :=
   (List.range crd.spec.partitions).foldl
     (fun s pIdx => promoteMasterlessPartition s pIdx livePodKeys standbyKeys dataBearingKeys excludedKeys
-      (holdEnabled && !holdExpiredParts.contains pIdx) knownEmptyKeys blockedKeys (holders.lookup pIdx)) state
+      (holdEnabled && !holdExpiredParts.contains pIdx) knownEmptyKeys blockedKeys (holders.lookup pIdx)
+      rankedKeys) state
 
 /-- Partitions left masterless because the refill held an unfit follower
     (see `promoteMasterlessPartition`): (partition, held follower keys). -/
@@ -1727,7 +1741,7 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
       -- replicas re-registered as Slave/Prepare, so no proxy exists for
       -- autoAssign and no Down entry exists for failover).
       let stateWithMasters := promoteMasterlessPartitions stateWithProxies crd s.livePodKeys s.standbyNodeKeys s.dataBearingKeys s.followUnfitKeys
-        s.followHoldEnabled s.followHoldExpiredParts s.knownEmptyKeys s.promotionBlockedKeys s.historyHolders
+        s.followHoldEnabled s.followHoldExpiredParts s.knownEmptyKeys s.promotionBlockedKeys s.historyHolders s.followRankedKeys
       let holdEffects := refillHoldEffects stateWithProxies stateWithMasters crd s
       -- a partition still masterless after the refill: what the refill saw
       -- for each of its copies (CI 807ae59, history (5): a replica on the
@@ -1870,7 +1884,7 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
         if failoverKeys.isEmpty then clusterState
         else handleFailoverWithPromotion clusterState.rebuildPartitionMap failoverKeys
       let recovered := promoteMasterlessPartitions afterFailover crd s.livePodKeys [] s.dataBearingKeys s.followUnfitKeys
-        s.followHoldEnabled s.followHoldExpiredParts s.knownEmptyKeys s.promotionBlockedKeys s.historyHolders
+        s.followHoldEnabled s.followHoldExpiredParts s.knownEmptyKeys s.promotionBlockedKeys s.historyHolders s.followRankedKeys
       let refilled := (List.range crd.spec.partitions).filter (fun p =>
         !FlareOperator.Reconciler.hasMasterForPartition afterFailover p
           && FlareOperator.Reconciler.hasMasterForPartition recovered p)

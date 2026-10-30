@@ -180,6 +180,10 @@ protected:
 
 	int										_master_reconstruction;
 	bool _boot_shift_pending;
+	// The source epoch was already advanced for the current master tenure
+	// (cleared when this node stops being master): a retried boot shift in
+	// the same tenure must not advance it again (rc68: 7 -> 8 in one map).
+	bool _master_epoch_advanced;
 	bool _reannounce_active;
 	bool _activation_pending;
 	pthread_mutex_t				_mutex_master_reconstruction;

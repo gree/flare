@@ -73,6 +73,7 @@ cluster::cluster(thread_pool* req_tp, thread_pool* other_tp, string server_name,
 		_type(type_node),
 		_master_reconstruction(0),
 		_boot_shift_pending(false),
+		_master_epoch_advanced(false),
 		_reannounce_active(false),
 		_activation_pending(false),
 		_node_map_version(0),
@@ -2555,6 +2556,9 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 	// finds it; a replica only hides it (its own clock must not change its
 	// data outside the replication history).
 	this->_storage->set_lazy_expiry_delete(new_role == role_master);
+	if (new_role != role_master) {
+		this->_master_epoch_advanced = false;
+	}
 	if (new_role != role_master && this->_promotion_refused) {
 		log_notice("promotion refusal lifted: no longer a master (new_role=%s)", cluster::role_cast(new_role).c_str());
 		this->_promotion_refused = false;
@@ -2647,11 +2651,21 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 		// only fires when the cursor exceeds our own sequence, so a
 		// snapshot-rebuilt replica (cursor == checkpoint sequence) would keep
 		// the old token over an unrelated sequence space.
-		if (this->_storage->advance_source_epoch("promotion") < 0) {
+		// Once per master tenure: the diff shift (slave -> master) and a
+		// still-pending boot shift (proxy -> master) of the SAME map, or a
+		// boot shift retried on every broadcast while no reconstruction
+		// source exists, each advanced it (rc68: epoch 7, 8 in one map
+		// application). One tenure is one history; a second token only
+		// forces the followers of the first to rebuild again.
+		if (this->_master_epoch_advanced) {
+			log_notice("promotion: the source epoch was already advanced for this master tenure — not advanced again", 0);
+		} else if (this->_storage->advance_source_epoch("promotion") < 0) {
 			// Fail closed: the storage marks its generations unavailable and
 			// every replication path refuses on that, rather than this node
 			// serving a new history under the previous identity.
 			log_err("promotion: could not advance the source epoch -> replication is UNAVAILABLE on this node until it can be persisted", 0);
+		} else {
+			this->_master_epoch_advanced = true;
 		}
 		uint64_t cursor = this->_storage->get_repl_last_lsn();
 		uint64_t seq = this->_storage->get_latest_sequence_number();

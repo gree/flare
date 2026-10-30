@@ -1857,6 +1857,22 @@ private def checkAuthoritativeHistory (ctx : Ctx) : IO Unit := do
       | (s', .recorded 0 r _) => r.gen == 4 && r.binding.copyId == "u1:4" && s'.recorded 0 == some h3 | _ => false)
       && (match bulk st 0 "m" (Seen.modern bM3 ⟨"M", "4:b2"⟩ true false [⟨"u1:3", "u1:4", "3:bulk"⟩, ⟨"u1:4", "u1:5", "4:b2"⟩] "bulk") "t" with
           | (_, .recorded 0 r _) => r.binding.copyId == "u1:5" | _ => false))
+  -- (3b) seed
+  let bSd : Binding := ⟨"uid-m", "boot-m", "w9:1"⟩
+  let hSeed : Hist := ⟨"M", "7:src"⟩
+  let seedChain : List Link := [⟨"u1:3", "w9:1", "7:src"⟩]
+  check ctx "history (seed): the recorded holder's copy replaced by a seed is followed through the chain recorded-copy -> current copy (reason seed, healthy): gen+1, reason seed"
+    (match seed st 0 "m" (Seen.modern bSd hSeed true false seedChain "seed") "t" with
+      | (s', .recorded 0 r _) => r.gen == 4 && r.reason == "seed" && r.binding.copyId == "w9:1" && s'.recorded 0 == some hSeed | _ => false)
+  check ctx "history (seed): a node that is not the recorded holder, a chain that does not reach the current copy, or no chain changes nothing"
+    ((seed st 0 "s" (Seen.modern bSd hSeed true false seedChain "seed") "t").1 == st
+      && (seed st 0 "m" (Seen.modern bSd hSeed true false [⟨"u9:3", "w9:1", "7:src"⟩] "seed") "t").1 == st
+      && (seed st 0 "m" (Seen.modern bSd hSeed true false [] "seed") "t").1 == st)
+  check ctx "history (seed): an epoch reason other than seed, a chain ending at another epoch, or an unhealthy copy changes nothing"
+    ((seed st 0 "m" (Seen.modern bSd hSeed true false seedChain "inherited") "t").1 == st
+      && (seed st 0 "m" (Seen.modern bSd hSeed true false seedChain "bulk") "t").1 == st
+      && (seed st 0 "m" (Seen.modern bSd ⟨"M", "8:other"⟩ true false seedChain "seed") "t").1 == st
+      && (seed st 0 "m" (Seen.modern bSd hSeed false false seedChain "seed") "t").1 == st)
   check ctx "history (3): the same uuid with N+1 WITHOUT a chain, a gap in the chain (two flushes, one link missing), or a chain not ending at the epoch / reason bulk = a HOLD beside the RETAINED record, never adopted"
     ((match bulk st 0 "m" (Seen.modern bM2 h3 true false [] "bulk") "t" with | (s', .held 0 _) => s'.recorded 0 == some h2 && (s'.held 0).isSome | _ => false)
       && (match bulk st 0 "m" (Seen.modern bM3 ⟨"M", "4:b2"⟩ true false [⟨"u1:4", "u1:5", "4:b2"⟩] "bulk") "t" with | (_, .held 0 _) => true | _ => false)

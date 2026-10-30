@@ -15,7 +15,7 @@ promotion decisions rely on. An operator restart erases the reference entirely.
 
 | | Authoritative history (per partition) | Observation (per copy) |
 |---|---|---|
-| What | the history the partition is ACCEPTED to be: `gen`, `master_id`, `epoch`, the holder `(node key, pod UID, boot id, copy id)`, `since`, `reason` (`first-build` / `adopted` / `promotion` / `bulk`) | what a copy reports: `(pod UID, boot id, copy id)`, `(master_id, epoch)`, applied position **within that history**, health flags, time |
+| What | the history the partition is ACCEPTED to be: `gen`, `master_id`, `epoch`, the holder `(node key, pod UID, boot id, copy id)`, `since`, `reason` (`first-build` / `adopted` / `promotion` / `bulk` / `seed`) | what a copy reports: `(pod UID, boot id, copy id)`, `(master_id, epoch)`, applied position **within that history**, health flags, time |
 | Changes only by | an explicit transition (below) | every successful probe |
 | Persisted | yes, with an intent for the transition in progress | yes, when the binding, the history or the health changes (the position is rate-limited) |
 
@@ -42,7 +42,18 @@ compared only within the same `(master_id, epoch)`.
    SAME binding, reports a new epoch: `gen + 1`, reason `bulk`. Any other node's
    new epoch (a restarted or empty ex-master: new boot id / copy id) is only an
    observation.
-5. **restore**: NOT automatic. Needs an approval that does not exist yet (R8).
+5. **seed** (cross-cluster snapshot push onto the destination master): the
+   push replaces the master's copy and inherits the source's epoch (reason
+   `seed`), so the copy id and the history both change at once. flared records
+   the receipt `recorded copy -> new copy @ inherited epoch` in the bulk chain
+   in the same synced batch as the restore marker (the chain the checkpoint
+   brings from the source is dropped; the destination's own links stay). The
+   RECORDED holder (same node key) is followed only when the chain walks from
+   the recorded copy to the current one, ends at the copy's epoch, the reason
+   is `seed` and the copy is healthy: `gen + 1`, reason `seed`. No receipt, a
+   wrong holder, another reason or an unhealthy copy changes nothing. Without
+   this a restarted destination master's only copy is FORBIDDEN `rejoining`.
+6. **restore**: NOT automatic. Needs an approval that does not exist yet (R8).
 
 ## Write order and recovery (the non-atomic window)
 

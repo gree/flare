@@ -13,7 +13,10 @@
     * promotion — an intent (id, expected map version) persisted before the map
       commit, resolved only when the persisted map carries that id;
     * bulk — the recorded holder (same pod and boot) proves, through flared's
-      persisted predecessor -> successor chain, that its copy became the new one.
+      persisted predecessor -> successor chain, that its copy became the new one;
+    * seed — the recorded holder's copy was REPLACED by a cross-cluster seed
+      (snapshot push): the same chain proves recorded copy -> current copy, with
+      the epoch reason "seed".
   A corrupt, foreign, unreadable or HELD record is never adopted or overwritten
   automatically. A partition with no modern copy (tch, older flared) is
   UNTRACKED (the previous behaviour) only when every copy was observed
@@ -35,7 +38,7 @@ structure Hist where
   epoch : String
   deriving Repr, BEq, Inhabited
 
-def reasons : List String := ["first-build", "adopted", "promotion", "bulk"]
+def reasons : List String := ["first-build", "adopted", "promotion", "bulk", "seed"]
 
 structure Record where
   gen : Nat
@@ -270,6 +273,27 @@ def bulk (s : Store) (p : Nat) (key : String) (seen : Seen) (now : String) : Sto
       | none =>
         let why := s!"bulk part-way: the copy changed from {r.binding.copyId} to {b.copyId} and no receipt proves it yet"
         (s.setHold p (some why), if h == some why then .none else .held p why)
+  | _, _, _ => (s, .none)
+
+/-- The recorded holder's copy REPLACED by a cross-cluster SEED (snapshot push):
+    flared writes the receipt (recorded copy -> new copy, the inherited epoch)
+    in the same batch as the restore marker, so there is no part-way state and
+    no hold: the record follows only when the chain walks from the recorded copy
+    to the current one, ends at the copy's epoch with reason "seed", and the
+    copy is healthy. Anything else changes nothing (the copy stays an
+    observation: a copy that is not the record's is never promotable). -/
+def seed (s : Store) (p : Nat) (key : String) (seen : Seen) (now : String) : Store × Change :=
+  match s.part p, s.intentFor p, seen with
+  | some (.known r h), none, .modern b hs healthy _ chain epochReason =>
+    if key != r.holder || b.copyId == r.binding.copyId then (s, .none)
+    else
+      match walkChain chain r.binding.copyId b.copyId with
+      | some ep =>
+        if ep == hs.epoch && epochReason == "seed" && healthy then
+          let r' : Record := { r with gen := r.gen + 1, hist := hs, binding := b, since := now, reason := "seed" }
+          (s.setPart p (.known r' none), .recorded p r' s!"the holder {key} was seeded ({r.binding.copyId} -> {b.copyId}), generation {r'.gen}{if h.isSome then " (hold lifted)" else ""}")
+        else (s, .none)
+      | none => (s, .none)
   | _, _, _ => (s, .none)
 
 /-- The holder RESTARTED normally (new process, maybe a new pod UID on the same

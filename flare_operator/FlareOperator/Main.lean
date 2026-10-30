@@ -1643,6 +1643,9 @@ private def observeHistory (stateRef : IO.Ref FlareClusterState) (crName ns : St
         let (s2, c2) := AuthoritativeHistory.bulk store p r.holder holderSeen now
         store := s2
         changes := note c2 changes
+        let (s3, c3) := AuthoritativeHistory.seed store p r.holder holderSeen now
+        store := s3
+        changes := note c3 changes
       | _ =>
         -- the unique copy the map marks as the partition's last master
         let lastMasters := (st.nodeMap.filter fun (_, n) => n.lastMasterOf == Int.ofNat p).map Prod.fst

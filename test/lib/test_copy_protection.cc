@@ -468,6 +468,106 @@ namespace test_copy_protection {
 		cut_assert(took < 2000, cut_message("took %llu ms", (unsigned long long)took));
 	}
 
+	// L10 (rc68, run 40341355474): the slave applied the map naming it Slave/
+	// Prepare 95 ms before the master did. Until the master applies it, its own
+	// map still names this node a proxy (same version or older): the wait must
+	// not prove, so no catch-up target is taken in that window. It proves only
+	// once the source's map names this node a slave.
+	struct switching_source {
+		int port;
+		volatile int ready;
+		volatile int stop;
+		uint64_t switch_at_ms;
+	};
+
+	void* switching_source_run(void* arg) {
+		switching_source* ss = static_cast<switching_source*>(arg);
+		int fd = socket(AF_INET, SOCK_STREAM, 0);
+		int one = 1;
+		setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+		struct sockaddr_in a;
+		memset(&a, 0, sizeof(a));
+		a.sin_family = AF_INET;
+		a.sin_port = htons(ss->port);
+		a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+		if (::bind(fd, (struct sockaddr*)&a, sizeof(a)) < 0 || listen(fd, 16) < 0) {
+			close(fd);
+			ss->ready = -1;
+			return NULL;
+		}
+		ss->ready = 1;
+		while (!ss->stop) {
+			fd_set rf;
+			FD_ZERO(&rf);
+			FD_SET(fd, &rf);
+			struct timeval tv = {0, 20 * 1000};
+			if (select(fd + 1, &rf, NULL, NULL, &tv) <= 0) {
+				continue;
+			}
+			int c = accept(fd, NULL, NULL);
+			if (c < 0) {
+				continue;
+			}
+			// the map is decided per connection: proxy before the switch
+			const bool applied = now_ms() >= ss->switch_at_ms;
+			const char* replies[2];
+			replies[0] = "STAT pid 1\r\nSTAT node_map_version 7\r\nSTAT curr_items 3\r\nEND\r\n";
+			replies[1] = applied
+				? "STAT src:12121:role master\r\nSTAT src:12121:state active\r\nSTAT src:12121:partition 0\r\n"
+					"STAT me:12121:role slave\r\nSTAT me:12121:state prepare\r\nSTAT me:12121:partition 0\r\nEND\r\n"
+				: "STAT src:12121:role master\r\nSTAT src:12121:state active\r\nSTAT src:12121:partition 0\r\n"
+					"STAT me:12121:role proxy\r\nSTAT me:12121:state active\r\nSTAT me:12121:partition -1\r\nEND\r\n";
+			for (int r = 0; r < 2; r++) {
+				string line;
+				char ch;
+				while (read(c, &ch, 1) == 1) {
+					line += ch;
+					if (ch == '\n') {
+						break;
+					}
+				}
+				ssize_t w = write(c, replies[r], strlen(replies[r]));
+				(void)w;
+			}
+			close(c);
+		}
+		close(fd);
+		return NULL;
+	}
+
+	void test_the_proof_waits_for_the_master_to_apply_the_map_naming_this_node_slave() {
+		stats_object = new stats();
+		switching_source ss;
+		ss.port = 20000 + rand() % 20000;
+		ss.ready = 0;
+		ss.stop = 0;
+		ss.switch_at_ms = now_ms() + 800;
+		pthread_t th;
+		pthread_create(&th, NULL, switching_source_run, &ss);
+		for (int i = 0; i < 100 && ss.ready == 0; i++) {
+			usleep(10 * 1000);
+		}
+		string last;
+		const uint64_t t0 = now_ms();
+		const bool ok = handler_reconstruction::wait_source_forwards_here("localhost", ss.port, "me:12121", "src:12121",
+			0, NULL, 5000, shared_thread(), last);
+		const uint64_t took = now_ms() - t0;
+		// a budget that ends before the master applies the map: no proof
+		string last2;
+		ss.switch_at_ms = now_ms() + 60000;
+		const bool early = handler_reconstruction::wait_source_forwards_here("localhost", ss.port, "me:12121", "src:12121",
+			0, NULL, 600, shared_thread(), last2);
+		ss.stop = 1;
+		pthread_join(th, NULL);
+		delete stats_object;
+		stats_object = NULL;
+		cut_notify("proof after %llu ms (%s); within the proxy window: %s (%s)", (unsigned long long)took, last.c_str(),
+			early ? "proof" : "no proof", last2.c_str());
+		cut_assert_equal_boolean(true, ok);
+		cut_assert(took >= 700, cut_message("proved after %llu ms, before the master applied the map", (unsigned long long)took));
+		cut_assert_equal_boolean(false, early);
+	}
+
 	// review of 3fa77f0: the deadline also holds through connect (no second
 	// attempt) and through anything else that blocks in the probe — the name
 	// lookup has no timeout of its own — because the waiter leaves at the

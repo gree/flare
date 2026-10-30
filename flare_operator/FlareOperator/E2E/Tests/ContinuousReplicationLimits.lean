@@ -6289,7 +6289,7 @@ private def Ctx.stepEvents (c : Ctx) (since : String) (pods : List String) : IO 
   let flNeedles := ["node map accepted", "copy switch DONE", "node activated", "snapshot received", "snapshot streamed",
     "staged rebuild DONE", "via WAL incremental sync", "storage open (", "ANSWERED but not stored", "shifting node_state",
     "shifting node_role", "dump completed", "truncat", "node_thread_type", "proxy write", "promotion", "flared version"]
-  let opNeedles := ["PROMOT", "Event: NodeAdd", "Event: NodeState", "Event: NodeRole", "Broadcasting node sync", "declared dead", "drain"]
+  let opNeedles := ["PROMOT", "Event: NodeAdd", "Event: NodeState", "Event: NodeRole", "Broadcasting node sync", "declared dead", "drain", "HANDOVER", "NO master"]
   let mut ev : List (String × String) := []
   for pod in pods do
     for extra in [["--previous"], []] do
@@ -6304,7 +6304,9 @@ private def Ctx.stepEvents (c : Ctx) (since : String) (pods : List String) : IO 
     | .ok o =>
       for l in o.splitOn "\n" do
         if opNeedles.any (containsSubstr l ·) && !containsSubstr l "[DEBUG]" then
-          if let some (t, rest) := todOfLogLine l then ev := ev ++ [(t, s!"operator: {rest.take 220}")]
+          -- whole HANDOVER / evidence lines: d0ddf54 41016847026 S3 cut the
+          -- abort's reason and the "observed at the abort" values at 220
+          if let some (t, rest) := todOfLogLine l then ev := ev ++ [(t, s!"operator: {rest.take 900}")]
     | .error _ => pure ()
   return ev
 

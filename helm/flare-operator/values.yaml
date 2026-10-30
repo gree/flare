@@ -439,6 +439,30 @@ cluster:
 # release.
 legacyMasterSwitch: false
 
+# Cordon move (flare-cordon-proactive-move; docs/RUNBOOK.md#cordon-move): when a
+# Node is cordoned (spec.unschedulable) the operator moves its flared pods off,
+# one at a time and without a write error: a master is handed over to a
+# replica on another node, a replica is demoted to a proxy; the pod leaves the
+# client Service (it needs the serving label, which the operator manages), and
+# only then may it be evicted (the node guard refuses before that, 429).
+# Needs nodeGuard.enabled. Local-PV volumes cannot move: use tmpfs or network storage.
+nodeReplacement:
+  enabled: true
+  # A partition needs at least this many real copies (master + replicas, counting
+  # the one being moved; on other nodes, Active, same history, no open repair, no
+  # new drop). Below it the move does not start: status.nodeMoves[].blocked, an
+  # Event and the alert FlareCordonMoveBlocked say so, and the eviction stays
+  # held. 2 moves a 2-copy partition and leaves the master alone while it runs
+  # (an accepted risk).
+  minCopies: 3
+  # the client Service must stop reaching the pod within this many seconds,
+  # else the move holds (the pod stays a proxy, alert FlareCordonMoveHeld)
+  drainWaitSeconds: 120
+  # no new client connection for this long (total_connections)
+  quietSeconds: 10
+  # no eviction this long after the release: the operator deletes the pod itself
+  evictWaitSeconds: 60
+
 nodeGuard:
   enabled: true
   tlsImage: alpine/socat:1.8.0.0

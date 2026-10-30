@@ -196,6 +196,24 @@ spec:
             summary: "Flare node {{`{{ $labels.pod }}`}}: reconstruction has failed past its threshold and cannot self-demote"
             runbook: docs/RUNBOOK.md#resync-failing
 
+        - alert: FlareCordonMoveBlocked
+          expr: flare_operator_cordon_move_blocked > 0
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Flare cluster {{`{{ $labels.cluster }}`}}: a pod on a cordoned node cannot be moved (fewer real copies than nodeReplacement.minCopies, or no successor); its eviction is held"
+            runbook: docs/RUNBOOK.md#cordon-move
+
+        - alert: FlareCordonMoveHeld
+          expr: flare_operator_cordon_move_held > 0
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Flare cluster {{`{{ $labels.cluster }}`}}: a cordon move is held as a proxy (the client Service still reaches the pod, or the handover keeps aborting); nothing is deleted"
+            runbook: docs/RUNBOOK.md#cordon-move
+
         - alert: FlareDrainNoSuccessor
           expr: flare_operator_drain_no_successor > 0
           labels:

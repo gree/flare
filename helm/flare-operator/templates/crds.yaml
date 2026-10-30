@@ -289,6 +289,21 @@ spec:
                     restart and counters are not re-baselined.
                   type: object
                   x-kubernetes-preserve-unknown-fields: true
+                nodeMoves:
+                  description: |
+                    Cordon moves (flare-cordon-proactive-move): the pods of cordoned
+                    Nodes the operator moves off, one at a time. `moves[]` holds
+                    {id, generation, node, pod, podUid, key, role, partition, phase,
+                    successor, reason, held, attempts, admittedUid, restored,
+                    startedMs, phaseMs, releasedMs}; phase is pending, handingOver,
+                    proxied, unserved, released, deleted, resyncing, done or cancelled.
+                    `blocked[]` lists the pods that cannot be moved now (fewer real
+                    copies than nodeReplacement.minCopies, no successor) with the
+                    reason. Written only by the operator and the node guard (its
+                    `admitted` record), always as a compare-and-swap on this value;
+                    read back on start, so a move survives an operator restart.
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
       subresources:
         status: {}
       additionalPrinterColumns:

@@ -351,7 +351,7 @@ int op_repl_snapshot_push::_run_server() {
 	}
 
 	// verification (CRC above + read-only structural probe inside) and swap
-	if (rdb->swap_in_snapshot(staging, cp_seq) < 0) {
+	if (rdb->swap_in_snapshot(staging, cp_seq, true) < 0) {
 		return -1;
 	}
 	if (this->_connection->write("SWAPPED\r\n", 9) < 0) {

@@ -391,6 +391,25 @@ string storage_rocksdb::_get_bulk_chain_locked() {
 	return v;
 }
 
+// The chain with one more line, kept to the last kBulkChainKeep.
+static string _append_bulk_chain(const string& chain, const string& line) {
+	vector<string> lines;
+	istringstream in(chain);
+	string l;
+	while (getline(in, l)) {
+		if (!l.empty()) lines.push_back(l);
+	}
+	lines.push_back(line);
+	while (lines.size() > storage_rocksdb::kBulkChainKeep) {
+		lines.erase(lines.begin());
+	}
+	ostringstream out;
+	for (size_t i = 0; i < lines.size(); i++) {
+		out << lines[i] << "\n";
+	}
+	return out.str();
+}
+
 /**
  *	The receipt of a completed bulk: append "<pred> <succ> <epoch>" to the
  *	chain (the last kBulkChainKeep) and remove the pending marker in ONE
@@ -407,24 +426,8 @@ int storage_rocksdb::_finalize_bulk_receipt(const string& pred, const string& su
 		log_err("bulk receipt NOT recorded (FLARE_TEST_BULK_RECEIPT_FAIL test seam)", 0);
 		return -1;
 	}
-	vector<string> lines;
-	{
-		istringstream in(this->_get_bulk_chain_locked());
-		string l;
-		while (getline(in, l)) {
-			if (!l.empty()) lines.push_back(l);
-		}
-	}
-	lines.push_back(pred + " " + succ + " " + epoch);
-	while (lines.size() > kBulkChainKeep) {
-		lines.erase(lines.begin());
-	}
-	ostringstream out;
-	for (size_t i = 0; i < lines.size(); i++) {
-		out << lines[i] << "\n";
-	}
 	rocksdb::WriteBatch batch;
-	batch.Put(kBulkChainKey, out.str());
+	batch.Put(kBulkChainKey, _append_bulk_chain(this->_get_bulk_chain_locked(), pred + " " + succ + " " + epoch));
 	batch.Delete(kBulkPendingKey);
 	rocksdb::WriteOptions wo;
 	wo.sync = true;
@@ -2935,7 +2938,7 @@ namespace {
 	}
 }
 
-int storage_rocksdb::swap_in_snapshot(const string& staging_dir, uint64_t checkpoint_seq) {
+int storage_rocksdb::swap_in_snapshot(const string& staging_dir, uint64_t checkpoint_seq, bool seed) {
 	if (this->_refuse_if_switch_unresolved("swap_in_snapshot")) {
 		return -1;
 	}
@@ -2985,6 +2988,23 @@ int storage_rocksdb::swap_in_snapshot(const string& staging_dir, uint64_t checkp
 	// reconstruction (balance 0, readiness-gated NotReady), so nothing
 	// user-visible is interrupted.
 	this->_wholelock_wrlock_copy_change();
+
+	// SEED receipt inputs, taken BEFORE the old copy is torn down: the copy
+	// this replaces, and the chain it already carries (a bulk before the seed
+	// stays part of the walk from the recorded copy; the chain the checkpoint
+	// brings is the SOURCE's and is dropped).
+	string seed_pred;
+	string seed_succ;
+	string seed_old_chain;
+	if (seed) {
+		seed_pred = this->get_copy_id();
+		seed_old_chain = this->_get_bulk_chain_locked();
+		uuid_t uuid;
+		char ubuf[37];
+		uuid_generate(uuid);
+		uuid_unparse_lower(uuid, ubuf);
+		seed_succ = string(ubuf) + ":1";
+	}
 
 	int r = -1;
 	do {
@@ -3123,9 +3143,22 @@ int storage_rocksdb::swap_in_snapshot(const string& staging_dir, uint64_t checkp
 			rocksdb::WriteBatch restore;
 			restore.Put(kReplLastLsnKey, lsn_value);
 			restore.Put(kReplSourceEpochKey, inherited_epoch);
-			restore.Put(kReplSourceEpochReasonKey, "inherited");
+			restore.Put(kReplSourceEpochReasonKey, seed ? "seed" : "inherited");
 			restore.Put(kReplIncarnationKey, next_incarnation);
 			restore.Put(kReplRestoreDoneKey, boost::lexical_cast<string>(checkpoint_seq));
+			if (seed) {
+				// the receipt of the seed, in the SAME synced batch as the
+				// restore marker: either the new copy exists with its receipt
+				// (and its own identity) or the marker is absent and the copy
+				// is rebuilt at open
+				if (seed_pred.empty()) {
+					log_err("swap_in_snapshot: seed of a copy without an identity: no receipt can be recorded -> refusing to complete the restore", 0);
+					break;
+				}
+				restore.Put(kCopyIdKey, seed_succ);
+				restore.Put(kBulkChainKey, _append_bulk_chain(seed_old_chain, seed_pred + " " + seed_succ + " " + inherited_epoch));
+				restore.Delete(kBulkPendingKey);
+			}
 			// The checkpoint carries the SOURCE's own rebuild evidence, which
 			// says nothing about this copy: drop it (the inherited epoch
 			// already identifies the history).
@@ -3142,12 +3175,25 @@ int storage_rocksdb::swap_in_snapshot(const string& staging_dir, uint64_t checkp
 			}
 			pthread_rwlock_wrlock(&this->_mutex_generations);
 			this->_source_epoch = inherited_epoch;
-			this->_source_epoch_reason = "inherited";
+			this->_source_epoch_reason = seed ? "seed" : "inherited";
 			this->_incarnation = next_incarnation;
+			if (seed) {
+				this->_copy_id = seed_succ;
+			}
 			this->_rebuilt_from_master_id.clear();
 			this->_rebuilt_from_epoch.clear();
 			this->_generations_broken = false;
 			pthread_rwlock_unlock(&this->_mutex_generations);
+			if (seed) {
+				// the COPY_ID file follows the key BEFORE the sentinel goes:
+				// a crash in between rebuilds instead of exposing a copy whose
+				// two identity records disagree
+				if (copy_fs::write_file_durable(this->_data_path, copy_fs::kCopyIdFile, seed_succ) != 0) {
+					log_err("swap_in_snapshot: could not write the COPY_ID file of the seeded copy %s -> the restore is not completed", seed_succ.c_str());
+					break;
+				}
+				log_notice("seed receipt: copy %s -> %s, epoch %s", seed_pred.c_str(), seed_succ.c_str(), inherited_epoch.c_str());
+			}
 			log_notice("restore completed (cursor=%llu, source_epoch=%s, incarnation=%s)",
 				(unsigned long long)checkpoint_seq,
 				inherited_epoch.c_str(), next_incarnation.c_str());
@@ -3199,8 +3245,22 @@ int storage_rocksdb::swap_in_snapshot(const string& staging_dir, uint64_t checkp
 		this->_corrupted = false;
 		this->incr_snapshot_bootstrap();
 		// a different copy (the source's checkpoint carries the SOURCE's
-		// identity key): mint this copy's own
-		this->new_copy_identity("snapshot swap");
+		// identity key): mint this copy's own (a seed minted it inside the
+		// restore batch, with its receipt)
+		if (!seed) {
+			this->new_copy_identity("snapshot swap");
+		} else {
+			if (!this->_staging) {
+				struct stat pst;
+				if (::stat((this->_data_dir + "/copy.partial").c_str(), &pst) == 0) {
+					this->clear_copy_partial("a different copy replaced the partially changed one");
+				}
+			}
+			pthread_rwlock_wrlock(&this->_mutex_generations);
+			this->_copy_identity_consistent = true;
+			pthread_rwlock_unlock(&this->_mutex_generations);
+			log_notice("copy identity: %s (seed)", seed_succ.c_str());
+		}
 		log_notice("snapshot bootstrap complete (seq=%llu, master_id=%s)",
 			(unsigned long long)checkpoint_seq, this->get_master_id().c_str());
 		r = 0;

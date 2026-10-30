@@ -1391,7 +1391,24 @@ private def nodeGuardAnswer (crName ns leaseName identity : String) (stateRef : 
     (_path body : String) : IO String := do
   match Admission.parseReview body with
   | .error e => return Admission.malformedResponse body e
-  | .ok r =>
+  | .ok r0 =>
+    -- an EVICTION (kubectl drain, the autoscaler) removes the pod inside the
+    -- apiserver without calling the pods DELETE webhook: it is judged here as
+    -- the delete of that pod, read now (the eviction names it only). A pod
+    -- that cannot be read is held (fail closed); a refusal is a 429 so
+    -- `kubectl drain` waits and retries instead of giving up.
+    let isEviction := r0.resource == "pods" && r0.subResource == "eviction" && r0.operation == "CREATE"
+    let evictedPod ← if isEviction && r0.«namespace» == ns then
+        match ← kubectl ["get", "pod", r0.name, "-n", ns, "-o", "json"] with
+        | .ok out => pure (Lean.Json.parse out).toOption
+        | .error _ => pure none
+      else pure none
+    if isEviction && r0.«namespace» == ns && evictedPod.isNone then
+      IO.eprintln s!"[flare-operator] NODE GUARD: HELD eviction of {r0.name} by {r0.username}: the pod could not be read"
+      return Admission.reviewResponse r0.uid false s!"flare: the pod {r0.name} could not be read to judge its eviction; retry" 429 "TooManyRequests"
+    let r := match evictedPod with
+      | some pj => { r0 with operation := "DELETE", oldObject := pj }
+      | none => r0
     let opAccount := match ← IO.getEnv "FLARE_OPERATOR_SERVICE_ACCOUNT" with
       | some sa => if sa.isEmpty then "" else s!"system:serviceaccount:{ns}:{sa}"
       | none => ""
@@ -1490,9 +1507,12 @@ private def nodeGuardAnswer (crName ns leaseName identity : String) (stateRef : 
     | .allow why =>
       if r.resource == "pods" || r.subResource == "scale" || r.resource == "statefulsets" then
         IO.eprintln s!"[flare-operator] NODE GUARD: allowed {r.operation} {r.resource}{if r.subResource.isEmpty then "" else "/" ++ r.subResource} {r.name}{if r.podUid.isEmpty then "" else s!" (uid {r.podUid}, grace {r.gracePeriodSeconds})"} by {r.username}{if r.dryRun then " (dry run)" else ""}: {why}"
-    -- a hold answers 429: `kubectl drain` waits and tries again
+    -- a hold answers 429: `kubectl drain` waits and tries again (an
+    -- eviction's refusal too: the drain retries until the move releases it)
     match verdict with
     | .hold why => return Admission.reviewResponse r.uid false why 429 "TooManyRequests"
+    | .deny why => if evictedPod.isSome then return Admission.reviewResponse r.uid false why 429 "TooManyRequests"
+                   else return Admission.reviewResponse r.uid false why
     | _ => return Admission.reviewResponse r.uid verdict.allowed verdict.message
 
 /-- Ensure K8s Service selectors point to the current Master for each partition. -/

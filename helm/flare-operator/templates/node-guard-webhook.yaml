@@ -55,7 +55,8 @@ metadata:
 webhooks:
   - name: pods.node-guard.flare.gree.net
     admissionReviewVersions: ["v1"]
-    sideEffects: None
+    # a released cordon move records `admitted` (never on a dry run)
+    sideEffects: NoneOnDryRun
     failurePolicy: Fail
     timeoutSeconds: {{ .Values.nodeGuard.timeoutSeconds }}
     matchPolicy: Equivalent
@@ -67,6 +68,13 @@ webhooks:
         apiVersions: ["v1"]
         operations: ["DELETE"]
         resources: ["pods"]
+        scope: Namespaced
+      # an eviction (kubectl drain, the autoscaler) deletes the pod without
+      # the DELETE webhook: judged as that pod's delete, refused with 429
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods/eviction"]
         scope: Namespaced
     clientConfig:
       caBundle: {{ $ca.Cert | b64enc }}

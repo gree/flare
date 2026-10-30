@@ -463,4 +463,20 @@ def changedSummaries (last : List (String × String)) (judged : List Judged)
   let changed := now.filter fun (k, s) => last.lookup k != some s
   (changed, now)
 
+/-- A partition's Active master as one incarnation: (pod key, registration
+    epoch, pod UID). The key alone misses a same-key re-promotion (L11: the
+    returning old master node-sw-nodes-0 was made master again; its flared
+    advanced the history, the surviving slave declared R3 needs_rebuild, but
+    the probe saw "the same master" and read it only every 30 passes). -/
+abbrev MasterIdentity := String × Nat × String
+
+/-- Partitions whose master changed between two passes: another key, another
+    registration epoch or pod UID under the same key, or (once any master
+    has been seen) a master that was not there before. Nothing is "moved"
+    on the very first pass (`before` empty). -/
+def mastersMoved (before now : List (Int × MasterIdentity)) : List Int :=
+  now.filterMap fun (part, id) => match before.lookup part with
+    | some a => if a != id then some part else none
+    | none => if before.isEmpty then none else some part
+
 end FlareOperator.FollowEvidence

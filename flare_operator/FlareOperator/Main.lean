@@ -1369,7 +1369,7 @@ private def readHistory (crName ns : String) : IO (Option (Option String) × Str
     slave of a partition whose master CHANGED is read at once (a promotion
     advances the history, its surviving slaves declare needs_rebuild — read
     only every FLARE_FOLLOW_PROBE_INTERVAL passes before, run 38037230581). -/
-initialize probeMastersRef : IO.Ref (List (Int × String)) ← IO.mkRef []
+initialize probeMastersRef : IO.Ref (List (Int × FollowEvidence.MasterIdentity)) ← IO.mkRef []
 /-- (partition, last tick to read its slaves every pass) after its master
     changed: flared's validator declares needs_rebuild ~2 s after the map, so
     one read on the next pass could miss it. -/
@@ -2215,13 +2215,13 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       if let some d1 := changedTo then
         IO.eprintln s!"[flare-operator] follow configuration changed to follow {if d1 then "on" else "off"} at tick {tr.tick}: confirming on {changeKeys} every pass until each shows it (at most {confirmBudget} passes)"
       let readyPods := pods.filter (fun p => p.ready && !p.terminating)
-      let mastersNow : List (Int × String) := cs.nodeMap.filterMap fun (k, n) =>
-        if n.role == FlareRole.Master && n.state == FlareState.Active then some (n.partition, k) else none
+      let mastersNow : List (Int × FollowEvidence.MasterIdentity) := cs.nodeMap.filterMap fun (k, n) =>
+        if n.role == FlareRole.Master && n.state == FlareState.Active then
+          some (n.partition, (k, n.regEpoch, ((pods.find? (fun p => Bridge.PodInfo.toNodeKey p == k)).map (·.uid)).getD ""))
+        else none
       let mastersBefore ← probeMastersRef.get
       probeMastersRef.set mastersNow
-      let movedNow := mastersNow.filterMap fun (part, b) => match mastersBefore.lookup part with
-        | some a => if a != b then some part else none
-        | none => if mastersBefore.isEmpty then none else some part
+      let movedNow := FollowEvidence.mastersMoved mastersBefore mastersNow
       let forced := ((← probeForcedUntilRef.get).filter (·.2 ≥ tr.tick)) ++ movedNow.map (·, tr.tick + 5)
       probeForcedUntilRef.set forced
       if !movedNow.isEmpty then

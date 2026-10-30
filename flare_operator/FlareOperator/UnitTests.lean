@@ -1397,6 +1397,21 @@ def checkLedgerObserve (ctx : Ctx) : IO Unit := do
   check ctx "ledger: a zero first sighting requests nothing"
     (dz.isEmpty && fz.isEmpty)
 
+def checkMasterMoved (ctx : Ctx) : IO Unit := do
+  let m := fun (k : String) (e : Nat) (u : String) => ((k, e, u) : FollowEvidence.MasterIdentity)
+  check ctx "master moved: first pass (nothing before) is not a move"
+    (FollowEvidence.mastersMoved [] [(0, m "n0" 5 "u1")] == [])
+  check ctx "master moved: same key, epoch and UID is not a move"
+    (FollowEvidence.mastersMoved [(0, m "n0" 5 "u1")] [(0, m "n0" 5 "u1")] == [])
+  check ctx "master moved: another key is a move"
+    (FollowEvidence.mastersMoved [(0, m "n0" 5 "u1")] [(0, m "n1" 6 "u2")] == [0])
+  check ctx "master moved: SAME key with a new registration epoch is a move (L11)"
+    (FollowEvidence.mastersMoved [(0, m "n0" 5 "u1")] [(0, m "n0" 9 "u1")] == [0])
+  check ctx "master moved: SAME key with a new pod UID is a move (L11)"
+    (FollowEvidence.mastersMoved [(0, m "n0" 5 "u1")] [(0, m "n0" 5 "u2")] == [0])
+  check ctx "master moved: a partition that gained a master after others were seen is a move; only that partition"
+    (FollowEvidence.mastersMoved [(0, m "n0" 5 "u1")] [(0, m "n0" 5 "u1"), (1, m "n2" 5 "u3")] == [1])
+
 def checkFollowConfirm (ctx : Ctx) : IO Unit := do
   let off : FollowEvidence.Reading := { complete := true, enabled := some false }
   let on : FollowEvidence.Reading := { complete := true, enabled := some true }
@@ -2794,6 +2809,7 @@ def run : IO UInt32 := do
   checkRepairSource ctx
   checkPodRows ctx
   checkFollowConfirm ctx
+  checkMasterMoved ctx
   checkLedgerObserve ctx
   checkTraceParse ctx
   checkTraceMatch ctx

@@ -79,6 +79,7 @@ private def redundant (c : Ctx) (avoid : Option String) : IO Bool := do
         let sameHistory := (statOf mo "rocksdb_source_epoch").isSome && statOf mo "rocksdb_source_epoch" == statOf ro "rocksdb_source_epoch"
         -- a missing or unreadable safety stat is NOT eligible: only an explicit 1 is
         let eligible := statOf ro "repl_read_source_eligible" == some "1"
+          && (statOf ro "repl_read_source_state").all (· == "eligible")   -- not revalidating / needs_rebuild
         return sameHistory && eligible
       | _, _ => return false
     | none => return false

@@ -28,6 +28,7 @@ import FlareOperator.StateMachine.ReplicaRepair
 import FlareOperator.StateMachine.Handover
 import FlareOperator.StateMachine.Rolling
 import FlareOperator.StateMachine.NodeGuard
+import FlareOperator.StateMachine.NodeMove
 import FlareOperator.K8s.Admission
 import FlareOperator.Server.WebhookServer
 import FlareOperator.StateMachine.SyncEvidence
@@ -1049,12 +1050,344 @@ private def runRolling (crName ns : String) (stateRef : IO.Ref FlareClusterState
     rollingStablePassesRef.set 0
   | _ => pure ()
 
+-- ═══════════════════════════════════════════════════════════════════════
+-- CORDON MOVE (flare-cordon-proactive-move; StateMachine/NodeMove.lean,
+-- flare-ci-inputs/decisions/NODE-OPS-NOSTOP-IMPLEMENTATION-PLAN-2026-10-26.md C)
+-- ═══════════════════════════════════════════════════════════════════════
+
+/-- keys the move holds out of assignment, as of the last pass -/
+initialize nodeMoveLedgerCacheRef : IO.Ref NodeMove.Ledger ← IO.mkRef {}
+initialize nodeMoveHeldRef : IO.Ref (List String) ← IO.mkRef []
+/-- pod → (total_connections, operator probes to the pod, mono ms of the last
+    increase not explained by the operator's own probes) -/
+initialize nodeMoveConnRef : IO.Ref (List (String × (Nat × Nat × Nat))) ← IO.mkRef []
+/-- master|dest → (dropped, failed) when first seen: a later increase means the
+    copy is not a real copy -/
+initialize nodeMoveBaseRef : IO.Ref (List (String × (Nat × Nat))) ← IO.mkRef []
+/-- phases and blocked pods already announced as Events -/
+initialize nodeMoveAnnouncedRef : IO.Ref (List String) ← IO.mkRef []
+
+private def nodeReplacementEnabled : IO Bool := do
+  return (← IO.getEnv "FLARE_NODE_REPLACEMENT") != some "off"
+
+private def envNat (name : String) (dflt : Nat) : IO Nat := do
+  match ← IO.getEnv name with
+  | some v => return v.trim.toNat?.getD dflt
+  | none => return dflt
+
+/-- values.yaml nodeReplacement.* reach the operator as environment variables -/
+private def nodeReplacementCfg : IO NodeMove.Config := do
+  return { minCopies := ← envNat "FLARE_NODE_REPLACEMENT_MIN_COPIES" 3,
+           drainWaitMs := (← envNat "FLARE_NODE_REPLACEMENT_DRAIN_WAIT_SECONDS" 120) * 1000,
+           quietMs := (← envNat "FLARE_NODE_REPLACEMENT_QUIET_SECONDS" 10) * 1000,
+           evictWaitMs := (← envNat "FLARE_NODE_REPLACEMENT_EVICT_WAIT_SECONDS" 60) * 1000 }
+
+/-- how long total_connections of `pod` has not increased by more than the
+    operator's own stats connections (none = not readable) -/
+private def observeClientConnections (pod ns : String) (stats : Option String) : IO (Option Nat × Option Nat) := do
+  match stats with
+  | none => return (none, none)
+  | some out =>
+    let now ← IO.monoMsNow
+    let probes ← Bridge.probesTo pod
+    let curr := (statNat out "curr_connections").map (· - 1)  -- minus the operator's own connection
+    match statNat out "total_connections" with
+    | none => return (none, curr)
+    | some total =>
+      let prev := (← nodeMoveConnRef.get).lookup pod
+      let lastIncrease := match prev with
+        | none => now
+        | some (t0, p0, li) => if (total : Int) - t0 > (probes : Int) - p0 then now else li
+      nodeMoveConnRef.modify fun l => (pod, (total, probes, lastIncrease)) :: l.filter (·.1 != pod)
+      return (some (now - lastIncrease), curr)
+
+/-- One pass of the cordon move: reads the cordoned nodes and the record,
+    steps the running move, persists (CAS) before it acts, and starts the
+    next one. Returns the keys held out of assignment. -/
+private def runNodeMoves (crName ns : String) (stateRef : IO.Ref FlareClusterState)
+    (repairLed : ReplicaRepair.Ledger) (metrics : OperatorMetrics) (leaseHeld : IO Bool)
+    : IO (List String) := do
+  if !(← nodeReplacementEnabled) then return []
+  let cfg ← nodeReplacementCfg
+  let heldFallback ← nodeMoveHeldRef.get
+  let cordoned ← match ← Bridge.listCordonedNodes with
+    | .ok c => pure c
+    | .error e =>
+      IO.eprintln s!"[flare-operator] NODE MOVE: {e}; nothing is decided this pass"
+      return heldFallback
+  let (led0, raw0) ← match ← Bridge.readNodeMoves crName ns with
+    | .ok r => pure r
+    | .error e =>
+      IO.eprintln s!"[flare-operator] NODE MOVE: {e}; nothing is decided this pass"
+      return heldFallback
+  let pods ← match ← Bridge.listFlaredPodsE crName ns with
+    | .ok ps => pure ps
+    | .error e =>
+      IO.eprintln s!"[flare-operator] NODE MOVE: pods unreadable ({e}); nothing is decided this pass"
+      return heldFallback
+  let ledRef ← IO.mkRef led0
+  let rawRef ← IO.mkRef raw0
+  let announce := fun (key reason msg : String) (warn : Bool) => do
+    if !(← nodeMoveAnnouncedRef.get).contains key then
+      nodeMoveAnnouncedRef.modify (key :: ·)
+      Bridge.emitEvent crName ns reason msg warn
+  -- persist `l` only as the lease holder, with the CAS on what was read
+  let save := fun (l : NodeMove.Ledger) => do
+    if !(← leaseHeld) then
+      IO.eprintln "[flare-operator] NODE MOVE: the lease could not be confirmed; nothing is written this pass"
+      passLeaseLostRef.set true
+      return false
+    match ← Bridge.casNodeMoves crName ns (← rawRef.get) l with
+    | .ok _ =>
+      ledRef.set l
+      rawRef.set (some l.toJson)
+      return true
+    | .error e =>
+      IO.eprintln s!"[flare-operator] NODE MOVE: record not saved ({e}); it is read again next pass"
+      return false
+  let wallNow ← Bridge.wallMs
+  let st0 ← stateRef.get
+  let hled ← handoverRef.get
+  let handoverLoaded ← handoverLoadedRef.get
+  let podByName := fun (n : String) => pods.find? (·.name == n)
+  -- ── the running move ────────────────────────────────────────────────
+  for m in led0.moves.filter (!·.finished) do
+    let st ← stateRef.get
+    let cur : Option NodeMove.CurPod ← match podByName m.pod with
+      | none => pure none
+      | some p =>
+        let k := p.toNodeKey
+        let n := st.lookupNode k
+        let needSynced := (m.phase == .resyncing || m.phase == .cancelled) && p.uid != m.podUid || m.phase == .cancelled
+        let synced ← if needSynced && n.any (·.role == FlareRole.Slave) then
+            match ← podStatsOf k ns with
+            | some out => pure (statNat out "repl_read_source_eligible" == some 1)
+            | none => pure false
+          else pure false
+        pure (some { uid := p.uid, terminating := p.terminating, ready := p.ready, serving := p.serving,
+                     role := n.map (·.role), active := n.any (·.state == FlareState.Active), synced })
+    let handover : NodeMove.HandoverView :=
+      if !handoverLoaded then .running
+      else if m.role != "master" then .none
+      else match Handover.find? hled m.partition.toNat with
+        | none => .none
+        | some e =>
+          if e.oldMaster != m.key then .running
+          else if e.phase == .aborted then
+            (if e.v1.isNone || e.vBack.isSome || e.noRollback then .aborted e.reason else .running)
+          else .running
+    let successorIsMaster := !m.successor.isEmpty
+      && (st.lookupNode m.successor).any (fun n => n.role == FlareRole.Master && n.state == FlareState.Active)
+    -- the drain evidence is read only while it can matter
+    let (inEndpoints, quiet, curr, ownProxy) ← if m.phase == .unserved && cur.any (·.uid == m.podUid) then do
+        let ep ← match ← Bridge.serviceEndpointPods s!"{crName}-nodes-external" ns with
+          | .ok names => pure (some (names.contains m.pod))
+          | .error _ => pure none
+        let stats ← podStatsOf m.key ns
+        let (q, c) ← observeClientConnections m.pod ns stats
+        pure (ep, q, c, stats.bind (fun o => (statStr o "own_role").map (· == "proxy")))
+      else pure (none, none, none, none)
+    let obs : NodeMove.Obs := {
+      nowMs := wallNow, nodeCordoned := cordoned.contains m.node, cur, handover, successorIsMaster,
+      inEndpoints, quietMs := quiet, currConnections := curr, ownProxy }
+    let (m1, act) := NodeMove.step cfg m obs
+    if m1 != m then
+      let l1 := (← ledRef.get).upsert m1 |>.trim
+      if !(← save l1) then continue
+      if m1.phase != m.phase then
+        IO.eprintln s!"[flare-operator] NODE MOVE {m.pod}@{m.node}: {m.phase} -> {m1.phase} (generation {m1.generation}){if m1.reason.isEmpty then "" else s!" — {m1.reason}"}"
+        if m1.phase == .released then
+          Bridge.emitEvent crName ns "FlareCordonMoveReleased"
+            s!"pod {m.pod} on cordoned node {m.node} drained from the client Service and released; eviction or deletion is now allowed" false
+        else if m1.phase == .cancelled then
+          Bridge.emitEvent crName ns "FlareCordonMoveCancelled" s!"{m1.reason}: the move of {m.pod} off {m.node} was cancelled" false
+        else if m1.phase == .done then
+          Bridge.emitEvent crName ns "FlareCordonMoveDone" s!"pod {m.pod} moved off node {m.node}; its replacement serves again" false
+      if m1.held && !m.held then
+        Bridge.emitEvent crName ns "FlareCordonMoveHeld" s!"{m1.reason} (pod {m.pod}, node {m.node})" true
+    else if m1.held && m.held && m1.reason != m.reason then pure ()
+    -- the action follows the persisted state
+    match act with
+    | .none => pure ()
+    | .requestHandover =>
+      let free := match Handover.find? hled m1.partition.toNat with
+        | none => true
+        | some e => e.oldMaster == m1.key && e.phase == .aborted
+                      && (e.v1.isNone || e.vBack.isSome || e.noRollback)
+      let okMaster := (st.lookupNode m1.key).any (fun n => n.role == FlareRole.Master && n.state == FlareState.Active)
+      let succOk := (st.lookupNode m1.successor).any (fun n => n.role == FlareRole.Slave && n.state == FlareState.Active
+                        && n.partition == m1.partition)
+      if handoverLoaded && free && okMaster && succOk then
+        let now ← IO.monoMsNow
+        let entry : Handover.Entry :=
+          { partition := m1.partition.toNat, oldMaster := m1.key, successor := m1.successor,
+            oldUid := m1.podUid, attempt := m1.attempts, startedMs := now, phaseMs := now }
+        handoverRef.modify fun l => Handover.upsert l entry
+        handoverDirtyRef.set true
+        IO.eprintln s!"[flare-operator] NODE MOVE {m1.pod}: ordered handover requested, partition {m1.partition} {m1.key} -> {m1.successor} (attempt {m1.attempts})"
+      else if handoverLoaded && !succOk then
+        IO.eprintln s!"[flare-operator] NODE MOVE {m1.pod}: the successor {m1.successor} is no longer an Active replica of partition {m1.partition}; the handover waits"
+    | .demote =>
+      let applied ← stateRef.modifyGet fun cur =>
+        match cur.lookupNode m1.key with
+        | some n =>
+          if n.role == FlareRole.Slave && n.partition == m1.partition then
+            let v := cur.nodeMapVersion + 1
+            (some v, { (cur.addNode m1.key { n with role := FlareRole.Proxy, state := FlareState.Active,
+                                                    partition := -1, formerSlaveOf := -1 }) with nodeMapVersion := v })
+          else (none, cur)
+        | none => (none, cur)
+      if let some v := applied then
+        IO.eprintln s!"[flare-operator] NODE MOVE {m1.pod}: replica {m1.key} demoted to a proxy at v{v}; held out of assignment"
+    | .removeServing =>
+      match ← Bridge.setServingLabel m1.pod ns m1.podUid false with
+      | .ok _ => IO.eprintln s!"[flare-operator] NODE MOVE {m1.pod}: serving label removed"
+      | .error e => IO.eprintln s!"[flare-operator] NODE MOVE {m1.pod}: serving label not removed ({e}); next pass retries"
+    | .restoreServing =>
+      -- the pod now holding the name (the recreated one in `resyncing`)
+      match podByName m1.pod with
+      | some p =>
+        match ← Bridge.setServingLabel m1.pod ns p.uid true with
+        | .ok _ => IO.eprintln s!"[flare-operator] NODE MOVE {m1.pod}: serving label restored on {p.uid}"
+        | .error e => IO.eprintln s!"[flare-operator] NODE MOVE {m1.pod}: serving label not restored ({e})"
+      | none => pure ()
+    | .deletePod =>
+      if (← leaseHeld) then
+        match ← Bridge.deletePodWithUidPrecondition m1.pod ns m1.podUid with
+        | .ok _ => IO.eprintln s!"[flare-operator] NODE MOVE {m1.pod}: no eviction within {cfg.evictWaitMs / 1000} s of the release; deleted (uid {m1.podUid})"
+        | .error e => IO.eprintln s!"[flare-operator] NODE MOVE {m1.pod}: delete not confirmed ({e}); the next pass reads it again"
+      else passLeaseLostRef.set true
+  -- ── starting the next move ──────────────────────────────────────────
+  let mut led ← ledRef.get
+  let st ← stateRef.get
+  let mut cands : List NodeMove.Cand := []
+  if led.active.isNone then
+    for p in pods do
+      if !cordoned.contains p.nodeName then continue
+      let k := p.toNodeKey
+      let n? := st.lookupNode k
+      let role := match n?.map (·.role) with
+        | some FlareRole.Master => "master" | some FlareRole.Slave => "slave" | some FlareRole.Proxy => "proxy" | none => ""
+      let movable := p.ready && !p.terminating && n?.isSome && p.serving
+      let part : Int := (n?.map (·.partition)).getD (-1)
+      let mut others : List NodeMove.CopyFact := []
+      let mut succ : Option String := none
+      if movable && (role == "master" || role == "slave") && part >= 0 then
+        let masterKey := match st.partitionMap.find? (fun (i, _) => (i : Int) == part) with
+          | some (_, pt) => pt.master
+          | none => none
+        let mStats ← match masterKey with
+          | some mk => podStatsOf mk ns
+          | none => pure none
+        for (ck, cn) in st.nodeMap do
+          if ck == k || cn.partition != part || cn.role == FlareRole.Proxy then continue
+          let cp := pods.find? (·.toNodeKey == ck)
+          let nodeName := (cp.map (·.nodeName)).getD ""
+          let active := cn.state == FlareState.Active && (cp.any fun x => x.ready && !x.terminating)
+          let cStats ← if active then podStatsOf ck ns else pure none
+          let sameHistory := match mStats, cStats with
+            | some mo, some co =>
+              statNat co "rocksdb_copy_identity_consistent" != some 0 && statNat co "rocksdb_quarantined" != some 1
+                && statStr mo "rocksdb_master_id" == statStr co "rocksdb_master_id"
+                && statStr mo "rocksdb_source_epoch" == statStr co "rocksdb_source_epoch"
+            | _, _ => false
+          let repairOpen := repairLed.entries.any (·.nodeKey == some ck)
+          let dropIncreased ← match mStats, masterKey with
+            | some mo, some mk =>
+              if mk == ck then pure false
+              else
+                let d := (statDest mo "proxy_write_dropped" ck).getD 0
+                let f := (statDest mo "proxy_write_failed" ck).getD 0
+                let bk := s!"{mk}|{ck}"
+                match (← nodeMoveBaseRef.get).lookup bk with
+                | some (d0, f0) => pure (d > d0 || f > f0)
+                | none =>
+                  nodeMoveBaseRef.modify fun l => (bk, (d, f)) :: l
+                  pure false
+            | _, _ => pure false
+          others := others ++ [{ key := ck, nodeName, active, sameHistory, repairOpen, dropIncreased }]
+          if role == "master" && succ.isNone && cn.role == FlareRole.Slave && active && sameHistory
+              && !cordoned.contains nodeName && !repairOpen && !dropIncreased then
+            if (cStats.bind (fun o => statNat o "repl_read_source_eligible")) == some 1 then succ := some ck
+      cands := cands ++ [{ pod := p.name, key := k, uid := p.uid, node := p.nodeName, role,
+                           partition := part, others, successor := succ, movable }]
+  let (start, blocked) := NodeMove.next cfg led cordoned cands wallNow
+  if let .start m := start then
+    led := { led with seq := led.seq + 1, blocked := blocked }
+    led := (led.upsert m).trim
+    if ← save led then
+      IO.eprintln s!"[flare-operator] NODE MOVE started: {m.pod} ({m.role}) on cordoned node {m.node}, request {m.id}"
+      Bridge.emitEvent crName ns "FlareCordonMoveStarted" s!"moving pod {m.pod} ({m.role}) off cordoned node {m.node}" false
+  else if led.active.isNone && blocked != led.blocked then
+    if ← save { led with blocked } then
+      for b in blocked do
+        announce s!"blocked|{b.pod}|{b.reason}" "FlareCordonMoveBlocked"
+          s!"pod {b.pod} on cordoned node {b.node} cannot be moved: {b.reason}" true
+  let final ← ledRef.get
+  let heldNow := final.heldKeys
+  nodeMoveHeldRef.set heldNow
+  nodeMoveLedgerCacheRef.set final
+  metrics.cordonMovesActive.set (final.moves.filter (!·.finished)).length.toFloat
+  metrics.cordonMoveHeld.set (if final.moves.any (fun m => !m.finished && m.held) then 1.0 else 0.0)
+  metrics.cordonMoveBlocked.set (if final.active.isNone then final.blocked.length.toFloat else 0.0)
+  return heldNow
+
+/-- The serving label of every pod that can serve and has none (a pod of the
+    chart's StatefulSet is created without it: the operator labels it once it
+    can serve; a pod a move owns is never touched here). -/
+private def runServingLabels (crName ns : String) (stateRef : IO.Ref FlareClusterState) : IO Unit := do
+  if !(← nodeReplacementEnabled) then return
+  let led := (← nodeMoveLedgerCacheRef.get)
+  let pods ← match ← Bridge.listFlaredPodsE crName ns with
+    | .ok ps => pure ps
+    | .error _ => return
+  let st ← stateRef.get
+  let mut n := 0
+  for p in pods do
+    if p.serving || p.terminating || !p.ready || p.uid.isEmpty || led.ownsLabel p.name then continue
+    let canServe := match st.lookupNode p.toNodeKey with
+      | some nd => nd.state == FlareState.Active
+      | none => false
+    if !canServe || n >= 4 then continue
+    match ← Bridge.setServingLabel p.name ns p.uid true with
+    | .ok _ => n := n + 1; IO.eprintln s!"[flare-operator] serving label added to {p.name}"
+    | .error _ => pure ()
+
+/-- The allow of a released cordon move (plan C.6): only the CURRENT leader,
+    with enough lease left for the write, writes `admitted` (CAS on the record
+    the decision was made on) and only then allows. A write that fails (the
+    operator wrote `cancelled`, the record moved) or a lease that ran out
+    during it: held (429); `released` already stands, so the next review, or
+    the operator after its grace, finishes the move. -/
+private def nodeMoveAdmit (crName ns leaseName identity : String) (led : NodeMove.Ledger)
+    (raw : Option Lean.Json) (m : NodeMove.Move) (reviewUid : String) : IO NodeGuard.Verdict := do
+  let margin := 5   -- the API call's bound (4 s) + 1 s
+  let remaining := fun (l : Bridge.LeaseInfo) => (l.leaseDurationSeconds : Int) - l.ageSeconds
+  match ← getLease leaseName ns with
+  | .error e => return .hold s!"flare: the lease could not be read ({e}); only the current leader releases a pod"
+  | .ok l1 =>
+    if l1.holderIdentity != identity || l1.expired then
+      return .hold "flare: this operator does not hold the lease; only the current leader releases a pod"
+    else if remaining l1 < margin then
+      return .hold s!"flare: the lease has {remaining l1} s left, less than the {margin} s the write needs; retry"
+    else
+      let bound := (min 4 (remaining l1 - 1)).toNat
+      match ← Bridge.casNodeMoves crName ns raw (led.admit m reviewUid) bound with
+      | .error e => return .hold s!"flare: the release of {m.pod} was not recorded ({e}); retry"
+      | .ok _ =>
+        match ← getLease leaseName ns with
+        | .ok l2 =>
+          if l2.holderIdentity == identity && !l2.expired && l2.transitions == l1.transitions && remaining l2 > 0 then
+            return .allow s!"the cordon move {m.id} (generation {m.generation}) released {m.pod}: drained from the client Service; the admission is recorded"
+          else return .hold "flare: leadership changed while the release was recorded; retry"
+        | .error _ => return .hold "flare: the lease could not be confirmed after the write; retry"
+
 /-- A0 stage 6b: the node-guard webhook's answer to one AdmissionReview
     (StateMachine/NodeGuard). Pods DELETE of this cluster's flared pods and
     UPDATE of its StatefulSet / scale subresource; anything else is allowed.
     It writes nothing (sideEffects: None); a review it cannot judge (pods
     unreadable) is refused (fail closed). -/
-private def nodeGuardAnswer (crName ns : String) (stateRef : IO.Ref FlareClusterState)
+private def nodeGuardAnswer (crName ns leaseName identity : String) (stateRef : IO.Ref FlareClusterState)
     (_path body : String) : IO String := do
   match Admission.parseReview body with
   | .error e => return Admission.malformedResponse body e
@@ -1115,9 +1448,17 @@ private def nodeGuardAnswer (crName ns : String) (stateRef : IO.Ref FlareCluster
                     break
                 pure (some ok)
           | none => pure (some [])
-        match caughtUp with
-        | none => pure (NodeGuard.Verdict.deny "flare: the pods could not be read to judge this delete; retry")
-        | some cu =>
+        -- the cordon move (plan C.6): judged on the record and the Nodes read NOW
+        let moveGuard ← if !(← nodeReplacementEnabled) then pure (some NodeMove.Guard.unrelated, none)
+          else match ← Bridge.readNodeMoves crName ns, ← Bridge.listCordonedNodes with
+            | .ok (led, raw), .ok cordoned =>
+              pure (some (NodeMove.guard led cordoned r.name r.podUid r.podNodeName
+                    ((r.podLabel NodeMove.servingLabel).isSome) ((st.lookupNode key).map (·.role))), some (led, raw))
+            | _, _ => pure (none, none)
+        match caughtUp, moveGuard.1 with
+        | none, _ => pure (NodeGuard.Verdict.deny "flare: the pods could not be read to judge this delete; retry")
+        | _, none => pure (NodeGuard.Verdict.hold "flare: the cordon move record or the Nodes could not be read to judge this delete; retry")
+        | some cu, some g =>
           let init ← nodeGuardInitRef.get
           -- the refused delete of a master starts its ordered handover now;
           -- the retried delete passes once it is a proxy (review of 9756855)
@@ -1126,7 +1467,12 @@ private def nodeGuardAnswer (crName ns : String) (stateRef : IO.Ref FlareCluster
             plannedHandoverRef.modify fun l => if l.contains (key, r.podUid) then l else l ++ [(key, r.podUid)]
             if !(pl.contains (key, r.podUid)) then
               IO.eprintln s!"[flare-operator] NODE GUARD: the delete of master {key} (uid {r.podUid}) by {r.username} asks for its ordered handover first"
-          pure (NodeGuard.podDelete init st cu r.username opAccount facts)
+          let v := NodeGuard.podDelete init st cu r.username opAccount facts g
+          match v, moveGuard.2 with
+          | .admit m, some (led, raw) =>
+            if r.dryRun then pure (NodeGuard.Verdict.hold "flare: dry run: the cordon move would release this pod; nothing is written or allowed")
+            else pure (← nodeMoveAdmit crName ns leaseName identity led raw m r.uid)
+          | v, _ => pure v
       | "statefulsets", "UPDATE" =>
         if r.name != s!"{crName}-nodes" then pure (NodeGuard.Verdict.allow "another StatefulSet")
         else match r.replicas with
@@ -1136,12 +1482,18 @@ private def nodeGuardAnswer (crName ns : String) (stateRef : IO.Ref FlareCluster
           | _ => pure (NodeGuard.Verdict.allow "replicas not changed")
       | _, _ => pure (NodeGuard.Verdict.allow "not gated")
     match verdict with
+    | .hold why =>
+      IO.eprintln s!"[flare-operator] NODE GUARD: HELD {r.operation} {r.resource} {r.name}{if r.podUid.isEmpty then "" else s!" (uid {r.podUid})"} by {r.username}{if r.dryRun then " (dry run)" else ""}: {why}"
+    | .admit _ => pure ()
     | .deny why =>
       IO.eprintln s!"[flare-operator] NODE GUARD: REFUSED {r.operation} {r.resource}{if r.subResource.isEmpty then "" else "/" ++ r.subResource} {r.name}{if r.podUid.isEmpty then "" else s!" (uid {r.podUid}, grace {r.gracePeriodSeconds})"} by {r.username}{if r.dryRun then " (dry run)" else ""}: {why}"
     | .allow why =>
       if r.resource == "pods" || r.subResource == "scale" || r.resource == "statefulsets" then
         IO.eprintln s!"[flare-operator] NODE GUARD: allowed {r.operation} {r.resource}{if r.subResource.isEmpty then "" else "/" ++ r.subResource} {r.name}{if r.podUid.isEmpty then "" else s!" (uid {r.podUid}, grace {r.gracePeriodSeconds})"} by {r.username}{if r.dryRun then " (dry run)" else ""}: {why}"
-    return Admission.reviewResponse r.uid verdict.allowed verdict.message
+    -- a hold answers 429: `kubectl drain` waits and tries again
+    match verdict with
+    | .hold why => return Admission.reviewResponse r.uid false why 429 "TooManyRequests"
+    | _ => return Admission.reviewResponse r.uid verdict.allowed verdict.message
 
 /-- Ensure K8s Service selectors point to the current Master for each partition. -/
 private def ensureServiceRouting (state : FlareClusterState) (crName ns : String)
@@ -3147,6 +3499,7 @@ private def repairKeysIfAvailable (availableRef : IO.Ref Bool) (ledgerRef : IO.R
   if !(← availableRef.get) then return none
   return some ((← ledgerRef.get).entries.filterMap (·.nodeKey))
 
+set_option maxRecDepth 4096 in
 /-- FSM-driven reconcile loop with partition reduction safety check and metrics.
     This is the production-ready version that wraps runReconcileDriver.
 
@@ -3426,6 +3779,13 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
     IO.eprintln "[flare-operator] PASS STOPPED: the lease was not renewed during the handover; no FSM step, rolling or send this pass"
     return
   let heldKeys := heldKeys ++ handoverHeld.filter (fun k => !heldKeys.contains k)
+  -- 2c. CORDON MOVE: a pod on a cordoned node is moved off, one at a time;
+  -- the pod it empties (and a master's successor) is held out of assignment
+  let moveHeld ← runNodeMoves crName ns stateRef (← ledgerRef.get) metrics leaseHeldNow
+  if ← passLeaseLostRef.get then
+    IO.eprintln "[flare-operator] PASS STOPPED: the lease was not confirmed during the cordon move; no FSM step, rolling or send this pass"
+    return
+  let heldKeys := heldKeys ++ moveHeld.filter (fun k => !heldKeys.contains k)
   nodeGuardRepairRef.set ((← ledgerRef.get).entries.filterMap (·.nodeKey))
 
   let drainBlockedRef ← IO.mkRef 0
@@ -3433,7 +3793,9 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
   -- A0: the operator replaces the pods not on the StatefulSet's update
   -- revision, one at a time, while the cluster is stable
   let busyNow := !(← ledgerRef.get).entries.isEmpty || (← handoverActiveRef.get) || !heldKeys.isEmpty
+    || (← nodeMoveLedgerCacheRef.get).active.isSome
   runRolling crName ns stateRef (← crdRef.get).spec.replicas busyNow leaseHeldNow
+  runServingLabels crName ns stateRef
   if ← passLeaseLostRef.get then
     IO.eprintln "[flare-operator] PASS STOPPED: the lease could not be confirmed before a rolling delete; no send this pass"
     return
@@ -4468,7 +4830,7 @@ def main (args : List String) : IO Unit := do
   -- leader pod.
   if (← IO.getEnv "FLARE_NODE_GUARD") == some "on" then
     let port := ((← IO.getEnv "FLARE_WEBHOOK_PORT").bind (·.toNat?)).getD 9444
-    Server.WebhookServer.serveBackground port.toUInt16 (nodeGuardAnswer crName ns stateRef)
+    Server.WebhookServer.serveBackground port.toUInt16 (nodeGuardAnswer crName ns leaseName identity stateRef)
     IO.eprintln s!"[flare-operator] node guard webhook serving on 127.0.0.1:{port}"
 
   -- SAF-09 (review 2026-10-05): running the operator and initialising a data

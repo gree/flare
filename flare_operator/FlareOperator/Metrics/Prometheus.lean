@@ -146,6 +146,15 @@ structure OperatorMetrics where
   -- must decide (e.g. trigger a final backup) — page immediately.
   drainNoSuccessor : Gauge
 
+  -- Gauges of the cordon move (StateMachine/NodeMove.lean): pods on cordoned
+  -- nodes that could not be moved (under nodeReplacement.minCopies, no
+  -- successor) — alert FlareCordonMoveBlocked; 1 while a move holds because
+  -- the client Service still reaches the pod after its bound, or a handover
+  -- keeps aborting — alert FlareCordonMoveHeld; the number of unfinished moves.
+  cordonMoveBlocked : Gauge
+  cordonMoveHeld : Gauge
+  cordonMovesActive : Gauge
+
   -- Gauge: 1 while the blast-radius circuit breaker is tripped (the FSM's
   -- last pass ended in EmergencyPaused), else 0. Page on this: it means a
   -- suspected AZ-scale outage with automatic failover intentionally halted.
@@ -226,6 +235,9 @@ def initMetrics : IO OperatorMetrics := do
   let replicaRepairVoided ← IO.mkRef 0
   let replicaRepairsPending ← IO.mkRef 0.0
   let drainNoSuccessor ← IO.mkRef 0.0
+  let cordonMoveBlocked ← IO.mkRef 0.0
+  let cordonMoveHeld ← IO.mkRef 0.0
+  let cordonMovesActive ← IO.mkRef 0.0
   let circuitBreakerTripped ← IO.mkRef 0.0
   let partitionsDesired ← IO.mkRef 0.0
   let migrationPhase ← IO.mkRef 0.0
@@ -258,6 +270,9 @@ def initMetrics : IO OperatorMetrics := do
     replicaRepairVoided := { value := replicaRepairVoided }
     replicaRepairsPending := { value := replicaRepairsPending }
     drainNoSuccessor := { value := drainNoSuccessor }
+    cordonMoveBlocked := { value := cordonMoveBlocked }
+    cordonMoveHeld := { value := cordonMoveHeld }
+    cordonMovesActive := { value := cordonMovesActive }
     circuitBreakerTripped := { value := circuitBreakerTripped }
     partitionsDesired := { value := partitionsDesired }
     migrationPhase := { value := migrationPhase }
@@ -514,6 +529,17 @@ def exportMetrics (metrics : OperatorMetrics) (clusterName : String) : IO String
   output := output ++ "# TYPE flare_operator_drain_no_successor gauge\n"
   let drainNoSucc ← metrics.drainNoSuccessor.value.get
   output := output ++ formatGauge "flare_operator_drain_no_successor" labels drainNoSucc
+
+  -- Cordon move (gauges)
+  output := output ++ "# HELP flare_operator_cordon_move_blocked Pods on cordoned nodes that cannot be moved now (fewer real copies than nodeReplacement.minCopies, or no successor); their eviction stays held\n"
+  output := output ++ "# TYPE flare_operator_cordon_move_blocked gauge\n"
+  output := output ++ formatGauge "flare_operator_cordon_move_blocked" labels (← metrics.cordonMoveBlocked.value.get)
+  output := output ++ "# HELP flare_operator_cordon_move_held Cordon moves held as a proxy: the client Service still reaches the pod after the bound, or the handover keeps aborting (nothing is deleted)\n"
+  output := output ++ "# TYPE flare_operator_cordon_move_held gauge\n"
+  output := output ++ formatGauge "flare_operator_cordon_move_held" labels (← metrics.cordonMoveHeld.value.get)
+  output := output ++ "# HELP flare_operator_cordon_moves_active Cordon moves not finished\n"
+  output := output ++ "# TYPE flare_operator_cordon_moves_active gauge\n"
+  output := output ++ formatGauge "flare_operator_cordon_moves_active" labels (← metrics.cordonMovesActive.value.get)
 
   -- Circuit breaker state (gauge)
   output := output ++ "# HELP flare_operator_circuit_breaker_tripped 1 while failover is paused by the blast-radius breaker\n"

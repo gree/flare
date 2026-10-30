@@ -2314,6 +2314,7 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       if SourceEligibility.promotionRisk masterless deadCandidate unhealthyKeys termKeys masterKeysNow then
         let mut readings : List (String × SourceEligibility.Reading) := []
         let mut evidence : List (String × PromotionEvidence.Class × PromotionEvidence.Binding) := []
+        let mut heldDetail : List String := []
         let mut observedFor : List (String × PromotionEvidence.Observed) := []
         -- decision 2026-10-08: EVERY live non-master candidate is read and
         -- classified by reason (Prepare and NotReady ones included: a last
@@ -2342,6 +2343,7 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
                 attributedRejoin := PromotionEvidence.isAttributedRejoin (n.role == FlareRole.Slave) (n.state == FlareState.Prepare) n.partition n.lastMasterOf n.formerSlaveOf }
               let cls := PromotionEvidence.classify reply obs
               evidence := evidence ++ [(key, cls, PromotionEvidence.bindingOf (some p.uid) reply)]
+              if !cls.promotable then heldDetail := heldDetail ++ [s!"{key}: {PromotionEvidence.r3DetailOf reply}"]
               observedFor := observedFor ++ [(key, obs)]
             | none => pure ()
         promotionEvidenceRef.set evidence
@@ -2349,6 +2351,8 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
         promotionRiskPassRef.set true
         if !evidence.isEmpty then
           IO.eprintln s!"[flare-operator] PROMOTION EVIDENCE (by reason, this pass): {evidence.map fun (k, c, b) => s!"{k}={c.label} [boot {b.bootId.getD "?"}]"}"
+        if !heldDetail.isEmpty then
+          IO.eprintln s!"[flare-operator] PROMOTION EVIDENCE readings of the copies not promotable: {heldDetail}"
         sourceIneligible := SourceEligibility.withheld readings
         -- decision 2026-10-07 (1): the commit refuses to promote a candidate
         -- whose reading was UNKNOWN (failed / incomplete) on this pass,

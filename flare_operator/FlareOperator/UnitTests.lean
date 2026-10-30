@@ -2199,6 +2199,12 @@ private def checkStaleR3Refill (ctx : Ctx) : IO Unit := do
       && PromotionEvidence.classify (some ((fLegacy "eligible" "m" "").replace "curr_items 2450" "curr_items 0"))
           { mapPrepare := false, mapActive := true, podReady := true, partitionHasMaster := false,
             lastMasterHistory := none, untrackedLastMaster := some "m" } != .lagging)
+  -- 62dddf9 40981436327 (rc56 upgrade 9): a held copy's R3 readings are logged
+  let det := PromotionEvidence.r3DetailOf (some ((fLegacy "needs_rebuild" "m" "3:k").replace "reason x" "reason history differs: copy 1:n1, master m 3:k"))
+  check ctx "promotion evidence: the readings line of a copy not promotable names R3's state, source, source epoch, reason, its history and items"
+    (containsSub det "state=needs_rebuild" && containsSub det "source=m" && containsSub det "sourceEpoch=3:k"
+      && containsSub det "reason=history differs: copy 1:n1, master m 3:k" && containsSub det "copy=N1/1:n1" && containsSub det "items=2450"
+      && PromotionEvidence.r3DetailOf none == "no reply")
   -- with a master present nothing changes: the same reading is eligible
   check ctx "untracked upgrade: with a master present the same bound reading is ELIGIBLE (the rule is masterless-only)"
     (PromotionEvidence.classify (some (fLegacy "eligible" "m" ""))

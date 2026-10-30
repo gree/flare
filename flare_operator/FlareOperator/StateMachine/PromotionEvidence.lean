@@ -251,6 +251,19 @@ def Stats.legacyCopyOfUntrackedLastMaster (s : Stats) (o : Observed) : Bool :=
     && (s.sourceState == some "eligible" || s.sourceState == some "revalidating")
     && o.mapActive && !o.mapPrepare && s.items.getD 0 != 0
 
+/-- What R3 and the follow side reported for a copy that is not promotable
+    (unknown / FORBIDDEN): the inputs of `classify`, so a held partition can be
+    explained from the log (62dddf9 40981436327, rc56 upgrade 9: the copy was
+    `unknown` after R3 needs_rebuild and the log kept no reading of why). -/
+def Stats.r3Detail (s : Stats) : String :=
+  s!"state={s.sourceState.getD "-"} source={s.readSource.getD "-"} sourceEpoch={s.readSourceEpoch.getD "-"} reason={s.readSourceReason.getD "-"} follow={s.followReason.getD "-"} copy={s.masterId.getD "-"}/{s.copyEpoch.getD "-"} items={s.items.getD 0}"
+
+/-- `Stats.r3Detail` of a raw stats reply; "no reply" without one. -/
+def r3DetailOf (reply : Option String) : String :=
+  match reply with
+  | some out => (parseStats out).r3Detail
+  | none => "no reply"
+
 /-- R3's reason names WHAT it compared the copy with: "history differs:
     copy E1, master K E2" or "lineage differs: copy X, master K Y".
     (kind, the copy's value, the compared master's key, its value). -/

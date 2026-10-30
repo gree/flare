@@ -1501,7 +1501,7 @@ def refillHoldEffects (before after : FlareClusterState) (crd : FlareClusterView
     then heldForExMaster after crd s.livePodKeys s.dataBearingKeys s.followUnfitKeys
     else []
   held.map (fun (p, ks) =>
-    FlareEffect.Log s!"[flare-operator] CRITICAL: partition {p} has NO master: its only data-bearing copy {ks} is unfit (too far behind its source, its copy is unusable, or it cannot be proven current: a stale read-source binding with no master to follow), so it is NOT promoted while the ex-master is away or cannot be read; waiting for the ex-master to return with its data (FLARE_FOLLOW_FAILOVER_WAIT_SECONDS). Writes to this partition fail meanwhile. See RUNBOOK #failover-lag-hold")
+    FlareEffect.Log s!"[flare-operator] CRITICAL: partition {p} has NO master: its only data-bearing copy {ks} is unfit (too far behind its source, its copy is unusable, or it cannot be proven current: a stale read-source binding with no master to follow), so it is NOT promoted while the ex-master is away or cannot be read; waiting for the ex-master to return with its data (FLARE_FOLLOW_FAILOVER_WAIT_SECONDS); if the ex-master is already back EMPTY, the copy is held by its promotion evidence instead (see the PROMOTION EVIDENCE lines; the wait expiring does not lift that). Writes to this partition fail meanwhile. See RUNBOOK #failover-lag-hold")
   ++ crowned.map (fun k =>
     let p : Nat := ((after.lookupNode k).map (·.partition.toNat)).getD 0
     let why :=

@@ -5674,7 +5674,20 @@ def historyTrackingSuite : TestSuite := {
         let mIp := (← getPodIp m ns).getD ""
         let ok ← waitForCondition "a recorded history" 120 do historyRecorded c
         if !ok then return .fail "precondition: no recorded history"
-        let before ← historyText c
+        -- the record must be settled first: the previous test's promotion
+        -- may still be adopting its history (698d77b 40976376890: "before"
+        -- was read 0.85 s ahead of "adopted as generation 4", which then
+        -- read as a write through the immutable record)
+        let mut before ← historyText c
+        let mut settled := false
+        let mut reads := 0
+        while !settled && reads < 12 do
+          IO.sleep 10000
+          let again ← historyText c
+          settled := again == before
+          before := again
+          reads := reads + 1
+        if !settled then return .fail "precondition: the record kept changing for 120 s (the previous test's promotion still adopting?)"
         match ← kubectl ["patch", "configmap", s!"{historyCfg.name}-history", "-n", ns, "--type", "merge", "-p", "{\"immutable\":true}"] with
         | .error e => return .fail s!"precondition: could not make the record immutable: {e}"
         | .ok _ => pure ()
@@ -5684,15 +5697,17 @@ def historyTrackingSuite : TestSuite := {
         let after ← historyText c
         let failed := containsSubstr (← c.opLogSince t0) "the authoritative history could not be persisted"
         IO.eprintln s!"# record before [{before.take 120}] after [{after.take 120}]; write failure logged={failed}"
-        if after != before then return .fail "the record changed although it was unwritable"
-        if !failed then return .fail "no failed history write was logged (the bulk change was not attempted?)"
         -- RUNBOOK #history-holder-reseated names this symptom (the master holds
         -- another history than the record); recorded, not asserted, so the
         -- runbook can say whether this test reached that state before its
         -- recovery (delete + approval) runs below
         let heldLines := ((← c.opLogSince t0).splitOn "\n").filter (containsSubstr · "REBUILD HELD (history)")
         IO.eprintln s!"# runbook state before the recovery: {heldLines.length} 'REBUILD HELD (history)' line(s); first: {(heldLines.head?.getD "(none)").trim.take 220}"
+        -- the immutable record is removed on every path, before any verdict:
+        -- left in place it failed the next tests' own preconditions
         discard <| kubectl ["delete", "configmap", s!"{historyCfg.name}-history", "-n", ns]
+        if after != before then return .fail "the record changed although it was unwritable"
+        if !failed then return .fail "no failed history write was logged (the bulk change was not attempted?)"
         -- an ABSENT record with a node map is a migration or a loss: NOT
         -- adopted until the explicit migration approval
         IO.sleep 45000

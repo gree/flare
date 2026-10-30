@@ -33,6 +33,7 @@ import FlareOperator.Server.WebhookServer
 import FlareOperator.StateMachine.SyncEvidence
 import FlareOperator.StateMachine.StatsObservation
 import FlareOperator.StateMachine.FollowEvidence
+import FlareOperator.StateMachine.FailoverOrder
 import FlareOperator.StateMachine.NodeMapRecovery
 import FlareOperator.Kubectl
 import FlareOperator.Server.TcpServer
@@ -2307,6 +2308,9 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       -- a copy whose source changed is not promotable until re-validated.
       let masterKeysNow := (cs.nodeMap.filter fun kv => kv.2.role == FlareRole.Master).map Prod.fst
       let mut sourceIneligible : List String := []
+      -- spec 4/12 (FailoverOrder): the copies of the last master's history,
+      -- largest applied position first, per partition read on this pass
+      let mut failoverRanked : List String := []
       r3WithheldRef.set []
       promotionEvidenceRef.set []
       promotionObservedRef.set []
@@ -2316,6 +2320,7 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
         let mut evidence : List (String × PromotionEvidence.Class × PromotionEvidence.Binding) := []
         let mut heldDetail : List String := []
         let mut observedFor : List (String × PromotionEvidence.Observed) := []
+        let mut orderCopies : List (Int × FailoverOrder.Copy) := []
         -- decision 2026-10-08: EVERY live non-master candidate is read and
         -- classified by reason (Prepare and NotReady ones included: a last
         -- resort must not reach a copy nobody looked at)
@@ -2329,6 +2334,10 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
               if n.role == FlareRole.Slave && n.state == FlareState.Active && readyNow.contains key then
                 readings := readings ++ [(key, SourceEligibility.classifyReply reply)]
               let part : Int := if n.partition ≥ 0 then n.partition else n.lastMasterOf
+              if let some out := reply then
+                if n.role == FlareRole.Slave then
+                  orderCopies := orderCopies ++ [(part, { key, epoch := statStr out "repl_follow_source_epoch",
+                                                          applied := statNat out "repl_applied_lsn" })]
               let hasMaster := cs.nodeMap.any fun kv => kv.2.role == FlareRole.Master && kv.2.partition == part
               let nPartsB ← desiredPartitionsRef.get
               let obs : PromotionEvidence.Observed := {
@@ -2346,6 +2355,11 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
               if !cls.promotable then heldDetail := heldDetail ++ [s!"{key}: {PromotionEvidence.r3DetailOf reply}"]
               observedFor := observedFor ++ [(key, obs)]
             | none => pure ()
+        for p in (orderCopies.map (·.1)).eraseDups do
+          let ord := FailoverOrder.order ((← recordedHistory p).map (·.2)) ((orderCopies.filter (·.1 == p)).map (·.2))
+          if ord.proof != .noFollower then
+            IO.eprintln s!"[flare-operator] failover order, partition {p}: {ord.describe}"
+          failoverRanked := failoverRanked ++ ord.ranked
         promotionEvidenceRef.set evidence
         promotionObservedRef.set observedFor
         promotionRiskPassRef.set true
@@ -2386,7 +2400,7 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
         else if left > 0 then
           IO.eprintln s!"[flare-operator] pinned successor {k} dropped: its pod is no longer the validated incarnation ({sid} -> {nowId})"
       pinnedSuccessorRef.set keptPins
-      let ranked := pinnedFirst ++ cls.ranked.filter (!pinnedFirst.contains ·)
+      let ranked := pinnedFirst ++ (cls.ranked ++ failoverRanked).filter (!pinnedFirst.contains ·)
       let nPartsHolders ← desiredPartitionsRef.get
       pure (.PodListResponse podKeys (Bridge.podZones pods nodeZones) termKeys dataKeys unhealthyKeys heldKeys
               (cls.unfit ++ (notReadyActive ++ sourceIneligible).filter (!cls.unfit.contains ·)) cls.unproven ranked knownEmpty

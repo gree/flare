@@ -83,6 +83,10 @@ def Review.propagationPolicy (r : Review) : String :=
 def Review.podAnnotation (r : Review) (key : String) : Option String :=
   (((r.oldObject.getObjValD "metadata").getObjValD "annotations").getObjValAs? String key).toOption
 
+/-- A label of the deleted pod. -/
+def Review.podLabel (r : Review) (key : String) : Option String :=
+  (((r.oldObject.getObjValD "metadata").getObjValD "labels").getObjValAs? String key).toOption
+
 /-- spec.replicas of the new and the old object (a StatefulSet, or an
     autoscaling/v1 Scale for the scale subresource). -/
 def Review.replicas (r : Review) : Option Nat × Option Nat :=

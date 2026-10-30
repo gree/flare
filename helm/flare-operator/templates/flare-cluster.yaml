@@ -623,6 +623,11 @@ spec:
   selector:
     app: flare
     cluster: {{ $c.name }}
+    {{- if .Values.nodeReplacement.enabled }}
+    # the operator puts this label on a pod that can serve and takes it off
+    # before a cordon move empties the pod (nodeReplacement)
+    flare.gree.net/serving: "true"
+    {{- end }}
   ports:
     - port: {{ $c.externalAccess.port }}
       targetPort: {{ $c.flarePort }}

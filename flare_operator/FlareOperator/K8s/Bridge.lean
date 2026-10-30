@@ -18,6 +18,7 @@ import FlareOperator.Kubectl
 import Lean.Data.Json
 import FlareOperator.StateMachine.ReplicaRepair
 import FlareOperator.StateMachine.Handover
+import FlareOperator.StateMachine.NodeMove
 
 namespace FlareOperator.K8s.Bridge
 
@@ -53,6 +54,8 @@ structure PodInfo where
   /-- the StatefulSet revision the pod was created from
       (controller-revision-hash); "" when not labelled -/
   revision : String := ""
+  /-- carries the `flare.gree.net/serving` label (the client Service selects it) -/
+  serving : Bool := false
   deriving Repr, BEq
 
 /-- Convert a PodInfo to a node key matching the FQDN used by flared for registration.
@@ -77,19 +80,21 @@ def getFlareClusterCRD (crName ns : String) : IO (Except String FlareClusterView
     column count is wrong is dropped rather than guessed. -/
 def parsePodRows (ns output : String) : List PodInfo :=
   (output.splitOn "\n").filterMap fun line =>
-    let row := fun (name ip ready hostname subdomain nodeName uid rc ts rev : String) =>
+    let row := fun (name ip ready hostname subdomain nodeName uid rc ts rev serving : String) =>
       if name.trim.isEmpty then none
       else some ({
         name := name.trim, ip := ip.trim, port := 12121,
         hostname := hostname.trim, subdomain := subdomain.trim, «namespace» := ns,
         ready := ready.trim == "True", nodeName := nodeName.trim,
         terminating := !ts.trim.isEmpty, uid := uid.trim, restarts := rc.trim.toNat?,
-        revision := rev.trim } : PodInfo)
+        revision := rev.trim, serving := serving.trim == "true" } : PodInfo)
     match line.trim.splitOn "|" with
+    | [name, ip, ready, hostname, subdomain, nodeName, uid, rc, ts, rev, serving] =>
+      row name ip ready hostname subdomain nodeName uid rc ts rev serving
     | [name, ip, ready, hostname, subdomain, nodeName, uid, rc, ts, rev] =>
-      row name ip ready hostname subdomain nodeName uid rc ts rev
+      row name ip ready hostname subdomain nodeName uid rc ts rev ""
     | [name, ip, ready, hostname, subdomain, nodeName, uid, rc, ts] =>
-      row name ip ready hostname subdomain nodeName uid rc ts ""
+      row name ip ready hostname subdomain nodeName uid rc ts "" ""
     | _ => none
 
 /-- List flared pods matching the cluster label selector.
@@ -108,7 +113,7 @@ def listFlaredPodsE (crName ns : String) : IO (Except String (List PodInfo)) := 
   -- no deletionTimestamp) keeps every column in place.
   let result ← retryConservative s!"list pods for {crName}" do
     kubectl ["get", "pods", "-n", ns, "-l", s!"app=flare,cluster={crName}",
-             "-o", "jsonpath={range .items[*]}{.metadata.name}|{.status.podIP}|{.status.conditions[?(.type==\"Ready\")].status}|{.spec.hostname}|{.spec.subdomain}|{.spec.nodeName}|{.metadata.uid}|{.status.containerStatuses[0].restartCount}|{.metadata.deletionTimestamp}|{.metadata.labels.controller-revision-hash}{\"\\n\"}{end}"]
+             "-o", "jsonpath={range .items[*]}{.metadata.name}|{.status.podIP}|{.status.conditions[?(.type==\"Ready\")].status}|{.spec.hostname}|{.spec.subdomain}|{.spec.nodeName}|{.metadata.uid}|{.status.containerStatuses[0].restartCount}|{.metadata.deletionTimestamp}|{.metadata.labels.controller-revision-hash}|{.metadata.labels.flare\\.gree\\.net/serving}{\"\\n\"}{end}"]
   match result with
   | .error e => return .error e
   | .ok output => return .ok (parsePodRows ns output)
@@ -502,8 +507,18 @@ def writeHandovers (crName ns : String) (l : Handover.Ledger) : IO (Except Strin
   | .error e => return .error e
   | .ok _ => return .ok ()
 
+/-- How many stats connections the operator opened to each pod (every
+    `queryPodStats` is one connection to flared, and flared counts it in
+    `total_connections`). The cordon move subtracts them: it asks whether
+    CLIENTS still connect, not whether the operator did. -/
+initialize statsProbeCount : IO.Ref (List (String × Nat)) ← IO.mkRef []
+
+def probesTo (pod : String) : IO Nat := do
+  return ((← statsProbeCount.get).lookup pod).getD 0
+
 /-- Query flared stats via kubectl exec and bash /dev/tcp. -/
-def queryPodStats (podName ns : String) (statsCmd : String) : IO (Except String String) :=
+def queryPodStats (podName ns : String) (statsCmd : String) : IO (Except String String) := do
+  statsProbeCount.modify fun l => (podName, (l.lookup podName).getD 0 + 1) :: l.filter (·.1 != podName)
   -- Read until the END line and return at once; the connection would stay
   -- open (memcached protocol), so a plain `cat` always ran into its 3 s
   -- timeout and every stats probe cost ≥3 s of reconcile time. The overall
@@ -627,6 +642,104 @@ def podZones (pods : List PodInfo) (nodeZones : List (String × String))
     if p.nodeName.isEmpty then none
     else (nodeZones.lookup p.nodeName).map fun z => (p.toNodeKey, z)
 
+-- ===========================================================================
+-- Cordon move (StateMachine/NodeMove.lean)
+-- ===========================================================================
+
+/-- Names of the Nodes with spec.unschedulable=true (cordoned). An error is
+    NOT an empty list: nothing is decided from an unreadable node list. -/
+def listCordonedNodes : IO (Except String (List String)) := do
+  match ← kubectl ["get", "nodes", "-o",
+      "jsonpath={range .items[?(@.spec.unschedulable==true)]}{.metadata.name}{\"\\n\"}{end}"] with
+  | .error e => return .error s!"list cordoned nodes: {e}"
+  | .ok out => return .ok ((out.splitOn "\n").map (·.trim) |>.filter (· != ""))
+
+/-- Wall clock in ms (the move's persisted times must survive a restart). -/
+def wallMs : IO Nat := do
+  let out ← IO.Process.output { cmd := "date", args := #["+%s%3N"] }
+  return (out.stdout.trim.toNat?).getD 0
+
+/-- `status.nodeMoves` as stored: the parsed ledger and the raw JSON (none =
+    absent). The raw value is the CAS precondition of the next write. -/
+def readNodeMoves (crName ns : String) : IO (Except String (NodeMove.Ledger × Option Lean.Json)) := do
+  match ← kubectl ["get", "flarecluster", crName, "-n", ns, "-o", "json"] with
+  | .error e => return .error s!"node moves read failed: {e}"
+  | .ok out =>
+    match Lean.Json.parse out with
+    | .error e => return .error s!"node moves read: CR JSON did not parse: {e}"
+    | .ok j =>
+      match j.getObjVal? "status" >>= (·.getObjVal? "nodeMoves") with
+      | .error _ => return .ok ({}, none)
+      | .ok r =>
+        match NodeMove.Ledger.fromJson? r with
+        | some l => return .ok (l, some r)
+        | none => return .error "node moves read: status.nodeMoves is present but does not parse (corrupt); refusing to start from an empty record"
+
+/-- Compare-and-swap of `status.nodeMoves`: a JSON patch whose `test` holds
+    the value this writer read (the stored value must still be exactly it) and
+    whose `add` writes the new one. The operator's phase writes and the node
+    guard's `admitted` write all go through here, so of two writers that read
+    the same record at most one commits. A resourceVersion test would fail on
+    every unrelated status write (handovers, repairs): this one only on a
+    change of the nodeMoves record itself. -/
+def casNodeMoves (crName ns : String) (old : Option Lean.Json) (new : NodeMove.Ledger)
+    (timeoutSec : Nat := 30) : IO (Except String Unit) := do
+  let ops : List Lean.Json :=
+    (match old with
+     | some o => [Lean.Json.mkObj [("op", "test"), ("path", "/status/nodeMoves"), ("value", o)]]
+     | none => []) ++
+    [Lean.Json.mkObj [("op", "add"), ("path", "/status/nodeMoves"), ("value", new.toJson)]]
+  let patch := (Lean.Json.arr ops.toArray).compress
+  let args := ["patch", "flarecluster", crName, "-n", ns, "--subresource=status", "--type=json", "-p", patch]
+  -- bounded: a hung call must not outlast the caller's lease margin
+  let out ← IO.Process.output { cmd := "timeout", args := #["-k", "1", toString timeoutSec, "kubectl"] ++ args.toArray }
+  if out.exitCode == 0 then return .ok ()
+  else if out.exitCode == 124 then return .error s!"node moves CAS timed out after {timeoutSec}s (outcome unknown; re-read)"
+  else return .error s!"node moves CAS refused: {out.stderr.trim}"
+
+/-- Put the serving label on / take it off a pod, only if it is still the
+    pod with `uid`. Adding refuses a terminating pod: such a pod never gets
+    the label back. -/
+def setServingLabel (pod ns uid : String) (on : Bool) : IO (Except String Unit) := do
+  if on then
+    match ← kubectl ["get", "pod", pod, "-n", ns, "-o", "jsonpath={.metadata.deletionTimestamp}"] with
+    | .error e => return .error e
+    | .ok ts =>
+      if !ts.trim.isEmpty then return .error s!"{pod} is terminating: the serving label is not put back"
+  let key := "/metadata/labels/flare.gree.net~1serving"
+  let ops : List Lean.Json :=
+    [Lean.Json.mkObj [("op", "test"), ("path", "/metadata/uid"), ("value", Lean.Json.str uid)],
+     if on then Lean.Json.mkObj [("op", "add"), ("path", key), ("value", "true")]
+     else Lean.Json.mkObj [("op", "remove"), ("path", key)]]
+  match ← kubectl ["patch", "pod", pod, "-n", ns, "--type=json", "-p", (Lean.Json.arr ops.toArray).compress] with
+  | .ok _ => return .ok ()
+  | .error e => return .error e
+
+/-- Names of the pods the EndpointSlices of Service `svc` list (ready or
+    not: any listing means the Service can still send to them). -/
+def serviceEndpointPods (svc ns : String) : IO (Except String (List String)) := do
+  match ← kubectl ["get", "endpointslices", "-n", ns, "-l", s!"kubernetes.io/service-name={svc}",
+      "-o", "jsonpath={range .items[*].endpoints[*]}{.targetRef.name}{\"\\n\"}{end}"] with
+  | .error e => return .error s!"endpointslices of {svc}: {e}"
+  | .ok out => return .ok ((out.splitOn "\n").map (·.trim) |>.filter (· != ""))
+
+/-- A Kubernetes Event on the FlareCluster (operator actions the user must
+    see: a cordon move blocked below minCopies, held, released). -/
+def emitEvent (crName ns reason message : String) (warning : Bool := false) : IO Unit := do
+  let ms ← wallMs
+  let name := s!"{crName}.{reason.toLower}.{ms}"
+  let ev := Lean.Json.mkObj [
+    ("apiVersion", "v1"), ("kind", "Event"),
+    ("metadata", Lean.Json.mkObj [("name", Lean.Json.str name), ("namespace", Lean.Json.str ns)]),
+    ("involvedObject", Lean.Json.mkObj [("apiVersion", "flare.gree.net/v1alpha1"), ("kind", "FlareCluster"),
+      ("name", Lean.Json.str crName), ("namespace", Lean.Json.str ns)]),
+    ("reason", Lean.Json.str reason), ("message", Lean.Json.str message),
+    ("type", Lean.Json.str (if warning then "Warning" else "Normal")),
+    ("source", Lean.Json.mkObj [("component", "flare-operator")])]
+  match ← kubectlApplyManifest ev.compress with
+  | .ok _ => pure ()
+  | .error e => IO.eprintln s!"[flare-operator] warning: Event {reason} not recorded: {e}"
+
 /-- Read the nodeMap data from a ConfigMap.
     kubectl get configmap <name> -n <ns> -o jsonpath='{.data.nodeMap}' -/
 def readFlaredConfigMap (cmName ns : String) : IO (Except String String) :=
@@ -647,6 +760,8 @@ structure LeaseInfo where
   /-- spec.leaseTransitions: the leadership GENERATION. Incremented by
       every takeover; the fencing token (see Main's version composition). -/
   transitions : Nat := 0
+  /-- seconds since the last renewal, at the read -/
+  ageSeconds : Nat := 0
   deriving Repr, BEq
 
 /-- Get lease info including expiry check.
@@ -672,7 +787,7 @@ def getLease (leaseName ns : String) : IO (Except String LeaseInfo) := do
       let age := ageStr.trim.toNat?.getD 0
       return .ok { holderIdentity := holder.trim, leaseDurationSeconds := dur,
                    expired := age ≥ dur, resourceVersion := rv.trim,
-                   transitions := transStr.trim.toNat?.getD 0 }
+                   transitions := transStr.trim.toNat?.getD 0, ageSeconds := age }
     | _ => return .error s!"unexpected getLease output: {result.stdout}"
   catch e =>
     return .error s!"getLease error: {e}"

@@ -103,13 +103,23 @@ def totalTests (suites : List TestSuite) : Nat :=
 /-- Run multiple suites. Supports --filter <names> to run a subset —
     a comma-separated list of suite names, so CI can shard the (serial,
     multi-hour) run across parallel matrix jobs with explicitly balanced
-    groups. A single name behaves as before. -/
+    groups. A single name behaves as before. Every name must be a suite:
+    an unknown one fails the run before anything runs (it was dropped
+    silently, and a run reported PASS without the suite asked for). -/
 def runAll (suites : List TestSuite) (filter : Option String) : IO UInt32 := do
+  let wanted : List String := match filter with
+    | none => []
+    | some f => (f.splitOn ",").map (·.trim) |>.filter (· ≠ "")
+  let unknown := wanted.filter (fun w => !suites.any (·.name == w))
+  if !unknown.isEmpty then
+    IO.eprintln s!"# Error: no suite named {unknown}"
+    IO.eprintln "# Available suites:"
+    for s in suites do
+      IO.eprintln s!"#   {s.name}"
+    return 1
   let filtered := match filter with
     | none => suites
-    | some f =>
-      let wanted := (f.splitOn ",").map (·.trim) |>.filter (· ≠ "")
-      suites.filter (fun s => wanted.contains s.name)
+    | some _ => suites.filter (fun s => wanted.contains s.name)
   if filtered.isEmpty then
     match filter with
     | some f =>

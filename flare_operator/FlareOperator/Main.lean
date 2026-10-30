@@ -470,6 +470,13 @@ initialize handoverHeldLogRef : IO.Ref (List (Nat × String)) ← IO.mkRef []
     the handover has seen it (CI 40862342948, S8: the delete landed between
     the two reads and the drain promoted the successor with no handover). -/
 initialize handoverSeenAliveRef : IO.Ref (Option (List String)) ← IO.mkRef none
+/-- Set when the FSM left a Terminating master to the next pass's handover
+    (it became Terminating after this pass's handover step): the leader loop
+    starts that pass at once instead of after its interval (698d77b
+    40976376890 forward-window 8: the handover started ~9 s after the delete,
+    its drain then ran into the old master's SIGTERM and aborted, and the
+    partition waited for the 5-minute last-resort refill). -/
+initialize handoverWakeRef : IO.Ref Bool ← IO.mkRef false
 initialize handoverLoadedRef : IO.Ref Bool ← IO.mkRef false
 initialize handoverDirtyRef : IO.Ref Bool ← IO.mkRef false
 /-- a handover is running: the leader loop does not wait the full interval -/
@@ -2126,6 +2133,7 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       let activeMasters := (csNow.nodeMap.filter fun kv => kv.2.role == FlareRole.Master && kv.2.state == FlareState.Active).map Prod.fst
       let lateMasters := Handover.drainDeferred seenAlive (Bridge.terminatingPodKeys pods) activeMasters
       if !lateMasters.isEmpty then
+        handoverWakeRef.set true
         IO.eprintln s!"[flare-operator] HANDOVER: Terminating master(s) {lateMasters} {if seenAlive.isNone then "were not observed by this pass's handover step (ledger or pods unreadable)" else "became Terminating after this pass's handover step"}; the drain leaves them to the next pass's handover"
       let termKeys := (Bridge.terminatingPodKeys pods).filter (!lateMasters.contains ·)
       -- Data-bearing probe (curr_items > 0 per pod) for the masterless
@@ -4739,7 +4747,10 @@ def main (args : List String) : IO Unit := do
     -- replicas still take the new empty process for their master (998dc30
     -- rc56 upgrade: 9 s later the replica had declared needs_rebuild)
     let sleepMs := if (← handoverActiveRef.get) then 200 else interval * 1000
+    -- ... and so does a Terminating master left to the next pass's
+    -- handover (handoverWakeRef)
     for _ in [0:sleepMs / 100] do
+      if (← handoverWakeRef.modifyGet fun w => (w, false)) then break
       IO.sleep 100
       if !(← leftActiveRef.get).isEmpty then break
 

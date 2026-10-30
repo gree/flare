@@ -431,6 +431,30 @@ once a minute, `CRITICAL: partition P has NO master
 each copy and its class, also when there is no copy or every copy is
 forbidden (FlareMasterMissing fires from the same gauge).
 
+## A master's flared restarted: its replica rebuilds {#master-restart-rebuild}
+
+Log lines: the master's `node add` re-registers it as `Slave P<n> (Prepare)`,
+then `PROMOTION of a LAGGING copy: <master> — a last resort` and, on the
+replica, `read source NEEDS REBUILD: history differs`.
+
+When a master's flared container restarts by itself (crash, OOM, a SIGTERM
+that did not come from the operator), the operator cannot tell a zombie
+from a restart over TCP, so it registers the returning process as a
+Prepare slave and leaves the master decision to the next reconcile pass.
+That pass re-seats the copy that holds the data, usually the same pod.
+Seating a master always starts a new history (source epoch). A replica bound
+to the old history therefore rebuilds from the master once.
+
+- **Data**: none is lost. The master kept its copy and is seated again.
+- **Cost**: one full rebuild of each replica of that partition, and a short
+  window without a master (writes to the partition fail until the re-seat).
+- **Expected**: the master's epoch moves by exactly one. Older builds could
+  advance it twice while applying one map (`source epoch advanced` twice);
+  that was a flared defect, fixed together with L11. It did not cause an
+  extra rebuild.
+- **Avoid it**: restart flared pods through the node guard
+  ([#node-guard](#node-guard)), which hands the master over first.
+
 ## Operator will not start: node map missing, invalid or unreadable {#node-map-lost}
 
 At startup the operator reads `<cluster>-node-map` (ConfigMap) and decides

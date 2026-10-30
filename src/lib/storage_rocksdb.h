@@ -477,7 +477,13 @@ public:
 	// and writers are excluded for the swap) and seed the replication cursor
 	// to the checkpoint's sequence. The master identity token travels INSIDE
 	// the checkpoint (reserved key), so lineage is inherited automatically.
-	int swap_in_snapshot(const string& staging_dir, uint64_t checkpoint_seq);
+	// `seed` (the cross-cluster snapshot PUSH onto a destination master, not a
+	// replica's pull): the copy this replaces and its successor are recorded
+	// as a receipt (pred -> succ, the inherited epoch) in the bulk chain, in
+	// the same synced batch as the restore marker, and the epoch reason is
+	// "seed" — the operator's authoritative history follows a seed only
+	// through that receipt.
+	int swap_in_snapshot(const string& staging_dir, uint64_t checkpoint_seq, bool seed = false);
 	// Prepare (wipe + mkdir) the receive-side staging dir and return its
 	// path. Kept inside storage so callers never hand-construct DB paths.
 	int prepare_snapshot_staging(string& out_dir);

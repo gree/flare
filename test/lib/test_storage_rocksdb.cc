@@ -2861,6 +2861,73 @@ void test_bulk_receipt_normal_failed_write_and_crash_before_epoch() {
 	drop_rocksdb(s, wal_slave_dir);
 }
 
+// A SEED (the cross-cluster snapshot push replacing a destination master's
+// copy) leaves a receipt like a bulk: pred copy -> succ copy with the
+// inherited epoch, in the same batch as the restore marker, reason "seed";
+// the chain the destination already carried stays (a bulk before the seed),
+// the SOURCE's chain does not. A replica's pull (no seed) leaves none.
+static void seed_swap(storage_rocksdb* master, storage_rocksdb* dest, bool seed) {
+	string cp_path;
+	uint64_t cp_seq = 0;
+	cut_assert_equal_int(0, master->create_snapshot_checkpoint(cp_path, cp_seq));
+	string staging;
+	cut_assert_equal_int(0, dest->prepare_snapshot_staging(staging));
+	cut_assert_equal_int(0, copy_dir_flat(cp_path, staging));
+	cut_assert_equal_int(0, master->remove_snapshot_checkpoint(cp_path));
+	cut_assert_equal_int(0, dest->swap_in_snapshot(staging, cp_seq, seed));
+}
+
+void test_seed_receipt_chain_reason_and_reopen() {
+	storage_rocksdb* master = make_rocksdb(wal_master_dir);
+	storage_rocksdb* dest = make_rocksdb(wal_slave_dir);
+	cut_assert_equal_int(0, storage_set_string(master, "k", "v"));
+	// the source has a bulk of its own: its chain must not travel
+	const string m0 = master->get_copy_id();
+	cut_assert_equal_int(0, master->truncate(0));
+	cut_assert_equal_int(0, storage_set_string(master, "k", "v"));
+	cut_assert_true(master->get_bulk_chain().find(m0) != string::npos);
+	// the destination has one too (before the seed)
+	cut_assert_equal_int(0, storage_set_string(dest, "old", "x"));
+	const string d0 = dest->get_copy_id();
+	cut_assert_equal_int(0, dest->truncate(0));
+	const string d1 = dest->get_copy_id();
+
+	seed_swap(master, dest, true);
+	const string d2 = dest->get_copy_id();
+	cut_assert_not_equal_string(d1.c_str(), d2.c_str());
+	cut_assert_not_equal_string(master->get_copy_id().c_str(), d2.c_str());
+	cut_assert_equal_string("seed", dest->get_source_epoch_reason().c_str());
+	cut_assert_equal_string(master->get_source_epoch().c_str(), dest->get_source_epoch().c_str());
+	string chain = dest->get_bulk_chain();
+	cut_assert_true(chain.find(d0 + " " + d1 + " ") != string::npos);
+	cut_assert_true(chain.find(d1 + " " + d2 + " " + dest->get_source_epoch()) != string::npos);
+	cut_assert_true(chain.find(m0) == string::npos);
+	cut_assert_false(dest->has_bulk_pending());
+	cut_assert_true(dest->copy_identity_consistent());
+
+	// durable: the receipt, reason and identity survive a reopen
+	drop_rocksdb_noremove(dest);
+	dest = make_rocksdb(wal_slave_dir);
+	cut_assert_equal_string(d2.c_str(), dest->get_copy_id().c_str());
+	cut_assert_equal_string("seed", dest->get_source_epoch_reason().c_str());
+	cut_assert_true(dest->get_bulk_chain().find(d1 + " " + d2 + " " + dest->get_source_epoch()) != string::npos);
+	cut_assert_true(dest->copy_identity_consistent());
+	drop_rocksdb(dest, wal_slave_dir);
+	drop_rocksdb(master, wal_master_dir);
+}
+
+void test_pull_swap_leaves_no_receipt_and_reason_inherited() {
+	storage_rocksdb* master = make_rocksdb(wal_master_dir);
+	storage_rocksdb* dest = make_rocksdb(wal_slave_dir);
+	cut_assert_equal_int(0, storage_set_string(master, "k", "v"));
+	const string d0 = dest->get_copy_id();
+	seed_swap(master, dest, false);
+	cut_assert_equal_string("inherited", dest->get_source_epoch_reason().c_str());
+	cut_assert_true(dest->get_bulk_chain().find(d0) == string::npos);
+	drop_rocksdb(dest, wal_slave_dir);
+	drop_rocksdb(master, wal_master_dir);
+}
+
 // Restore provenance (restore-isolated 5): a LIVE copy is never refused for
 // its binding (its partition is the operator's decision) — the binding is
 // recorded and re-recorded from the map, so its checkpoints carry where the

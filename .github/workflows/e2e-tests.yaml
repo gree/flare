@@ -97,7 +97,7 @@ jobs:
             {"group":"history-promotion","suites":"history-held,history-firstbuild,history-intent-restart,history-masterless,promotion-disconnected-follower,promotion-disconnected-follower-empty,promotion-proxy-only-copy"},
             {"group":"failover-data","suites":"replace-nodes,failover-during-replication,data-survival-failover,pvc-data-survival,backup-restore,continuous-replication-enable,continuous-replication-multipart-enable"},
             {"group":"breaker-migration","suites":"circuit-breaker,operator-restart,blue-green-migration,continuous-replication-lag-hold-expiry,copy-identity"},
-            {"group":"authority","suites":"topology-authority,resync-failure-self-demote,snapshot-push-seed"},
+            {"group":"authority","unit":true,"suites":"topology-authority,resync-failure-self-demote,snapshot-push-seed"},
             {"group":"cluster-init","suites":"partition-reduction,continuous-replication-lag-hold,cluster-init"},
             {"group":"repair","suites":"replica-repair,prepare-evidence,native-metrics,continuous-replication-upgrade,continuous-replication-lag-hold-unreadable"},
             {"group":"node-ops-switch-a","suites":"node-ops-switch-delete,node-ops-switch-rolling"},
@@ -244,6 +244,19 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           echo "E2E-EVIDENCE commit=$sha tree=$tree scope=$scope event=$EVENT group=$GROUP suites=$SUITES"
 
+      # The Lean build is cached between runs of the same branch (and from the
+      # default branch): lake rebuilds only the modules whose inputs changed.
+      # A cold run builds everything once.
+      - name: Cache Lean toolchain and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.elan
+            flare_operator/.lake
+          key: e2e-lean-${{ runner.os }}-${{ hashFiles('flare_operator/lean-toolchain', 'flare_operator/lake-manifest.json') }}-${{ github.sha }}
+          restore-keys: |
+            e2e-lean-${{ runner.os }}-${{ hashFiles('flare_operator/lean-toolchain', 'flare_operator/lake-manifest.json') }}-
+
       - name: Install elan (Lean version manager)
         run: |
           curl --retry 5 --retry-delay 3 --retry-all-errors https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y
@@ -280,6 +293,12 @@ jobs:
           python3 -m unittest discover -s scripts/tests -p 'test_snapshot_receive.py'
 
       - name: Build Lean operator and tests
+        env:
+          # the pure safety tests (flare_unit) build and run in ONE leg of the
+          # full matrix; a single-suite run and the other legs build only the
+          # operator and the E2E driver (flare_unit's UnitTests:c.o alone took
+          # ~75 min of a 2 h targeted run, 41192150575)
+          RUN_UNIT: ${{ matrix.unit && 'true' || 'false' }}
         run: |
           cd flare_operator
           # SEPARATE invocations on purpose. Naming the library and an
@@ -292,10 +311,14 @@ jobs:
           # passing; the build order in a good run is Main → Main → Main:c.o,
           # in the bad one Main → Main:c.o → Main.
           build_all() {
-            lake build FlareOperator \
-              && lake build flare_operator \
-              && lake build flare_unit \
-              && lake build flare_e2e
+            if [ "$RUN_UNIT" = true ]; then
+              lake build FlareOperator \
+                && lake build flare_operator \
+                && lake build flare_unit \
+                && lake build flare_e2e
+            else
+              lake build flare_operator && lake build flare_e2e
+            fi
           }
           # Retry once from a CLEAN tree. The runner's clang also dies with
           # SIGBUS (exit 135) occasionally (two consecutive otherwise-green
@@ -308,7 +331,7 @@ jobs:
             build_all
           }
 
-      - name: Run pure safety tests
+      - name: Record the tested revision
         shell: bash
         run: |
           set -euo pipefail
@@ -316,6 +339,12 @@ jobs:
           git rev-parse HEAD > ci-results/tested-sha.txt
           # the TREE actually tested (a PR run tests a merge commit, not the branch head)
           git rev-parse 'HEAD^{tree}' > ci-results/tested-tree.txt
+
+      - name: Run pure safety tests
+        if: ${{ matrix.unit }}
+        shell: bash
+        run: |
+          set -euo pipefail
           timeout --kill-after=10 120 flare_operator/.lake/build/bin/flare_unit 2>&1 | tee ci-results/flare-unit.log
 
       # The node-operations suites (planned switches, drain) need separate
@@ -413,8 +442,13 @@ jobs:
       # 36864650674). A real build error fails all three attempts.
       - name: Build operator image
         run: |
+          # package the binary built above (Ubuntu runner, elan toolchain: the
+          # same glibc loader as the runtime image) instead of building Lean
+          # again inside the image
+          mkdir -p ci-bin
+          cp flare_operator/.lake/build/bin/flare_operator ci-bin/flare_operator
           for attempt in 1 2 3; do
-            docker build -t flare-operator:test -f Dockerfile.operator . && exit 0
+            docker build -t flare-operator:test -f Dockerfile.operator.ci . && exit 0
             echo "::warning::operator image build failed (attempt $attempt/3); retrying in 30 s"
             sleep 30
           done

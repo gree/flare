@@ -1,0 +1,23 @@
+# CI-only runtime image for the Lean 4 flare-operator: packages the binary the
+# e2e workflow already built on the Ubuntu runner (ci-bin/flare_operator, elan
+# toolchain, /lib64/ld-linux-x86-64.so.2) instead of building Lean again.
+# Release images keep using Dockerfile.operator (builds from source).
+FROM --platform=linux/amd64 ubuntu:noble
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" \
+    && install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl \
+    && rm kubectl
+
+COPY ci-bin/flare_operator /usr/local/bin/flare_operator
+
+RUN useradd -r -s /bin/false flare-operator
+USER flare-operator
+
+ENTRYPOINT ["/usr/local/bin/flare_operator"]

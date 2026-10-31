@@ -1387,6 +1387,13 @@ initialize downAtCommitRef : IO.Ref (List String) ← IO.mkRef []
 initialize unreachableDownRef : IO.Ref (List String) ← IO.mkRef []
 /-- When the reachability step last probed (monotonic ms; 0 = never). -/
 initialize reachProbedAtRef : IO.Ref Nat ← IO.mkRef 0
+/-- Nodes made down by unreachability (spec 12). A live flared marked Down
+    leaves Down only by re-registering, i.e. a restart (4e); once such a node
+    answers the operator again it is restarted at once instead of after the
+    stuck-down wait (E2E 41185704625: Down 5 min after the heal). -/
+initialize downByReachRef : IO.Ref (List String) ← IO.mkRef []
+/-- The last reachability probe reached NO node (UnreachableNode's guard). -/
+initialize reachGuardRef : IO.Ref Bool ← IO.mkRef false
 
 /-- When the store was last loaded (monotonic ms; 0 = never). -/
 initialize historyLoadedAtRef : IO.Ref Nat ← IO.mkRef 0
@@ -3199,6 +3206,8 @@ private def runReachabilityStep (stateRef : IO.Ref FlareClusterState)
   let reachVerdict := FlareOperator.UnreachableNode.step (← unreachCyclesRef.get) probed (← stateRef.get)
   unreachCyclesRef.set reachVerdict.streaks
   unreachableDownRef.set reachVerdict.down
+  downByReachRef.modify fun l => l ++ reachVerdict.down.filter (!l.contains ·)
+  reachGuardRef.set reachVerdict.guardTripped
   if reachVerdict.guardTripped then
     IO.eprintln s!"[flare-operator] CRITICAL: the operator cannot reach ANY of the {probed.length} flare node(s) it probed — treated as a k8s API / network problem on the operator's side: NO node is marked down and no master is promoted (alert only) until a node answers"
   for k in reachVerdict.down do
@@ -4262,15 +4271,27 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
   let downRestartCycles := ((← IO.getEnv "FLARE_DOWN_RESTART_CYCLES").bind (·.toNat?)).getD 60
   if downRestartCycles > 0 then
     if podDeletionAllowed then
-      match newDown.find? (fun kv => kv.2 ≥ downRestartCycles) with
+      -- a node made down by unreachability that answers again (no streak,
+      -- no guard) restarts after 3 passes, not the stuck-down wait
+      -- (never while no node is reachable: the guard resets every streak)
+      let streaksNow ← unreachCyclesRef.get
+      let guardNow ← reachGuardRef.get
+      let downByReach ← downByReachRef.get
+      let reachableAgain := if guardNow then []
+        else downByReach.filter fun k => !(streaksNow.any (·.1 == k))
+      match newDown.find? (fun kv => kv.2 ≥ (if reachableAgain.contains kv.1 then 3 else downRestartCycles)) with
       | some (key, cycles) =>
         match finalState.lookupNode key with
         | some node =>
           if node.role == FlareRole.Proxy then
             let podName := extractPodName node.serverName
             IO.eprintln s!"[flare-operator] STUCK-DOWN RECOVERY: {key} has been Down with its pod present for {cycles} ticks (~{cycles * 5 / 60} min); every partition has an Active master, so restarting {podName} to force a clean re-registration (it will rejoin via Prepare and catch up)"
+            if reachableAgain.contains key then
+              IO.eprintln s!"[flare-operator] REACHABLE AGAIN: {key} was marked down because the operator could not reach it; it answers again, so it is restarted now to re-register (not after the stuck-down wait)"
             match ← Bridge.deletePodGraceful podName ns with
-            | .ok () => downCyclesRef.set (newDown.filter (fun kv => kv.1 != key))
+            | .ok () =>
+              downCyclesRef.set (newDown.filter (fun kv => kv.1 != key))
+              downByReachRef.modify (·.filter (· != key))
             | .error e => IO.eprintln s!"[flare-operator] stuck-down recovery: failed to delete {podName}: {e}"
         | none => pure ()
       | none => pure ()

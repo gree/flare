@@ -118,9 +118,17 @@ private def opIpOf : IO (Except String String) := do
   | some ip => return .ok ip
   | none => return .error s!"no IP for {opPod}"
 
-private def graceOver : IO Bool :=
-  waitForCondition "operator past its startup grace period" 240 do
-    return containsSubstr (← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 400) "grace period over"
+/-- the operator logged the end of its startup grace (it is not restarted in
+    this suite): once seen it stays true — the line scrolls out of the log's
+    tail after the first test (41185704625: tests 2-4 failed on it) -/
+initialize graceSeenRef : IO.Ref Bool ← IO.mkRef false
+
+private def graceOver : IO Bool := do
+  if ← graceSeenRef.get then return true
+  let ok ← waitForCondition "operator past its startup grace period" 240 do
+    return containsSubstr (← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 400000) "grace period over"
+  if ok then graceSeenRef.set true
+  return ok
 
 /-- partition 0 has an Active master and two Active slaves again (after a heal) -/
 private def p0Stable : IO Bool := do

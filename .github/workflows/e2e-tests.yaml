@@ -93,7 +93,7 @@ jobs:
             {"group":"forward-window","suites":"promotion-reasons,promotion-precommit,forward-window,forward-window-wal,forward-window-steps"},
             {"group":"repair-ledger","suites":"repair-ledger,migration-per-key-only"},
             {"group":"restore-promotion","suites":"restore-isolated,promotion-repeat,history-tracking"},
-            {"group":"failover-order","suites":"failover-order"},
+            {"group":"failover-order","suites":"failover-order,first-build-busy-pool"},
             {"group":"history-promotion","suites":"history-held,history-firstbuild,history-intent-restart,history-masterless,promotion-disconnected-follower,promotion-disconnected-follower-empty,promotion-proxy-only-copy"},
             {"group":"failover-data","suites":"replace-nodes,failover-during-replication,data-survival-failover,pvc-data-survival,backup-restore,continuous-replication-enable,continuous-replication-multipart-enable"},
             {"group":"breaker-migration","suites":"circuit-breaker,operator-restart,blue-green-migration,continuous-replication-lag-hold-expiry,copy-identity"},

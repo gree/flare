@@ -232,8 +232,8 @@ def results : List (String × Bool) := Id.run do
               | .hold _ => true | .unrelated => true | _ => false)]
   r := r ++ [("node guard: a data pod on a cordoned node with no move yet is held",
               match guard {} ["w1"] "c-nodes-0" "u1" "w1" true (some FlareRole.Slave) with | .hold _ => true | _ => false)]
-  r := r ++ [("node guard: a proxy on a cordoned node with no move is left to the usual rules",
-              guard {} ["w1"] "c-nodes-0" "u1" "w1" true (some FlareRole.Proxy) == .unrelated)]
+  r := r ++ [("node guard: a proxy on a cordoned node with no move yet is held too (it serves clients until its move; 41200478947 C1)",
+              match guard {} ["w1"] "c-nodes-0" "u1" "w1" true (some FlareRole.Proxy) with | .hold _ => true | _ => false)]
   r := r ++ [("node guard: a pod on a schedulable node is unrelated",
               guard {} [] "c-nodes-0" "u1" "w1" true (some FlareRole.Slave) == .unrelated)]
   let adm := lr.admit released "review-7"

@@ -476,8 +476,13 @@ def guard (l : Ledger) (cordoned : List String) (podName podUid podNode : String
       .hold s!"flare: node {m.node} is no longer cordoned (or the pod is elsewhere); the move {m.id} does not release the pod"
     else .permit m
   | none =>
-    if cordoned.contains podNode && podRole != some FlareRole.Proxy then
-      .hold s!"flare: node {podNode} is cordoned and the cordon move of {podName} has not been released (not started: waiting for its turn or for enough real copies, see status.nodeMoves)"
+    -- every flared pod on a cordoned node is moved, a proxy too: it still
+    -- serves clients until the move takes it out of their Service. A proxy's
+    -- move is never blocked (startBlock), it only waits for its turn
+    -- (41200478947 C1: the master just handed over was a proxy with its move
+    -- not yet started, and "a proxy holds no data" let its eviction through)
+    if cordoned.contains podNode then
+      .hold s!"flare: node {podNode} is cordoned and the cordon move of {podName} has not been released (not started: waiting for its turn{if podRole == some FlareRole.Proxy then "" else " or for enough real copies"}, see status.nodeMoves)"
     else .unrelated
 
 /-- Record the AdmissionReview uid the guard is about to allow with. -/

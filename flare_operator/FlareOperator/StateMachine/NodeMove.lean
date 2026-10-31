@@ -84,6 +84,30 @@ def Phase.fromString? : String → Option Phase
 /-- the label the client Service selects on (chart: `<name>-nodes-external`) -/
 def servingLabel : String := "flare.gree.net/serving"
 
+/-- The baseline of a moving pod's client request counter for the quiet
+    check: the counter, the operator's own share of it, when it last grew,
+    and the flared process it was read from (reconstruction_boot_id). -/
+structure QuietBase where
+  total : Nat
+  own : Nat
+  lastIncrease : Nat
+  boot : String
+  deriving Repr, BEq, Inhabited
+
+/-- One reading of the counter. The counter is process-local (flared starts it
+    at 0): another boot id, or a counter below the baseline, is another
+    process — the quiet window starts again (review of 09ce11a: a restarted
+    flared's requests stayed below the old count and never reset it). Growth
+    beyond the operator's own share also starts it again. -/
+def quietStep (prev : Option QuietBase) (total own : Nat) (boot : String) (now : Nat) : QuietBase :=
+  let li := match prev with
+    | none => now
+    | some b =>
+      if b.boot != boot || total < b.total || own < b.own then now
+      else if total - b.total > own - b.own then now
+      else b.lastIncrease
+  { total, own, lastIncrease := li, boot }
+
 structure Config where
   /-- partitions need at least this many real copies, the moving one included -/
   minCopies : Nat := 3

@@ -149,6 +149,20 @@ def results : List (String × Bool) := Id.run do
   -- the pod replaced / removed
   r := r ++ [("node move: a pod replaced under the same name before released -> cancelled",
               phaseOf (step cfg (mv "slave" .proxied) (obs 1 (some (pod "u9" .Proxy)))) == .cancelled)]
+  -- ── quiet baseline (review of 09ce11a) ──────────────────────────────
+  let q0 := quietStep none 100 0 "boot-a" 1000
+  let qSame := quietStep (some q0) 100 0 "boot-a" 9000
+  r := r ++ [("node move: quiet — no growth keeps the last increase; growth restarts the window",
+              q0.lastIncrease == 1000 && qSame.lastIncrease == 1000
+              && (quietStep (some q0) 101 0 "boot-a" 9000).lastIncrease == 9000)]
+  r := r ++ [("node move: quiet — a restarted flared (another boot id) restarts the window even though its counter is below the old one",
+              (quietStep (some q0) 3 0 "boot-b" 9000).lastIncrease == 9000
+              && (quietStep (some (quietStep (some q0) 3 0 "boot-b" 9000)) 3 0 "boot-b" 20000).lastIncrease == 9000
+              && (quietStep (some (quietStep (some q0) 3 0 "boot-b" 9000)) 4 0 "boot-b" 20000).lastIncrease == 20000)]
+  r := r ++ [("node move: quiet — a counter below the baseline (reset, no boot id reported) restarts the window",
+              (quietStep (some { q0 with boot := "" }) 5 0 "" 9000).lastIncrease == 9000)]
+  r := r ++ [("node move: quiet — the operator's own requests alone do not restart it",
+              (quietStep (some { q0 with own := 2 }) 103 5 "boot-a" 9000).lastIncrease == 1000)]
   -- ── minCopies ───────────────────────────────────────────────────────
   let others2 := [copy "a" "w2", copy "b" "w3"]
   r := r ++ [("node move: 3 copies (this + 2 real) start with minCopies 3", (startBlock cfg "slave" ["w1"] others2).isNone)]

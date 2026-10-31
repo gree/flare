@@ -1060,7 +1060,7 @@ initialize nodeMoveLedgerCacheRef : IO.Ref NodeMove.Ledger ← IO.mkRef {}
 initialize nodeMoveHeldRef : IO.Ref (List String) ← IO.mkRef []
 /-- pod → (total_connections, operator probes to the pod, mono ms of the last
     increase not explained by the operator's own probes) -/
-initialize nodeMoveConnRef : IO.Ref (List (String × (Nat × Nat × Nat))) ← IO.mkRef []
+initialize nodeMoveConnRef : IO.Ref (List (String × NodeMove.QuietBase)) ← IO.mkRef []
 /-- master|dest → (dropped, failed) when first seen: a later increase means the
     copy is not a real copy -/
 initialize nodeMoveBaseRef : IO.Ref (List (String × (Nat × Nat))) ← IO.mkRef []
@@ -1102,12 +1102,14 @@ private def observeClientConnections (pod ns : String) (stats : Option String) :
     match counter with
     | none => return (none, curr)
     | some total =>
-      let prev := (← nodeMoveConnRef.get).lookup pod
-      let lastIncrease := match prev with
-        | none => now
-        | some (t0, p0, li) => if (total : Int) - t0 > (own : Int) - p0 then now else li
-      nodeMoveConnRef.modify fun l => (pod, (total, own, lastIncrease)) :: l.filter (·.1 != pod)
-      return (some (now - lastIncrease), curr)
+      -- the flared process the counter belongs to: a restart starts it at 0
+      let boot := ((out.splitOn "\n").findSome? fun line =>
+        match (line.trim.replace "\r" "").splitOn " " with
+        | ["STAT", "reconstruction_boot_id", v] => some v
+        | _ => none).getD ""
+      let b := NodeMove.quietStep ((← nodeMoveConnRef.get).lookup pod) total own boot now
+      nodeMoveConnRef.modify fun l => (pod, b) :: l.filter (·.1 != pod)
+      return (some (now - b.lastIncrease), curr)
 
 /-- One pass of the cordon move: reads the cordoned nodes and the record,
     steps the running move, persists (CAS) before it acts, and starts the

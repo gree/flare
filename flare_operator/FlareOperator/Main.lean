@@ -4705,7 +4705,7 @@ def main (args : List String) : IO Unit := do
   let masterSnapshotRef ← IO.mkRef (none : Option (List String))
 
   -- Start TCP server in background (using Server.TcpServer)
-  let _ ← IO.asTask (prio := .default) do
+  let _ ← IO.asTask (prio := .dedicated) do
     try
       startServerFromRefs port stateRef crdRef
     catch e =>

@@ -153,7 +153,7 @@ def startMetricsServer (metrics : OperatorMetrics) (clusterName : String) (confi
         acceptLoop fuel
       | .ok clientSocket =>
         -- Handle request in background task
-        let _ ← IO.asTask (prio := .default) do
+        let _ ← IO.asTask (prio := .dedicated) do
           try
             handleClient clientSocket metrics clusterName
           catch e =>
@@ -164,7 +164,7 @@ def startMetricsServer (metrics : OperatorMetrics) (clusterName : String) (confi
 
 /-- Start metrics server in background task -/
 def startMetricsServerBackground (metrics : OperatorMetrics) (clusterName : String) (config : ServerConfig := {}) : IO Unit := do
-  let _ ← IO.asTask (prio := .default) do
+  let _ ← IO.asTask (prio := .dedicated) do
     startMetricsServer metrics clusterName config
   pure ()
 

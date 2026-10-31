@@ -274,8 +274,13 @@ def startServer (port : UInt16) (state : ServerState) : IO Unit := do
         IO.eprintln s!"[flare-operator] accept error: {e}"
         acceptLoop fuel
       | .ok clientSocket =>
-        -- Spawn handler as async task
-        let _ ← IO.asTask (prio := .default) do
+        -- Spawn handler on its own thread (.dedicated): on the shared task
+        -- pool (~one worker per CPU) the accept loops of this, the health and
+        -- the metrics servers block workers for good, and a `node add` sat
+        -- unread ~1 s during the first pass after start — past flared's 1 s
+        -- read timeout, so flared restarted and the first build lost its
+        -- master (CI 41186795576, flare-bug-first-build-node-add-timeout)
+        let _ ← IO.asTask (prio := .dedicated) do
           try
             handleConnection clientSocket state
           catch e =>

@@ -148,7 +148,7 @@ def broadcastTopologyToAllPods (crName ns : String) (version : Nat) (nodes : Lis
   -- the demotion map to the still-alive leaving pod); the deadline is what
   -- distinguishes "Terminating but reachable" from "gone".
   let tasks ← pods.mapM fun pod =>
-    IO.asTask (sendNodeSyncToNode pod.ip 12121 version nodes)
+    IO.asTask (prio := .dedicated) (sendNodeSyncToNode pod.ip 12121 version nodes)
   let deadline := (← IO.monoMsNow) + 15000
   let mut confirmed := true
   -- Belt over TcpClient's own deadlines: the broadcast runs synchronously

@@ -4704,6 +4704,16 @@ def main (args : List String) : IO Unit := do
   -- mid-migration triggers a fail-safe abort (see handleClusterReplication).
   let masterSnapshotRef ← IO.mkRef (none : Option (List String))
 
+  -- TEST SEAM (flare-bug-first-build-node-add-timeout E2E). Unset in
+  -- production: one getEnv. FLARE_TEST_POOL_BUSY=<n> occupies the shared task
+  -- pool at start with n tasks that sleep 60 s each, the way blocked accept
+  -- loops did: a server handler on that pool would not run until a worker
+  -- frees up, past flared's 1 s read timeout. The servers run on dedicated
+  -- threads, so registration must not notice.
+  if let some n := (← IO.getEnv "FLARE_TEST_POOL_BUSY").bind String.toNat? then
+    IO.eprintln s!"[flare-operator] TEST SEAM: occupying the shared task pool with {n} task(s) sleeping 60 s"
+    for _ in [0:n] do
+      let _ ← IO.asTask (prio := .default) (IO.sleep 60000)
   -- Start TCP server in background (using Server.TcpServer)
   let _ ← IO.asTask (prio := .dedicated) do
     try

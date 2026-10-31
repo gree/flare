@@ -49,6 +49,7 @@ import FlareOperator.E2E.Tests.ReadBalance
 import FlareOperator.E2E.Tests.RestoreIsolated
 import FlareOperator.E2E.Tests.NodeOpsSwitch
 import FlareOperator.E2E.Tests.FailoverOrder
+import FlareOperator.E2E.Tests.FirstBuildBusyPool
 
 open FlareOperator.E2E
 
@@ -56,6 +57,7 @@ def main (args : List String) : IO UInt32 :=
   e2eMain ([
     Tests.Failover.suite,
     Tests.FailoverOrder.suite,
+    Tests.FirstBuildBusyPool.suite,
     Tests.ReadBalance.suite,
     Tests.ScaleOutMaster.suite,
     Tests.ScaleOutSlave.suite,

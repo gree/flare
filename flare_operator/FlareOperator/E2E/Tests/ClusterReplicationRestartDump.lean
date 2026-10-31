@@ -59,7 +59,19 @@ private def cfgDst : ClusterConfig := {
   debugPod := "debug-crk"
   storageBackend := "rocksdb"
   usePvc := true
+  -- held re-seat (below): the restarted master registers as a Prepare slave
+  -- and is promoted a few seconds later; forwards in between WAIT for a
+  -- master (master-wait-msec, 20 s) and then succeed, so without the hold
+  -- SERVER_ERROR came by chance only (3 of 4 runs: connection refusals only)
+  operatorEnv := [("FLARE_TEST_PROMOTION_BARRIER", "/tmp/crk")]
 }
+
+/-- `sh -c cmd` in the destination operator pod. -/
+private def dstOpExec (cmd : String) : IO (Except String String) := do
+  let pods ← getPodNames s!"app={cfgDst.operatorName}" cfgDst.«namespace»
+  match pods.head? with
+  | none => return .error "no operator pod"
+  | some pod => kubectl ["exec", "-n", cfgDst.«namespace», pod, "--", "sh", "-c", cmd]
 
 private def dstSvc : String := s!"{cfgDst.name}-nodes.{cfgDst.«namespace»}.svc.cluster.local"
 
@@ -262,6 +274,18 @@ def suite : TestSuite := {
         match ← kubectl ["scale", "deployment", cfgDst.operatorName, "-n", cfgDst.«namespace», "--replicas=1"] with
         | .error e => return .fail s!"could not release the destination operator: {e}"
         | .ok _ => pure ()
+        -- hold the re-seat of the restarted master past the forwards' master
+        -- wait (20 s): they fail SERVER_ERROR and the source resends them
+        -- (the order test 3 checks). Armed before the operator's startup
+        -- grace ends, released 30 s after the promotion is reached.
+        let armed ← waitForCondition "the destination operator's promotion barrier is armed" 120 do
+          return (← dstOpExec "mkdir -p /tmp/crk && rm -f /tmp/crk/promote-* && touch /tmp/crk/promote-arm") matches .ok _
+        let reached ← if armed then waitForCondition "the re-seat of the restarted master is held" 300 do
+            return (← dstOpExec "cat /tmp/crk/promote-reached") matches .ok _
+          else pure false
+        if reached then IO.sleep 30000
+        discard <| dstOpExec "touch /tmp/crk/promote-release"
+        IO.eprintln s!"# promotion barrier armed={armed}, re-seat held={reached} (30 s past the 20 s master wait)"
         if !unacked.isEmpty then
           return .fail s!"the source did not acknowledge {unacked} — the premise does not hold"
         -- the master is back when the map names it before AND after it

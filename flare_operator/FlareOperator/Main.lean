@@ -1777,6 +1777,13 @@ initialize reachProbedAtRef : IO.Ref Nat ← IO.mkRef 0
     answers the operator again it is restarted at once instead of after the
     stuck-down wait (E2E 41185704625: Down 5 min after the heal). -/
 initialize downByReachRef : IO.Ref (List String) ← IO.mkRef []
+/-- The nodes the latest probe round ANSWERED (a successful connect): only
+    these are "reachable again". A node missing from the failure streaks was
+    not necessarily answered — a Down node is not tracked there (41238593672:
+    a slave still cut off was restarted as reachable again, its recreated pod
+    got a new IP outside the cut, and the master it had no successor for was
+    failed over to it). -/
+initialize reachOkRef : IO.Ref (List String) ← IO.mkRef []
 /-- The last reachability probe reached NO node (UnreachableNode's guard). -/
 initialize reachGuardRef : IO.Ref Bool ← IO.mkRef false
 /-- spec 13: node -> when its conflicting master claim was first seen (ms),
@@ -3627,6 +3634,7 @@ private def runReachabilityStep (stateRef : IO.Ref FlareClusterState)
       | .ok b => pure b
       | .error _ => pure true
     probed := probed ++ [(key, ok)]
+  reachOkRef.set ((probed.filter (·.2)).map (·.1))
   let reachVerdict := FlareOperator.UnreachableNode.step (← unreachCyclesRef.get) probed (← stateRef.get)
   unreachCyclesRef.set reachVerdict.streaks
   unreachableDownRef.set reachVerdict.down
@@ -4743,8 +4751,9 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
       let streaksNow ← unreachCyclesRef.get
       let guardNow ← reachGuardRef.get
       let downByReach ← downByReachRef.get
+      let reachOk ← reachOkRef.get
       let reachableAgain := if guardNow then []
-        else downByReach.filter fun k => !(streaksNow.any (·.1 == k))
+        else downByReach.filter fun k => reachOk.contains k && !(streaksNow.any (·.1 == k))
       match newDown.find? (fun kv => kv.2 ≥ (if reachableAgain.contains kv.1 then 3 else downRestartCycles)) with
       | some (key, cycles) =>
         match finalState.lookupNode key with

@@ -17,10 +17,23 @@
   cannot hide a wrong rule: the node chosen as A is the one that is FIRST in
   the operator's map, the order the old code would have used.
 
-  Before it (user decision 2026-10-31, option A: rule (b) is not adopted): a
-  master that only the OPERATOR cannot reach is not failed over. The operator
-  ⇄ master link alone is cut; the operator raises its CRITICAL reachability
-  alert, the master stays the master and keeps acknowledging writes.
+  Then (user decision 2026-10-31, spec 12, replacing the morning's option A):
+  a flare node the OPERATOR cannot reach (TCP to its flared port) is marked
+  down with flarei's retry count and wait (3 probes, 5 s apart, 1 s timeout,
+  ~15 s; src/flarei/ini_option.h), proxy; a master only if a reachable slave
+  can be promoted (otherwise it stays master and the reason is logged); and
+  when the operator reaches NO node at all it does nothing (alert only: the
+  k8s API / its own network is suspect).
+    - operator ⇄ master cut only -> the master is marked down, a reachable
+      slave is promoted. DATA GUARANTEE: every write acknowledged and
+      replicated before the cut is on the new master (0 missing is asserted).
+      A client that still reaches the OLD master (C' case) can have writes
+      acknowledged there that the new master never sees: those are counted and
+      reported, not asserted (rule 13 resolves duplicate masters, other issue).
+    - operator ⇄ every flare pod cut -> nothing happens for 90 s.
+    - operator ⇄ master and ⇄ both its slaves cut (other partitions stay
+      reachable) -> the master has no reachable successor: it stays master and
+      the log names the reason.
 -/
 import FlareOperator.E2E.Framework
 import FlareOperator.E2E.Helpers
@@ -36,7 +49,7 @@ open FlareOperator.Kubectl
 private def cfg : ClusterConfig := {
   name := "fo-order"
   «namespace» := "flare-fo-order"
-  partitions := 1
+  partitions := 2
   replicas := 3
   operatorName := "flare-operator"
   debugPod := "debug-fo-order"
@@ -95,6 +108,41 @@ private def healLink (a b : String) : IO Unit := do
 private def p0Master : IO (Option String) := do
   return (findMasterFqdn (← nodeView) 0).map podOf
 
+private def opLogs : IO String := kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 4000
+
+private def opIpOf : IO (Except String String) := do
+  let opPod ← match ← kubectl ["get", "pods", "-n", cfg.«namespace», "-l", s!"app={cfg.operatorName}", "-o", "jsonpath={.items[0].metadata.name}"] with
+    | .ok o => pure o.trim
+    | .error e => return .error s!"no operator pod: {e}"
+  match ← getPodIp opPod cfg.«namespace» with
+  | some ip => return .ok ip
+  | none => return .error s!"no IP for {opPod}"
+
+private def graceOver : IO Bool :=
+  waitForCondition "operator past its startup grace period" 240 do
+    return containsSubstr (← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 400) "grace period over"
+
+/-- partition 0 has an Active master and two Active slaves again (after a heal) -/
+private def p0Stable : IO Bool := do
+  let es ← nodeView
+  let p0 := es.filter (·.partition == 0)
+  return (p0.filter (fun e => e.role == 0 && e.state == 0)).length == 1
+    && (p0.filter (fun e => e.role == 1 && e.state == 0)).length == 2
+
+private def waitP0Stable : IO Bool :=
+  waitForCondition "partition 0 has a master and two Active slaves" 360 p0Stable
+
+private def keysMissing (ip pfx : String) (n : Nat) : IO Nat := do
+  let mut missing := 0
+  for i in [0:n] do
+    match ← memcachedGet cfg.debugPod cfg.«namespace» ip cfg.flarePort s!"{pfx}_{i}" with
+    | some _ => pure ()
+    | none => missing := missing + 1
+  return missing
+
+private def countLines (logs needle1 needle2 : String) : Nat :=
+  ((logs.splitOn "\n").filter fun l => containsSubstr l needle1 && containsSubstr l needle2).length
+
 def suite : TestSuite := {
   name := "failover-order"
   setup := do
@@ -106,41 +154,135 @@ def suite : TestSuite := {
     cleanupCluster cfg
   onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
   tests := [
-    { name := "a master that only the OPERATOR cannot reach (operator ⇄ master cut, the pod Ready, clients reaching it) is NOT failed over: the CRITICAL reachability alert names it, it stays the master for 90 s and keeps acknowledging writes"
+    { name := "operator ⇄ master cut only (the pod Ready, clients reaching it): the master is marked down after flarei's 3 probes and a reachable slave is promoted; every write acknowledged and replicated before the cut is on the new master (0 missing); writes only the old master acknowledged afterwards are counted"
       run := do
-        let graceOver ← waitForCondition "operator past its startup grace period" 240 do
-          return containsSubstr (← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 400) "grace period over"
-        if !graceOver then return .fail "the operator never logged the end of its startup grace period"
+        if !(← graceOver) then return .fail "the operator never logged the end of its startup grace period"
+        if !(← waitP0Stable) then return .fail "precondition: partition 0 is not stable"
         let some mPod ← p0Master | return .fail "no Active P0 master in the operator's map"
         let some mIp ← getPodIp mPod cfg.«namespace» | return .fail s!"no IP for {mPod}"
-        let opPod ← match ← kubectl ["get", "pods", "-n", cfg.«namespace», "-l", s!"app={cfg.operatorName}", "-o", "jsonpath={.items[0].metadata.name}"] with
-          | .ok o => pure o.trim
-          | .error e => return .fail s!"no operator pod: {e}"
-        let some opIp ← getPodIp opPod cfg.«namespace» | return .fail s!"no IP for {opPod}"
+        let opIp ← match ← opIpOf with
+          | .ok ip => pure ip
+          | .error e => return .fail e
+        let slaves := ((← nodeView).filter fun e => e.partition == 0 && e.role == 1).map (podOf ·.fqdn)
+        let pre ← writeKeys cfg.debugPod cfg.«namespace» mIp cfg.flarePort "unr_pre" 20
+        if pre != 20 then return .fail s!"precondition: only {pre}/20 keys stored before the cut"
+        let some h0 ← statNat mIp "rocksdb_latest_sequence_number" | return .fail "the master's head is unreadable"
+        for sp in slaves do
+          let some sIp ← getPodIp sp cfg.«namespace» | return .fail s!"no IP for {sp}"
+          let ok ← waitForCondition s!"{sp} applied the keys (head {h0})" 120 do
+            return (← statNat sIp "repl_applied_lsn").getD 0 ≥ h0
+          if !ok then return .fail s!"precondition: {sp} did not apply the keys"
+        let t0 ← IO.monoMsNow
         match ← cutLink opIp mIp with
         | .error e => return .fail s!"could not cut operator ⇄ {mPod}: {e}"
         | .ok _ => pure ()
         try
-          let alerted ← waitForCondition s!"the operator alerts that it cannot reach {mPod}" 120 do
-            return ((← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 2000).splitOn "\n").any fun l =>
-              containsSubstr l "the OPERATOR cannot connect" && containsSubstr l mPod
-          if !alerted then return .fail s!"precondition: no CRITICAL reachability alert for {mPod} within 120 s (the cut did not take)"
-          for i in [0:9] do
-            IO.sleep 10000
+          let promoted ← waitForCondition s!"a new P0 master after the operator lost {mPod}" 180 do
             match ← p0Master with
-            | some m => if m != mPod then return .fail s!"{mPod} was failed over to {m} while only the operator could not reach it ({(i + 1) * 10} s after the alert)"
-            | none => return .fail s!"partition 0 has no master {(i + 1) * 10} s after the alert"
-          let stored ← writeKeys cfg.debugPod cfg.«namespace» mIp cfg.flarePort "unreach" 20
-          IO.eprintln s!"# {mPod} still the master 90 s after the alert; {stored}/20 writes acknowledged"
-          if stored != 20 then return .fail s!"only {stored}/20 writes acknowledged by {mPod} while the operator could not reach it"
+            | some m => return m != mPod
+            | none => return false
+          let secs := ((← IO.monoMsNow) - t0) / 1000
+          if !promoted then return .fail s!"{mPod} (reachable by clients, unreachable from the operator) was never failed over (180 s)"
+          IO.eprintln s!"# {mPod} replaced {secs} s after the cut (flarei equivalent: 3 probes x 5 s = ~15 s, plus a tick and the map commit)"
+          let some m2 ← p0Master | return .fail "no master after the wait"
+          if !(slaves.contains m2) then return .fail s!"{m2} was promoted but is not one of the slaves {slaves}"
+          if countLines (← opLogs) "UNREACHABLE: master" mPod == 0 then
+            return .fail s!"no 'UNREACHABLE: master {mPod}' line in the operator log"
+          let some m2Ip ← getPodIp m2 cfg.«namespace» | return .fail s!"no IP for {m2}"
+          let applied ← waitForCondition s!"{m2} reports own_role master" 60 do
+            match ← execInDebugPod cfg.debugPod cfg.«namespace» s!"printf 'stats\\r\\n' | nc -w 3 {m2Ip} {cfg.flarePort}" with
+            | .ok o => return containsSubstr o "STAT own_role master"
+            | .error _ => return false
+          if !applied then return .fail s!"{m2} never reported itself master"
+          let missingPre ← keysMissing m2Ip "unr_pre" 20
+          let fresh ← writeKeys cfg.debugPod cfg.«namespace» m2Ip cfg.flarePort "unr_new" 20
+          -- C' case: a client that still reaches the old master
+          let oldAcked ← writeKeys cfg.debugPod cfg.«namespace» mIp cfg.flarePort "unr_old" 20
+          IO.eprintln s!"# new master {m2}: {20 - missingPre}/20 pre-cut keys present, {fresh}/20 new writes acknowledged; old master {mPod} still acknowledged {oldAcked}/20 writes from a client"
+          if missingPre != 0 then return .fail s!"{missingPre}/20 writes acknowledged and replicated before the cut are missing on the new master {m2}"
+          if fresh != 20 then return .fail s!"only {fresh}/20 writes acknowledged by the new master {m2}"
+          healLink opIp mIp
+          if !(← waitP0Stable) then return .fail "partition 0 did not return to a master and two Active slaves after the heal"
+          let some m3 ← p0Master | return .fail "no master after the heal"
+          let some m3Ip ← getPodIp m3 cfg.«namespace» | return .fail s!"no IP for {m3}"
+          let lostOld := (← keysMissing m3Ip "unr_old" 20)
+          IO.eprintln s!"# after the heal (master {m3}): unr_pre missing {(← keysMissing m3Ip "unr_pre" 20)}, unr_new missing {(← keysMissing m3Ip "unr_new" 20)}; of the {oldAcked} writes only the old master acknowledged, {lostOld}/20 are absent (C' case: not asserted; rule 13 handles duplicate masters)"
           return .pass
         finally
           healLink opIp mIp },
+    { name := "operator ⇄ EVERY flare pod cut (nothing reachable: the operator's own network is suspect): nothing is marked down, the master is unchanged for 90 s and the 'cannot reach ANY' alert is logged"
+      run := do
+        if !(← graceOver) then return .fail "the operator never logged the end of its startup grace period"
+        if !(← waitP0Stable) then return .fail "precondition: partition 0 is not stable"
+        let some mPod ← p0Master | return .fail "no Active P0 master in the operator's map"
+        let some mIp ← getPodIp mPod cfg.«namespace» | return .fail s!"no IP for {mPod}"
+        let opIp ← match ← opIpOf with
+          | .ok ip => pure ip
+          | .error e => return .fail e
+        let mut ips : List String := []
+        for e in ← nodeView do
+          if let some ip ← getPodIp (podOf e.fqdn) cfg.«namespace» then ips := ips ++ [ip]
+        let downBefore := countLines (← opLogs) "UNREACHABLE:" ""
+        let mut cut : List String := []
+        try
+          for ip in ips do
+            match ← cutLink opIp ip with
+            | .error e => return .fail s!"could not cut operator ⇄ {ip}: {e}"
+            | .ok _ => cut := cut ++ [ip]
+          let alerted ← waitForCondition "the operator alerts that it reaches NO node" 120 do
+            return containsSubstr (← opLogs) "cannot reach ANY of the"
+          if !alerted then return .fail "no 'cannot reach ANY' alert within 120 s (the cuts did not take)"
+          for i in [0:9] do
+            IO.sleep 10000
+            match ← p0Master with
+            | some m => if m != mPod then return .fail s!"{mPod} was replaced by {m} while the operator reached no node ({(i + 1) * 10} s)"
+            | none => return .fail s!"partition 0 has no master {(i + 1) * 10} s after the alert"
+          let downAfter := countLines (← opLogs) "UNREACHABLE:" ""
+          if downAfter > downBefore then return .fail s!"the operator marked a node unreachable-down while it reached none ({downBefore} -> {downAfter} log lines)"
+          let stored ← writeKeys cfg.debugPod cfg.«namespace» mIp cfg.flarePort "unr_all" 20
+          IO.eprintln s!"# master {mPod} unchanged for 90 s with every operator link cut; alert logged; {stored}/20 writes acknowledged"
+          if stored != 20 then return .fail s!"only {stored}/20 writes acknowledged by {mPod}"
+          return .pass
+        finally
+          for ip in cut do healLink opIp ip },
+    { name := "an unreachable master with NO reachable promotable slave (operator ⇄ master and ⇄ both its slaves cut, the other partition reachable) is NOT marked down: it stays the master for 90 s and the log names the reason"
+      run := do
+        if !(← graceOver) then return .fail "the operator never logged the end of its startup grace period"
+        if !(← waitP0Stable) then return .fail "precondition: partition 0 is not stable"
+        let some mPod ← p0Master | return .fail "no Active P0 master in the operator's map"
+        let some mIp ← getPodIp mPod cfg.«namespace» | return .fail s!"no IP for {mPod}"
+        let opIp ← match ← opIpOf with
+          | .ok ip => pure ip
+          | .error e => return .fail e
+        let slaveIps ← (((← nodeView).filter fun e => e.partition == 0 && e.role == 1).map (podOf ·.fqdn)).mapM fun sp => do
+          return (← getPodIp sp cfg.«namespace»).getD ""
+        if slaveIps.length != 2 || slaveIps.any (· == "") then return .fail s!"precondition: two slaves with IPs expected, got {slaveIps}"
+        let before := countLines (← opLogs) "NO reachable promotable successor" mPod
+        let mut cut : List String := []
+        try
+          for ip in mIp :: slaveIps do
+            match ← cutLink opIp ip with
+            | .error e => return .fail s!"could not cut operator ⇄ {ip}: {e}"
+            | .ok _ => cut := cut ++ [ip]
+          let logged ← waitForCondition s!"the operator logs that {mPod} has no reachable promotable successor" 180 do
+            return countLines (← opLogs) "NO reachable promotable successor" mPod > before
+          if !logged then return .fail s!"no 'NO reachable promotable successor' line naming {mPod} within 180 s"
+          for i in [0:9] do
+            IO.sleep 10000
+            match ← p0Master with
+            | some m => if m != mPod then return .fail s!"{mPod} was replaced by {m} although no reachable slave could be promoted ({(i + 1) * 10} s)"
+            | none => return .fail s!"{mPod} is no longer the Active master of partition 0 ({(i + 1) * 10} s after the reason was logged)"
+          let stored ← writeKeys cfg.debugPod cfg.«namespace» mIp cfg.flarePort "unr_nosucc" 20
+          IO.eprintln s!"# {mPod} still the master 90 s after the reason was logged; {stored}/20 writes acknowledged"
+          if stored != 20 then return .fail s!"only {stored}/20 writes acknowledged by {mPod}"
+          return .pass
+        finally
+          for ip in cut do healLink opIp ip
+          discard <| waitP0Stable },
     { name := "two followers: the master is lost while one follower is stale; the follower with the LARGER applied sequence is promoted, and every key is on it"
       run := do
-        let graceOver ← waitForCondition "operator past its startup grace period" 240 do
-          return containsSubstr (← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 400) "grace period over"
-        if !graceOver then return .fail "the operator never logged the end of its startup grace period"
+        if !(← graceOver) then return .fail "the operator never logged the end of its startup grace period"
+        if !(← waitP0Stable) then return .fail "precondition: partition 0 is not stable (master and two Active slaves)"
         let some mPod ← p0Master | return .fail "no Active P0 master in the operator's map"
         let some mIp ← getPodIp mPod cfg.«namespace» | return .fail s!"no IP for {mPod}"
         let entries ← nodeView

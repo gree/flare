@@ -34,6 +34,7 @@ import FlareOperator.StateMachine.SyncEvidence
 import FlareOperator.StateMachine.StatsObservation
 import FlareOperator.StateMachine.FollowEvidence
 import FlareOperator.StateMachine.FailoverOrder
+import FlareOperator.StateMachine.UnreachableNode
 import FlareOperator.StateMachine.NodeMapRecovery
 import FlareOperator.Kubectl
 import FlareOperator.Server.TcpServer
@@ -1380,6 +1381,11 @@ initialize probeForcedUntilRef : IO.Ref (List (Int × Nat)) ← IO.mkRef []
     that rejoins after it starts its NotReady window again). -/
 initialize downAtCommitRef : IO.Ref (List String) ← IO.mkRef []
 
+/-- Nodes the operator could not reach for flarei's retry count in a row
+    (StateMachine/UnreachableNode, spec 12): set once per pass before the
+    FSM, read by the pod listing as additional unhealthy keys. -/
+initialize unreachableDownRef : IO.Ref (List String) ← IO.mkRef []
+
 /-- When the store was last loaded (monotonic ms; 0 = never). -/
 initialize historyLoadedAtRef : IO.Ref Nat ← IO.mkRef 0
 
@@ -2122,7 +2128,12 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       let fresh := K8sReconciler.rejoinedAfterDown (← downAtCommitRef.get) (← stateRef.get) ++ leftActive
       let newUnready := K8sReconciler.unreadyStreaks prevUnready notReadyKeys (← stateRef.get) fresh
       unreadyCyclesRef.set newUnready
+      -- spec 12: nodes the OPERATOR cannot reach join the same list (flarei's
+      -- retry count; a master without a reachable successor is kept, see
+      -- unhealthyMastersKept; no action at all when no node is reachable)
+      let unreachableDown ← unreachableDownRef.get
       let unhealthyKeys := (newUnready.filter (fun kv => kv.2 ≥ unreadyDeadCycles)).map Prod.fst
+        ++ unreachableDown.filter (fun k => !(newUnready.filter (fun kv => kv.2 ≥ unreadyDeadCycles)).any (·.1 == k))
       for (k, n) in newUnready do
         if n == unreadyDeadCycles then
           IO.eprintln s!"[flare-operator] CRITICAL: node {k} pod is PRESENT but has been NotReady for {n} ticks -> treating it as dead (flared crashed or wedged); failover/refill will act on it"
@@ -3157,6 +3168,38 @@ private def repairKeysIfAvailable (availableRef : IO.Ref Bool) (ledgerRef : IO.R
   if !(← availableRef.get) then return none
   return some ((← ledgerRef.get).entries.filterMap (·.nodeKey))
 
+/-- 2c. OPERATOR-SIDE REACHABILITY (spec 12, 2026-10-31), once per pass before
+    the FSM. Every Ready pod's flared port is probed (flarei: 1 s timeout, 5 s
+    interval, 3 failures in a row). The pure verdict (StateMachine/
+    UnreachableNode) names the nodes to treat as down and trips the GUARD when
+    NO probed node is reachable: then the operator's own side (k8s API,
+    network) is suspect and nothing is flagged. -/
+private def runReachabilityStep (stateRef : IO.Ref FlareClusterState)
+    (podAddrsRef : IO.Ref (List (String × String)))
+    (unreachCyclesRef : IO.Ref (List (String × Nat))) : IO Unit := do
+  let probeAddrs := (← podAddrsRef.get).filter (·.2 != "")
+  let probeTasks ← probeAddrs.mapM fun (_, ip) =>
+    IO.asTask (Server.probeNodeReachable ip 12121 FlareOperator.UnreachableNode.monitorReadTimeoutMs)
+  let mut probed : List (String × Bool) := []
+  for ((key, _), t) in probeAddrs.zip probeTasks do
+    let ok ← match ← IO.wait t with
+      | .ok b => pure b
+      | .error _ => pure true
+    probed := probed ++ [(key, ok)]
+  let reachVerdict := FlareOperator.UnreachableNode.step (← unreachCyclesRef.get) probed (← stateRef.get)
+  unreachCyclesRef.set reachVerdict.streaks
+  unreachableDownRef.set reachVerdict.down
+  if reachVerdict.guardTripped then
+    IO.eprintln s!"[flare-operator] CRITICAL: the operator cannot reach ANY of the {probed.length} flare node(s) it probed — treated as a k8s API / network problem on the operator's side: NO node is marked down and no master is promoted (alert only) until a node answers"
+  for k in reachVerdict.down do
+    match (← stateRef.get).lookupNode k with
+    | some n =>
+      if n.role == FlareRole.Master then
+        IO.eprintln s!"[flare-operator] UNREACHABLE: master {k} failed {FlareOperator.UnreachableNode.monitorThreshold} consecutive operator probes — marked down if a reachable slave of its partition can be promoted, otherwise kept as master (see the CRITICAL line that names it)"
+      else
+        IO.eprintln s!"[flare-operator] UNREACHABLE: {k} ({repr n.role}) failed {FlareOperator.UnreachableNode.monitorThreshold} consecutive operator probes — marked down (proxy); the rebuild path builds another copy"
+    | none => pure ()
+
 /-- FSM-driven reconcile loop with partition reduction safety check and metrics.
     This is the production-ready version that wraps runReconcileDriver.
 
@@ -3437,6 +3480,8 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
     return
   let heldKeys := heldKeys ++ handoverHeld.filter (fun k => !heldKeys.contains k)
   nodeGuardRepairRef.set ((← ledgerRef.get).entries.filterMap (·.nodeKey))
+
+  runReachabilityStep stateRef podAddrsRef unreachCyclesRef
 
   let drainBlockedRef ← IO.mkRef 0
   runReconcileDriver stateRef migrationRef graceCyclesRef trippedRef drainBlockedRef unreadyCyclesRef podKeysRef podAddrsRef heldKeys crName ns
@@ -4220,31 +4265,16 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
         | none => pure ()
       | none => pure ()
 
-  -- 4f. OPERATOR-SIDE REACHABILITY. Every other liveness signal is blind to
-  -- the operator→pod path: the readiness probe runs inside the pod (kubelet
-  -- asking flared about itself) and the stats probes travel via the API
-  -- server. So a node can be Ready and serving clients perfectly while the
-  -- operator cannot push topology to it — it then runs on a STALE MAP (wrong
-  -- roles) until the path heals, which is hazard H4 with no detector.
-  -- ALERT ONLY, never fed into dead detection: unreachability is a loss of
-  -- OUR feedback and the fault may be on our side, so failing over a master
-  -- we merely cannot see is the unsafe control action (see
-  -- docs/STPA-node-state.md). Probed every ~30s, not per tick.
+  -- 4f. OPERATOR-SIDE REACHABILITY alerts. The probing and the down decision
+  -- run once per pass before the FSM (step 2c, StateMachine/UnreachableNode);
+  -- here only the standing alert is raised, ~every 30 s.
   let reachSlot := (← IO.monoMsNow) / 30000
   if reachSlot != (← reachSlotRef.get) then
     reachSlotRef.set reachSlot
-    let addrs ← podAddrsRef.get
-    let prevUnreach ← unreachCyclesRef.get
-    let mut newUnreach : List (String × Nat) := []
-    for (key, ip) in addrs do
-      if ip != "" then
-        if !(← Server.probeNodeReachable ip 12121) then
-          let streak := ((prevUnreach.lookup key).getD 0) + 1
-          newUnreach := newUnreach ++ [(key, streak)]
-          if streak == 1 || streak % 10 == 0 then
-            IO.eprintln s!"[flare-operator] CRITICAL: node {key} ({ip}:12121) is READY but the OPERATOR cannot connect to it ({streak} consecutive probes, ~{streak * 30}s). Topology pushes are not landing — that node is running on a stale map. NOT failing it over: the fault may be on our side. See RUNBOOK #node-unreachable"
-    unreachCyclesRef.set newUnreach
-    metrics.unreachableNodes.set newUnreach.length.toFloat
+    for (key, streak) in (← unreachCyclesRef.get) do
+      if streak ≥ 1 then
+        IO.eprintln s!"[flare-operator] CRITICAL: node {key} is READY but the OPERATOR cannot connect to it ({streak} consecutive probes, ~{streak * FlareOperator.UnreachableNode.monitorIntervalSec}s). Topology pushes are not landing — that node is running on a stale map. At {FlareOperator.UnreachableNode.monitorThreshold} probes it is treated as down (a master only if a reachable successor exists). See RUNBOOK #node-unreachable"
+    metrics.unreachableNodes.set (← unreachCyclesRef.get).length.toFloat
 
   -- 5. Handle rocksdb config propagation + cluster replication migration
   let crd ← crdRef.get

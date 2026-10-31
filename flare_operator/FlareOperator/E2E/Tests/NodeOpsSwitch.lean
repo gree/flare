@@ -1019,6 +1019,105 @@ def nodeGuardTest (c : Ctx) : IO TestResult := do
     IO.eprintln s!"# [{c.test}] node guard: {if fails.isEmpty then "every check held" else String.intercalate "; " fails}"
     if fails.isEmpty then return .pass else return .fail (String.intercalate "; " fails)
 
+/-- the pod's UID and whether it carries the serving label ("" = unreadable) -/
+private def podUidServing (c : Ctx) (pod : String) : IO (String × Bool) := do
+  match ← kubectl ["get", "pod", pod, "-n", c.cfg.«namespace», "-o",
+      "jsonpath={.metadata.uid} {.metadata.labels.flare\\.gree\\.net/serving}"] with
+  | .ok o =>
+    let ws := (o.trim.splitOn " ").filter (· != "")
+    return (ws.head?.getD "", ws.length ≥ 2)
+  | .error _ => return ("", false)
+
+/-- C3: the partition has fewer real copies than minCopies (2 vs 3): cordon +
+    drain of the replica's worker never starts a move; the drain's evictions
+    are held (it times out), the replica keeps its pod, its role and the
+    serving label, and the move is reported blocked. Uncordon ends it. -/
+def cordonBlockedTest (c : Ctx) : IO TestResult := do
+  match ← c.placement with
+  | .error e => return .fail e
+  | .ok p =>
+    if !(← operatorSettled c) then
+      return .fail (notSetUp "the operator did not finish its startup grace period")
+    if !(← waitForCondition "the pair is redundant with the replica on the master's history" 300 (redundant c none)) then
+      return .fail (notSetUp "the cluster did not start this test with a healthy pair")
+    c.conditions ["C3: minCopies 3 on a 2-copy pair; cordon + drain (90 s) of the replica's worker"]
+    let ns := c.cfg.«namespace»
+    let (uid0, _) ← podUidServing c p.replica.name
+    if uid0.isEmpty then return .fail (notSetUp s!"the uid of {p.replica.name} is unreadable")
+    let mut fails : List String := []
+    match ← kubectl ["cordon", p.replica.node] with
+    | .error e => return .fail (notSetUp s!"cordon failed: {e.take 200}")
+    | .ok _ => pure ()
+    let stem ← startDrain p.replica.node 90
+    discard <| waitForCondition "the drain ended" 150 (return (← drainResult stem).isSome)
+    let drain ← drainResult stem
+    match drain with
+    | some (rc, out) =>
+      for l in out.splitOn "\n" do c.art "drain.txt" l
+      c.event s!"drain rc={rc}"
+      if rc == "0" then fails := fails ++ ["the drain completed: the eviction of a pod whose move cannot start was allowed"]
+    | none => fails := fails ++ ["the drain did not end within 150 s"]
+    let (uid1, serving1) ← podUidServing c p.replica.name
+    if uid1 != uid0 then fails := fails ++ [s!"{p.replica.name} was replaced ({uid0} -> {uid1})"]
+    if !serving1 then fails := fails ++ [s!"{p.replica.name} lost the serving label"]
+    let logs ← kubectlLogsLabel s!"app={c.cfg.operatorName}" ns 30000
+    for x in (logs.splitOn "\n").filter (fun x => containsSubstr x "NODE MOVE" || containsSubstr x "NODE GUARD") do c.art "cordon-move.txt" x
+    if containsSubstr logs s!"NODE MOVE started: {p.replica.name}" then
+      fails := fails ++ [s!"a move of {p.replica.name} started with fewer copies than minCopies"]
+    let ev ← match ← kubectl ["get", "events", "-n", ns, "--field-selector", "reason=FlareCordonMoveBlocked", "-o", "jsonpath={.items[*].message}"] with
+      | .ok o => pure o
+      | .error _ => pure ""
+    c.event s!"blocked events: {ev.take 300}"
+    if !containsSubstr ev p.replica.name then fails := fails ++ ["no FlareCordonMoveBlocked event names the replica"]
+    uncordon p.replica.node
+    if !(← waitForCondition "the pair is still redundant after the uncordon" 120 (redundant c none)) then
+      fails := fails ++ ["the pair is not redundant after the uncordon"]
+    return if fails.isEmpty then .pass else .fail (String.intercalate "; " fails)
+
+/-- C4: uncordon BEFORE the move is released cancels it: the replica, already a
+    proxy out of the clients' Service, gets the serving label back, keeps its
+    pod (same UID) and is a synced replica again. No drain runs. -/
+def cordonCancelTest (c : Ctx) : IO TestResult := do
+  match ← c.placement with
+  | .error e => return .fail e
+  | .ok p =>
+    if !(← operatorSettled c) then
+      return .fail (notSetUp "the operator did not finish its startup grace period")
+    if !(← waitForCondition "the pair is redundant with the replica on the master's history" 300 (redundant c none)) then
+      return .fail (notSetUp "the cluster did not start this test with a healthy pair")
+    c.conditions ["C4: minCopies 2; cordon of the replica's worker, uncordon once the move is proxied (no drain)"]
+    let ns := c.cfg.«namespace»
+    let (uid0, _) ← podUidServing c p.replica.name
+    if uid0.isEmpty then return .fail (notSetUp s!"the uid of {p.replica.name} is unreadable")
+    let opLogs := do return (← kubectlLogsLabel s!"app={c.cfg.operatorName}" ns 30000)
+    match ← kubectl ["cordon", p.replica.node] with
+    | .error e => return .fail (notSetUp s!"cordon failed: {e.take 200}")
+    | .ok _ => pure ()
+    let proxied ← waitForCondition s!"the move of {p.replica.name} is proxied" 180 do
+      return containsSubstr (← opLogs) s!"NODE MOVE {p.replica.name}@{p.replica.node}: pending -> proxied"
+    uncordon p.replica.node
+    c.event s!"uncordoned {p.replica.node} (move proxied={proxied})"
+    if !proxied then return .fail (notSetUp s!"the move of {p.replica.name} never reached proxied within 180 s")
+    let logs0 ← opLogs
+    if containsSubstr logs0 s!"NODE MOVE {p.replica.name}@{p.replica.node}: unserved -> released" then
+      return .fail (notSetUp "the move was released before the uncordon: the cancel case was not exercised")
+    let mut fails : List String := []
+    let cancelled ← waitForCondition s!"the move of {p.replica.name} is cancelled" 120 do
+      return ((← opLogs).splitOn "\n").any fun l =>
+        containsSubstr l s!"NODE MOVE {p.replica.name}@{p.replica.node}:" && containsSubstr l "-> cancelled"
+    if !cancelled then fails := fails ++ ["no cancel of the move was logged after the uncordon"]
+    let back ← waitForCondition s!"{p.replica.name} serves again" 120 do
+      return (← podUidServing c p.replica.name).2
+    if !back then fails := fails ++ [s!"{p.replica.name} did not get the serving label back"]
+    let (uid1, _) ← podUidServing c p.replica.name
+    if uid1 != uid0 then fails := fails ++ [s!"{p.replica.name} was replaced ({uid0} -> {uid1}) although the move was cancelled"]
+    if !(← waitForCondition "the pair is redundant again" 300 (redundant c none)) then
+      fails := fails ++ ["the replica did not become a synced replica again"]
+    for x in ((← opLogs).splitOn "\n").filter (fun x => containsSubstr x "NODE MOVE" || containsSubstr x "serving label") do c.art "cordon-move.txt" x
+    if (← opLogs).splitOn "\n" |>.any (fun l => containsSubstr l s!"NODE MOVE {p.replica.name}@" && containsSubstr l "-> released") then
+      fails := fails ++ ["the move was released after the uncordon"]
+    return if fails.isEmpty then .pass else .fail (String.intercalate "; " fails)
+
 /-- One scenario per suite, each on a FRESH cluster: a scenario that leaves the
     pair broken (e.g. a replica on an older history after S3) no longer makes
     the next one fail on its precondition, and each leg stays well inside the
@@ -1030,6 +1129,8 @@ inductive Scenario where
   | sigtermHold
   | abortExhaust
   | nodeGuard
+  | cordonBlocked
+  | cordonCancel
   deriving BEq
 
 def Scenario.slug : Scenario → String
@@ -1048,6 +1149,8 @@ def Scenario.slug : Scenario → String
   | .sigtermHold => "sigterm-hold"
   | .abortExhaust => "abortexhaust"
   | .nodeGuard => "node-guard"
+  | .cordonBlocked => "cordon-blocked"
+  | .cordonCancel => "cordon-cancel"
 
 def Scenario.title : Scenario → String
   | .op .deleteMaster => "(S1) kubectl delete pod of the MASTER under a client-like load: the pod is replaced; 0 write errors, 0 acknowledged writes missing on the final master and replica"
@@ -1064,6 +1167,8 @@ def Scenario.title : Scenario → String
   | .gate => "(S5) the old master is cut from the replica and deleted under a write load: preStop / flared report the drain as NOT lossless, never as lossless (gate test)"
   | .nodeGuard => "(G1) node guard webhook: a force delete of the master and a scale-down over a data-holding ordinal are refused; the delete-override annotation is allowed; a graceful delete of the master is refused until the ordered handover has moved it, then allowed"
   | .abortExhaust => "(S9) the master stays cut from its successor and is deleted: attempts 2 and 3 start, and only after the third abort does the one-map drain take the master (orchestration test, not a data verdict)"
+  | .cordonBlocked => "(C3) cordon + drain of the replica's worker with fewer copies than minCopies (2 vs 3): no move starts, the evictions are held (the drain times out), the replica keeps its pod, role and serving label, a FlareCordonMoveBlocked event names it; the pair is redundant after the uncordon"
+  | .cordonCancel => "(C4) cordon of the replica's worker, uncordon once its move is proxied: the move is cancelled, the replica gets the serving label back on the same pod and is a synced replica again"
   | .sigtermHold => "(S6) a sync client write held on a cut replica across a SIGTERM (cut removed 40 s after it): the client gets STORED and the replica holds the value"
 
 private def scenarioSuite (sc : Scenario) (tmpfs : Bool) : TestSuite :=
@@ -1086,6 +1191,10 @@ private def scenarioSuite (sc : Scenario) (tmpfs : Bool) : TestSuite :=
     -- C1/C2: two copies, so minCopies 2 (the accepted risk of a 2-copy pair)
     else if sc == .op .cordonMaster || sc == .op .cordonReplica then
       { cfg0 with nodeGuard := true, nodeReplacement := true, nodeReplacementMinCopies := 2 }
+    else if sc == .cordonCancel then
+      { cfg0 with nodeGuard := true, nodeReplacement := true, nodeReplacementMinCopies := 2 }
+    else if sc == .cordonBlocked then
+      { cfg0 with nodeGuard := true, nodeReplacement := true, nodeReplacementMinCopies := 3 }
     else cfg0
   let c : Ctx := { cfg, suite, test := s!"s-{sc.slug}" }
   { name := suite
@@ -1099,7 +1208,7 @@ private def scenarioSuite (sc : Scenario) (tmpfs : Bool) : TestSuite :=
       cleanupCluster cfg
     onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
     afterEach := fun i => saveFullLogs cfg.«namespace» s!"after-test-{i}"
-    tests := [{ name := sc.title, run := match sc with | .op o => switchTest c o | .gate => gateTest c | .sigtermHold => sigtermHoldTest c | .abortExhaust => abortExhaustTest c | .nodeGuard => nodeGuardTest c }] }
+    tests := [{ name := sc.title, run := match sc with | .op o => switchTest c o | .gate => gateTest c | .sigtermHold => sigtermHoldTest c | .abortExhaust => abortExhaustTest c | .nodeGuard => nodeGuardTest c | .cordonBlocked => cordonBlockedTest c | .cordonCancel => cordonCancelTest c }] }
 
 def scenarios : List Scenario := [.op .deleteMaster, .op .rollingRestart, .op .rollBoth, .op .drainMaster, .gate, .sigtermHold, .op .deleteMasterSaveFail, .op .deleteMasterAbortRetry, .abortExhaust, .nodeGuard, .op .deleteMasterLeaseTakeover, .op .deleteMasterObserveFail, .op .helmUpgrade]
 
@@ -1107,6 +1216,6 @@ def scenarios : List Scenario := [.op .deleteMaster, .op .rollingRestart, .op .r
 def switchSuites : List TestSuite :=
   scenarios.map (fun sc => scenarioSuite sc false) ++ scenarios.map (fun sc => scenarioSuite sc true)
     -- the cordon move needs storage that can leave its node: tmpfs only
-    ++ [Scenario.op .cordonMaster, .op .cordonReplica].map (fun sc => scenarioSuite sc true)
+    ++ [Scenario.op .cordonMaster, .op .cordonReplica, .cordonBlocked, .cordonCancel].map (fun sc => scenarioSuite sc true)
 
 end FlareOperator.E2E.Tests.NodeOpsSwitch

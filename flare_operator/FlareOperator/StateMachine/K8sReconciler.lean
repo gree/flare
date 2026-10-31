@@ -1705,7 +1705,7 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
     let blockedEffects := blocked.map fun k =>
       FlareEffect.Log s!"[flare-operator] CRITICAL: draining master {k} has NO promotable successor — kept as master until its grace period expires; the partition then loses its only data-bearing node (tmpfs: rewind to last S3 backup on reseed). Operator cannot recover this. See RUNBOOK #drain-no-successor"
     let keptEffects := keptMasters.map fun k =>
-      FlareEffect.Log s!"[flare-operator] CRITICAL: master {k} is NOT SERVING (pod present, NotReady) and has NO promotable successor — kept as master rather than demoted, because demoting would only make the partition masterless sooner and break its clean rejoin. The partition is serving nothing until this process recovers. See RUNBOOK #node-unhealthy"
+      FlareEffect.Log s!"[flare-operator] CRITICAL: master {k} is NOT SERVING or UNREACHABLE (pod present; NotReady, or the operator cannot connect to it) and has NO reachable promotable successor — kept as master rather than demoted, because demoting would only make the partition masterless sooner and break its clean rejoin. The partition is serving nothing until this process recovers. See RUNBOOK #node-unhealthy"
     -- SAF-10c: a WAL-mode follower promoted WITHOUT proof of currency. The
     -- design (§5.3) forbids describing such a promotion as loss-free.
     let newlyMaster := fun (k : String) (n : FlareNode) =>

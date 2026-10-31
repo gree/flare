@@ -6,6 +6,7 @@
 -/
 import FlareOperator.StateMachine.FailoverOrder
 import FlareOperator.StateMachine.K8sReconciler
+import FlareOperator.StateMachine.UnreachableNode
 
 namespace FlareOperator.UnitTestsFailover
 
@@ -68,6 +69,46 @@ def results : List (String × Bool) := Id.run do
     refill [] [] [] (some "c") == some "c")]
   r := r ++ [("refill: the newest copy wins over the standby preference",
     refill ["b", "a"] [] ["b"] == some "b")]
+
+  -- spec 12 (2026-10-31): operator-unreachable nodes -> down, with the guard
+  let mkState : FlareClusterState :=
+    ({ nodeMap := [("m", node "m" .Master .Active 0), ("s", node "s" .Slave .Active 0),
+                   ("t", node "t" .Slave .Active 0), ("p", node "p" .Proxy .Active (-1))],
+       nodeMapVersion := 7 } : FlareClusterState).rebuildPartitionMap
+  let step := FlareOperator.UnreachableNode.step
+  let v1 := step [] [("m", false), ("s", true), ("t", true)] mkState
+  let v2 := step v1.streaks [("m", false), ("s", true), ("t", true)] mkState
+  let v3 := step v2.streaks [("m", false), ("s", true), ("t", true)] mkState
+  r := r ++ [("unreachable: flarei's defaults (3 probes, 5 s, 1000 ms) are the operator's",
+    FlareOperator.UnreachableNode.monitorThreshold == 3 && FlareOperator.UnreachableNode.monitorIntervalSec == 5
+      && FlareOperator.UnreachableNode.monitorReadTimeoutMs == 1000)]
+  r := r ++ [("unreachable: one or two failed probes do not make a node down",
+    v1.down.isEmpty && v2.down.isEmpty && v2.streaks == [("m", 2)])]
+  r := r ++ [("unreachable: the third consecutive failed probe makes it down",
+    v3.down == ["m"] && !v3.guardTripped)]
+  r := r ++ [("unreachable: a successful probe in between restarts the count",
+    (step v2.streaks [("m", true), ("s", true), ("t", true)] mkState).streaks.isEmpty)]
+  r := r ++ [("unreachable: a Proxy (no role to fail over) never counts",
+    (step [("p", 5)] [("p", false), ("s", true)] mkState).down.isEmpty)]
+  let g := step [("m", 2)] [("m", false), ("s", false), ("t", false)] mkState
+  r := r ++ [("unreachable GUARD: every probed node unreachable -> nothing down, streaks restart, guard tripped",
+    g.down.isEmpty && g.streaks.isEmpty && g.guardTripped)]
+  r := r ++ [("unreachable GUARD: a stale streak cannot fire the moment the guard releases",
+    (step g.streaks [("m", false), ("s", true), ("t", true)] mkState).down.isEmpty)]
+  r := r ++ [("unreachable GUARD: no probe at all (empty list) is not a tripped guard",
+    !(step [] [] mkState).guardTripped)]
+  r := r ++ [("unreachable GUARD: even when only the lone Active node is probed and unreachable",
+    (step [("m", 9)] [("m", false)] mkState).guardTripped)]
+  let kept := fun (unhealthy : List String) =>
+    K8sReconciler.unhealthyMastersKept mkState unhealthy unhealthy ["m", "s", "t", "p"]
+  r := r ++ [("unreachable master with a reachable slave: not kept -> failed over",
+    (kept ["m"]).isEmpty)]
+  r := r ++ [("unreachable master, every slave also unreachable: no successor -> kept as master",
+    kept ["m", "s", "t"] == ["m"])]
+  r := r ++ [("unreachable master, one slave unreachable and one reachable: failed over to the reachable",
+    (kept ["m", "s"]).isEmpty)]
+  r := r ++ [("unreachable slave: down (failed over to proxy), never kept",
+    (kept ["s"]).isEmpty)]
   return r
 
 end FlareOperator.UnitTestsFailover

@@ -70,11 +70,11 @@ private def sendString (sock : Socket) (s : String) : IO Unit := do
     node can therefore be perfectly healthy for clients while the operator
     cannot push topology to it — it then runs on a stale map indefinitely.
 
-    Deliberately NOT wired into dead detection: unreachability is a loss of
-    OUR feedback, and the fault may be on our side, so acting on it (failing
-    over a master we merely cannot see) is the unsafe control action. It is
-    an alerting signal only. -/
-def probeNodeReachable (ip : String) (port : Nat) : IO Bool := do
+    Feeds dead detection through StateMachine/UnreachableNode (spec 12,
+    2026-10-31): flarei's retry count and wait, a master only with a reachable
+    successor, and nothing at all when no node of the cluster is reachable
+    (then the fault is taken to be the operator's own). -/
+def probeNodeReachable (ip : String) (port : Nat) (timeoutMs : Nat := 3000) : IO Bool := do
   let ipAddr ← match parseIPv4 ip with
     | some addr => pure addr
     | none => return false
@@ -84,7 +84,7 @@ def probeNodeReachable (ip : String) (port : Nat) : IO Bool := do
     let connectPromise ← sock.connect addr
     let connectTask := connectPromise.result!
     let mut connected := false
-    for _ in [0:60] do
+    for _ in [0:(timeoutMs + 49) / 50] do
       if (← IO.hasFinished connectTask) then
         connected := true
         break

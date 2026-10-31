@@ -1828,6 +1828,17 @@ private def checkAuthoritativeHistory (ctx : Ctx) : IO Unit := do
     ((match establish fresh 0 (some "m") cs false "t" with | (_, .recorded 0 r _) => r.reason == "first-build" | _ => false)
       && (establish absent 0 (some "m") cs false "t").2 == .none
       && (match establish absent 0 (some "m") cs true "t" with | (_, .recorded 0 r _) => r.reason == "adopted" | _ => false))
+  -- 41211110343: the first master restarted before its record and came back a replica
+  let empties := [("a", PromotionEvidence.Class.empty), ("b", .empty)]
+  check ctx "history (1): a first build's partition with no record and no intent whose every copy reads empty is seated as a first build's; a record, an intent, an absent (not first-build) store, a copy that is not empty or has no evidence keeps it guarded"
+    (firstBuildUnrecordedEmpty fresh 0 ["a", "b"] empties
+      && !firstBuildUnrecordedEmpty st 0 ["a", "b"] empties
+      && !firstBuildUnrecordedEmpty { fresh with intents := [{ id := "i", partition := 0, kind := "promotion", target := "a", binding := bM, fromGen := 0, fromHist := h2, expectedVersion := 1 }] } 0 ["a", "b"] empties
+      && !firstBuildUnrecordedEmpty absent 0 ["a", "b"] empties
+      && !firstBuildUnrecordedEmpty fresh 0 ["a", "b"] [("a", .empty), ("b", .eligible)]
+      && !firstBuildUnrecordedEmpty fresh 0 ["a", "b"] [("a", .empty)]
+      && !firstBuildUnrecordedEmpty fresh 0 [] empties
+      && firstBuildUnrecordedEmpty fresh 1 ["a"] empties)
   check ctx "history (1): a corrupt, foreign or unreadable record is NEVER adopted, approved or not, and never written back"
     ((establish (load "cu" 1 (some (some "garbage")) false) 0 (some "m") cs true "t").2 == .none
       && (establish (load "cu" 1 (some (some (serialize { st with clusterUid := "other" }))) false) 0 (some "m") cs true "t").2 == .none

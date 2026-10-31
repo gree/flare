@@ -2914,6 +2914,15 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
         let p := (((gated.state.lookupNode k).map (·.partition)).getD (-1))
         if p < 0 then continue
         if !st.tracked p.toNat then continue   -- untracked partition: previous behaviour
+        -- a first build's partition never recorded, every copy empty this pass
+        -- (41211110343: the first master restarted before its history was
+        -- recorded and came back a replica): seated as a first build's master
+        let copiesP := (k :: (cur.nodeMap.filter fun (_, n) =>
+            ((n.role == FlareRole.Master || n.role == FlareRole.Slave) && n.partition == p) || n.lastMasterOf == p).map Prod.fst).eraseDups
+        let evCls := (← promotionEvidenceRef.get).map fun (key, c, _) => (key, c)
+        if AuthoritativeHistory.firstBuildUnrecordedEmpty st p.toNat copiesP evCls then
+          IO.eprintln s!"[flare-operator] promotion of {k}: partition {p} of this first build has no recorded history and every copy reads empty this pass ({copiesP}) — seated as a first build's master; its history is recorded from it"
+          continue
         match st.part p.toNat with
         | some (.known rec none) =>
           -- the fresh read that makes the intent is CLASSIFIED again and bound

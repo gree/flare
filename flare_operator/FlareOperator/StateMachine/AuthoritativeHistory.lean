@@ -129,6 +129,20 @@ def Store.setHold (s : Store) (p : Nat) (h : Option String) : Store :=
 
 def Store.intentFor (s : Store) (p : Nat) : Option Intent := s.intents.find? (·.partition == p)
 
+/-- A partition of a store CREATED as a first build that has no record and no
+    intent, every copy of which (`copies`, the candidate included) this pass's
+    promotion evidence classifies EMPTY: nothing was ever recorded for it and
+    no copy holds data, so its master is seated as a first build's and the
+    history is then recorded from it (`establish`). 41211110343: the first
+    master's flared gave up on its first node add and restarted before its
+    history was recorded, re-registered as a replica, and every later
+    promotion was refused as "not recorded" — the partition stayed masterless.
+    A copy without evidence, or of any other class, keeps it guarded. -/
+def firstBuildUnrecordedEmpty (s : Store) (p : Nat) (copies : List String)
+    (cls : List (String × PromotionEvidence.Class)) : Bool :=
+  s.origin == "first-build" && (s.part p).isNone && (s.intentFor p).isNone && !copies.isEmpty &&
+    copies.all fun k => cls.lookup k == some .empty
+
 /-- Untracked only when explicitly decided; anything else (known, unknown,
     not yet decided) is guarded. -/
 def Store.tracked (s : Store) (p : Nat) : Bool :=

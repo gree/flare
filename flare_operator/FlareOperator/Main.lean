@@ -4310,7 +4310,20 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
       | some (key, cycles) =>
         match finalState.lookupNode key with
         | some node =>
-          if node.role == FlareRole.Proxy then
+          -- TEST SEAM (spec 13 E2E): a pod the map is withheld from
+          -- (FLARE_TEST_BROADCAST_SKIP_FILE) is not restarted either — a
+          -- restart would hand it the map by re-registration. Unset in
+          -- production: one getEnv.
+          let skipped ← match ← IO.getEnv "FLARE_TEST_BROADCAST_SKIP_FILE" with
+            | some f =>
+              try
+                let l := ((← IO.FS.readFile f).splitOn "\n").map String.trim
+                pure (l.contains (extractPodName node.serverName))
+              catch _ => pure false
+            | none => pure false
+          if skipped then
+            IO.eprintln s!"[flare-operator] TEST SEAM: not restarting {key} (the map is withheld from it)"
+          else if node.role == FlareRole.Proxy then
             let podName := extractPodName node.serverName
             IO.eprintln s!"[flare-operator] STUCK-DOWN RECOVERY: {key} has been Down with its pod present for {cycles} ticks (~{cycles * 5 / 60} min); every partition has an Active master, so restarting {podName} to force a clean re-registration (it will rejoin via Prepare and catch up)"
             if reachableAgain.contains key then

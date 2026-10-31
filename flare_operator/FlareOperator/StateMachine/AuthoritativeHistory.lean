@@ -137,11 +137,28 @@ def Store.intentFor (s : Store) (p : Nat) : Option Intent := s.intents.find? (·
     master's flared gave up on its first node add and restarted before its
     history was recorded, re-registered as a replica, and every later
     promotion was refused as "not recorded" — the partition stayed masterless.
-    A copy without evidence, or of any other class, keeps it guarded. -/
+    `pass` is this pass's evidence, `fresh` a read made at the commit (review
+    of 89cf9d9: the pass evidence alone may be stale): every copy must be
+    EMPTY in both, with a complete binding (pod UID, boot id, copy id) that
+    did not change between them. A copy without either reading, of any other
+    class, with an incomplete binding, or restarted / recreated / given
+    another copy in between keeps it guarded. -/
 def firstBuildUnrecordedEmpty (s : Store) (p : Nat) (copies : List String)
-    (cls : List (String × PromotionEvidence.Class)) : Bool :=
+    (pass fresh : List (String × PromotionEvidence.Class × PromotionEvidence.Binding)) : Bool :=
   s.origin == "first-build" && (s.part p).isNone && (s.intentFor p).isNone && !copies.isEmpty &&
-    copies.all fun k => cls.lookup k == some .empty
+    copies.all fun k =>
+      match pass.find? (·.1 == k), fresh.find? (·.1 == k) with
+      | some (_, .empty, b0), some (_, .empty, b1) => b0.complete && b0 == b1
+      | _, _ => false
+
+/-- The pass evidence alone admits the exception (the cheap check before the
+    commit-time reads): first build, nothing recorded, every copy EMPTY. -/
+def firstBuildUnrecordedEmptyCandidate (s : Store) (p : Nat) (copies : List String)
+    (pass : List (String × PromotionEvidence.Class × PromotionEvidence.Binding)) : Bool :=
+  s.origin == "first-build" && (s.part p).isNone && (s.intentFor p).isNone && !copies.isEmpty &&
+    copies.all fun k => match pass.find? (·.1 == k) with
+      | some (_, .empty, _) => true
+      | _ => false
 
 /-- Untracked only when explicitly decided; anything else (known, unknown,
     not yet decided) is guarded. -/

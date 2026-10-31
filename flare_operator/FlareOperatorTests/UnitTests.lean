@@ -1829,16 +1829,31 @@ private def checkAuthoritativeHistory (ctx : Ctx) : IO Unit := do
       && (establish absent 0 (some "m") cs false "t").2 == .none
       && (match establish absent 0 (some "m") cs true "t" with | (_, .recorded 0 r _) => r.reason == "adopted" | _ => false))
   -- 41211110343: the first master restarted before its record and came back a replica
-  let empties := [("a", PromotionEvidence.Class.empty), ("b", .empty)]
-  check ctx "history (1): a first build's partition with no record and no intent whose every copy reads empty is seated as a first build's; a record, an intent, an absent (not first-build) store, a copy that is not empty or has no evidence keeps it guarded"
-    (firstBuildUnrecordedEmpty fresh 0 ["a", "b"] empties
-      && !firstBuildUnrecordedEmpty st 0 ["a", "b"] empties
-      && !firstBuildUnrecordedEmpty { fresh with intents := [{ id := "i", partition := 0, kind := "promotion", target := "a", binding := bM, fromGen := 0, fromHist := h2, expectedVersion := 1 }] } 0 ["a", "b"] empties
-      && !firstBuildUnrecordedEmpty absent 0 ["a", "b"] empties
-      && !firstBuildUnrecordedEmpty fresh 0 ["a", "b"] [("a", .empty), ("b", .eligible)]
-      && !firstBuildUnrecordedEmpty fresh 0 ["a", "b"] [("a", .empty)]
-      && !firstBuildUnrecordedEmpty fresh 0 [] empties
-      && firstBuildUnrecordedEmpty fresh 1 ["a"] empties)
+  let pb := fun (u : String) => ({ podUid := some u, bootId := some s!"boot-{u}", copyId := some s!"copy-{u}" } : PromotionEvidence.Binding)
+  let empties : List (String × PromotionEvidence.Class × PromotionEvidence.Binding) :=
+    [("a", .empty, pb "ua"), ("b", .empty, pb "ub")]
+  let intentSt : Store := { fresh with intents := [{ id := "i", partition := 0, kind := "promotion", target := "a", binding := bM, fromGen := 0, fromHist := h2, expectedVersion := 1 }] }
+  check ctx "history (1): a first build's partition with no record and no intent whose every copy reads empty, in this pass and again at the commit, is seated as a first build's; a record, an intent, an absent (not first-build) store, a copy that is not empty or has no reading keeps it guarded"
+    (firstBuildUnrecordedEmpty fresh 0 ["a", "b"] empties empties
+      && firstBuildUnrecordedEmptyCandidate fresh 0 ["a", "b"] empties
+      && !firstBuildUnrecordedEmpty st 0 ["a", "b"] empties empties
+      && !firstBuildUnrecordedEmpty intentSt 0 ["a", "b"] empties empties
+      && !firstBuildUnrecordedEmpty absent 0 ["a", "b"] empties empties
+      && !firstBuildUnrecordedEmptyCandidate absent 0 ["a", "b"] empties
+      && !firstBuildUnrecordedEmpty fresh 0 ["a", "b"] [("a", .empty, pb "ua"), ("b", .eligible, pb "ub")] empties
+      && !firstBuildUnrecordedEmptyCandidate fresh 0 ["a", "b"] [("a", .empty, pb "ua"), ("b", .eligible, pb "ub")]
+      && !firstBuildUnrecordedEmpty fresh 0 ["a", "b"] [("a", .empty, pb "ua")] empties
+      && !firstBuildUnrecordedEmpty fresh 0 [] empties empties
+      && firstBuildUnrecordedEmpty fresh 1 ["a"] empties empties)
+  -- review of 89cf9d9: the pass evidence may be stale at the commit
+  check ctx "history (1): the first build exception is refused when a copy's pod UID, boot id or copy id changed between the pass reading and the commit read, the commit read is not empty or unreadable, or a binding is incomplete"
+    (!firstBuildUnrecordedEmpty fresh 0 ["a", "b"] empties [("a", .empty, { pb "ua" with podUid := some "ua2" }), ("b", .empty, pb "ub")]
+      && !firstBuildUnrecordedEmpty fresh 0 ["a", "b"] empties [("a", .empty, { pb "ua" with bootId := some "boot-new" }), ("b", .empty, pb "ub")]
+      && !firstBuildUnrecordedEmpty fresh 0 ["a", "b"] empties [("a", .empty, pb "ua"), ("b", .empty, { pb "ub" with copyId := some "copy-new" })]
+      && !firstBuildUnrecordedEmpty fresh 0 ["a", "b"] empties [("a", .eligible, pb "ua"), ("b", .empty, pb "ub")]
+      && !firstBuildUnrecordedEmpty fresh 0 ["a", "b"] empties [("a", .unknown "stats unreadable", { podUid := none, bootId := none, copyId := none }), ("b", .empty, pb "ub")]
+      && !firstBuildUnrecordedEmpty fresh 0 ["a", "b"] empties [("b", .empty, pb "ub")]
+      && !firstBuildUnrecordedEmpty fresh 0 ["a"] [("a", .empty, { pb "ua" with copyId := none })] [("a", .empty, { pb "ua" with copyId := none })])
   check ctx "history (1): a corrupt, foreign or unreadable record is NEVER adopted, approved or not, and never written back"
     ((establish (load "cu" 1 (some (some "garbage")) false) 0 (some "m") cs true "t").2 == .none
       && (establish (load "cu" 1 (some (some (serialize { st with clusterUid := "other" }))) false) 0 (some "m") cs true "t").2 == .none

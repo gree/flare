@@ -305,6 +305,8 @@ initialize promotionEvidenceRef : IO.Ref (List (String × PromotionEvidence.Clas
 initialize promotionRiskPassRef : IO.Ref Bool ← IO.mkRef false
 /-- What the operator observed of each candidate on that pass (to classify it again at commit). -/
 initialize promotionObservedRef : IO.Ref (List (String × PromotionEvidence.Observed)) ← IO.mkRef []
+/-- FLARE_TEST_STALE_FIRST_BUILD_EVIDENCE was applied (once per process). -/
+initialize staleFirstBuildSeamUsedRef : IO.Ref Bool ← IO.mkRef false
 /-- Copy retention §10 (decision 2026-10-07, item 3): rebuilding nodes whose
     stats say parked with nothing in flight (no transfer, serve or switch). -/
 initialize parkedIdleRef : IO.Ref (List String) ← IO.mkRef []
@@ -2919,10 +2921,35 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
         -- recorded and came back a replica): seated as a first build's master
         let copiesP := (k :: (cur.nodeMap.filter fun (_, n) =>
             ((n.role == FlareRole.Master || n.role == FlareRole.Slave) && n.partition == p) || n.lastMasterOf == p).map Prod.fst).eraseDups
-        let evCls := (← promotionEvidenceRef.get).map fun (key, c, _) => (key, c)
-        if AuthoritativeHistory.firstBuildUnrecordedEmpty st p.toNat copiesP evCls then
-          IO.eprintln s!"[flare-operator] promotion of {k}: partition {p} of this first build has no recorded history and every copy reads empty this pass ({copiesP}) — seated as a first build's master; its history is recorded from it"
-          continue
+        let mut passEvAll := (← promotionEvidenceRef.get)
+        if AuthoritativeHistory.firstBuildUnrecordedEmptyCandidate st p.toNat copiesP passEvAll then
+          -- TEST SEAM (FLARE_TEST_STALE_FIRST_BUILD_EVIDENCE, unset in
+          -- production): once per process the candidate's pass evidence is
+          -- given another boot id, as if it was read from an earlier flared
+          -- process; the commit-time comparison must refuse it
+          if ((← IO.getEnv "FLARE_TEST_STALE_FIRST_BUILD_EVIDENCE").getD "") == "1" && !(← staleFirstBuildSeamUsedRef.get) then
+            staleFirstBuildSeamUsedRef.set true
+            passEvAll := passEvAll.map fun (key, c, b) => if key == k then (key, c, { b with bootId := some "test-seam-stale" }) else (key, c, b)
+            IO.eprintln s!"[flare-operator] TEST SEAM: the pass evidence of {k} carries a stale boot id (FLARE_TEST_STALE_FIRST_BUILD_EVIDENCE)"
+          -- every copy is read again at the commit and must still be EMPTY
+          -- with the same pod UID, boot id and copy id (review of 89cf9d9)
+          let mut freshAll : List (String × PromotionEvidence.Class × PromotionEvidence.Binding) := []
+          for c in copiesP do
+            let fr ← readFresh c ns
+            let nc? := cur.lookupNode c
+            let obsC : PromotionEvidence.Observed := ((← promotionObservedRef.get).lookup c).getD {
+              mapPrepare := (nc?.map (·.state)) == some FlareState.Prepare, mapActive := (nc?.map (·.state)) == some FlareState.Active,
+              podReady := true, partitionHasMaster := false, lastMasterHistory := none }
+            freshAll := freshAll ++ [(c, PromotionEvidence.classify (fr.map (·.2)) obsC, PromotionEvidence.bindingOf (fr.map (·.1)) (fr.map (·.2)))]
+          if AuthoritativeHistory.firstBuildUnrecordedEmpty st p.toNat copiesP passEvAll freshAll then
+            IO.eprintln s!"[flare-operator] promotion of {k}: partition {p} of this first build has no recorded history and every copy reads empty this pass and again at the commit with the same pod, boot and copy ({copiesP}) — seated as a first build's master; its history is recorded from it"
+            continue
+          else
+            let fmtEv := fun (l : List (String × PromotionEvidence.Class × PromotionEvidence.Binding)) =>
+              l.map fun (key, c, b) => s!"{key}={c.label} {repr b}"
+            IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: the first build exception for partition {p} is REJECTED — a copy is not empty at the commit or its pod / boot / copy changed since this pass's reading (pass {fmtEv (passEvAll.filter fun e => copiesP.contains e.1)}; commit {fmtEv freshAll}) — nothing from this pass is committed"
+            promotionAbortedRef.set true
+            return
         match st.part p.toNat with
         | some (.known rec none) =>
           -- the fresh read that makes the intent is CLASSIFIED again and bound

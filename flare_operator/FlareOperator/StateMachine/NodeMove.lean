@@ -89,7 +89,7 @@ structure Config where
   minCopies : Nat := 3
   /-- unserved → hold after this (the pod stays a proxy, alert, never deleted) -/
   drainWaitMs : Nat := 120000
-  /-- total_connections must not have increased for this long -/
+  /-- no client request (client_requests; total_connections on an older flared) for this long -/
   quietMs : Nat := 10000
   /-- released → the operator deletes the pod itself after this -/
   evictWaitMs : Nat := 60000
@@ -174,7 +174,11 @@ def Ledger.heldKeys (l : Ledger) : List String :=
   l.moves.foldl (fun acc m =>
     if m.finished then acc
     else match m.phase with
-      | .pending => if m.successor.isEmpty then acc else acc ++ [m.successor]
+      -- a slave is demoted while its move is still pending (step: .demote):
+      -- held from then on, or the same pass seats it again as a replica
+      -- (41136280524 C2: demoted every pass, never proxied)
+      | .pending =>
+        (if m.successor.isEmpty then acc else acc ++ [m.successor]) ++ (if m.role == "slave" then [m.key] else [])
       | .handingOver => (if m.successor.isEmpty then acc else acc ++ [m.successor]) ++ [m.key]
       | .proxied | .unserved | .released => acc ++ [m.key]
       | .deleted => acc ++ [m.key]
@@ -253,7 +257,7 @@ structure Obs where
   successorIsMaster : Bool := false
   /-- the pod's address is in an EndpointSlice of the client Service (none = unread) -/
   inEndpoints : Option Bool := none
-  /-- how long total_connections has not increased (none = unread) -/
+  /-- how long no client request arrived (none = unread) -/
   quietMs : Option Nat := none
   currConnections : Option Nat := none
   /-- flared's own view (stats own_role) says proxy (none = unread) -/
@@ -302,8 +306,8 @@ def drainWhy (cfg : Config) (o : Obs) : String :=
     | some true => "address still in the EndpointSlice"
     | none => "EndpointSlice unreadable"
   let b := match o.quietMs with
-    | some q => if q >= cfg.quietMs then "no new connections" else s!"new connections {q} ms ago (needs {cfg.quietMs})"
-    | none => "total_connections unreadable"
+    | some q => if q >= cfg.quietMs then "no client requests" else s!"last client request {q} ms ago (needs {cfg.quietMs})"
+    | none => "client_requests unreadable"
   let c := match o.currConnections with
     | some 0 => "no open connections"
     | some n => s!"{n} open connection(s)"

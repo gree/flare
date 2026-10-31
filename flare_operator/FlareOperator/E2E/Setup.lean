@@ -1043,10 +1043,13 @@ def helmSets (cfg : ClusterConfig) : List String :=
   ["fullnameOverride=" ++ cfg.operatorName, "namespace=" ++ cfg.«namespace», "crds.install=false",
    "replicaCount=1", "image.repository=flare-operator", "image.tag=test", "image.pullPolicy=Never",
    "podLabels.app=" ++ cfg.operatorName,
-   "cluster.enabled=true", "cluster.name=" ++ cfg.name,
+   "clusterName=" ++ cfg.name, "cluster.enabled=true", "cluster.name=" ++ cfg.name,
    s!"cluster.partitions={cfg.partitions}", s!"cluster.replicas={cfg.replicas}",
    "cluster.image.repository=flare-node-rocksdb", "cluster.image.tag=test", "cluster.image.pullPolicy=Never",
-   "cluster.hostnameSpread=hard", s!"nodeGuard.enabled={cfg.nodeGuard}"] ++ storage
+   "cluster.hostnameSpread=hard", s!"nodeGuard.enabled={cfg.nodeGuard}",
+   -- the clients' all-pods Service (<cluster>-nodes-external) the harness's
+   -- second load path uses; in cluster, so ClusterIP
+   "cluster.externalAccess.enabled=true", "cluster.externalAccess.type=ClusterIP"] ++ storage
 
 /-- `helm <args>` with a bound; the output or the error. -/
 def helmCmd (args : List String) (timeoutSec : Nat := 300) : IO (Except String String) := do

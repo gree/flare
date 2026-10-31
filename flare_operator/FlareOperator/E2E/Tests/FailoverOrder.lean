@@ -328,7 +328,10 @@ def suite : TestSuite := {
           if stored != 20 then return .fail s!"only {stored}/20 writes acknowledged by {mPod}"
           return .pass
         finally
-          for ip in cut do healLink opIp ip },
+          -- every ip, not `cut`: a `let mut` updated inside the try is not
+          -- seen by its finally when the try exits through `return`
+          -- (41194666000: no link was healed, every later test ran cut off)
+          for ip in ips do healLink opIp ip },
     { name := "an unreachable master with NO reachable promotable slave (operator ⇄ master and ⇄ both its slaves cut, the other partition reachable) is NOT marked down: it stays the master for 90 s and the log names the reason"
       run := do
         if !(← graceOver) then return .fail "the operator never logged the end of its startup grace period"
@@ -361,7 +364,8 @@ def suite : TestSuite := {
           if stored != 20 then return .fail s!"only {stored}/20 writes acknowledged by {mPod}"
           return .pass
         finally
-          for ip in cut do healLink opIp ip
+          -- the fixed list, not `cut` (see the test above)
+          for ip in mIp :: slaveIps do healLink opIp ip
           discard <| waitP0Stable },
     { name := "two followers: the master is lost while one follower is stale; the follower with the LARGER applied sequence is promoted, and every key is on it"
       run := do

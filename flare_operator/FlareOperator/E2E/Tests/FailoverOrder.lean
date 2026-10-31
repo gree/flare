@@ -139,8 +139,21 @@ private def p0Stable : IO Bool := do
   return (p0.filter (fun e => e.role == 0 && e.state == 0)).length == 1
     && (p0.filter (fun e => e.role == 1 && e.state == 0)).length == 2
 
+/-- every flared pod is Ready by its own probe (its own map says active):
+    the operator's map alone can be ahead of a node that has not applied it
+    yet (41228665463: test 3 cut the operator off before a restarted node got
+    the map that made it active; it went NotReady and stayed Down ~10 min) -/
+private def allPodsReady : IO Bool := do
+  match ← kubectl ["get", "pods", "-n", cfg.«namespace», "-l", s!"cluster={cfg.name}", "-o",
+      "jsonpath={range .items[*]}{.status.containerStatuses[0].ready}{\"\\n\"}{end}"] with
+  | .ok o =>
+    let rs := (o.splitOn "\n").map String.trim |>.filter (· != "")
+    return !rs.isEmpty && rs.all (· == "true")
+  | .error _ => return false
+
 private def waitP0Stable : IO Bool :=
-  waitForCondition "partition 0 has a master and two Active slaves" 360 p0Stable
+  waitForCondition "partition 0 has a master and two Active slaves, every flared pod Ready" 360 do
+    return (← p0Stable) && (← allPodsReady)
 
 private def keysMissing (ip pfx : String) (n : Nat) : IO Nat := do
   let mut missing := 0

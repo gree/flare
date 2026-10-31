@@ -1784,6 +1784,8 @@ initialize downByReachRef : IO.Ref (List String) ← IO.mkRef []
     got a new IP outside the cut, and the master it had no successor for was
     failed over to it). -/
 initialize reachOkRef : IO.Ref (List String) ← IO.mkRef []
+/-- (node key, pod UID) of the pods the latest probe round listed -/
+initialize reachPodIdRef : IO.Ref (List (String × String)) ← IO.mkRef []
 /-- The last reachability probe reached NO node (UnreachableNode's guard). -/
 initialize reachGuardRef : IO.Ref Bool ← IO.mkRef false
 /-- spec 13: node -> when its conflicting master claim was first seen (ms),
@@ -3614,8 +3616,7 @@ private def repairKeysIfAvailable (availableRef : IO.Ref Bool) (ledgerRef : IO.R
     UnreachableNode) names the nodes to treat as down and trips the GUARD when
     NO probed node is reachable: then the operator's own side (k8s API,
     network) is suspect and nothing is flagged. -/
-private def runReachabilityStep (stateRef : IO.Ref FlareClusterState)
-    (podAddrsRef : IO.Ref (List (String × String)))
+private def runReachabilityStep (crName ns : String) (stateRef : IO.Ref FlareClusterState)
     (unreachCyclesRef : IO.Ref (List (String × Nat))) : IO Unit := do
   -- flarei's interval between probes, NOT one per pass: passes run every
   -- ~100 ms while a handover is in flight, and three failures there would
@@ -3624,8 +3625,35 @@ private def runReachabilityStep (stateRef : IO.Ref FlareClusterState)
   let now ← IO.monoMsNow
   let last ← reachProbedAtRef.get
   if last != 0 && now - last < FlareOperator.UnreachableNode.monitorIntervalSec * 1000 then return
+  -- the probes go to the pods of a FRESH, successful listing of this pass
+  -- (review of ae8ac49: the driver's address list is the previous pass's; a
+  -- recreated pod's old IP fails and would mark the live node down). No
+  -- listing: no probe, no streak moves and no down decision this round.
+  -- TEST SEAM (FLARE_TEST_REACH_LIST_FAIL_FILE, unset in production): while
+  -- the named file exists the listing is treated as failed
+  let listFail ← match ← IO.getEnv "FLARE_TEST_REACH_LIST_FAIL_FILE" with
+    | some f => System.FilePath.pathExists f
+    | none => pure false
+  let listing ← if listFail then pure (.error "TEST SEAM: listing failure (FLARE_TEST_REACH_LIST_FAIL_FILE)") else Bridge.listFlaredPodsE crName ns
+  let pods ← match listing with
+    | .ok ps => pure ps
+    | .error e =>
+      IO.eprintln s!"[flare-operator] reachability: pod listing failed ({e}) — no probe and no down decision this round"
+      unreachableDownRef.set []
+      reachOkRef.set []
+      return
   reachProbedAtRef.set now
-  let probeAddrs := (← podAddrsRef.get).filter (·.2 != "")
+  let live := pods.filter (fun p => p.ready && !p.terminating && !p.ip.isEmpty)
+  let probeAddrs := live.map fun p => (Bridge.PodInfo.toNodeKey p, p.ip)
+  -- a streak belongs to one pod incarnation: a new pod UID under the key
+  -- starts it again (its failures were the old pod's)
+  let ids := live.map fun p => (Bridge.PodInfo.toNodeKey p, p.uid)
+  let prevIds ← reachPodIdRef.get
+  reachPodIdRef.set ids
+  unreachCyclesRef.modify fun l => l.filter fun (k, _) =>
+    match prevIds.lookup k, ids.lookup k with
+    | some u0, some u1 => u0 == u1
+    | _, _ => true
   let probeTasks ← probeAddrs.mapM fun (_, ip) =>
     IO.asTask (prio := .dedicated) (Server.probeNodeReachable ip 12121 FlareOperator.UnreachableNode.monitorReadTimeoutMs)
   let mut probed : List (String × Bool) := []
@@ -3940,7 +3968,7 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
   let heldKeys := heldKeys ++ moveHeld.filter (fun k => !heldKeys.contains k)
   nodeGuardRepairRef.set ((← ledgerRef.get).entries.filterMap (·.nodeKey))
 
-  runReachabilityStep stateRef podAddrsRef unreachCyclesRef
+  runReachabilityStep crName ns stateRef unreachCyclesRef
 
   let drainBlockedRef ← IO.mkRef 0
   runReconcileDriver stateRef migrationRef graceCyclesRef trippedRef drainBlockedRef unreadyCyclesRef podKeysRef podAddrsRef heldKeys crName ns

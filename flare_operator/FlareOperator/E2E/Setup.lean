@@ -739,9 +739,12 @@ def setupNodeGuardWebhook (cfg : ClusterConfig) : IO Unit := do
   let ns := cfg.«namespace»
   let svc := s!"{cfg.operatorName}-webhook"
   let dir := s!"/tmp/flare-node-guard-{ns}"
+  -- a short CN: openssl refuses one over 64 characters, and
+  -- "<svc>.flare-node-swt-cordon-operator-restart.svc" is 65 (41222014541 C6);
+  -- the names are in the subjectAltName
   let script := s!"set -e; rm -rf {dir}; mkdir -p {dir}; cd {dir}; " ++
     "openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=flare-e2e-ca -keyout ca.key -out ca.crt 2>>err.txt; " ++
-    s!"openssl req -newkey rsa:2048 -nodes -subj /CN={svc}.{ns}.svc -keyout tls.key -out tls.csr 2>>err.txt; " ++
+    s!"openssl req -newkey rsa:2048 -nodes -subj /CN=flare-node-guard -keyout tls.key -out tls.csr 2>>err.txt; " ++
     s!"printf 'subjectAltName=DNS:{svc}.{ns}.svc,DNS:{svc}.{ns}.svc.cluster.local\\n' > ext.cnf; " ++
     "openssl x509 -req -in tls.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 2 -extfile ext.cnf -out tls.crt 2>>err.txt; " ++
     s!"kubectl -n {ns} create secret tls {cfg.operatorName}-webhook-tls --cert tls.crt --key tls.key --dry-run=client -o yaml | kubectl apply -f - >/dev/null; " ++

@@ -1008,6 +1008,97 @@ def deploySecondCluster (cfg : ClusterConfig) : IO Unit := do
   -- Deploy StatefulSet
   applyYaml (statefulSetYaml cfg)
 
+/-- The chart in this checkout (flare_e2e runs from flare_operator/). -/
+def helmChartDir : IO String := do
+  for d in ["../helm/flare-operator", "helm/flare-operator", "../../helm/flare-operator"] do
+    if ← System.FilePath.pathExists s!"{d}/Chart.yaml" then return d
+  throw (IO.userError "the helm chart (helm/flare-operator) was not found from the working directory")
+
+/-- The helm release of a cluster deployed by `deployHelmCluster`. -/
+def helmRelease (cfg : ClusterConfig) : String := s!"{cfg.name}-rel"
+
+/-- A copy of this chart as an OLDER release shipped it: the StatefulSet's
+    updateStrategy RollingUpdate (the chart before A0 made it OnDelete).
+    Everything else is this chart, so the upgrade changes the strategy and
+    what the test adds, nothing more. -/
+def helmChartRollingUpdate (cfg : ClusterConfig) : IO String := do
+  let src ← helmChartDir
+  let dst := s!"/tmp/flare-chart-rollingupdate-{cfg.«namespace»}"
+  discard <| IO.Process.output { cmd := "rm", args := #["-rf", dst] }
+  let cp ← IO.Process.output { cmd := "cp", args := #["-r", src, dst] }
+  if cp.exitCode != 0 then throw (IO.userError s!"could not copy the chart: {cp.stderr}")
+  let t := s!"{dst}/templates/flare-cluster.yaml"
+  let body ← IO.FS.readFile t
+  if !containsSubstr body "type: OnDelete" then
+    throw (IO.userError "the chart's StatefulSet has no `type: OnDelete` to turn back into RollingUpdate")
+  IO.FS.writeFile t (body.replace "type: OnDelete" "type: RollingUpdate")
+  return dst
+
+/-- The helm values a test release sets (names the harness expects, the CI
+    images, this namespace only, the shared CRDs not installed again). -/
+def helmSets (cfg : ClusterConfig) : List String :=
+  let storage := if cfg.useTmpfs then
+      ["cluster.persistence.enabled=false", "cluster.tmpfs.enabled=true", "cluster.tmpfs.sizeLimit=512Mi"]
+    else ["cluster.persistence.enabled=true", "cluster.persistence.size=1Gi"]
+  ["fullnameOverride=" ++ cfg.operatorName, "namespace=" ++ cfg.«namespace», "crds.install=false",
+   "replicaCount=1", "image.repository=flare-operator", "image.tag=test", "image.pullPolicy=Never",
+   "podLabels.app=" ++ cfg.operatorName,
+   "cluster.enabled=true", "cluster.name=" ++ cfg.name,
+   s!"cluster.partitions={cfg.partitions}", s!"cluster.replicas={cfg.replicas}",
+   "cluster.image.repository=flare-node-rocksdb", "cluster.image.tag=test", "cluster.image.pullPolicy=Never",
+   "cluster.hostnameSpread=hard", s!"nodeGuard.enabled={cfg.nodeGuard}"] ++ storage
+
+/-- `helm <args>` with a bound; the output or the error. -/
+def helmCmd (args : List String) (timeoutSec : Nat := 300) : IO (Except String String) := do
+  let out ← IO.Process.output { cmd := "timeout", args := (#[toString timeoutSec, "helm"] ++ args.toArray) }
+  if out.exitCode == 0 then return .ok out.stdout
+  else return .error s!"helm {String.intercalate " " (args.take 3)} failed ({out.exitCode}): {out.stderr.trim.take 800}"
+
+/-- A cluster installed by a REAL `helm install` of `chart` (not the
+    harness's own manifests): namespace, the debug pod, the release, the
+    first-build approval, the operator rolled out. -/
+def deployHelmCluster (cfg : ClusterConfig) (chart : String) : IO Unit := do
+  IO.eprintln s!"# Deploying cluster '{cfg.name}' in namespace '{cfg.«namespace»}' by helm install of {chart}"
+  let _ ← waitForCondition s!"namespace {cfg.«namespace»} not Terminating" 30 do
+    match ← kubectl ["get", "namespace", cfg.«namespace», "-o", "jsonpath={.status.phase}"] with
+    | .ok phase => return (phase.trim != "Terminating")
+    | .error _ => return true
+  let _ ← kubectl ["create", "namespace", cfg.«namespace»]
+  let _ ← waitForCondition s!"default ServiceAccount in {cfg.«namespace»}" 120 do
+    match ← kubectl ["get", "serviceaccount", "default", "-n", cfg.«namespace», "-o", "jsonpath={.metadata.name}"] with
+    | .ok name => return (name.trim == "default")
+    | .error _ => return false
+  let overrides := if cfg.multiNode then
+      [s!"--overrides=\{\"spec\":\{\"nodeSelector\":\{\"node-role.kubernetes.io/control-plane\":\"\"},\"tolerations\":[\{\"key\":\"node-role.kubernetes.io/control-plane\",\"operator\":\"Exists\",\"effect\":\"NoSchedule\"}]}}"]
+    else []
+  match ← kubectl (["run", cfg.debugPod, s!"--namespace={cfg.«namespace»}", s!"--image={cfg.debugImage}", "--restart=Never"]
+      ++ overrides ++ ["--command", "--", "sleep", "86400"]) with
+  | .ok _ => pure ()
+  | .error e => if !containsSubstr e "AlreadyExists" then IO.eprintln s!"# WARNING: could not create debug pod {cfg.debugPod}: {e}"
+  let _ ← kubectlWaitReady s!"pod/{cfg.debugPod}" cfg.«namespace» 60
+  let sets := (helmSets cfg).foldl (fun acc v => acc ++ ["--set", v]) []
+  match ← helmCmd (["install", helmRelease cfg, chart, "--namespace", cfg.«namespace»] ++ sets) with
+  | .ok _ => pure ()
+  | .error e => throw (IO.userError e)
+  approveFirstBuild cfg
+  let ok ← kubectlRolloutStatus s!"deployment/{cfg.operatorName}" cfg.«namespace» 300
+  if !ok then
+    dumpOperatorLogs cfg
+    throw (IO.userError "the operator of the helm release did not become ready")
+  IO.sleep 10000
+
+/-- Uninstall a `deployHelmCluster` release and what outlives it. -/
+def cleanupHelmCluster (cfg : ClusterConfig) : IO Unit := do
+  let ns := cfg.«namespace»
+  discard <| helmCmd ["uninstall", helmRelease cfg, "--namespace", ns, "--wait", "--timeout", "180s"] 240
+  kubectlDelete "flarecluster" cfg.name ns
+  for i in List.range (cfg.partitions * cfg.replicas) do
+    kubectlDelete "pvc" s!"data-{cfg.name}-nodes-{i}" ns
+  for cm in [s!"{cfg.name}-node-map", s!"{cfg.name}-history"] do kubectlDelete "configmap" cm ns
+  kubectlDelete "lease" s!"{cfg.name}-operator-lease" ns
+  let _ ← kubectl ["delete", "pod", cfg.debugPod, "-n", ns, "--force", "--grace-period=0", "--ignore-not-found"]
+  IO.sleep 3000
+
 /-- Cleanup all resources for a cluster. -/
 def cleanupCluster (cfg : ClusterConfig) : IO Unit := do
   IO.eprintln s!"# Cleaning up cluster '{cfg.name}'"

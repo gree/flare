@@ -185,6 +185,12 @@ inductive SwitchOp where
       the pods (test seam) but the FSM can: no drain or promotion while it
       lasts, then the handover completes the switch (review of 67e27eb) -/
   | deleteMasterObserveFail
+  /-- a REAL `helm upgrade` of a release installed from the chart as an older
+      release shipped it (StatefulSet RollingUpdate) to this chart (OnDelete),
+      with a pod template change in the same upgrade (plan A0): the
+      StatefulSet controller replaces no pod; the operator replaces them one
+      at a time, a master after its ordered handover -/
+  | helmUpgrade
   deriving BEq, Repr
 
 def SwitchOp.label : SwitchOp → String
@@ -196,6 +202,7 @@ def SwitchOp.label : SwitchOp → String
   | .deleteMasterAbortRetry => "kubectl delete pod (master) while it is cut from its successor: the handover aborts, then retries after the cut is removed"
   | .deleteMasterLeaseTakeover => "kubectl delete pod (master) while it is cut from its successor, and the operator's lease taken by another identity mid-handover"
   | .deleteMasterObserveFail => "kubectl delete pod (master) while the handover step cannot read the pods"
+  | .helmUpgrade => "helm upgrade from the RollingUpdate chart to this chart (OnDelete) with a pod template change"
 
 /-- The file the operator's FLARE_TEST_HANDOVER_PODS_FAIL_FILE names. -/
 def podsFailFile : String := "/tmp/handover-pods-fail"
@@ -303,6 +310,66 @@ private def switchRun (c : Ctx) (op : SwitchOp) : IO (Except String SwitchObs) :
         if rc != "0" then opOk := false
       | none => opOk := false; opDetail := "drain did not finish within 660 s"
       drained := some p.master.node
+    | .helmUpgrade =>
+      let stsField := fun (path : String) => do
+        match ← kubectl ["get", "statefulset", s!"{c.cfg.name}-nodes", "-n", ns, "-o", s!"jsonpath=\{{path}}"] with
+        | .ok o => pure o.trim
+        | .error _ => pure ""
+      let podRevs := fun (_ : Unit) => do
+        match ← kubectl ["get", "pods", "-n", ns, "-l", s!"cluster={c.cfg.name}", "-o",
+            "jsonpath={range .items[*]}{.metadata.name}|{.metadata.labels.controller-revision-hash}{\"\\n\"}{end}"] with
+        | .ok o => pure ((o.splitOn "\n").filterMap fun l => match l.trim.splitOn "|" with
+            | [n, r] => if n.isEmpty then none else some (n, r)
+            | _ => none)
+        | .error _ => pure []
+      let s0 ← stsField ".spec.updateStrategy.type"
+      let rev0 ← stsField ".status.updateRevision"
+      c.event s!"before the upgrade: updateStrategy {s0}, update revision {rev0}, pods {← podRevs ()}"
+      if s0 != "RollingUpdate" then
+        checkFail := some s!"the release was not installed from the RollingUpdate chart (updateStrategy {s0})"
+      let chart ← helmChartDir
+      let t0 ← nowSec
+      match ← helmCmd ["upgrade", helmRelease c.cfg, chart, "--namespace", ns, "--reuse-values",
+          "--set", "cluster.podLabels.flare-e2e-upgrade=v2"] 300 with
+      | .error e => opOk := false; opDetail := s!"helm upgrade failed: {e.take 300}"
+      | .ok _ =>
+        let _ ← waitForCondition "the StatefulSet has a new update revision" 60 do
+          return (← stsField ".status.updateRevision") != rev0
+        let s1 ← stsField ".spec.updateStrategy.type"
+        let rev1 ← stsField ".status.updateRevision"
+        c.event s!"helm upgrade done in {(← nowSec) - t0} s: updateStrategy {s0} -> {s1}, update revision {rev0} -> {rev1}"
+        if s1 != "OnDelete" then
+          checkFail := some s!"after the upgrade the StatefulSet's updateStrategy is {s1}, not OnDelete"
+        if rev1 == rev0 || rev1.isEmpty then
+          opOk := false; opDetail := s!"the upgrade made no new pod template revision ({rev0} -> {rev1})"
+        else
+          -- every pod on the new revision, Ready (the operator's rolling)
+          let (_, all) ← observe c 900 (do
+            let rs ← podRevs ()
+            let ps := (← c.pods).getD []
+            return rs.length == c.cfg.partitions * c.cfg.replicas && rs.all (·.2 == rev1)
+              && ps.all (fun (r : PodRow) => r.ready && !r.deleting))
+          c.event s!"every pod on {rev1} and Ready={all}: {← podRevs ()}"
+          if !all then opOk := false; opDetail := s!"the pods did not all reach {rev1} within 900 s"
+          else opDetail := s!"helm upgrade: {s0} -> {s1}; every pod replaced onto {rev1}"
+          -- the switch order: who deleted each pod, and the master's handover first
+          let lines := (← kubectlLogsLabel s!"app={c.cfg.operatorName}" ns 30000).splitOn "\n"
+          let order := lines.filter fun l => containsSubstr l "ROLLING: deleted" || containsSubstr l "HANDOVER p0 "
+          for x in order do c.art "upgrade-order.txt" x
+          c.event s!"switch order (operator): {(order.filter (containsSubstr · "ROLLING: deleted")).map fun l => ((l.splitOn "ROLLING: deleted ").getD 1 "").take 60}"
+          let mut fails : List String := []
+          for b in before do
+            let delIdx := lines.findIdx? fun l => containsSubstr l s!"ROLLING: deleted {b.name} (uid {b.uid}"
+            if delIdx.isNone then
+              fails := fails ++ [s!"{b.name} (uid {b.uid}) was replaced without the operator's rolling delete (by the StatefulSet controller?)"]
+            if b.name == p.master.name then
+              let hIdx := lines.findIdx? fun l => containsSubstr l "HANDOVER p0 " && containsSubstr l p.master.name
+              match hIdx, delIdx with
+              | some h, some d => if h > d then fails := fails ++ [s!"the master {b.name} was deleted before its handover"]
+              | none, _ => fails := fails ++ [s!"the master {b.name} was replaced without an ordered handover"]
+              | _, none => pure ()
+          if !fails.isEmpty then
+            checkFail := some ((checkFail.map (· ++ "; ")).getD "" ++ String.intercalate "; " fails ++ " (see upgrade-order.txt)")
     | .deleteMasterSaveFail =>
       let opNames ← match ← kubectl ["get", "pods", "-n", ns, "-l", s!"app={c.cfg.operatorName}", "-o", "jsonpath={.items[*].metadata.name}"] with
         | .ok o => pure (some ((o.trim.splitOn " ").filter (!·.isEmpty)))
@@ -518,7 +585,7 @@ private def switchRun (c : Ctx) (op : SwitchOp) : IO (Except String SwitchObs) :
       | _, _ => false
     let (moved, movedDetail) := match op with
       | .deleteMaster | .deleteMasterSaveFail | .deleteMasterAbortRetry | .deleteMasterLeaseTakeover | .deleteMasterObserveFail => (uidChanged p.master.name, s!"master pod {p.master.name} replaced={uidChanged p.master.name}")
-      | .rollingRestart | .rollBoth =>
+      | .rollingRestart | .rollBoth | .helmUpgrade =>
         let all := before.all fun (b : PodRow) => uidChanged b.name
         (all, s!"every pod replaced={all} ({before.map fun (b : PodRow) => (b.name, uidChanged b.name)})")
       | .drainMaster =>
@@ -928,6 +995,7 @@ def Scenario.slug : Scenario → String
   | .op .deleteMasterAbortRetry => "abortretry"
   | .op .deleteMasterLeaseTakeover => "leasetakeover"
   | .op .deleteMasterObserveFail => "observefail"
+  | .op .helmUpgrade => "helm-upgrade"
   | .gate => "gate"
   | .sigtermHold => "sigterm-hold"
   | .abortExhaust => "abortexhaust"
@@ -941,6 +1009,7 @@ def Scenario.title : Scenario → String
   | .op .deleteMasterAbortRetry => "(S8) kubectl delete pod of the MASTER while it is cut from its successor, under a client-like load: the first handover aborts and rolls back, the cut is removed, the retry (attempt 2) completes; the one-map drain never takes the master; 0 write errors, 0 missing"
   | .op .deleteMasterSaveFail => "(S7) kubectl delete pod of the MASTER while the operator cannot save its handover ledger, then an operator restart, under a client-like load: no handover map before its phase is saved; the new operator completes the switch; 0 write errors, 0 missing"
   | .op .deleteMasterObserveFail => "(S11) kubectl delete pod of the MASTER while the operator's handover step cannot read the pods (the FSM can), under a client-like load: the one-map drain does not take the master and nothing is promoted while it lasts; once readable, the ordered handover completes the switch; 0 write errors, 0 missing"
+  | .op .helmUpgrade => "(H1) REAL helm upgrade of a release installed from the chart with the StatefulSet's RollingUpdate (an older release) to this chart (OnDelete) with a pod template change, under a client-like load: the StatefulSet controller replaces no pod; the operator replaces every pod one at a time, the master after its ordered handover; 0 write errors, 0 missing"
   | .op .deleteMasterLeaseTakeover => "(S10) kubectl delete pod of the MASTER while it is cut from its successor, and the operator's lease taken by another identity mid-handover, under a client-like load: the old leader stops the pass (no FSM step, rolling or send) and exits; the next leader finishes the handover from its ledger; 0 acknowledged writes missing (write errors reported: the operator is away longer than the clients' wait, approved category (a))"
   | .gate => "(S5) the old master is cut from the replica and deleted under a write load: preStop / flared report the drain as NOT lossless, never as lossless (gate test)"
   | .nodeGuard => "(G1) node guard webhook: a force delete of the master and a scale-down over a data-holding ordinal are refused; the delete-override annotation is allowed; a graceful delete of the master is refused until the ordered handover has moved it, then allowed"
@@ -960,18 +1029,26 @@ private def scenarioSuite (sc : Scenario) (tmpfs : Bool) : TestSuite :=
     -- S9: three attempts (Th + rollback + retry delay each) outlast 60 s
     else if sc == .abortExhaust || sc == .op .deleteMasterLeaseTakeover then { cfg0 with drainSeconds := 180 }
     else if sc == .nodeGuard then { cfg0 with nodeGuard := true }
+    -- H1: the chart's own release (unique operator name: the chart names
+    -- its ClusterRole and binding after it), node guard on as in production
+    else if sc == .op .helmUpgrade then
+      { cfg0 with operatorName := s!"flare-operator-{short}", nodeGuard := true }
     else cfg0
   let c : Ctx := { cfg, suite, test := s!"s-{sc.slug}" }
   { name := suite
-    setup := do deployCluster cfg; IO.sleep 50000
+    setup := do
+      if sc == .op .helmUpgrade then deployHelmCluster cfg (← helmChartRollingUpdate cfg)
+      else deployCluster cfg
+      IO.sleep 50000
     teardown := do
+      if sc == .op .helmUpgrade then cleanupHelmCluster cfg
       for w in ← dataWorkers do uncordon w
       cleanupCluster cfg
     onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
     afterEach := fun i => saveFullLogs cfg.«namespace» s!"after-test-{i}"
     tests := [{ name := sc.title, run := match sc with | .op o => switchTest c o | .gate => gateTest c | .sigtermHold => sigtermHoldTest c | .abortExhaust => abortExhaustTest c | .nodeGuard => nodeGuardTest c }] }
 
-def scenarios : List Scenario := [.op .deleteMaster, .op .rollingRestart, .op .rollBoth, .op .drainMaster, .gate, .sigtermHold, .op .deleteMasterSaveFail, .op .deleteMasterAbortRetry, .abortExhaust, .nodeGuard, .op .deleteMasterLeaseTakeover, .op .deleteMasterObserveFail]
+def scenarios : List Scenario := [.op .deleteMaster, .op .rollingRestart, .op .rollBoth, .op .drainMaster, .gate, .sigtermHold, .op .deleteMasterSaveFail, .op .deleteMasterAbortRetry, .abortExhaust, .nodeGuard, .op .deleteMasterLeaseTakeover, .op .deleteMasterObserveFail, .op .helmUpgrade]
 
 /-- node-ops-switch-<scenario> (PVC) and node-ops-switch-tmpfs-<scenario>. -/
 def switchSuites : List TestSuite :=

@@ -3567,47 +3567,54 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
     topologyAuditRef.set {}
   else
     let key := auditKeys[audit.next % auditKeys.length]!
-    let pod := extractPodName key
-    let (before, after, reply) ← Bridge.topologyProbe pod ns
-    let version := reply.bind TopologyObservation.reportedVersion
-    let verdict := TopologyObservation.judge finalVersion before after version
-    let sample : TopologyObservation.Sample := {
-      nodeKey := key, uid := after, reportedVersion := version
-      observedAtMs := ← IO.monoMsNow
-      verdict := verdict }
-    topologyAuditRef.set (TopologyObservation.record audit auditKeys sample)
-    IO.eprintln s!"[TopologyAudit] node={key} uid={after} desired={finalVersion} reported={version} verdict={verdict.label}"
-    -- spec 13: a master claim the committed map gives to ANOTHER node; it is
-    -- re-sent the map below (behind) and treated as down if the claim still
-    -- stands after DuplicateMaster.holdMs. Not while no node is reachable.
-    if !(← reachGuardRef.get) then
-      -- only on a map version OTHER than the committed one (behind or
-      -- ahead): on the current map its view is the operator's own
-      let conflict := match verdict with
-        | .unknown => none
-        | .current => some false
-        | .behind | .ahead => (reply.bind DuplicateMaster.ownClaim).map (DuplicateMaster.conflicts finalState key)
-      let seenBefore := (← duplicateFirstSeenRef.get).any (·.1 == key)
-      let (fs, down) := DuplicateMaster.step (← duplicateFirstSeenRef.get) key conflict (← IO.monoMsNow)
-      duplicateFirstSeenRef.set fs
-      if conflict == some true && !seenBefore then
-        IO.eprintln s!"[flare-operator] CRITICAL: {key} claims to be a MASTER the committed map v{finalVersion} gives to another node (reports v{version}); the map is re-sent, and it is treated as down if the claim still stands in {DuplicateMaster.holdMs / 1000} s"
-      if down && !((← duplicateDownRef.get).contains key) then
-        duplicateDownRef.modify (· ++ [key])
-        -- a live flared marked Down leaves Down only by re-registering: it is
-        -- restarted as soon as it answers (4e), which also hands it the
-        -- current map (41200694530: Down 9 min until the stuck-down wait)
-        downByReachRef.modify fun l => if l.contains key then l else l ++ [key]
-        IO.eprintln s!"[flare-operator] DUPLICATE MASTER: {key} still claims a master the committed map gives to another node after {DuplicateMaster.holdMs / 1000} s -> treated as down (proxy); the map's master is kept"
-      if conflict == some false && (← duplicateDownRef.get).contains key then
-        duplicateDownRef.modify (·.filter (· != key))
-        IO.eprintln s!"[flare-operator] DUPLICATE MASTER: {key} no longer claims a conflicting master role"
-    match verdict with
-    | .behind =>
-      pendingBroadcastRef.modify fun p => some (p.getD finalVersion)
-    | .ahead =>
-      IO.eprintln s!"[TopologyAudit] CRITICAL: recipient {key} reports newer authority than committed v{finalVersion}; not inventing a generation or declaring it unhealthy"
-    | .unknown | .current => pure ()
+    -- spec 13: a node whose duplicate master claim is pending is read EVERY
+    -- pass besides the round robin, so the claim is judged after holdMs and
+    -- not after a full audit round (41222065256: ~68 s for 6 nodes; the
+    -- round robin advances only on its own key)
+    let pendingDup := ((← duplicateFirstSeenRef.get).map (·.1)).filter fun k => k != key && auditKeys.contains k
+    for (k, isRR) in (key, true) :: pendingDup.map (·, false) do
+      let key := k
+      let pod := extractPodName key
+      let (before, after, reply) ← Bridge.topologyProbe pod ns
+      let version := reply.bind TopologyObservation.reportedVersion
+      let verdict := TopologyObservation.judge finalVersion before after version
+      let sample : TopologyObservation.Sample := {
+        nodeKey := key, uid := after, reportedVersion := version
+        observedAtMs := ← IO.monoMsNow
+        verdict := verdict }
+      if isRR then topologyAuditRef.set (TopologyObservation.record audit auditKeys sample)
+      IO.eprintln s!"[TopologyAudit] node={key} uid={after} desired={finalVersion} reported={version} verdict={verdict.label}"
+      -- spec 13: a master claim the committed map gives to ANOTHER node; it is
+      -- re-sent the map below (behind) and treated as down if the claim still
+      -- stands after DuplicateMaster.holdMs. Not while no node is reachable.
+      if !(← reachGuardRef.get) then
+        -- only on a map version OTHER than the committed one (behind or
+        -- ahead): on the current map its view is the operator's own
+        let conflict := match verdict with
+          | .unknown => none
+          | .current => some false
+          | .behind | .ahead => (reply.bind DuplicateMaster.ownClaim).map (DuplicateMaster.conflicts finalState key)
+        let seenBefore := (← duplicateFirstSeenRef.get).any (·.1 == key)
+        let (fs, down) := DuplicateMaster.step (← duplicateFirstSeenRef.get) key conflict (← IO.monoMsNow)
+        duplicateFirstSeenRef.set fs
+        if conflict == some true && !seenBefore then
+          IO.eprintln s!"[flare-operator] CRITICAL: {key} claims to be a MASTER the committed map v{finalVersion} gives to another node (reports v{version}); the map is re-sent, and it is treated as down if the claim still stands in {DuplicateMaster.holdMs / 1000} s"
+        if down && !((← duplicateDownRef.get).contains key) then
+          duplicateDownRef.modify (· ++ [key])
+          -- a live flared marked Down leaves Down only by re-registering: it is
+          -- restarted as soon as it answers (4e), which also hands it the
+          -- current map (41200694530: Down 9 min until the stuck-down wait)
+          downByReachRef.modify fun l => if l.contains key then l else l ++ [key]
+          IO.eprintln s!"[flare-operator] DUPLICATE MASTER: {key} still claims a master the committed map gives to another node after {DuplicateMaster.holdMs / 1000} s -> treated as down (proxy); the map's master is kept"
+        if conflict == some false && (← duplicateDownRef.get).contains key then
+          duplicateDownRef.modify (·.filter (· != key))
+          IO.eprintln s!"[flare-operator] DUPLICATE MASTER: {key} no longer claims a conflicting master role"
+      match verdict with
+      | .behind =>
+        pendingBroadcastRef.modify fun p => some (p.getD finalVersion)
+      | .ahead =>
+        IO.eprintln s!"[TopologyAudit] CRITICAL: recipient {key} reports newer authority than committed v{finalVersion}; not inventing a generation or declaring it unhealthy"
+      | .unknown | .current => pure ()
   let observed := TopologyObservation.summarize (← topologyAuditRef.get) auditKeys
     finalVersion (← IO.monoMsNow) 60000
   metrics.topologyBehindNodes.set observed.behind.toFloat
@@ -4336,6 +4343,12 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
             | .ok () =>
               downCyclesRef.set (newDown.filter (fun kv => kv.1 != key))
               downByReachRef.modify (·.filter (· != key))
+              -- a duplicate master claim was the old process's: the
+              -- re-registered one must not be marked dead for it again
+              -- (41222065256: Down ~10 min after its restart, until the
+              -- audit read it again)
+              duplicateDownRef.modify (·.filter (· != key))
+              duplicateFirstSeenRef.modify (·.filter (·.1 != key))
             | .error e => IO.eprintln s!"[flare-operator] stuck-down recovery: failed to delete {podName}: {e}"
         | none => pure ()
       | none => pure ()

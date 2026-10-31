@@ -580,7 +580,7 @@
           "procedure": "Run flare_unit observation cases: complete/truncated/duplicate stats; older/equal/newer version; missing/changing UID; new Unknown replaces old confirmation. Continuous-replication requires a UID-bound current observation from the production audit. Replacement during probe and startup republish as sole recovery remain unstaged. E2E (2026-10-01, CI pending): topology-authority test 'same-name Pod replacement during the topology probe' holds the probe of the slave after its first UID read (test seam FLARE_TEST_PROBE_BARRIER, 30 s ceiling), force-replaces the pod under the same name, releases, and requires the first audit line for that pod after the release to carry verdict=unknown; then requires a later probe of the new UID to report verdict=current and the topology to be applied.",
           "references": [
             {
-              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "path": "flare_operator/FlareOperatorTests/UnitTests.lean",
               "symbol": "checkTopologyObservation"
             },
             {
@@ -630,7 +630,7 @@
               "symbol": "BroadcastTriggers"
             },
             {
-              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "path": "flare_operator/FlareOperatorTests/UnitTests.lean",
               "symbol": "checkTopologyDelivery"
             },
             {
@@ -653,7 +653,7 @@
               "symbol": "persistedVersionRef"
             },
             {
-              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "path": "flare_operator/FlareOperatorTests/UnitTests.lean",
               "symbol": "checkTopologyDelivery"
             },
             {
@@ -672,7 +672,7 @@
               "symbol": "decide"
             },
             {
-              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "path": "flare_operator/FlareOperatorTests/UnitTests.lean",
               "symbol": "checkNodeMapRecovery"
             },
             {
@@ -2399,11 +2399,11 @@
           "procedure": "flare_unit pins the ledger decisions on flared's completion record: release records boot id/current id/drops; a re-announced Active, a newer reconstruction still running, a newer one that FAILED, or a success from another source is NOT completion; a success newer than the reseat one completes; failure-then-success completes; a RESTART with identical counters completes because the boot id differs; a restart still running does not; late drops requeue exactly the increment; a partially corrupt ledger (missing masterKey, malformed counter, unknown phase, one bad among good) fails as a whole.",
           "references": [
             {
-              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "path": "flare_operator/FlareOperatorTests/UnitTests.lean",
               "symbol": "checkAdvanceComplete"
             },
             {
-              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "path": "flare_operator/FlareOperatorTests/UnitTests.lean",
               "symbol": "checkReactivation"
             }
           ]
@@ -3484,7 +3484,7 @@
           "procedure": "flare_unit pins SyncEvidence.judge on the completion record: latest running / failed / aborted refused; success from another source refused; #0 refused; the first review's LSN-0 input refused (cursor not seeded); lineage mismatch, cursor ahead, missing RocksDB lineage/cursor, and an incomplete master reply refused; failure-then-success (#2 succeeded after #1 failed) and abort-then-success ACCEPTED; a new process's own success accepted; a far-behind seeded cursor accepted; non-RocksDB accepted on the record; a source change refused until a success from the new master with matching lineage.",
           "references": [
             {
-              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "path": "flare_operator/FlareOperatorTests/UnitTests.lean",
               "symbol": "checkJudgeRefusals"
             }
           ]
@@ -3510,11 +3510,11 @@
           "procedure": "flare_unit pins FollowEvidence.judge (unreadable → unknown; mode off → notInMode; not following, another epoch, stale observation, lag over the bound, applied ahead of the head → ineligible; unreadable master → unknown; lag at the bound eligible; read vs promotion bounds), unfitReason, classify (ranked highest-applied first; unproven vs unfit; withheld reads; mode memory; remembered-in-mode unreadable/not-probed → unproven and withheld, never unfit; no master reading → nothing proven), the probe policy, shapePromotionCandidates (unfit removed, ranked first, unproven last, nodeMap untouched, findActiveSuccessor sees the order, all-excluded leaves no successor), withholdReads (slave 0, master/Down/unlisted untouched, keys preserved) and the masterless refill's exclusion. E2E (2026-10-01, CI pending): continuous-replication test 'operator restart while the replica's stats cannot be read' sets spec slave=50 and waits for the following replica to be served, revokes the operator's pods/exec on the replica, replaces the operator pod, and requires the fresh process to withhold the replica (committed balance 0), the follower to keep following, the master unchanged and no demotion; after pods/exec is restored the replica must be served at 50 again with no reconstruction and the same pod UID. E2E (2026-10-01, CI pending), non-follow-mode recovery: read-balance test 'operator restart in a cluster without follow mode' replaces the operator with spec slave=100 and a standby, and requires the fresh operator to log its stats probe, every regular slave to be back at 100 and the standby at 0 within 120 s, and no follow-eligibility decision in that cluster. SAF-08 (2026-10-02): flare_unit cases for markProcessChanges — first sighting not marked; a changed boot id makes an eligible follower Unknown (withheld, unproven, not unfit); the second consistent reading restores eligibility; unprobed nodes keep their boot id; a node out of the mode keeps the legacy policy.",
           "references": [
             {
-              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "path": "flare_operator/FlareOperatorTests/UnitTests.lean",
               "symbol": "checkFollowJudge"
             },
             {
-              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "path": "flare_operator/FlareOperatorTests/UnitTests.lean",
               "symbol": "checkFollowShaping"
             },
             {
@@ -3563,7 +3563,7 @@
           "procedure": "A normal promotion needs evidence against the CURRENT source: flare_unit checkPromotionEvidence pairs the same bound R3 reading (eligible against a present master; lagging / unknown on a masterless partition; FORBIDDEN markers win; commit re-classification agrees; a non-reading pass refuses it). E2E promotion-disconnected-follower (C1): a follower cut off from its master with a stale R3 binding is not promoted as a normal (eligible) candidate.",
           "references": [
             {
-              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "path": "flare_operator/FlareOperatorTests/UnitTests.lean",
               "symbol": "checkPromotionEvidence"
             },
             {
@@ -4740,7 +4740,7 @@
           "procedure": "flare_unit pins parseCurrItems (blank/missing/non-numeric are unknown, genuine 0 is known 0), emptyMasterVerdict (act only on known-0 + known data-bearing), successorStillValid (invalid when not data-bearing, demoted to Proxy, or the target is no longer an Active master), and deleteGate (refuses when the OPERATOR lost its lease, the pod UID changed, the successor is invalid on the post-read map, or the fresh verdict is skip).",
           "references": [
             {
-              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "path": "flare_operator/FlareOperatorTests/UnitTests.lean",
               "symbol": "checkDeleteGate"
             }
           ]
@@ -4751,7 +4751,7 @@
           "procedure": "flare_unit pins deleteGate's survivorFollowOk: an unproven surviving follower refuses the delete with a reason naming continuous replication; the survive purpose uses the promotion bound.",
           "references": [
             {
-              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "path": "flare_operator/FlareOperatorTests/UnitTests.lean",
               "symbol": "checkFollowShaping"
             },
             {
@@ -5259,7 +5259,7 @@
               "symbol": "lagHoldSuite"
             },
             {
-              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "path": "flare_operator/FlareOperatorTests/UnitTests.lean",
               "symbol": "checkFailoverLagHold"
             },
             {
@@ -5326,7 +5326,7 @@
           "procedure": "history-tracking 10 (stale R3 binding on a masterless partition). Unit: flare_unit checkStaleR3Refill drives the real classifier through the refill and its log effects: ex-master back READ empty -> the follower is seated, NOT LOSS-FREE 'READ empty'; ex-master away -> held (CRITICAL), then seated NOT LOSS-FREE 'EXPIRED' after the wait; ex-master back with every write -> the ex-master, no false NOT LOSS-FREE; ex-master back with an unhealthy copy -> held, then the follower after the wait; no recorded history -> never seated. E2E promotion-disconnected-follower (C1, PVC: the ex-master returns with all 50 keys by value while the operator is down; the cut follower must not be crowned ahead of it) and promotion-disconnected-follower-empty (A1, pod-local: the ex-master is verified empty; the follower is promoted with every base key and logged NOT LOSS-FREE). Unobservable / precondition failures are reported as such, not as data verdicts.",
           "references": [
             {
-              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "path": "flare_operator/FlareOperatorTests/UnitTests.lean",
               "symbol": "checkStaleR3Refill"
             },
             {
@@ -5345,7 +5345,7 @@
           "procedure": "The only copy with data died an Active slave and returns while the ex-master returns EMPTY (decision 2026-10-16). Unit: flare_unit checkAttributedRejoin (arChecks): the dead-node demotion records formerSlaveOf only for an Active slave, persisted as slaveOf= and read back; a drained / repair-held / unrecorded copy is not attributed; the rejoin re-seats it Slave/Prepare in that partition; the classifier needs every copy-integrity key reported healthy, a copy id, non-empty, the exact binding, the recorded history, no failed reconstruction (missing = unknown, forbidden marker or another history = FORBIDDEN, never eligible); the refill seats it only as the masterless last resort under the wait rule, never a forbidden one even after expiry, and an unobserved (Down / unread) copy keeps the wait; the masterless CRITICAL summary and its throttle. E2E promotion-proxy-only-copy: (P) operator running, the replica's registration held until it is demoted to Proxy and the empty ex-master is back: it rejoins by its record, is seated NOT LOSS-FREE, and its LOCAL copy holds every key and value; (F) the same with copy.partial: never seated past the 60 s wait, flare_operator_partitions_masterless 1, a throttled CRITICAL naming it FORBIDDEN, its keys kept.",
           "references": [
             {
-              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "path": "flare_operator/FlareOperatorTests/UnitTests.lean",
               "symbol": "checkAttributedRejoin"
             },
             {
@@ -8854,7 +8854,7 @@
               "symbol": "test_follow_disconnect_is_not_a_rebuild"
             },
             {
-              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "path": "flare_operator/FlareOperatorTests/UnitTests.lean",
               "symbol": "checkFollowOwnership"
             }
           ]
@@ -10712,7 +10712,7 @@
               "symbol": "test_follow_only_unsatisfiable_positions_rebuild"
             },
             {
-              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "path": "flare_operator/FlareOperatorTests/UnitTests.lean",
               "symbol": "checkFollowShaping"
             }
           ]
@@ -10734,7 +10734,7 @@
           "procedure": "flare_unit: the two routes to a rebuild request (a counted drop and the follower's needs_rebuild declaration) in either order, and a drop on an OWNED entry plus the declaration in one pass, yield exactly one un-owned entry for the node and one demotion.",
           "references": [
             {
-              "path": "flare_operator/FlareOperator/UnitTests.lean",
+              "path": "flare_operator/FlareOperatorTests/UnitTests.lean",
               "symbol": "checkFollowShaping"
             }
           ]

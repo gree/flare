@@ -47,6 +47,16 @@ def Verdict.message : Verdict → String
     audited exception (logged by the operator). -/
 def overrideAnnotation : String := "flare.gree.net/delete-override"
 
+/-- The kube-controller-manager's own controllers, by their service accounts
+    (--use-service-account-credentials). Only these: every other kube-system
+    account — cluster-autoscaler, descheduler and the like — evicts through
+    the guard like anyone else (stage-10 Runbook audit G3: all of
+    system:serviceaccount:kube-system:* was trusted, so an autoscaler
+    scale-down skipped the handover and the cordon move). -/
+def trustedControllers : List String :=
+  ["namespace-controller", "generic-garbage-collector", "statefulset-controller",
+   "pod-garbage-collector", "node-controller"]
+
 /-- Requests the guard never stands in the way of: the operator itself, and
     Kubernetes' own controllers (namespace deletion, garbage collection, the
     node lifecycle; the StatefulSet controller removes pods only after a
@@ -55,7 +65,7 @@ def overrideAnnotation : String := "flare.gree.net/delete-override"
 def trustedRequester (username operatorAccount : String) : Bool :=
   (!operatorAccount.isEmpty && username == operatorAccount)
   || username == "system:kube-controller-manager"
-  || username.startsWith "system:serviceaccount:kube-system:"
+  || trustedControllers.any (fun c => username == s!"system:serviceaccount:kube-system:{c}")
 
 /-- The kubelet's own DELETE that confirms a pod already terminating (it has
     a deletionTimestamp: a delete this guard judged earlier) — and only by the

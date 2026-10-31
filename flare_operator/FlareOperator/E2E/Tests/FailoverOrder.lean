@@ -61,7 +61,10 @@ private def cfg : ClusterConfig := {
   extraFlaredConf := "repl-identity-forward = true\nrepl-follow-enabled = true\nrepl-follow-poll-interval-usec = 200000"
   operatorEnv := [("FLARE_STATS_PROBE_INTERVAL_MS", "15000"),
     -- spec 13 test: pods named in this file are not sent the node map
-    ("FLARE_TEST_BROADCAST_SKIP_FILE", "/tmp/bskip")]
+    ("FLARE_TEST_BROADCAST_SKIP_FILE", "/tmp/bskip"),
+    -- review of ae8ac49: while this file exists the reachability step's pod
+    -- listing fails
+    ("FLARE_TEST_REACH_LIST_FAIL_FILE", "/tmp/reachfail")]
 }
 
 /-- every kind node: pods may be placed on any of them (the multi-node
@@ -446,7 +449,58 @@ def suite : TestSuite := {
         finally
           healLink mIp aIp
           for node in ← kindNodes do
-            discard <| kubectl ["uncordon", node] }
+            discard <| kubectl ["uncordon", node] },
+    { name := "(review of ae8ac49) stale pod addresses: a slave's OLD IP is cut from the operator and its pod recreated (new IP, reachable) — the slave is never marked unreachable; with the reachability step's pod listing failing (FLARE_TEST_REACH_LIST_FAIL_FILE) while the master is cut, nothing is marked down and the master is unchanged for 60 s"
+      run := do
+        if !(← graceOver) then return .fail "the operator never logged the end of its startup grace period"
+        if !(← waitP0Stable) then return .fail "precondition: partition 0 is not stable"
+        let opIp ← match ← opIpOf with
+          | .ok ip => pure ip
+          | .error e => return .fail e
+        let some sPod := ((← nodeView).filter fun e => e.partition == 0 && e.role == 1).head?.map (podOf ·.fqdn)
+          | return .fail "precondition: no slave of partition 0"
+        let some sIp ← getPodIp sPod cfg.«namespace» | return .fail s!"no IP for {sPod}"
+        let before := countLines (← opLogs) "UNREACHABLE" sPod
+        match ← cutLink opIp sIp with
+        | .error e => return .fail s!"could not cut operator ⇄ {sIp}: {e}"
+        | .ok _ => pure ()
+        try
+          discard <| kubectl ["delete", "pod", sPod, "-n", cfg.«namespace», "--wait=false"]
+          let moved ← waitForCondition s!"{sPod} is recreated on another IP and Ready" 180 do
+            match ← getPodIp sPod cfg.«namespace» with
+            | some ip => return ip != sIp && (← allPodsReady)
+            | none => return false
+          if !moved then return .fail s!"precondition: {sPod} did not come back Ready on another IP than {sIp}"
+          IO.sleep 30000   -- six probe rounds against the new address
+          let after := countLines (← opLogs) "UNREACHABLE" sPod
+          IO.eprintln s!"# {sPod}: old IP {sIp} cut, recreated on {(← getPodIp sPod cfg.«namespace»).getD "-"}; UNREACHABLE lines {before} -> {after}"
+          if after > before then return .fail s!"{sPod} was marked unreachable after it was recreated on a reachable IP (its old IP stayed cut)"
+        finally
+          healLink opIp sIp
+        if !(← waitP0Stable) then return .fail "partition 0 did not settle after the recreation"
+        -- part 2: no fresh listing, no decision
+        let some mPod ← p0Master | return .fail "no Active P0 master in the operator's map"
+        let some mIp ← getPodIp mPod cfg.«namespace» | return .fail s!"no IP for {mPod}"
+        match ← opExec "touch /tmp/reachfail" with
+        | .error e => return .fail s!"could not arm the listing-failure seam: {e}"
+        | .ok _ => pure ()
+        try
+          match ← cutLink opIp mIp with
+          | .error e => return .fail s!"could not cut operator ⇄ {mIp}: {e}"
+          | .ok _ => pure ()
+          for i in [0:6] do
+            IO.sleep 10000
+            match ← p0Master with
+            | some m => if m != mPod then return .fail s!"{mPod} was replaced by {m} while the reachability listing failed ({(i + 1) * 10} s)"
+            | none => return .fail s!"{mPod} is no longer the Active master while the reachability listing failed ({(i + 1) * 10} s)"
+          let logs ← opLogs
+          if countLines logs "reachability: pod listing failed" "no down decision" == 0 then
+            return .fail "the operator never logged that the reachability step skipped its round for a failed listing"
+          return .pass
+        finally
+          discard <| opExec "rm -f /tmp/reachfail"
+          healLink opIp mIp
+          discard <| waitP0Stable }
   ]
 }
 

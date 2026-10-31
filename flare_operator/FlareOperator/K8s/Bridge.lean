@@ -736,7 +736,10 @@ def emitEvent (crName ns reason message : String) (warning : Bool := false) : IO
     ("reason", Lean.Json.str reason), ("message", Lean.Json.str message),
     ("type", Lean.Json.str (if warning then "Warning" else "Normal")),
     ("source", Lean.Json.mkObj [("component", "flare-operator")])]
-  match ← kubectlApplyManifest ev.compress with
+  -- create, not apply: the name is new every time, and apply first GETs the
+  -- object, which the role does not grant on events (41165977319 C3: every
+  -- cordon Event was refused, Forbidden "cannot get resource events")
+  match ← kubectlApplyManifest ev.compress "create" with
   | .ok _ => pure ()
   | .error e => IO.eprintln s!"[flare-operator] warning: Event {reason} not recorded: {e}"
 

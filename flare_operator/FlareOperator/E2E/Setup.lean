@@ -1049,7 +1049,11 @@ def helmSets (cfg : ClusterConfig) : List String :=
    "cluster.hostnameSpread=hard", s!"nodeGuard.enabled={cfg.nodeGuard}",
    -- the clients' all-pods Service (<cluster>-nodes-external) the harness's
    -- second load path uses; in cluster, so ClusterIP
-   "cluster.externalAccess.enabled=true", "cluster.externalAccess.type=ClusterIP"] ++ storage
+   "cluster.externalAccess.enabled=true", "cluster.externalAccess.type=ClusterIP",
+   -- the staged rebuild's free-space reserve (the harness's own clusters
+   -- boot with it): unset, a replica's rebuild stops at reserve_unset and it
+   -- stays a Prepare slave (41178232161)
+   s!"cluster.rocksdb.rebuildReserveBytes={(cfg.rebuildReserveBytes.getD e2eRebuildReserveBytes)}"] ++ storage
 
 /-- `helm <args>` with a bound; the output or the error. -/
 def helmCmd (args : List String) (timeoutSec : Nat := 300) : IO (Except String String) := do

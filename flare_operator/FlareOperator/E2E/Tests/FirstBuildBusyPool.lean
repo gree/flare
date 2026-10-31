@@ -123,4 +123,52 @@ def suiteDroppedAdd : TestSuite := {
   ]
 }
 
+/-- As first-build-dropped-add, and the candidate's pass evidence carries a
+    stale boot id once (FLARE_TEST_STALE_FIRST_BUILD_EVIDENCE): the commit
+    re-reads every copy and must REJECT the first build exception for it
+    (review of 89cf9d9: stale EMPTY evidence must never authorize the
+    promotion); a later pass with matching readings seats the master. -/
+private def cfgStale : ClusterConfig := {
+  name := "fb-stale"
+  «namespace» := "flare-fb-stale"
+  partitions := 1
+  replicas := 2
+  operatorName := "flare-operator"
+  debugPod := "debug-fb-stale"
+  storageBackend := "rocksdb"
+  useTmpfs := true
+  operatorEnv := [("FLARE_TEST_DROP_FIRST_NODE_ADD", "1"), ("FLARE_TEST_STALE_FIRST_BUILD_EVIDENCE", "1")]
+}
+
+def suiteStaleEvidence : TestSuite := {
+  name := "first-build-stale-evidence"
+  setup := deployCluster cfgStale
+  teardown := cleanupCluster cfgStale
+  onFailure := dumpClusterDiagnostics cfgStale.«namespace» s!"app={cfgStale.operatorName}"
+  tests := [
+    { name := "the first build exception with a copy's pass evidence from another flared boot (FLARE_TEST_STALE_FIRST_BUILD_EVIDENCE): the commit re-read refuses it (REJECTED, nothing committed); a later pass whose readings match seats the master; partition 0 gets an Active master and an Active slave"
+      run := do
+        let built ← waitForCondition "partition 0 has an Active master and an Active slave" 300 do
+          let es := parseNodeSync (← operatorTcpCmd cfgStale.debugPod cfgStale.«namespace» cfgStale.operatorName cfgStale.operatorPort "node sync")
+          let p0 := es.filter (·.partition == 0)
+          return p0.any (fun e => e.role == 0 && e.state == 0) && p0.any (fun e => e.role == 1 && e.state == 0)
+        let logs ← kubectlLogsLabel s!"app={cfgStale.operatorName}" cfgStale.«namespace» 400000
+        let lines := logs.splitOn "\n"
+        for l in (lines.filter fun l => containsSubstr l "TEST SEAM" || containsSubstr l "first build exception"
+            || containsSubstr l "seated as a first build's master").take 20 do
+          IO.eprintln s!"# {l.trim.take 400}"
+        let idx := fun (pat : String) => lines.findIdx? (containsSubstr · pat)
+        match idx "TEST SEAM: the pass evidence", idx "is REJECTED", idx "seated as a first build's master" with
+        | none, _, _ => return .fail "precondition: the stale-evidence seam was not applied (the exception was never reached)"
+        | some _, none, _ => return .fail "the first build exception was NOT rejected although the candidate's pass evidence was from another boot"
+        | some si, some ri, seated =>
+          if ri < si then return .fail "a rejection was logged before the seam was applied"
+          match seated with
+          | some ai => if ai < ri then return .fail "the master was seated by the exception before its stale evidence was rejected"
+          | none => return .fail "the master was never seated as a first build's after the stale evidence was rejected"
+          if !built then return .fail "partition 0 never got an Active master and an Active slave"
+          return .pass }
+  ]
+}
+
 end FlareOperator.E2E.Tests.FirstBuildBusyPool

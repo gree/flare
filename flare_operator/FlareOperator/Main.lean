@@ -3650,10 +3650,7 @@ private def runReachabilityStep (crName ns : String) (stateRef : IO.Ref FlareClu
   let ids := live.map fun p => (Bridge.PodInfo.toNodeKey p, p.uid)
   let prevIds ← reachPodIdRef.get
   reachPodIdRef.set ids
-  unreachCyclesRef.modify fun l => l.filter fun (k, _) =>
-    match prevIds.lookup k, ids.lookup k with
-    | some u0, some u1 => u0 == u1
-    | _, _ => true
+  unreachCyclesRef.modify fun l => FlareOperator.UnreachableNode.keepStreaksForSamePod l prevIds ids
   let probeTasks ← probeAddrs.mapM fun (_, ip) =>
     IO.asTask (prio := .dedicated) (Server.probeNodeReachable ip 12121 FlareOperator.UnreachableNode.monitorReadTimeoutMs)
   let mut probed : List (String × Bool) := []

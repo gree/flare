@@ -87,6 +87,18 @@ def results : List (String × Bool) := Id.run do
     v1.down.isEmpty && v2.down.isEmpty && v2.streaks == [("m", 2)])]
   r := r ++ [("unreachable: the third consecutive failed probe makes it down",
     v3.down == ["m"] && !v3.guardTripped)]
+  -- review of a74d3ec: a streak belongs to one pod incarnation
+  let keep := FlareOperator.UnreachableNode.keepStreaksForSamePod
+  let w1 := keep v2.streaks [("m", "u1")] [("m", "u1")]
+  let wGone := keep v2.streaks [("m", "u1")] []
+  let wBack := keep wGone [] [("m", "u2")]
+  let w2 := keep v2.streaks [("m", "u1")] [("m", "u2")]
+  let vNew := step w2 [("m", false), ("s", true), ("t", true)] mkState
+  r := r ++ [("unreachable: a streak is kept only for the same pod UID in both listings; missing from one, another UID or no UID starts it again",
+    w1 == [("m", 2)] && wGone.isEmpty && wBack.isEmpty && w2.isEmpty
+      && (keep v2.streaks [] [("m", "u1")]).isEmpty && (keep v2.streaks [("m", "")] [("m", "")]).isEmpty)]
+  r := r ++ [("unreachable: a pod missing from a listing and recreated under the same name (new UID) is not down at its first failed probe (the old pod's two failures are not added)",
+    vNew.down.isEmpty && vNew.streaks == [("m", 1)])]
   r := r ++ [("unreachable: a successful probe in between restarts the count",
     (step v2.streaks [("m", true), ("s", true), ("t", true)] mkState).streaks.isEmpty)]
   r := r ++ [("unreachable: a Proxy (no role to fail over) never counts",

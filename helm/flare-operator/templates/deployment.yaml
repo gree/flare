@@ -111,7 +111,27 @@ spec:
         - name: webhook-tls
           image: {{ .Values.nodeGuard.tlsImage }}
           imagePullPolicy: IfNotPresent
-          args: ["OPENSSL-LISTEN:9443,reuseaddr,fork,cert=/tls/tls.crt,key=/tls/tls.key,verify=0", "TCP:127.0.0.1:9444"]
+          # The certificate is generated on every render (helm upgrade, an
+          # ArgoCD sync), and the API server trusts the new CA at once, while
+          # socat keeps the certificate it loaded at start: every webhook call
+          # then failed TLS and, with failurePolicy Fail, every guarded delete
+          # (the operator's rolling too) was refused until the operator pods
+          # restarted (E2E 41181975092, helm upgrade: http 500 for 15 min).
+          # socat is restarted when the mounted Secret changes (the kubelet
+          # refreshes it within about a minute).
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              sum() { cat /tls/tls.crt /tls/tls.key | md5sum; }
+              while true; do
+                socat OPENSSL-LISTEN:9443,reuseaddr,fork,cert=/tls/tls.crt,key=/tls/tls.key,verify=0 TCP:127.0.0.1:9444 &
+                pid=$!
+                s=$(sum)
+                while kill -0 "$pid" 2>/dev/null && [ "$(sum)" = "$s" ]; do sleep 5; done
+                echo "webhook-tls: certificate changed (or socat exited); restarting socat"
+                kill "$pid" 2>/dev/null
+                wait "$pid" 2>/dev/null
+              done
           ports:
             - name: webhook
               containerPort: 9443

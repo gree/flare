@@ -49,7 +49,10 @@ open FlareOperator.Kubectl
 private def cfg : ClusterConfig := {
   name := "fo-order"
   «namespace» := "flare-fo-order"
-  partitions := 2
+  -- 3 partitions (9 pods): test 4 cuts partition 0's master and both slaves;
+  -- with 2 partitions that is 3 of 6 nodes and the circuit breaker (>= 50%)
+  -- trips before the no-successor rule is reached (41233191422)
+  partitions := 3
   replicas := 3
   operatorName := "flare-operator"
   debugPod := "debug-fo-order"

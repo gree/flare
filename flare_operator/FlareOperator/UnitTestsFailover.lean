@@ -58,8 +58,14 @@ def results : List (String × Bool) := Id.run do
     refill ["b", "c", "a"] ["b"] == some "c")]
   r := r ++ [("refill: ranking never admits a key the gates reject (all blocked -> none)",
     refill ["b"] ["a", "b", "c"] == none)]
-  r := r ++ [("refill: the recorded history holder still wins over the ranking",
-    refill ["b", "a"] [] [] (some "c") == some "c")]
+  -- review of 7feb0e8: spec 4 promotes the largest applied position of the
+  -- last master's epoch; a holder behind it would lose acknowledged writes
+  r := r ++ [("refill: a PROVEN ranking wins over the recorded history holder (the holder c is behind b)",
+    refill ["b", "a"] [] [] (some "c") == some "b")]
+  r := r ++ [("refill: the holder is seated when no ranked key passes the gates",
+    refill ["b"] ["b"] [] (some "c") == some "c")]
+  r := r ++ [("refill: without a proven ranking the holder still wins over map order",
+    refill [] [] [] (some "c") == some "c")]
   r := r ++ [("refill: the newest copy wins over the standby preference",
     refill ["b", "a"] [] ["b"] == some "b")]
   return r

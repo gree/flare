@@ -718,7 +718,9 @@ def sigtermHoldTest (c : Ctx) : IO TestResult := do
       let after := lines.drop (lines.length - j)
       if !(after.any (containsSubstr · "master changed on partition(s) [0]")) then
         return .fail s!"{p.master.name} was re-seated after a masterless pass, but the operator did not see a master change on partition 0 (no forced follow probe of the surviving replica)"
-    | none => c.event "no re-seat of the same key after the SIGTERM (no masterless pass to check)"
+    | none =>
+      -- the case this checks did not happen: never counted as a pass (review of 7feb0e8)
+      return .fail (notSetUp s!"no re-seat of {p.master.name} after the SIGTERM: the masterless pass -> same key back case was not exercised")
     return .pass
 
 /-- S9 (review of 4bdc83b): attempt exhaustion through the real

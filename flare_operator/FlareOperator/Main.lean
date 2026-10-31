@@ -2361,7 +2361,11 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
           let ord := FailoverOrder.order ((← recordedHistory p).map (·.2)) ((orderCopies.filter (·.1 == p)).map (·.2))
           if ord.proof != .noFollower then
             IO.eprintln s!"[flare-operator] failover order, partition {p}: {ord.describe}"
-          failoverRanked := failoverRanked ++ ord.ranked
+          -- only a PROVEN order is passed on: it ranks before the recorded
+          -- holder in the refill. An unreadable one is logged above and the
+          -- existing tiers decide (NOT LOSS-FREE).
+          if ord.proof == .proven then
+            failoverRanked := failoverRanked ++ ord.ranked
         promotionEvidenceRef.set evidence
         promotionObservedRef.set observedFor
         promotionRiskPassRef.set true

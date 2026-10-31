@@ -1323,16 +1323,17 @@ def promoteMasterlessPartition (state : FlareClusterState) (pIdx : Nat)
     (rankedKeys : List String := []) : FlareClusterState :=
   if FlareOperator.Reconciler.hasMasterForPartition state pIdx then state
   else
-    -- within ONE tier, the recorded history holder first (it still has to
-    -- satisfy that tier's own condition); then map order as before
-    -- then the follower of the last master with the largest applied position
-    -- (`rankedKeys`, FailoverOrder: it only orders what `pred` accepts)
+    -- within ONE tier (each still has to satisfy that tier's own condition):
+    -- first the PROVEN order (`rankedKeys`: the followers of the last
+    -- master's epoch by applied position, FailoverOrder, proven only — spec
+    -- 4: the largest applied sequence of that epoch is promoted, so a holder
+    -- behind it would discard acknowledged writes), then the recorded history
+    -- holder, then map order as before
     let pick := fun (pred : String × FlareNode → Bool) =>
-      (match preferKey with
-        | some k => state.nodeMap.find? (fun (kv : String × FlareNode) => kv.1 == k && pred kv)
-        | none => none).orElse (fun _ =>
-          (FlareOperator.FailoverOrder.firstRanked rankedKeys state.nodeMap pred).orElse
-            (fun _ => state.nodeMap.find? pred))
+      (FlareOperator.FailoverOrder.firstRanked rankedKeys state.nodeMap pred).orElse (fun _ =>
+        (match preferKey with
+          | some k => state.nodeMap.find? (fun (kv : String × FlareNode) => kv.1 == k && pred kv)
+          | none => none).orElse (fun _ => state.nodeMap.find? pred))
     -- SAF-10c: `excludedKeys` are followers KNOWN to hold an unusable copy
     -- (StateMachine/FollowEvidence); they are not "in sync" whatever their
     -- map state says. The data-bearing last-resort tiers below are left as
@@ -1350,8 +1351,8 @@ def promoteMasterlessPartition (state : FlareClusterState) (pIdx : Nat)
       | some k => state.nodeMap.find? (fun (kv : String × FlareNode) =>
           kv.1 == k && isActiveSlave kv && !standbyKeys.contains k)
       | none => none
-    let activeFirst := holderFirst.orElse (fun _ =>
-      FlareOperator.FailoverOrder.firstRanked rankedKeys state.nodeMap isActiveSlave)
+    let activeFirst := (FlareOperator.FailoverOrder.firstRanked rankedKeys state.nodeMap isActiveSlave).orElse
+      (fun _ => holderFirst)
     let candidate :=
       -- standby slaves are the refill choice of LAST resort (availability
       -- still wins over locality when only standby copies survive).

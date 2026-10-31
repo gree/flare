@@ -267,6 +267,12 @@ def suite : TestSuite := {
           let logs ← opLogs
           for l in (logs.splitOn "\n").filter (fun l => containsSubstr l "DUPLICATE MASTER" || containsSubstr l "claims to be a MASTER") do
             IO.eprintln s!"# {l.trim.take 300}"
+          -- every audit sample of mPod (41207217684: one CRITICAL and no
+          -- later sample in the suite's log tail to show why it never stood)
+          if !detected then
+            let full ← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 400000
+            for l in (full.splitOn "\n").filter (fun l => containsSubstr l s!"[TopologyAudit] node={mPod}." || (containsSubstr l mPod && containsSubstr l "reach")) do
+              IO.eprintln s!"# {l.trim.take 300}"
           if !detected then return .fail s!"{mPod} claimed a master the map gives to {m2}, but it was never treated as a duplicate master (120 s)"
           if (← p0Master) != some m2 then return .fail s!"the map's master changed from {m2} while the duplicate claim was handled"
           let some m2Ip ← getPodIp m2 cfg.«namespace» | return .fail s!"no IP for {m2}"

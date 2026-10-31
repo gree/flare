@@ -132,9 +132,10 @@ private def sendResponse (sock : Socket) (response : String) : IO Unit := do
     Topology broadcast is handled by Main.lean's reconcile loop, which
     actively pushes updates to all flared nodes' port 12121.
     No K8s I/O happens here — strict separation from kubectl bridge. -/
-def handleConnection (sock : Socket) (state : ServerState) : IO Unit := do
+def handleConnection (sock : Socket) (state : ServerState) (acceptedAtMs : Nat := 0) : IO Unit := do
   let bufRef ← IO.mkRef ByteArray.empty
   let mut running := true
+  let mut first := true
   while running do
     match ← readLine sock bufRef with
     | none =>
@@ -142,6 +143,12 @@ def handleConnection (sock : Socket) (state : ServerState) : IO Unit := do
     | some line =>
       -- Parse: pure (String → FlareEvent)
       IO.eprintln s!"[DEBUG] Received command: {line.take 100}"
+      -- flare-bug-first-build-node-add-timeout: where a registration's wait
+      -- goes (accept -> handler start -> first line read); flared gives up
+      -- after 1 s
+      if first && acceptedAtMs != 0 && line.startsWith "node add" then
+        IO.eprintln s!"[TcpServer] node add read {(← IO.monoMsNow) - acceptedAtMs} ms after its connection was accepted"
+      first := false
       let event := parseFlareCommand line
       IO.eprintln s!"[DEBUG] Parsed to: {toString (repr event) |>.take 150}"
       -- Atomic read-modify-write: modifyGet uses Ref.take (destructive read)
@@ -274,6 +281,7 @@ def startServer (port : UInt16) (state : ServerState) : IO Unit := do
         IO.eprintln s!"[flare-operator] accept error: {e}"
         acceptLoop fuel
       | .ok clientSocket =>
+        let acceptedAt ← IO.monoMsNow
         -- Spawn handler on its own thread (.dedicated): on the shared task
         -- pool (~one worker per CPU) the accept loops of this, the health and
         -- the metrics servers block workers for good, and a `node add` sat
@@ -282,7 +290,10 @@ def startServer (port : UInt16) (state : ServerState) : IO Unit := do
         -- master (CI 41186795576, flare-bug-first-build-node-add-timeout)
         let _ ← IO.asTask (prio := .dedicated) do
           try
-            handleConnection clientSocket state
+            let started ← IO.monoMsNow
+            if started - acceptedAt ≥ 100 then
+              IO.eprintln s!"[TcpServer] connection handler started {started - acceptedAt} ms after the accept"
+            handleConnection clientSocket state acceptedAt
           catch e =>
             IO.eprintln s!"[flare-operator] connection error: {e}"
           -- handleConnection already unregisters on exit; no extra cleanup needed

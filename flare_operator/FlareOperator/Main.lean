@@ -35,6 +35,7 @@ import FlareOperator.StateMachine.StatsObservation
 import FlareOperator.StateMachine.FollowEvidence
 import FlareOperator.StateMachine.FailoverOrder
 import FlareOperator.StateMachine.UnreachableNode
+import FlareOperator.StateMachine.DuplicateMaster
 import FlareOperator.StateMachine.NodeMapRecovery
 import FlareOperator.Kubectl
 import FlareOperator.Server.TcpServer
@@ -1394,6 +1395,11 @@ initialize reachProbedAtRef : IO.Ref Nat ← IO.mkRef 0
 initialize downByReachRef : IO.Ref (List String) ← IO.mkRef []
 /-- The last reachability probe reached NO node (UnreachableNode's guard). -/
 initialize reachGuardRef : IO.Ref Bool ← IO.mkRef false
+/-- spec 13: node -> when its conflicting master claim was first seen (ms),
+    and the nodes whose claim stood for DuplicateMaster.holdMs (treated as
+    down with the unreachable ones). -/
+initialize duplicateFirstSeenRef : IO.Ref (List (String × Nat)) ← IO.mkRef []
+initialize duplicateDownRef : IO.Ref (List String) ← IO.mkRef []
 
 /-- When the store was last loaded (monotonic ms; 0 = never). -/
 initialize historyLoadedAtRef : IO.Ref Nat ← IO.mkRef 0
@@ -2140,7 +2146,7 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       -- spec 12: nodes the OPERATOR cannot reach join the same list (flarei's
       -- retry count; a master without a reachable successor is kept, see
       -- unhealthyMastersKept; no action at all when no node is reachable)
-      let unreachableDown ← unreachableDownRef.get
+      let unreachableDown := (← unreachableDownRef.get) ++ (← duplicateDownRef.get).filter (!(← unreachableDownRef.get).contains ·)
       let unhealthyKeys := (newUnready.filter (fun kv => kv.2 ≥ unreadyDeadCycles)).map Prod.fst
         ++ unreachableDown.filter (fun k => !(newUnready.filter (fun kv => kv.2 ≥ unreadyDeadCycles)).any (·.1 == k))
       for (k, n) in newUnready do
@@ -3196,7 +3202,7 @@ private def runReachabilityStep (stateRef : IO.Ref FlareClusterState)
   reachProbedAtRef.set now
   let probeAddrs := (← podAddrsRef.get).filter (·.2 != "")
   let probeTasks ← probeAddrs.mapM fun (_, ip) =>
-    IO.asTask (Server.probeNodeReachable ip 12121 FlareOperator.UnreachableNode.monitorReadTimeoutMs)
+    IO.asTask (prio := .dedicated) (Server.probeNodeReachable ip 12121 FlareOperator.UnreachableNode.monitorReadTimeoutMs)
   let mut probed : List (String × Bool) := []
   for ((key, _), t) in probeAddrs.zip probeTasks do
     let ok ← match ← IO.wait t with
@@ -3571,6 +3577,27 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
       verdict := verdict }
     topologyAuditRef.set (TopologyObservation.record audit auditKeys sample)
     IO.eprintln s!"[TopologyAudit] node={key} uid={after} desired={finalVersion} reported={version} verdict={verdict.label}"
+    -- spec 13: a master claim the committed map gives to ANOTHER node; it is
+    -- re-sent the map below (behind) and treated as down if the claim still
+    -- stands after DuplicateMaster.holdMs. Not while no node is reachable.
+    if !(← reachGuardRef.get) then
+      -- only on a map version OTHER than the committed one (behind or
+      -- ahead): on the current map its view is the operator's own
+      let conflict := match verdict with
+        | .unknown => none
+        | .current => some false
+        | .behind | .ahead => (reply.bind DuplicateMaster.ownClaim).map (DuplicateMaster.conflicts finalState key)
+      let seenBefore := (← duplicateFirstSeenRef.get).any (·.1 == key)
+      let (fs, down) := DuplicateMaster.step (← duplicateFirstSeenRef.get) key conflict (← IO.monoMsNow)
+      duplicateFirstSeenRef.set fs
+      if conflict == some true && !seenBefore then
+        IO.eprintln s!"[flare-operator] CRITICAL: {key} claims to be a MASTER the committed map v{finalVersion} gives to another node (reports v{version}); the map is re-sent, and it is treated as down if the claim still stands in {DuplicateMaster.holdMs / 1000} s"
+      if down && !((← duplicateDownRef.get).contains key) then
+        duplicateDownRef.modify (· ++ [key])
+        IO.eprintln s!"[flare-operator] DUPLICATE MASTER: {key} still claims a master the committed map gives to another node after {DuplicateMaster.holdMs / 1000} s -> treated as down (proxy); the map's master is kept"
+      if conflict == some false && (← duplicateDownRef.get).contains key then
+        duplicateDownRef.modify (·.filter (· != key))
+        IO.eprintln s!"[flare-operator] DUPLICATE MASTER: {key} no longer claims a conflicting master role"
     match verdict with
     | .behind =>
       pendingBroadcastRef.modify fun p => some (p.getD finalVersion)

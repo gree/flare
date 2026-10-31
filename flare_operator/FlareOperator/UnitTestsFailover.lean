@@ -7,6 +7,7 @@
 import FlareOperator.StateMachine.FailoverOrder
 import FlareOperator.StateMachine.K8sReconciler
 import FlareOperator.StateMachine.UnreachableNode
+import FlareOperator.StateMachine.DuplicateMaster
 
 namespace FlareOperator.UnitTestsFailover
 
@@ -109,6 +110,27 @@ def results : List (String × Bool) := Id.run do
     (kept ["m", "s"]).isEmpty)]
   r := r ++ [("unreachable slave: down (failed over to proxy), never kept",
     (kept ["s"]).isEmpty)]
+  -- spec 13: a master claim the committed map gives to another node
+  let dm : FlareClusterState :=
+    ({ nodeMap := [("a", node "a" .Master .Active 0), ("b", node "b" .Slave .Active 0)],
+       nodeMapVersion := 7 } : FlareClusterState).rebuildPartitionMap
+  let reply := fun (role : String) (part : Int) => s!"STAT own_role {role}\r\nSTAT own_partition {part}\r\nSTAT node_map_version 6\r\nEND\r\n"
+  r := r ++ [("duplicate master: a node claiming the master the map gives to ANOTHER node conflicts; the map's own master, a slave claim or no partition does not",
+    (DuplicateMaster.ownClaim (reply "master" 0)).map (DuplicateMaster.conflicts dm "b") == some true
+      && (DuplicateMaster.ownClaim (reply "master" 0)).map (DuplicateMaster.conflicts dm "a") == some false
+      && (DuplicateMaster.ownClaim (reply "slave" 0)).map (DuplicateMaster.conflicts dm "b") == some false
+      && (DuplicateMaster.ownClaim (reply "proxy" (-1))).map (DuplicateMaster.conflicts dm "b") == some false
+      && DuplicateMaster.ownClaim "STAT own_role master\r\nEND\r\n" == none)]
+  let h := DuplicateMaster.holdMs
+  r := r ++ [("duplicate master: down only after the claim stood holdMs (15 s, flarei's 3 x 5 s); fast passes do not shorten it",
+    h == 15000
+      && (DuplicateMaster.step [] "b" (some true) 1000) == ([("b", 1000)], false)
+      && (DuplicateMaster.step [("b", 1000)] "b" (some true) 1200).2 == false
+      && (DuplicateMaster.step [("b", 1000)] "b" (some true) (1000 + h)).2 == true)]
+  r := r ++ [("duplicate master: a claim that ends clears it; an unreadable sample keeps what was known and never starts a count",
+    (DuplicateMaster.step [("b", 1000)] "b" (some false) 99000) == ([], false)
+      && (DuplicateMaster.step [] "b" none 99000) == ([], false)
+      && (DuplicateMaster.step [("b", 1000)] "b" none (1000 + h)).2 == true)]
   return r
 
 end FlareOperator.UnitTestsFailover

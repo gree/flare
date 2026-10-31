@@ -147,8 +147,20 @@ def broadcastTopologyToAllPods (crName ns : String) (version : Nat) (nodes : Lis
   -- Note: Terminating pods are INTENTIONALLY included (graceful drain sends
   -- the demotion map to the still-alive leaving pod); the deadline is what
   -- distinguishes "Terminating but reachable" from "gone".
-  let tasks ← pods.mapM fun pod =>
+  -- TEST SEAM (spec 13 E2E). Unset in production, this is one getEnv per
+  -- broadcast: pods named in the file FLARE_TEST_BROADCAST_SKIP_FILE (one per
+  -- line) are not sent the map, so that node stays on the map it has — the
+  -- duplicate-master claim the audit must detect. The skip is unconfirmed.
+  let skip ← match ← IO.getEnv "FLARE_TEST_BROADCAST_SKIP_FILE" with
+    | some f =>
+      try pure (((← IO.FS.readFile f).splitOn "\n").map String.trim |>.filter (· != ""))
+      catch _ => pure []
+    | none => pure []
+  if !skip.isEmpty then
+    IO.eprintln s!"[TopologyBroadcast] TEST SEAM: not sending v{version} to {skip}"
+  let tasks ← (pods.filter (fun p => !skip.contains p.name)).mapM fun pod =>
     IO.asTask (sendNodeSyncToNode pod.ip 12121 version nodes)
+  let skippedAny := pods.any (fun p => skip.contains p.name)
   let deadline := (← IO.monoMsNow) + 15000
   let mut confirmed := true
   -- Belt over TcpClient's own deadlines: the broadcast runs synchronously
@@ -172,6 +184,7 @@ def broadcastTopologyToAllPods (crName ns : String) (version : Nat) (nodes : Lis
       confirmed := false
       IO.eprintln "[TopologyBroadcast] WARNING: send task exceeded 15s — abandoning it (bounded broadcast)"
 
+  if skippedAny then confirmed := false
   IO.eprintln s!"[TopologyBroadcast] Broadcast attempt complete (v{version}); all targets reply-confirmed={confirmed}"
   return confirmed
 

@@ -1385,6 +1385,8 @@ initialize downAtCommitRef : IO.Ref (List String) ← IO.mkRef []
     (StateMachine/UnreachableNode, spec 12): set once per pass before the
     FSM, read by the pod listing as additional unhealthy keys. -/
 initialize unreachableDownRef : IO.Ref (List String) ← IO.mkRef []
+/-- When the reachability step last probed (monotonic ms; 0 = never). -/
+initialize reachProbedAtRef : IO.Ref Nat ← IO.mkRef 0
 
 /-- When the store was last loaded (monotonic ms; 0 = never). -/
 initialize historyLoadedAtRef : IO.Ref Nat ← IO.mkRef 0
@@ -3177,6 +3179,14 @@ private def repairKeysIfAvailable (availableRef : IO.Ref Bool) (ledgerRef : IO.R
 private def runReachabilityStep (stateRef : IO.Ref FlareClusterState)
     (podAddrsRef : IO.Ref (List (String × String)))
     (unreachCyclesRef : IO.Ref (List (String × Nat))) : IO Unit := do
+  -- flarei's interval between probes, NOT one per pass: passes run every
+  -- ~100 ms while a handover is in flight, and three failures there would
+  -- mark a node down in well under a second. Between probes the last
+  -- verdict (unreachableDownRef) stands.
+  let now ← IO.monoMsNow
+  let last ← reachProbedAtRef.get
+  if last != 0 && now - last < FlareOperator.UnreachableNode.monitorIntervalSec * 1000 then return
+  reachProbedAtRef.set now
   let probeAddrs := (← podAddrsRef.get).filter (·.2 != "")
   let probeTasks ← probeAddrs.mapM fun (_, ip) =>
     IO.asTask (Server.probeNodeReachable ip 12121 FlareOperator.UnreachableNode.monitorReadTimeoutMs)

@@ -278,6 +278,8 @@ def results : List (String × Bool) := Id.run do
               ({ moves := [mv "slave" .unserved] } : Ledger).heldKeys == ["k0"]
               && ({ moves := [mv "master" .handingOver] } : Ledger).heldKeys == ["k1", "k0"]
               && ({ moves := [mv "master" .pending] } : Ledger).heldKeys == ["k1"]
+              -- 41136280524 C2: the slave demoted while pending stays held
+              && ({ moves := [mv "slave" .pending] } : Ledger).heldKeys.contains "k0"
               && ({ moves := [mv "slave" .resyncing] } : Ledger).heldKeys == []
               && ({ moves := [mv "slave" .done] } : Ledger).heldKeys == [])]
   r := r ++ [("node move: trim keeps the unfinished moves and the last few finished",

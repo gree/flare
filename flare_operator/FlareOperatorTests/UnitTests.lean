@@ -35,11 +35,11 @@ import FlareOperator.StateMachine.RebuildConcurrency
 import FlareOperator.StateMachine.AuthoritativeHistory
 import FlareOperator.StateMachine.CopyDiscardApproval
 import FlareOperator.StateMachine.PromotionEvidence
-import FlareOperator.UnitTestsHandover
-import FlareOperator.UnitTestsRolling
-import FlareOperator.UnitTestsNodeGuard
-import FlareOperator.UnitTestsFailover
-import FlareOperator.UnitTestsNodeMove
+import FlareOperatorTests.UnitTestsHandover
+import FlareOperatorTests.UnitTestsRolling
+import FlareOperatorTests.UnitTestsNodeGuard
+import FlareOperatorTests.UnitTestsFailover
+import FlareOperatorTests.UnitTestsNodeMove
 
 open FlareOperator.K8s
 open FlareOperator.ReplicaRepair

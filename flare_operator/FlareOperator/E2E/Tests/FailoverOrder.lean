@@ -56,7 +56,9 @@ private def cfg : ClusterConfig := {
   storageBackend := "rocksdb"
   usePvc := true
   extraFlaredConf := "repl-identity-forward = true\nrepl-follow-enabled = true\nrepl-follow-poll-interval-usec = 200000"
-  operatorEnv := [("FLARE_STATS_PROBE_INTERVAL_MS", "15000")]
+  operatorEnv := [("FLARE_STATS_PROBE_INTERVAL_MS", "15000"),
+    -- spec 13 test: pods named in this file are not sent the node map
+    ("FLARE_TEST_BROADCAST_SKIP_FILE", "/tmp/bskip")]
 }
 
 /-- every kind node: pods may be placed on any of them (the multi-node
@@ -148,6 +150,20 @@ private def keysMissing (ip pfx : String) (n : Nat) : IO Nat := do
     | none => missing := missing + 1
   return missing
 
+/-- `sh -c cmd` in the operator pod. -/
+private def opExec (cmd : String) : IO (Except String String) := do
+  match ← kubectl ["get", "pods", "-n", cfg.«namespace», "-l", s!"app={cfg.operatorName}", "-o", "jsonpath={.items[0].metadata.name}"] with
+  | .ok o => kubectl ["exec", "-n", cfg.«namespace», o.trim, "--", "sh", "-c", cmd]
+  | .error e => return .error e
+
+private def ownRole (ip : String) : IO (Option String) := do
+  match ← execInDebugPod cfg.debugPod cfg.«namespace» s!"printf 'stats\\r\\n' | nc -w 3 {ip} {cfg.flarePort}" with
+  | .ok o => return (o.splitOn "\n").findSome? fun l =>
+      match (l.trim.replace "\r" "").splitOn " " with
+      | ["STAT", "own_role", v] => some v
+      | _ => none
+  | .error _ => return none
+
 private def countLines (logs needle1 needle2 : String) : Nat :=
   ((logs.splitOn "\n").filter fun l => containsSubstr l needle1 && containsSubstr l needle2).length
 
@@ -218,6 +234,66 @@ def suite : TestSuite := {
           return .pass
         finally
           healLink opIp mIp },
+    { name := "(spec 13) a master the committed map no longer names keeps claiming it (its flared frozen with SIGSTOP until failed over as NotReady, then resumed with the map withheld from it): detected and treated as down after 15 s; the map's master keeps serving (writes acknowledged); once it gets the map the claim ends"
+      run := do
+        if !(← graceOver) then return .fail "the operator never logged the end of its startup grace period"
+        if !(← waitP0Stable) then return .fail "precondition: partition 0 is not stable"
+        let some mPod ← p0Master | return .fail "no Active P0 master in the operator's map"
+        let some mIp ← getPodIp mPod cfg.«namespace» | return .fail s!"no IP for {mPod}"
+        -- freeze flared from the kind node (a signal to the container's
+        -- pid 1 from inside its namespace is ignored): the kernel still
+        -- accepts TCP connects, so rule 12 does not mark it unreachable;
+        -- its readiness probe fails and the NotReady path fails it over
+        let freeze := fun (sig : String) => do
+          let node ← match ← kubectl ["get", "pod", mPod, "-n", cfg.«namespace», "-o", "jsonpath={.spec.nodeName}"] with
+            | .ok o => pure o.trim
+            | .error e => return Except.error e
+          let cid ← match ← kubectl ["get", "pod", mPod, "-n", cfg.«namespace», "-o", "jsonpath={.status.containerStatuses[0].containerID}"] with
+            | .ok o => pure ((o.trim.splitOn "://").getLast!)
+            | .error e => return Except.error e
+          hostCmd "docker" ["exec", node, "sh", "-c",
+            s!"kill -{sig} $(crictl inspect --output go-template --template '\{\{.info.pid}}' {cid})"]
+        match ← opExec s!"echo {mPod} > /tmp/bskip" with
+        | .error e => return .fail s!"could not arm the broadcast skip: {e}"
+        | .ok _ => pure ()
+        try
+          match ← freeze "STOP" with
+          | .error e => return .fail s!"could not freeze {mPod}'s flared: {e}"
+          | .ok _ => pure ()
+          let promoted ← waitForCondition s!"a new P0 master after {mPod} froze" 240 do
+            match ← p0Master with
+            | some m => return m != mPod
+            | none => return false
+          if !promoted then
+            discard <| freeze "CONT"
+            return .fail s!"precondition: {mPod} was not failed over while frozen (NotReady path)"
+          match ← freeze "CONT" with
+          | .error e => return .fail s!"could not resume {mPod}'s flared: {e}"
+          | .ok _ => pure ()
+          let some m2 ← p0Master | return .fail "no master after the failover"
+          -- reachable again, but on its old map: it still claims master
+          let claims ← waitForCondition s!"{mPod} still reports own_role master" 30 do
+            return (← ownRole mIp) == some "master"
+          if !claims then return .fail s!"precondition: {mPod} does not claim master after the heal (it got a map anyway?)"
+          let detected ← waitForCondition s!"the operator treats {mPod} as a duplicate master" 120 do
+            return countLines (← opLogs) s!"DUPLICATE MASTER: {mPod}" "treated as down" > 0
+          let logs ← opLogs
+          for l in (logs.splitOn "\n").filter (fun l => containsSubstr l "DUPLICATE MASTER" || containsSubstr l "claims to be a MASTER") do
+            IO.eprintln s!"# {l.trim.take 300}"
+          if !detected then return .fail s!"{mPod} claimed a master the map gives to {m2}, but it was never treated as a duplicate master (120 s)"
+          if (← p0Master) != some m2 then return .fail s!"the map's master changed from {m2} while the duplicate claim was handled"
+          let some m2Ip ← getPodIp m2 cfg.«namespace» | return .fail s!"no IP for {m2}"
+          let acked ← writeKeys cfg.debugPod cfg.«namespace» m2Ip cfg.flarePort "dup_new" 20
+          if acked != 20 then return .fail s!"only {acked}/20 writes acknowledged by the map's master {m2}"
+          discard <| opExec "rm -f /tmp/bskip"
+          let ended ← waitForCondition s!"{mPod} no longer claims master once it gets the map" 120 do
+            return (← ownRole mIp) != some "master"
+          if !ended then return .fail s!"{mPod} still claims master 120 s after the map was no longer withheld"
+          if !(← waitP0Stable) then return .fail "partition 0 did not return to a master and two Active slaves"
+          return .pass
+        finally
+          discard <| opExec "rm -f /tmp/bskip"
+          discard <| freeze "CONT" },
     { name := "operator ⇄ EVERY flare pod cut (nothing reachable: the operator's own network is suspect): nothing is marked down, the master is unchanged for 90 s and the 'cannot reach ANY' alert is logged"
       run := do
         if !(← graceOver) then return .fail "the operator never logged the end of its startup grace period"

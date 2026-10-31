@@ -1284,6 +1284,79 @@ def cordonTwoNodesTest (c : Ctx) : IO TestResult := do
       fails := fails ++ ["the pair is not redundant after the cordons were removed"]
     return if fails.isEmpty then .pass else .fail (String.intercalate "; " fails)
 
+/-- the restart count of the pod's flared container -/
+private def podRestartCount (c : Ctx) (pod : String) : IO (Option Nat) := do
+  match ← kubectl ["get", "pod", pod, "-n", c.cfg.«namespace», "-o", "jsonpath={.status.containerStatuses[0].restartCount}"] with
+  | .ok o => return o.trim.toNat?
+  | .error _ => return none
+
+/-- the pod's flared container is ready -/
+private def podContainerReady (c : Ctx) (pod : String) : IO Bool := do
+  match ← kubectl ["get", "pod", pod, "-n", c.cfg.«namespace», "-o", "jsonpath={.status.containerStatuses[0].ready}"] with
+  | .ok o => return o.trim == "true"
+  | .error _ => return false
+
+/-- C9 (review of 09ce11a): the quiet check survives a flared restart. The
+    replica's worker is cordoned while a client holds a connection to the
+    replica (so the move cannot be released); once its serving label is
+    removed, flared is restarted in the pod (its request counter starts at 0)
+    and one request is sent to the new process. The move must not be released
+    until a full quiet interval (10 s) after that request: the restarted
+    process's counter, below the old one, starts the window again. -/
+def cordonRestartQuietTest (c : Ctx) : IO TestResult := do
+  match ← cordonPrecond c with
+  | .error e => return .fail e
+  | .ok p =>
+    c.conditions ["C9: minCopies 2; cordon of the replica's worker with a client connection held, flared restarted after the serving label is removed, one request to the new process (no drain)"]
+    let ns := c.cfg.«namespace»
+    let opLogs := do return (← kubectlLogsLabel s!"app={c.cfg.operatorName}" ns 30000)
+    let released := do
+      return ((← opLogs).splitOn "\n").any fun l => containsSubstr l s!"NODE MOVE {p.replica.name}@" && containsSubstr l "-> released"
+    -- a held client connection keeps curr_connections > 0: never released
+    match ← execInDebugPod c.cfg.debugPod ns s!"setsid sh -c 'sleep 900 | nc {p.replica.ip} {c.cfg.flarePort}' >/dev/null 2>&1 < /dev/null &" with
+    | .error e => return .fail (notSetUp s!"could not hold a client connection: {e.take 200}")
+    | .ok _ => pure ()
+    let mut fails : List String := []
+    try
+      match ← kubectl ["cordon", p.replica.node] with
+      | .error e => return .fail (notSetUp s!"cordon failed: {e.take 200}")
+      | .ok _ => pure ()
+      let unlabeled ← waitForCondition s!"the serving label of {p.replica.name} is removed" 180 do
+        return containsSubstr (← opLogs) s!"NODE MOVE {p.replica.name}: serving label removed"
+      if !unlabeled then return .fail (notSetUp "the serving label was never removed")
+      if ← released then return .fail (notSetUp "the move was released while a client connection was held: the restart case was not exercised")
+      let restarts0 := (← podRestartCount c p.replica.name).getD 0
+      match ← kubectl ["exec", "-n", ns, p.replica.name, "--", "sh", "-c", "kill -TERM 1"] with
+      | .error e => return .fail (notSetUp s!"could not restart flared in {p.replica.name}: {e.take 200}")
+      | .ok _ => pure ()
+      let back ← waitForCondition s!"flared in {p.replica.name} restarted and answers" 120 do
+        let r := (← podRestartCount c p.replica.name).getD 0
+        return r > restarts0 && (← podContainerReady c p.replica.name)
+      if !back then return .fail (notSetUp "flared did not restart")
+      if ← released then
+        c.event "released before the request to the new process"
+      -- one request to the NEW process, then watch the move every second
+      let ok ← memcachedSet c.cfg.debugPod ns p.replica.ip c.cfg.flarePort "c9_after_restart" "v"
+      let t0 ← IO.monoMsNow
+      c.event s!"request to the restarted flared: stored={ok}"
+      let mut releasedAt : Option Nat := none
+      for _ in [0:60] do
+        if ← released then
+          releasedAt := some ((← IO.monoMsNow) - t0)
+          break
+        IO.sleep 1000
+      c.event s!"released {releasedAt.map (s!"{·} ms") |>.getD "not within 60 s"} after the request"
+      match releasedAt with
+      | some ms => if ms < 8000 then fails := fails ++ [s!"the move was released {ms} ms after a request to the restarted flared (quiet interval 10 s): the old counter baseline hid it"]
+      | none => pure ()
+      for x in ((← opLogs).splitOn "\n").filter (fun x => containsSubstr x "NODE MOVE") do c.art "cordon-move.txt" x
+    finally
+      discard <| execInDebugPod c.cfg.debugPod ns "pkill -f 'sleep 900' || true"
+      uncordon p.replica.node
+    if !(← waitForCondition "the pair is redundant again" 600 (redundant c none)) then
+      fails := fails ++ ["the pair is not redundant after the uncordon"]
+    return if fails.isEmpty then .pass else .fail (String.intercalate "; " fails)
+
 /-- C8: the operator is away (scaled to 0): the node guard webhook fails
     closed, so cordon + drain of the replica's worker cannot evict it; the
     replica keeps its pod. The operator comes back and the pair is redundant. -/
@@ -1340,6 +1413,7 @@ inductive Scenario where
   | cordonOperatorRestart
   | cordonTwoNodes
   | cordonNoOperator
+  | cordonRestartQuiet
   deriving BEq
 
 def Scenario.slug : Scenario → String
@@ -1364,6 +1438,7 @@ def Scenario.slug : Scenario → String
   | .cordonOperatorRestart => "cordon-operator-restart"
   | .cordonTwoNodes => "cordon-two-nodes"
   | .cordonNoOperator => "cordon-no-operator"
+  | .cordonRestartQuiet => "cordon-restart-quiet"
 
 def Scenario.title : Scenario → String
   | .op .deleteMaster => "(S1) kubectl delete pod of the MASTER under a client-like load: the pod is replaced; 0 write errors, 0 acknowledged writes missing on the final master and replica"
@@ -1384,6 +1459,7 @@ def Scenario.title : Scenario → String
   | .cordonNoSuccessor => "(C5) cordon + drain of the master's worker while its successor cannot catch up (master <-> replica cut): the handover aborts and never completes, the master stays on the same pod, the evictions are held (the drain times out); redundant again after the cut and the cordon are removed"
   | .cordonOperatorRestart => "(C6) the operator restarts in the middle of a move (replica's worker cordoned, move proxied): the new operator resumes the recorded move (no second move of the pod), a drain then completes and the pod is recreated on another worker; redundant again"
   | .cordonTwoNodes => "(C7) the master's and the replica's workers cordoned together (two copies): neither has a real copy left on an uncordoned node, so no move starts, both are reported blocked, both pods keep their UID; redundant again after the cordons are removed"
+  | .cordonRestartQuiet => "(C9) flared restarts after the serving label is removed (a client connection held, so not yet released) and gets one request: the move is not released until a full quiet interval after it"
   | .cordonNoOperator => "(C8) the operator is away (scaled to 0): the node guard fails closed, cordon + drain of the replica's worker evicts nothing (the drain fails), the replica keeps its pod; redundant after the operator returns"
   | .cordonCancel => "(C4) cordon of the replica's worker, uncordon once its move is proxied: the move is cancelled, the replica gets the serving label back on the same pod and is a synced replica again"
   | .sigtermHold => "(S6) a sync client write held on a cut replica across a SIGTERM (cut removed 40 s after it): the client gets STORED and the replica holds the value"
@@ -1408,7 +1484,7 @@ private def scenarioSuite (sc : Scenario) (tmpfs : Bool) : TestSuite :=
     -- C1/C2: two copies, so minCopies 2 (the accepted risk of a 2-copy pair)
     else if sc == .op .cordonMaster || sc == .op .cordonReplica then
       { cfg0 with nodeGuard := true, nodeReplacement := true, nodeReplacementMinCopies := 2 }
-    else if sc == .cordonNoSuccessor || sc == .cordonOperatorRestart || sc == .cordonTwoNodes || sc == .cordonNoOperator then
+    else if sc == .cordonNoSuccessor || sc == .cordonOperatorRestart || sc == .cordonTwoNodes || sc == .cordonNoOperator || sc == .cordonRestartQuiet then
       { cfg0 with nodeGuard := true, nodeReplacement := true, nodeReplacementMinCopies := 2 }
     else if sc == .cordonCancel then
       { cfg0 with nodeGuard := true, nodeReplacement := true, nodeReplacementMinCopies := 2 }
@@ -1427,7 +1503,7 @@ private def scenarioSuite (sc : Scenario) (tmpfs : Bool) : TestSuite :=
       cleanupCluster cfg
     onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
     afterEach := fun i => saveFullLogs cfg.«namespace» s!"after-test-{i}"
-    tests := [{ name := sc.title, run := match sc with | .op o => switchTest c o | .gate => gateTest c | .sigtermHold => sigtermHoldTest c | .abortExhaust => abortExhaustTest c | .nodeGuard => nodeGuardTest c | .cordonBlocked => cordonBlockedTest c | .cordonCancel => cordonCancelTest c | .cordonNoSuccessor => cordonNoSuccessorTest c | .cordonOperatorRestart => cordonOperatorRestartTest c | .cordonTwoNodes => cordonTwoNodesTest c | .cordonNoOperator => cordonNoOperatorTest c }] }
+    tests := [{ name := sc.title, run := match sc with | .op o => switchTest c o | .gate => gateTest c | .sigtermHold => sigtermHoldTest c | .abortExhaust => abortExhaustTest c | .nodeGuard => nodeGuardTest c | .cordonBlocked => cordonBlockedTest c | .cordonCancel => cordonCancelTest c | .cordonNoSuccessor => cordonNoSuccessorTest c | .cordonOperatorRestart => cordonOperatorRestartTest c | .cordonTwoNodes => cordonTwoNodesTest c | .cordonNoOperator => cordonNoOperatorTest c | .cordonRestartQuiet => cordonRestartQuietTest c }] }
 
 def scenarios : List Scenario := [.op .deleteMaster, .op .rollingRestart, .op .rollBoth, .op .drainMaster, .gate, .sigtermHold, .op .deleteMasterSaveFail, .op .deleteMasterAbortRetry, .abortExhaust, .nodeGuard, .op .deleteMasterLeaseTakeover, .op .deleteMasterObserveFail, .op .helmUpgrade]
 
@@ -1435,6 +1511,6 @@ def scenarios : List Scenario := [.op .deleteMaster, .op .rollingRestart, .op .r
 def switchSuites : List TestSuite :=
   scenarios.map (fun sc => scenarioSuite sc false) ++ scenarios.map (fun sc => scenarioSuite sc true)
     -- the cordon move needs storage that can leave its node: tmpfs only
-    ++ [Scenario.op .cordonMaster, .op .cordonReplica, .cordonBlocked, .cordonCancel, .cordonNoSuccessor, .cordonOperatorRestart, .cordonTwoNodes, .cordonNoOperator].map (fun sc => scenarioSuite sc true)
+    ++ [Scenario.op .cordonMaster, .op .cordonReplica, .cordonBlocked, .cordonCancel, .cordonNoSuccessor, .cordonOperatorRestart, .cordonTwoNodes, .cordonNoOperator, .cordonRestartQuiet].map (fun sc => scenarioSuite sc true)
 
 end FlareOperator.E2E.Tests.NodeOpsSwitch

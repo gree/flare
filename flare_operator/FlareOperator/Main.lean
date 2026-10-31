@@ -3594,6 +3594,10 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
         IO.eprintln s!"[flare-operator] CRITICAL: {key} claims to be a MASTER the committed map v{finalVersion} gives to another node (reports v{version}); the map is re-sent, and it is treated as down if the claim still stands in {DuplicateMaster.holdMs / 1000} s"
       if down && !((← duplicateDownRef.get).contains key) then
         duplicateDownRef.modify (· ++ [key])
+        -- a live flared marked Down leaves Down only by re-registering: it is
+        -- restarted as soon as it answers (4e), which also hands it the
+        -- current map (41200694530: Down 9 min until the stuck-down wait)
+        downByReachRef.modify fun l => if l.contains key then l else l ++ [key]
         IO.eprintln s!"[flare-operator] DUPLICATE MASTER: {key} still claims a master the committed map gives to another node after {DuplicateMaster.holdMs / 1000} s -> treated as down (proxy); the map's master is kept"
       if conflict == some false && (← duplicateDownRef.get).contains key then
         duplicateDownRef.modify (·.filter (· != key))

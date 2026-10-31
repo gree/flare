@@ -458,7 +458,8 @@ nodeReplacement:
   # the client Service must stop reaching the pod within this many seconds,
   # else the move holds (the pod stays a proxy, alert FlareCordonMoveHeld)
   drainWaitSeconds: 120
-  # no new client connection for this long (total_connections)
+  # no new client request for this long (flared client_requests, its baseline
+  # bound to the flared process; total_connections on an older flared)
   quietSeconds: 10
   # no eviction this long after the release: the operator deletes the pod itself
   evictWaitSeconds: 60

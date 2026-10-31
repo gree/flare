@@ -135,7 +135,7 @@ spec:
           labels:
             severity: critical
           annotations:
-            summary: "Flare cluster {{`{{ $labels.cluster }}`}}: operator cannot reach a Ready node — it is running on a stale topology"
+            summary: "Flare cluster {{`{{ $labels.cluster }}`}}: operator cannot reach a Ready node — not failed over (a master kept without a reachable successor, or the guard: no node reachable)"
             runbook: docs/RUNBOOK.md#node-unreachable
 
         # Master and replica key counts have drifted apart. Live replication
@@ -354,5 +354,5 @@ spec:
             severity: warning
           annotations:
             summary: "Flare pod {{`{{ $labels.pod }}`}}: last successful backup is stale"
-            runbook: docs/BACKUP_RESTORE.md#monitoring
+            runbook: docs/RUNBOOK.md#backup-stale
 {{- end }}

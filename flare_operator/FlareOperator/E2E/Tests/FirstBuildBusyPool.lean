@@ -67,6 +67,11 @@ def suite : TestSuite := {
           return p0.any (fun e => e.role == 0 && e.state == 0) && p0.any (fun e => e.role == 1 && e.state == 0)
         let rs ← restarts
         IO.eprintln s!"# flared restarts: {rs}"
+        -- the node add timings (7d00123) on a pass as well: the operator's log
+        -- reaches the job log only on a failure (41208964188 had none)
+        let full ← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 400000
+        for l in (full.splitOn "\n").filter (containsSubstr · "[TcpServer]") |>.take 40 do
+          IO.eprintln s!"# {l.trim.take 300}"
         if !built then return .fail s!"partition 0 never got an Active master and an Active slave (restarts {rs})"
         if rs.length != cfg.partitions * cfg.replicas then return .fail s!"precondition: expected {cfg.partitions * cfg.replicas} flared pods, saw {rs}"
         if rs.any (·.2 > 0) then return .fail s!"a flared pod restarted during the first build (its node add went unanswered?): {rs}"

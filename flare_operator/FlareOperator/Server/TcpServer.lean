@@ -44,6 +44,13 @@ initialize registrationGateRef : IO.Ref (Option String) ← IO.mkRef none
     streak of the old membership ends; CI 37908698742). -/
 initialize leftActiveRef : IO.Ref (List String) ← IO.mkRef []
 
+/-- TEST SEAM (flare-bug-first-build-node-add-timeout). Unset in production.
+    With FLARE_TEST_DROP_FIRST_NODE_ADD set, the first `node add` of this
+    process is applied but answered by closing the connection: flared gives
+    up on its registration and restarts, as when it read nothing within 1 s
+    (41211110343). Once per process. -/
+initialize firstNodeAddDroppedRef : IO.Ref Bool ← IO.mkRef false
+
 /-- Encapsulates the shared mutable state for the TCP server.
     All fields are IO.Ref for thread-safe access from concurrent handlers.
     The CRD ref is read-only from the TCP server's perspective (updated
@@ -244,18 +251,33 @@ def handleConnection (sock : Socket) (state : ServerState) (acceptedAtMs : Nat :
         | _ => pure ()
       | _ => pure ()
       -- Respond to the originating client
-      match response with
-      | .CloseConnection =>
+      let isAdd := match event with
+        | .NodeAdd .. => true
+        | _ => false
+      let dropAdd ← if !isAdd then pure false else do
+        match ← IO.getEnv "FLARE_TEST_DROP_FIRST_NODE_ADD" with
+        | some v =>
+          if v != "" && v != "0" then
+            let already ← firstNodeAddDroppedRef.modifyGet fun d => (d, true)
+            pure !already
+          else pure false
+        | none => pure false
+      if dropAdd then
+        IO.eprintln "[flare-operator] TEST SEAM: the first node add was applied and its connection closed unanswered (FLARE_TEST_DROP_FIRST_NODE_ADD)"
         running := false
-      | _ =>
-        let payload := serializeResponse response
-        -- Log node list payloads to debug partition=-1 issue
-        match event with
-        | .NodeAdd .. | .NodeSync .. =>
-          let preview := payload.take 500 |>.replace "\r\n" " | "
-          IO.eprintln s!"[DEBUG] Sending response: {preview}"
-        | _ => pure ()
-        sendResponse sock payload
+      else
+        match response with
+        | .CloseConnection =>
+          running := false
+        | _ =>
+          let payload := serializeResponse response
+          -- Log node list payloads to debug partition=-1 issue
+          match event with
+          | .NodeAdd .. | .NodeSync .. =>
+            let preview := payload.take 500 |>.replace "\r\n" " | "
+            IO.eprintln s!"[DEBUG] Sending response: {preview}"
+          | _ => pure ()
+          sendResponse sock payload
 
 -- ===========================================================================
 -- Server Entry Point

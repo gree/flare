@@ -58,6 +58,7 @@ def main (args : List String) : IO UInt32 :=
     Tests.Failover.suite,
     Tests.FailoverOrder.suite,
     Tests.FirstBuildBusyPool.suite,
+    Tests.FirstBuildBusyPool.suiteDroppedAdd,
     Tests.ReadBalance.suite,
     Tests.ScaleOutMaster.suite,
     Tests.ScaleOutSlave.suite,

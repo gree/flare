@@ -81,4 +81,46 @@ def suite : TestSuite := {
   ]
 }
 
+/-- The first master's flared gives up on its first node add (the seam
+    FLARE_TEST_DROP_FIRST_NODE_ADD applies it and closes the connection
+    unanswered) and restarts before its history is recorded; it comes back a
+    replica (41211110343). The partition, never recorded and empty on every
+    copy, must still get a master: seated as a first build's
+    (AuthoritativeHistory.firstBuildUnrecordedEmpty), not held masterless. -/
+private def cfgDropped : ClusterConfig := {
+  name := "fb-drop"
+  «namespace» := "flare-fb-drop"
+  partitions := 1
+  replicas := 2
+  operatorName := "flare-operator"
+  debugPod := "debug-fb-drop"
+  storageBackend := "rocksdb"
+  useTmpfs := true
+  operatorEnv := [("FLARE_TEST_DROP_FIRST_NODE_ADD", "1")]
+}
+
+def suiteDroppedAdd : TestSuite := {
+  name := "first-build-dropped-add"
+  setup := deployCluster cfgDropped
+  teardown := cleanupCluster cfgDropped
+  onFailure := dumpClusterDiagnostics cfgDropped.«namespace» s!"app={cfgDropped.operatorName}"
+  tests := [
+    { name := "first build where the first master's flared never gets its node add answered (FLARE_TEST_DROP_FIRST_NODE_ADD) and restarts before the partition's history is recorded: partition 0 still gets an Active master and an Active slave, seated as a first build's"
+      run := do
+        let built ← waitForCondition "partition 0 has an Active master and an Active slave" 300 do
+          let es := parseNodeSync (← operatorTcpCmd cfgDropped.debugPod cfgDropped.«namespace» cfgDropped.operatorName cfgDropped.operatorPort "node sync")
+          let p0 := es.filter (·.partition == 0)
+          return p0.any (fun e => e.role == 0 && e.state == 0) && p0.any (fun e => e.role == 1 && e.state == 0)
+        let logs ← kubectlLogsLabel s!"app={cfgDropped.operatorName}" cfgDropped.«namespace» 400000
+        let lines := logs.splitOn "\n"
+        for l in (lines.filter fun l => containsSubstr l "TEST SEAM: the first node add" || containsSubstr l "seated as a first build's master"
+            || containsSubstr l "PROMOTION ABORTED" || containsSubstr l "Result: Master P0" || containsSubstr l "Result: Slave P0").take 20 do
+          IO.eprintln s!"# {l.trim.take 300}"
+        if !lines.any (containsSubstr · "TEST SEAM: the first node add") then
+          return .fail "precondition: the operator did not drop a node add (seam not armed)"
+        if !built then return .fail "partition 0 never got an Active master and an Active slave after the first master's registration was dropped"
+        return .pass }
+  ]
+}
+
 end FlareOperator.E2E.Tests.FirstBuildBusyPool

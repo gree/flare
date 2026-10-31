@@ -41,7 +41,13 @@ private def cfg : ClusterConfig := {
   operatorEnv := [("FLARE_STATS_PROBE_INTERVAL_MS", "15000")]
 }
 
-private def kindNode : String := "flare-e2e-control-plane"
+/-- every kind node: pods may be placed on any of them (the multi-node
+    cluster of a mixed single-suite run, 41149278771), and a pod's traffic
+    crosses the FORWARD chain of the node it runs on -/
+private def kindNodes : IO (List String) := do
+  match ← kubectl ["get", "nodes", "-o", "jsonpath={.items[*].metadata.name}"] with
+  | .ok o => return (o.trim.splitOn " ").filter (· != "")
+  | .error _ => return ["flare-e2e-control-plane"]
 private def podOf (fqdn : String) : String := (fqdn.splitOn ".").head?.getD fqdn
 
 private def hostCmd (cmd : String) (args : List String) : IO (Except String String) := do
@@ -66,18 +72,20 @@ private def rule (a b : String) : List String :=
    "-j", "REJECT", "--reject-with", "tcp-reset"]
 
 private def cutLink (a b : String) : IO (Except String Unit) := do
-  for spec in [rule a b, rule b a] do
-    match ← hostCmd "docker" (["exec", kindNode, "iptables", "-I", "FORWARD", "1"] ++ spec.drop 1) with
-    | .error e => return .error e
-    | .ok _ => pure ()
+  for node in ← kindNodes do
+    for spec in [rule a b, rule b a] do
+      match ← hostCmd "docker" (["exec", node, "iptables", "-I", "FORWARD", "1"] ++ spec.drop 1) with
+      | .error e => return .error e
+      | .ok _ => pure ()
   return .ok ()
 
 private def healLink (a b : String) : IO Unit := do
-  for spec in [rule a b, rule b a] do
-    for _ in [0:5] do
-      match ← hostCmd "docker" (["exec", kindNode, "iptables", "-D"] ++ spec) with
-      | .ok _ => pure ()
-      | .error _ => break
+  for node in ← kindNodes do
+    for spec in [rule a b, rule b a] do
+      for _ in [0:5] do
+        match ← hostCmd "docker" (["exec", node, "iptables", "-D"] ++ spec) with
+        | .ok _ => pure ()
+        | .error _ => break
 
 private def p0Master : IO (Option String) := do
   return (findMasterFqdn (← nodeView) 0).map podOf
@@ -88,7 +96,8 @@ def suite : TestSuite := {
     deployCluster cfg
     IO.sleep 50000
   teardown := do
-    discard <| kubectl ["uncordon", kindNode]
+    for node in ← kindNodes do
+      discard <| kubectl ["uncordon", node]
     cleanupCluster cfg
   onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
   tests := [
@@ -128,15 +137,18 @@ def suite : TestSuite := {
           if !bCaught then return .fail s!"precondition: {bPod} did not apply the later keys ({bApplied} < {h1})"
           if aApplied ≥ bApplied then return .fail s!"precondition: {aPod} is not behind {bPod} ({aApplied} vs {bApplied}): no order to test"
           -- the master is lost for good: its node is cordoned, its pod deleted
-          match ← kubectl ["cordon", kindNode] with
-          | .error e => return .fail s!"could not cordon {kindNode}: {e}"
+          let mNode ← match ← kubectl ["get", "pod", mPod, "-n", cfg.«namespace», "-o", "jsonpath={.spec.nodeName}"] with
+            | .ok o => pure o.trim
+            | .error e => return .fail s!"no node for {mPod}: {e}"
+          match ← kubectl ["cordon", mNode] with
+          | .error e => return .fail s!"could not cordon {mNode}: {e}"
           | .ok _ => pure ()
           discard <| kubectl ["delete", "pod", mPod, "-n", cfg.«namespace», "--grace-period=0", "--force", "--wait=false"]
           let promoted ← waitForCondition s!"a new P0 master after {mPod} is lost" 240 do
             match ← p0Master with
             | some m => return m != mPod
             | none => return false
-          discard <| kubectl ["uncordon", kindNode]
+          discard <| kubectl ["uncordon", mNode]
           if !promoted then return .fail s!"no successor was promoted after {mPod} was lost"
           let some m2 ← p0Master | return .fail "no master after the wait"
           IO.eprintln s!"# promoted {m2} (larger applied: {bPod}; stale: {aPod})"
@@ -159,7 +171,8 @@ def suite : TestSuite := {
           return .pass
         finally
           healLink mIp aIp
-          discard <| kubectl ["uncordon", kindNode] }
+          for node in ← kindNodes do
+            discard <| kubectl ["uncordon", node] }
   ]
 }
 

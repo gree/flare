@@ -60,4 +60,16 @@ def step (prev : List (String × Nat)) (probed : List (String × Bool))
     { streaks := streaks
       down := (streaks.filter (fun kv => kv.2 ≥ threshold)).map (·.1) }
 
+/-- The failure streaks kept into a probe round: only a key whose pod UID is
+    known and the SAME in the previous successful listing and in this one.
+    A key missing from either listing, or under another UID, starts again —
+    its failures were another pod's (review of a74d3ec: a pod missing from a
+    listing and recreated under the same name inherited the old streak). -/
+def keepStreaksForSamePod (streaks : List (String × Nat)) (prevIds ids : List (String × String))
+    : List (String × Nat) :=
+  streaks.filter fun (k, _) =>
+    match prevIds.lookup k, ids.lookup k with
+    | some u0, some u1 => !u0.isEmpty && u0 == u1
+    | _, _ => false
+
 end FlareOperator.UnreachableNode

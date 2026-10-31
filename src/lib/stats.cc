@@ -50,6 +50,7 @@ stats::stats():
 		_get_misses(0),
 		_proxy_write_dropped(0),
 		_requests_in_progress(0),
+		_client_requests(0),
 		_writes_waiting_for_master(0),
 		_master_waits_ok(0),
 		_reads_waited_for_master(0),

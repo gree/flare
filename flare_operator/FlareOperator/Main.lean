@@ -1091,14 +1091,22 @@ private def observeClientConnections (pod ns : String) (stats : Option String) :
     let now ← IO.monoMsNow
     let probes ← Bridge.probesTo pod
     let curr := (statNat out "curr_connections").map (· - 1)  -- minus the operator's own connection
-    match statNat out "total_connections" with
+    -- client_requests counts data requests only: the kubelet's probes (one
+    -- connection each, every 5 s) never reset it, as they did
+    -- total_connections (41136280524: unserved for 10 min, "new connections
+    -- 0 ms ago"). An older flared without it: total_connections minus the
+    -- operator's own stats connections.
+    let (counter, own) := match statNat out "client_requests" with
+      | some n => (some n, 0)
+      | none => (statNat out "total_connections", probes)
+    match counter with
     | none => return (none, curr)
     | some total =>
       let prev := (← nodeMoveConnRef.get).lookup pod
       let lastIncrease := match prev with
         | none => now
-        | some (t0, p0, li) => if (total : Int) - t0 > (probes : Int) - p0 then now else li
-      nodeMoveConnRef.modify fun l => (pod, (total, probes, lastIncrease)) :: l.filter (·.1 != pod)
+        | some (t0, p0, li) => if (total : Int) - t0 > (own : Int) - p0 then now else li
+      nodeMoveConnRef.modify fun l => (pod, (total, own, lastIncrease)) :: l.filter (·.1 != pod)
       return (some (now - lastIncrease), curr)
 
 /-- One pass of the cordon move: reads the cordoned nodes and the record,

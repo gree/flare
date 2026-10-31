@@ -1147,6 +1147,12 @@ def cordonNoSuccessorTest (c : Ctx) : IO TestResult := do
     | .ok installed =>
       let mut fails : List String := []
       try
+        -- writes the replica cannot receive: without them the cut leaves it
+        -- current and the handover is safe (41211321783: no write was made,
+        -- the handover proved the drain and completed)
+        let acked ← writeKeys c.cfg.debugPod ns p.master.ip c.cfg.flarePort "c5_cut" 20
+        c.event s!"{acked}/20 writes acknowledged by the master during the cut"
+        if acked == 0 then return .fail (notSetUp "the master acknowledged no write during the cut")
         match ← kubectl ["cordon", p.master.node] with
         | .error e => return .fail (notSetUp s!"cordon failed: {e.take 200}")
         | .ok _ => pure ()
@@ -1160,8 +1166,10 @@ def cordonNoSuccessorTest (c : Ctx) : IO TestResult := do
         | none => fails := fails ++ ["the drain did not end within 180 s"]
         let logs ← kubectlLogsLabel s!"app={c.cfg.operatorName}" ns 30000
         for x in (logs.splitOn "\n").filter (fun x => containsSubstr x "NODE MOVE" || containsSubstr x "HANDOVER" || containsSubstr x "NODE GUARD") do c.art "cordon-move.txt" x
-        if !((logs.splitOn "\n").any fun l => containsSubstr l "HANDOVER" && containsSubstr l "aborted") then
-          fails := fails ++ ["no aborted handover was logged (was the handover tried?)"]
+        -- held before it starts (forwards dropped to the successor) or
+        -- aborted: either way never done
+        if (logs.splitOn "\n").any fun l => containsSubstr l "HANDOVER" && containsSubstr l " done in " then
+          fails := fails ++ ["a handover completed although its successor could not catch up"]
         let (uid1, _) ← podUidServing c p.master.name
         if uid1 != uid0 then fails := fails ++ [s!"{p.master.name} was replaced ({uid0} -> {uid1})"]
         match (← c.roles).bind (·.1) with
@@ -1229,9 +1237,13 @@ def cordonOperatorRestartTest (c : Ctx) : IO TestResult := do
       fails := fails ++ ["the pair is not redundant after the move"]
     return if fails.isEmpty then .pass else .fail (String.intercalate "; " fails)
 
-/-- C7: both workers that hold a flared pod are cordoned at once (no drain):
-    the moves run one at a time — the second starts only after the first is
-    done (or never in the window). -/
+/-- C7: both workers that hold a flared pod are cordoned at once (no drain),
+    two copies: neither copy has another real copy on an uncordoned node
+    (NodeMove.realCopies counts uncordoned nodes only), so NO move starts —
+    both are reported blocked (FlareCordonMoveBlocked), both pods keep their
+    UID and serving label, and the pair is redundant after the uncordons.
+    41211321783 expected the moves to run one at a time and none could start;
+    one-at-a-time is unit-tested (NodeMove.next with an active move). -/
 def cordonTwoNodesTest (c : Ctx) : IO TestResult := do
   match ← cordonPrecond c with
   | .error e => return .fail e
@@ -1239,30 +1251,36 @@ def cordonTwoNodesTest (c : Ctx) : IO TestResult := do
     c.conditions ["C7: minCopies 2; the master's and the replica's workers cordoned together (no drain)"]
     let ns := c.cfg.«namespace»
     let opLogs := do return (← kubectlLogsLabel s!"app={c.cfg.operatorName}" ns 30000)
+    let (uidM, _) ← podUidServing c p.master.name
+    let (uidR, _) ← podUidServing c p.replica.name
     for n in [p.master.node, p.replica.node] do discard <| kubectl ["cordon", n]
     let mut fails : List String := []
     try
-      let firstDone ← waitForCondition "the first move is done" 600 do
-        return ((← opLogs).splitOn "\n").any fun l => containsSubstr l "NODE MOVE" && containsSubstr l "-> done"
+      let blockedEv := do
+        match ← kubectl ["get", "events", "-n", ns, "--field-selector", "reason=FlareCordonMoveBlocked", "-o", "jsonpath={.items[*].message}"] with
+        | .ok o => pure o
+        | .error _ => pure ""
+      let both ← waitForCondition "both pods are reported blocked" 180 do
+        let ev ← blockedEv
+        return containsSubstr ev p.master.name && containsSubstr ev p.replica.name
+      let ev ← blockedEv
+      c.event s!"blocked events: {ev.take 400}"
+      if !both then fails := fails ++ ["not both pods were reported blocked (FlareCordonMoveBlocked) within 180 s"]
+      -- a further minute: still nothing starts
+      IO.sleep 60000
       let lines := (← opLogs).splitOn "\n"
       for x in lines.filter (containsSubstr · "NODE MOVE") do c.art "cordon-move.txt" x
-      let starts := lines.filterMap fun l =>
-        if containsSubstr l "NODE MOVE started: " then some ((l.splitOn "NODE MOVE started: ").getD 1 "" |>.takeWhile (· != ' ')) else none
-      c.event s!"moves started (in order): {starts}; the first done={firstDone}"
-      if !firstDone then fails := fails ++ ["no move was done within 600 s"]
-      match starts with
-      | [] => fails := fails ++ ["no move started"]
-      | first :: rest =>
-        let doneIdx := lines.findIdx? fun l => containsSubstr l s!"NODE MOVE {first}@" && containsSubstr l "-> done"
-        for second in rest do
-          let sIdx := lines.findIdx? fun l => containsSubstr l s!"NODE MOVE started: {second}"
-          match sIdx, doneIdx with
-          | some si, some di => if si < di then fails := fails ++ [s!"the move of {second} started before the move of {first} was done"]
-          | some _, none => fails := fails ++ [s!"the move of {second} started while the move of {first} was not done"]
-          | _, _ => pure ()
+      if lines.any (containsSubstr · "NODE MOVE started: ") then
+        fails := fails ++ ["a move started although neither copy keeps a real copy on an uncordoned node"]
+      let (uidM1, _) ← podUidServing c p.master.name
+      let (uidR1, _) ← podUidServing c p.replica.name
+      if uidM1 != uidM || uidR1 != uidR then fails := fails ++ [s!"a pod was replaced ({uidM} -> {uidM1}, {uidR} -> {uidR1})"]
+      match (← c.roles).bind (·.1) with
+      | some m => if m != p.master.name then fails := fails ++ [s!"the master moved to {m}"]
+      | none => fails := fails ++ ["partition 0 has no master"]
     finally
       for n in [p.master.node, p.replica.node] do uncordon n
-    if !(← waitForCondition "the pair is redundant again" 600 (redundant c none)) then
+    if !(← waitForCondition "the pair is redundant again" 300 (redundant c none)) then
       fails := fails ++ ["the pair is not redundant after the cordons were removed"]
     return if fails.isEmpty then .pass else .fail (String.intercalate "; " fails)
 
@@ -1365,7 +1383,7 @@ def Scenario.title : Scenario → String
   | .cordonBlocked => "(C3) cordon + drain of the replica's worker with fewer copies than minCopies (2 vs 3): no move starts, the evictions are held (the drain times out), the replica keeps its pod, role and serving label, a FlareCordonMoveBlocked event names it; the pair is redundant after the uncordon"
   | .cordonNoSuccessor => "(C5) cordon + drain of the master's worker while its successor cannot catch up (master <-> replica cut): the handover aborts and never completes, the master stays on the same pod, the evictions are held (the drain times out); redundant again after the cut and the cordon are removed"
   | .cordonOperatorRestart => "(C6) the operator restarts in the middle of a move (replica's worker cordoned, move proxied): the new operator resumes the recorded move (no second move of the pod), a drain then completes and the pod is recreated on another worker; redundant again"
-  | .cordonTwoNodes => "(C7) the master's and the replica's workers cordoned together: the moves run one at a time (the second starts only after the first is done); redundant again after the cordons are removed"
+  | .cordonTwoNodes => "(C7) the master's and the replica's workers cordoned together (two copies): neither has a real copy left on an uncordoned node, so no move starts, both are reported blocked, both pods keep their UID; redundant again after the cordons are removed"
   | .cordonNoOperator => "(C8) the operator is away (scaled to 0): the node guard fails closed, cordon + drain of the replica's worker evicts nothing (the drain fails), the replica keeps its pod; redundant after the operator returns"
   | .cordonCancel => "(C4) cordon of the replica's worker, uncordon once its move is proxied: the move is cancelled, the replica gets the serving label back on the same pod and is a synced replica again"
   | .sigtermHold => "(S6) a sync client write held on a cut replica across a SIGTERM (cut removed 40 s after it): the client gets STORED and the replica holds the value"

@@ -500,6 +500,61 @@ def suite : TestSuite := {
         finally
           discard <| opExec "rm -f /tmp/reachfail"
           healLink opIp mIp
+          discard <| waitP0Stable },
+    { name := "(review of a74d3ec) a slave's failure streak does not pass to its recreated pod: its old IP is cut until it fails a probe, the pod is deleted (missing from the listing) and recreated under the same name, and the NEW pod is cut from its first probe — it is marked down no sooner than three of its own failed probes (~10 s after Ready), never at its first"
+      run := do
+        if !(← graceOver) then return .fail "the operator never logged the end of its startup grace period"
+        if !(← waitP0Stable) then return .fail "precondition: partition 0 is not stable"
+        let opIp ← match ← opIpOf with
+          | .ok ip => pure ip
+          | .error e => return .fail e
+        let some sPod := ((← nodeView).filter fun e => e.partition == 0 && e.role == 1).head?.map (podOf ·.fqdn)
+          | return .fail "precondition: no slave of partition 0"
+        let some oldIp ← getPodIp sPod cfg.«namespace» | return .fail s!"no IP for {sPod}"
+        let down0 := countLines (← opLogs) "UNREACHABLE" sPod
+        match ← cutLink opIp oldIp with
+        | .error e => return .fail s!"could not cut operator ⇄ {oldIp}: {e}"
+        | .ok _ => pure ()
+        try
+          IO.sleep 7000   -- one or two failed probes of the old pod, not three
+          if countLines (← opLogs) "UNREACHABLE" sPod > down0 then
+            return .fail "precondition: the old pod was already marked down before its deletion (three probes in 7 s)"
+          discard <| kubectl ["delete", "pod", sPod, "-n", cfg.«namespace», "--wait=false"]
+          -- cut the new pod's address as soon as it has one (before Ready)
+          let got ← waitForCondition s!"{sPod} is recreated with another IP" 180 do
+            match ← getPodIp sPod cfg.«namespace» with
+            | some ip => return ip != oldIp
+            | none => return false
+          if !got then return .fail s!"precondition: {sPod} did not come back with another IP"
+          let newIp := (← getPodIp sPod cfg.«namespace»).getD ""
+          match ← cutLink opIp newIp with
+          | .error e => return .fail s!"could not cut operator ⇄ {newIp}: {e}"
+          | .ok _ => pure ()
+          let ready ← waitForCondition s!"the recreated {sPod} is Ready" 180 do
+            match ← kubectl ["get", "pod", sPod, "-n", cfg.«namespace», "-o", "jsonpath={.status.containerStatuses[0].ready}"] with
+            | .ok o => return o.trim == "true"
+            | .error _ => return false
+          if !ready then return .fail s!"precondition: the recreated {sPod} never became Ready"
+          let t0 ← IO.monoMsNow
+          let down1 := countLines (← opLogs) "UNREACHABLE" sPod
+          let mut downAt : Option Nat := none
+          for _ in [0:60] do
+            if countLines (← opLogs) "UNREACHABLE" sPod > down1 then
+              downAt := some ((← IO.monoMsNow) - t0)
+              break
+            IO.sleep 1000
+          IO.eprintln s!"# {sPod}: old IP {oldIp} cut, recreated on {newIp} and cut; marked down {downAt.map (s!"{·} ms") |>.getD "not within 60 s"} after Ready"
+          match downAt with
+          | some ms => if ms < 8000 then return .fail s!"the recreated {sPod} was marked down {ms} ms after Ready — fewer than its own three probes (the old pod's failures were added)"
+          | none => return .fail s!"the recreated {sPod}, cut from its first probe, was never marked down within 60 s"
+          return .pass
+        finally
+          -- the pod's address now, not `newIp`: a `let mut` set in the try is
+          -- not seen here when the try returns early
+          healLink opIp oldIp
+          match ← getPodIp sPod cfg.«namespace» with
+          | some ip => if ip != oldIp then healLink opIp ip
+          | none => pure ()
           discard <| waitP0Stable }
   ]
 }

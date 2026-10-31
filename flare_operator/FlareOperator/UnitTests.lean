@@ -2212,6 +2212,18 @@ private def checkStaleR3Refill (ctx : Ctx) : IO Unit := do
   let (uM, _) := staleR3Refill holdState [("f", copy 30 "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\n")] ["f"] ["f"] [] [0]
   check ctx "history-tracking 10: a stale-eligible follower whose history cannot be told is UNKNOWN: never seated, not even after the wait"
     (uM == none)
+
+/-- The untracked (legacy-upgrade) cases of the stale-R3 refill: a function of
+    their own so the generated C of checkStaleR3Refill stays small enough for
+    cc1 (one function held 12.7 GB at -O3). -/
+private def checkStaleR3RefillUntracked (ctx : Ctx) : IO Unit := do
+  let copy := fun (items : Nat) (extra : String) =>
+    s!"STAT rocksdb_copy_identity_consistent 1\r\nSTAT rocksdb_quarantined 0\r\nSTAT rocksdb_copy_partial 0\r\nSTAT rebuild_in_flight 0\r\nSTAT rocksdb_copy_id u:1\r\nSTAT reconstruction_boot_id 7\r\nSTAT curr_items {items}\r\n" ++ extra ++ "END\r\n"
+  let mEmpty := copy 0 "STAT rocksdb_master_id M2\r\nSTAT rocksdb_source_epoch 5:x\r\nSTAT repl_read_source_eligible 0\r\nSTAT repl_read_source_state none\r\n"
+  let back : FlareClusterState :=
+    ({ holdState with nodeMap := [("m", holdNode .Slave .Prepare 0 "m" 0), ("f", holdNode .Slave .Active 0 "f")] }).rebuildPartitionMap
+  let nlf := fun (ls : List String) => ls.any (containsSub · "PROMOTION NOT LOSS-FREE")
+  let held := fun (ls : List String) => ls.any (containsSub · "has NO master")
   -- upgrade from rc56 on tmpfs (decision 2026-10-16, CI 38714646714): the
   -- partition is UNTRACKED (its master was a legacy flared: no history can be
   -- recorded) and the replica was validated against that master itself, a
@@ -2247,6 +2259,25 @@ private def checkStaleR3Refill (ctx : Ctx) : IO Unit := do
     (PromotionEvidence.classify (some (fLegacy "eligible" "m" ""))
       { mapPrepare := false, mapActive := true, podReady := true, partitionHasMaster := true,
         lastMasterHistory := none, untrackedLastMaster := some "m" } == .eligible)
+  -- ddf24f6 41103383413 (rc56 upgrade 9): the ex-master came back EMPTY with a
+  -- new lineage and R3 re-validated the replica against it before the refill:
+  -- needs_rebuild "lineage differs ... master m <new>". Only the source
+  -- changed, so the copy keeps the legacy rule (held last resort, NOT LOSS-FREE).
+  let fRebuilt := fun (src reason : String) =>
+    (fLegacy "needs_rebuild" src "").replace "reason x" s!"reason {reason}"
+  let rb := fRebuilt "m" "lineage differs: copy N1, master m M2"
+  let (rM, rL) := staleR3Refill back [("m", mEmpty), ("f", rb)] ["m", "f"] ["f"] ["m"] [] none (some "m")
+  check ctx "untracked upgrade (needs_rebuild against the ex-master back READ EMPTY): the replica is seated as the last resort, logged NOT LOSS-FREE (READ empty)"
+    (rM == some "f" && nlf rL && rL.any (containsSub · "READ empty"))
+  let (rhM, rhL) := staleR3Refill holdState [("f", rb)] ["f"] ["f"] [] [] none (some "m")
+  check ctx "untracked upgrade (needs_rebuild against the ex-master): the ex-master AWAY: HELD, not seated before the wait"
+    (rhM == none && held rhL && !nlf rhL)
+  check ctx "untracked upgrade: needs_rebuild stays UNKNOWN (never seated, not even after the wait) when it compared with ANOTHER node, compared a history, the source had an epoch, or the partition is not untracked"
+    (never (fRebuilt "x" "lineage differs: copy N1, master x M2") (some "m")
+      && never (fRebuilt "m" "lineage differs: copy N1, master x M2") (some "m")
+      && never (fRebuilt "m" "history differs: copy 1:n1, master m 5:x") (some "m")
+      && never ((fLegacy "needs_rebuild" "m" "5:x").replace "reason x" "reason lineage differs: copy N1, master m M2") (some "m")
+      && never rb none)
 
 -- ─── promotion by reason (decision 2026-10-08) ────────────────────────────
 
@@ -2847,6 +2878,7 @@ def run : IO UInt32 := do
   checkCopyDiscardApproval ctx
   checkPromotionEvidence ctx
   checkStaleR3Refill ctx
+  checkStaleR3RefillUntracked ctx
   checkMigrationForwardGate ctx
   checkSnapshotPushSwitch ctx
   let failures ← ctx.failures.get

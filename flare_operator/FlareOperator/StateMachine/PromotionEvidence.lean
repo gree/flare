@@ -283,6 +283,24 @@ def parseR3Reason (reason : String) : Option (String × String × String × Stri
     "could not continue from this source"): never bypassed. -/
 def unhealthyFollowReasons : List String := ["apply_error", "generations_unavailable", "no_position"]
 
+/-- The same legacy copy after R3 re-validated it against the ex-master that
+    came BACK with a new lineage (rc56 upgrade 9, ddf24f6 41103383413: the
+    ex-master returned empty on tmpfs; ~2 s later the replica declared
+    needs_rebuild "lineage differs: copy X, master <ex-master> Y"). The copy
+    did not change: only its source did, so the declaration says nothing
+    against the data it holds — `lagging`, with the same held last resort
+    (seated only when the ex-master is READ empty or the wait expired, NOT
+    LOSS-FREE). A needs_rebuild that compared it with any other node, or
+    with a history (not a lineage), stays `unknown`. -/
+def Stats.legacyCopyRebuiltAgainstReturnedLastMaster (s : Stats) (o : Observed) : Bool :=
+  !o.partitionHasMaster && o.lastMasterHistory.isNone && o.untrackedLastMaster.isSome
+    && s.readSource == o.untrackedLastMaster && s.readSourceEpoch == some ""
+    && s.sourceState == some "needs_rebuild"
+    && o.mapActive && !o.mapPrepare && s.items.getD 0 != 0
+    && (match s.readSourceReason.bind parseR3Reason with
+        | some (kind, _, mkey, _) => kind == "lineage" && some mkey == o.untrackedLastMaster
+        | none => false)
+
 /-- R3 needs_rebuild with the partition WITHOUT a master (user decision
     2026-10-09: an ex-master that returned EMPTY must not condemn the healthy,
     merely-behind copy that holds the last master's data). R3 compared the copy
@@ -297,7 +315,9 @@ def unhealthyFollowReasons : List String := ["apply_error", "generations_unavail
     running markers were already checked (forbiddenMarker). -/
 def needsRebuildClass (s : Stats) (o : Observed) : Class :=
   match o.lastMasterHistory with
-  | none => .unknown "R3 needs_rebuild, and the last master's history was not recorded"
+  | none =>
+    if s.legacyCopyRebuiltAgainstReturnedLastMaster o then .lagging
+    else .unknown "R3 needs_rebuild, and the last master's history was not recorded"
   | some (mid, ep) =>
     if s.masterId != some mid || s.copyEpoch != some ep then
       .forbidden s!"R3: confirmed different history (the copy is {s.masterId}/{s.copyEpoch}, the recorded last master {mid}/{ep})"

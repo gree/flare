@@ -16,6 +16,11 @@
   The expectation is on the data AND on the identity (B), so a lucky map order
   cannot hide a wrong rule: the node chosen as A is the one that is FIRST in
   the operator's map, the order the old code would have used.
+
+  Before it (user decision 2026-10-31, option A: rule (b) is not adopted): a
+  master that only the OPERATOR cannot reach is not failed over. The operator
+  ⇄ master link alone is cut; the operator raises its CRITICAL reachability
+  alert, the master stays the master and keeps acknowledging writes.
 -/
 import FlareOperator.E2E.Framework
 import FlareOperator.E2E.Helpers
@@ -101,6 +106,36 @@ def suite : TestSuite := {
     cleanupCluster cfg
   onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
   tests := [
+    { name := "a master that only the OPERATOR cannot reach (operator ⇄ master cut, the pod Ready, clients reaching it) is NOT failed over: the CRITICAL reachability alert names it, it stays the master for 90 s and keeps acknowledging writes"
+      run := do
+        let graceOver ← waitForCondition "operator past its startup grace period" 240 do
+          return containsSubstr (← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 400) "grace period over"
+        if !graceOver then return .fail "the operator never logged the end of its startup grace period"
+        let some mPod ← p0Master | return .fail "no Active P0 master in the operator's map"
+        let some mIp ← getPodIp mPod cfg.«namespace» | return .fail s!"no IP for {mPod}"
+        let opPod ← match ← kubectl ["get", "pods", "-n", cfg.«namespace», "-l", s!"app={cfg.operatorName}", "-o", "jsonpath={.items[0].metadata.name}"] with
+          | .ok o => pure o.trim
+          | .error e => return .fail s!"no operator pod: {e}"
+        let some opIp ← getPodIp opPod cfg.«namespace» | return .fail s!"no IP for {opPod}"
+        match ← cutLink opIp mIp with
+        | .error e => return .fail s!"could not cut operator ⇄ {mPod}: {e}"
+        | .ok _ => pure ()
+        try
+          let alerted ← waitForCondition s!"the operator alerts that it cannot reach {mPod}" 120 do
+            return ((← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 2000).splitOn "\n").any fun l =>
+              containsSubstr l "the OPERATOR cannot connect" && containsSubstr l mPod
+          if !alerted then return .fail s!"precondition: no CRITICAL reachability alert for {mPod} within 120 s (the cut did not take)"
+          for i in [0:9] do
+            IO.sleep 10000
+            match ← p0Master with
+            | some m => if m != mPod then return .fail s!"{mPod} was failed over to {m} while only the operator could not reach it ({(i + 1) * 10} s after the alert)"
+            | none => return .fail s!"partition 0 has no master {(i + 1) * 10} s after the alert"
+          let stored ← writeKeys cfg.debugPod cfg.«namespace» mIp cfg.flarePort "unreach" 20
+          IO.eprintln s!"# {mPod} still the master 90 s after the alert; {stored}/20 writes acknowledged"
+          if stored != 20 then return .fail s!"only {stored}/20 writes acknowledged by {mPod} while the operator could not reach it"
+          return .pass
+        finally
+          healLink opIp mIp },
     { name := "two followers: the master is lost while one follower is stale; the follower with the LARGER applied sequence is promoted, and every key is on it"
       run := do
         let graceOver ← waitForCondition "operator past its startup grace period" 240 do

@@ -63,14 +63,38 @@ webhooks:
     namespaceSelector:
       matchLabels:
         kubernetes.io/metadata.name: {{ $ns }}
+    # flared pods only: with the operator away (failurePolicy Fail) the
+    # kubelet could not remove the operator's own exited pod, and it never
+    # went away (41211321783 C8)
+    objectSelector:
+      matchLabels:
+        app: flare
     rules:
       - apiGroups: [""]
         apiVersions: ["v1"]
         operations: ["DELETE"]
         resources: ["pods"]
         scope: Namespaced
-      # an eviction (kubectl drain, the autoscaler) deletes the pod without
-      # the DELETE webhook: judged as that pod's delete, refused with 429
+    clientConfig:
+      caBundle: {{ $ca.Cert | b64enc }}
+      service:
+        name: {{ $svc }}
+        namespace: {{ $ns }}
+        path: /pods
+        port: 443
+  # an eviction (kubectl drain, the autoscaler) deletes the pod without the
+  # DELETE webhook: judged as that pod's delete, refused with 429. No
+  # objectSelector: the Eviction object carries none of the pod's labels.
+  - name: evictions.node-guard.flare.gree.net
+    admissionReviewVersions: ["v1"]
+    sideEffects: NoneOnDryRun
+    failurePolicy: Fail
+    timeoutSeconds: {{ .Values.nodeGuard.timeoutSeconds }}
+    matchPolicy: Equivalent
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ $ns }}
+    rules:
       - apiGroups: [""]
         apiVersions: ["v1"]
         operations: ["CREATE"]

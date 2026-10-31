@@ -740,15 +740,24 @@ def setupNodeGuardWebhook (cfg : ClusterConfig) : IO Unit := do
   let svc := s!"{cfg.operatorName}-webhook"
   let dir := s!"/tmp/flare-node-guard-{ns}"
   let script := s!"set -e; rm -rf {dir}; mkdir -p {dir}; cd {dir}; " ++
-    "openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=flare-e2e-ca -keyout ca.key -out ca.crt 2>/dev/null; " ++
-    s!"openssl req -newkey rsa:2048 -nodes -subj /CN={svc}.{ns}.svc -keyout tls.key -out tls.csr 2>/dev/null; " ++
+    "openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=flare-e2e-ca -keyout ca.key -out ca.crt 2>>err.txt; " ++
+    s!"openssl req -newkey rsa:2048 -nodes -subj /CN={svc}.{ns}.svc -keyout tls.key -out tls.csr 2>>err.txt; " ++
     s!"printf 'subjectAltName=DNS:{svc}.{ns}.svc,DNS:{svc}.{ns}.svc.cluster.local\\n' > ext.cnf; " ++
-    "openssl x509 -req -in tls.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 2 -extfile ext.cnf -out tls.crt 2>/dev/null; " ++
+    "openssl x509 -req -in tls.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 2 -extfile ext.cnf -out tls.crt 2>>err.txt; " ++
     s!"kubectl -n {ns} create secret tls {cfg.operatorName}-webhook-tls --cert tls.crt --key tls.key --dry-run=client -o yaml | kubectl apply -f - >/dev/null; " ++
     "base64 < ca.crt | tr -d '\\n' > ca.b64"
-  let out ← IO.Process.output { cmd := "sh", args := #["-c", script] }
+  -- retried: 41211321783 C6 failed here once with nothing on stderr (openssl's
+  -- output was discarded; it now goes to err.txt and into the error)
+  let mut out ← IO.Process.output { cmd := "sh", args := #["-c", script] }
+  for _ in [0:2] do
+    if out.exitCode == 0 then break
+    let err ← try IO.FS.readFile s!"{dir}/err.txt" catch _ => pure ""
+    IO.eprintln s!"# node guard certificates failed (exit {out.exitCode}): {out.stderr.trim.take 300} {err.trim.take 600}; retrying"
+    IO.sleep 2000
+    out ← IO.Process.output { cmd := "sh", args := #["-c", script] }
   if out.exitCode != 0 then
-    throw (IO.userError s!"node guard certificates: {out.stderr.trim}")
+    let err ← try IO.FS.readFile s!"{dir}/err.txt" catch _ => pure ""
+    throw (IO.userError s!"node guard certificates (exit {out.exitCode}): {out.stderr.trim} {err.trim.take 600}")
   let ca := (← IO.FS.readFile s!"{dir}/ca.b64").trim
   let hook := fun (hname path : String) (rules : String) (objSel : String) =>
     s!"  - name: {hname}
@@ -789,7 +798,12 @@ metadata:
   name: flare-node-guard-{ns}
 webhooks:
 " ++ hook "pods.node-guard.flare.gree.net" "/pods"
-      "      - apiGroups: [\"\"]\n        apiVersions: [\"v1\"]\n        operations: [\"DELETE\"]\n        resources: [\"pods\"]\n        scope: Namespaced\n      - apiGroups: [\"\"]\n        apiVersions: [\"v1\"]\n        operations: [\"CREATE\"]\n        resources: [\"pods/eviction\"]\n        scope: Namespaced"
+      "      - apiGroups: [\"\"]\n        apiVersions: [\"v1\"]\n        operations: [\"DELETE\"]\n        resources: [\"pods\"]\n        scope: Namespaced"
+      -- flared pods only (as the chart): the operator's own exited pod must
+      -- stay removable while it is away (41211321783 C8)
+      "\n    objectSelector:\n      matchLabels:\n        app: flare"
+    ++ hook "evictions.node-guard.flare.gree.net" "/pods"
+      "      - apiGroups: [\"\"]\n        apiVersions: [\"v1\"]\n        operations: [\"CREATE\"]\n        resources: [\"pods/eviction\"]\n        scope: Namespaced"
       ""
     ++ hook "statefulsets.node-guard.flare.gree.net" "/statefulsets"
       "      - apiGroups: [\"apps\"]\n        apiVersions: [\"v1\"]\n        operations: [\"UPDATE\", \"DELETE\"]\n        resources: [\"statefulsets\", \"statefulsets/scale\"]\n        scope: Namespaced"

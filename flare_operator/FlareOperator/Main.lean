@@ -2351,6 +2351,9 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
                 isLastMasterHolder := part ≥ 0 && n.lastMasterOf == part
                 expectedBinding := if part ≥ 0 then some (PromotionEvidence.bindingFor part.toNat nPartsB cs.partitionSize) else none
                 untrackedLastMaster := ← untrackedLastMaster cs part
+                untrackedLastMasterReadEmpty := match ← untrackedLastMaster cs part with
+                  | some lm => knownEmpty.contains lm
+                  | none => false
                 attributedRejoin := PromotionEvidence.isAttributedRejoin (n.role == FlareRole.Slave) (n.state == FlareState.Prepare) n.partition n.lastMasterOf n.formerSlaveOf }
               let cls := PromotionEvidence.classify reply obs
               evidence := evidence ++ [(key, cls, PromotionEvidence.bindingOf (some p.uid) reply)]

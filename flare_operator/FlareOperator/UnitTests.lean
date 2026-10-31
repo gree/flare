@@ -2160,7 +2160,10 @@ private def staleR3Refill (st : FlareClusterState) (replies : List (String × St
     : Option String × List String :=
   let obs : PromotionEvidence.Observed :=
     { mapPrepare := false, mapActive := true, podReady := true, partitionHasMaster := false,
-      lastMasterHistory := lastHist, untrackedLastMaster := untracked }
+      lastMasterHistory := lastHist, untrackedLastMaster := untracked,
+      untrackedLastMasterReadEmpty := match untracked with
+        | some m => knownEmpty.contains m
+        | none => false }
   let classes := replies.map fun (k, r) =>
     let n? := st.lookupNode k
     (k, PromotionEvidence.classify (some r) { obs with
@@ -2272,6 +2275,25 @@ private def checkStaleR3RefillUntracked (ctx : Ctx) : IO Unit := do
   let (rhM, rhL) := staleR3Refill holdState [("f", rb)] ["f"] ["f"] [] [] none (some "m")
   check ctx "untracked upgrade (needs_rebuild against the ex-master): the ex-master AWAY: HELD, not seated before the wait"
     (rhM == none && held rhL && !nlf rhL)
+  -- review of 0cf9d43: the rule needs the ex-master READ EMPTY this pass; the
+  -- replica's own R3 reading alone never says the ex-master's copy is gone
+  let mData := copy 50 "STAT rocksdb_master_id M\r\nSTAT rocksdb_source_epoch 2:e\r\nSTAT repl_read_source_eligible 0\r\nSTAT repl_read_source_state none\r\n"
+  let (axM, axL) := staleR3Refill holdState [("f", rb)] ["f"] ["f"] [] [0] none (some "m")
+  check ctx "untracked upgrade (needs_rebuild against the ex-master): the ex-master AWAY (emptiness not observed): never seated, not even after the wait"
+    (axM == none && !nlf axL)
+  let (dM, _) := staleR3Refill back [("m", mData), ("f", rb)] ["m", "f"] ["m", "f"] [] [0] none (some "m")
+  check ctx "untracked upgrade (needs_rebuild against the ex-master): the ex-master back WITH data (not read empty): the replica is never seated NOT LOSS-FREE, not even after the wait"
+    (dM != some "f")
+  let (uxM, _) := staleR3Refill back [("f", rb)] ["m", "f"] ["f"] [] [0] none (some "m")
+  check ctx "untracked upgrade (needs_rebuild against the ex-master): the ex-master live but UNREADABLE: never seated, not even after the wait"
+    (uxM == none)
+  check ctx "untracked upgrade (needs_rebuild against the ex-master): the classifier says lagging only with the ex-master read empty"
+    (PromotionEvidence.classify (some rb)
+        { mapPrepare := false, mapActive := true, podReady := true, partitionHasMaster := false,
+          lastMasterHistory := none, untrackedLastMaster := some "m", untrackedLastMasterReadEmpty := true } == .lagging
+      && PromotionEvidence.classify (some rb)
+        { mapPrepare := false, mapActive := true, podReady := true, partitionHasMaster := false,
+          lastMasterHistory := none, untrackedLastMaster := some "m" } != .lagging)
   check ctx "untracked upgrade: needs_rebuild stays UNKNOWN (never seated, not even after the wait) when it compared with ANOTHER node, compared a history, the source had an epoch, or the partition is not untracked"
     (never (fRebuilt "x" "lineage differs: copy N1, master x M2") (some "m")
       && never (fRebuilt "m" "lineage differs: copy N1, master x M2") (some "m")

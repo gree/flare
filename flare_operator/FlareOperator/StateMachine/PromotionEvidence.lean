@@ -230,6 +230,10 @@ structure Observed where
       behaviour, decided): no history can be recorded for it; `none` = tracked,
       undecided, or no unique last master -/
   untrackedLastMaster : Option String := none
+  /-- that last master (`untrackedLastMaster`) was READ EMPTY this pass, bound
+      to its unchanged pod (Main's knownEmpty). `false` = not read, unreadable,
+      data-bearing, or not checked (review of 0cf9d43) -/
+  untrackedLastMasterReadEmpty : Bool := false
   /-- the copy is in its partition ONLY by the persisted attribution of a dead
       ex-slave (formerSlaveOf, decision 2026-10-16): rejoined Slave/Prepare,
       not the partition's ex-master, not re-synced since. Its belonging and
@@ -294,6 +298,10 @@ def unhealthyFollowReasons : List String := ["apply_error", "generations_unavail
     with a history (not a lineage), stays `unknown`. -/
 def Stats.legacyCopyRebuiltAgainstReturnedLastMaster (s : Stats) (o : Observed) : Bool :=
   !o.partitionHasMaster && o.lastMasterHistory.isNone && o.untrackedLastMaster.isSome
+    -- the ex-master it was compared with is EMPTY now (read this pass, its
+    -- pod unchanged): not read, unreadable or data-bearing = unknown
+    -- (review of 0cf9d43)
+    && o.untrackedLastMasterReadEmpty
     && s.readSource == o.untrackedLastMaster && s.readSourceEpoch == some ""
     && s.sourceState == some "needs_rebuild"
     && o.mapActive && !o.mapPrepare && s.items.getD 0 != 0

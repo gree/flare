@@ -234,44 +234,31 @@ def suite : TestSuite := {
           return .pass
         finally
           healLink opIp mIp },
-    { name := "(spec 13) a master the committed map no longer names keeps claiming it (its flared frozen with SIGSTOP until failed over as NotReady, then resumed with the map withheld from it): detected and treated as down after 15 s; the map's master keeps serving (writes acknowledged); once it gets the map the claim ends"
+    { name := "(spec 13) a master the committed map no longer names keeps claiming it (failed over while cut from the operator, then reachable again with the map withheld from it and not restarted): detected and treated as down after 15 s; the map's master keeps serving (writes acknowledged); once it gets the map the claim ends"
       run := do
         if !(← graceOver) then return .fail "the operator never logged the end of its startup grace period"
         if !(← waitP0Stable) then return .fail "precondition: partition 0 is not stable"
         let some mPod ← p0Master | return .fail "no Active P0 master in the operator's map"
         let some mIp ← getPodIp mPod cfg.«namespace» | return .fail s!"no IP for {mPod}"
-        -- freeze flared from the kind node (a signal to the container's
-        -- pid 1 from inside its namespace is ignored): the kernel still
-        -- accepts TCP connects, so rule 12 does not mark it unreachable;
-        -- its readiness probe fails and the NotReady path fails it over
-        let freeze := fun (sig : String) => do
-          let node ← match ← kubectl ["get", "pod", mPod, "-n", cfg.«namespace», "-o", "jsonpath={.spec.nodeName}"] with
-            | .ok o => pure o.trim
-            | .error e => return Except.error e
-          let cid ← match ← kubectl ["get", "pod", mPod, "-n", cfg.«namespace», "-o", "jsonpath={.status.containerStatuses[0].containerID}"] with
-            | .ok o => pure ((o.trim.splitOn "://").getLast!)
-            | .error e => return Except.error e
-          hostCmd "docker" ["exec", node, "sh", "-c",
-            s!"kill -{sig} $(crictl inspect --output go-template --template '\{\{.info.pid}}' {cid})"]
+        let opIp ← match ← opIpOf with
+          | .ok ip => pure ip
+          | .error e => return .fail e
+        -- the seam withholds the map from mPod and keeps the operator from
+        -- restarting it (a restart would hand it the map by re-registration)
         match ← opExec s!"echo {mPod} > /tmp/bskip" with
         | .error e => return .fail s!"could not arm the broadcast skip: {e}"
         | .ok _ => pure ()
         try
-          match ← freeze "STOP" with
-          | .error e => return .fail s!"could not freeze {mPod}'s flared: {e}"
+          match ← cutLink opIp mIp with
+          | .error e => return .fail s!"could not cut operator ⇄ {mPod}: {e}"
           | .ok _ => pure ()
-          let promoted ← waitForCondition s!"a new P0 master after {mPod} froze" 240 do
+          let promoted ← waitForCondition s!"a new P0 master after the operator lost {mPod}" 180 do
             match ← p0Master with
             | some m => return m != mPod
             | none => return false
-          if !promoted then
-            discard <| freeze "CONT"
-            return .fail s!"precondition: {mPod} was not failed over while frozen (NotReady path)"
-          match ← freeze "CONT" with
-          | .error e => return .fail s!"could not resume {mPod}'s flared: {e}"
-          | .ok _ => pure ()
+          if !promoted then return .fail s!"precondition: {mPod} was not failed over while cut (rule 12)"
+          healLink opIp mIp
           let some m2 ← p0Master | return .fail "no master after the failover"
-          -- reachable again, but on its old map: it still claims master
           let claims ← waitForCondition s!"{mPod} still reports own_role master" 30 do
             return (← ownRole mIp) == some "master"
           if !claims then return .fail s!"precondition: {mPod} does not claim master after the heal (it got a map anyway?)"
@@ -293,7 +280,7 @@ def suite : TestSuite := {
           return .pass
         finally
           discard <| opExec "rm -f /tmp/bskip"
-          discard <| freeze "CONT" },
+          healLink opIp mIp },
     { name := "operator ⇄ EVERY flare pod cut (nothing reachable: the operator's own network is suspect): nothing is marked down, the master is unchanged for 90 s and the 'cannot reach ANY' alert is logged"
       run := do
         if !(← graceOver) then return .fail "the operator never logged the end of its startup grace period"

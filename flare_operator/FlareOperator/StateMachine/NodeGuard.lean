@@ -11,6 +11,7 @@
   StatefulSet scale-down that removes ordinals still holding data.
 -/
 import FlareOperator.K8s.FlareCluster
+import FlareOperator.StateMachine.NodeMove
 
 namespace FlareOperator.NodeGuard
 
@@ -19,6 +20,12 @@ open FlareOperator.K8s
 inductive Verdict where
   | allow (why : String)
   | deny (why : String)
+  /-- refused for now, the caller retries (429: `kubectl drain` waits and
+      tries again): a cordon move has not released the pod -/
+  | hold (why : String)
+  /-- the cordon move released this pod: allowed only once Main has written
+      `admitted` for it (CAS, current leader, lease margin) — until then not allowed -/
+  | admit (m : FlareOperator.NodeMove.Move)
   deriving Repr, BEq
 
 private def roleName : FlareRole → String
@@ -28,11 +35,13 @@ private def roleName : FlareRole → String
 
 def Verdict.allowed : Verdict → Bool
   | .allow _ => true
-  | .deny _ => false
+  | .deny _ | .hold _ | .admit _ => false
 
 def Verdict.message : Verdict → String
   | .allow why => why
   | .deny why => why
+  | .hold why => why
+  | .admit m => s!"flare: the cordon move {m.id} (generation {m.generation}) released this pod; the release is being recorded"
 
 /-- The annotation that lets one pod (by UID) through anyway: an explicit,
     audited exception (logged by the operator). -/
@@ -96,7 +105,8 @@ structure PodFacts where
     map may be the empty default and nothing can be judged: refused (review
     of 262fde9: the webhook started before the map was loaded failed open). -/
 def podDelete (initialized : Bool) (s : FlareClusterState) (caughtUp : List String)
-    (requester operatorAccount : String) (pod : PodFacts) : Verdict :=
+    (requester operatorAccount : String) (pod : PodFacts)
+    (move : FlareOperator.NodeMove.Guard := .unrelated) : Verdict :=
   if trustedRequester requester operatorAccount then .allow s!"requested by {requester}"
   else if kubeletConfirms requester pod.nodeName pod.terminating then
     .allow s!"the kubelet of {pod.nodeName} confirms the removal of a pod already terminating"
@@ -104,7 +114,14 @@ def podDelete (initialized : Bool) (s : FlareClusterState) (caughtUp : List Stri
     .allow s!"{overrideAnnotation} names this pod (uid {pod.uid}): allowed as an explicit exception"
   else if !initialized then
     .deny s!"flare: the operator has not finished reading the cluster yet (just started or just became leader), so it cannot tell what this pod holds. Retry in a few seconds, or annotate the pod {overrideAnnotation}=<its uid> to accept the risk explicitly"
-  else match s.lookupNode pod.nodeKey with
+  else match move with
+  -- the cordon move owns this pod (plan C.6): refused until it released the
+  -- pod, whatever the pod's role is now (a replica already demoted to a
+  -- proxy is NOT free to go: it may still be reached through the LB)
+  | .hold why => .hold why
+  | .permit m => .admit m
+  | .unrelated =>
+  match s.lookupNode pod.nodeKey with
   | none =>
     .deny s!"flare: this pod is not in the operator's node map, so it cannot tell what the pod holds (it may be starting with data on its volume). Retry once it has registered, or annotate the pod {overrideAnnotation}=<its uid> to accept the risk explicitly"
   | some n =>

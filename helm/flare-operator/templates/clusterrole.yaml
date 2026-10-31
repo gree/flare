@@ -34,6 +34,10 @@ rules:
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list", "watch"]
+  # EndpointSlices (the cordon move waits until the client Service no longer lists a pod)
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
   # Pods/exec (exec into pods for replication control)
   - apiGroups: [""]
     resources: ["pods/exec"]

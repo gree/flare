@@ -68,6 +68,11 @@ protected:
 	// client requests being executed now (parsed, not yet answered): on a
 	// proxy, a write being forwarded to its master is one of them
 	AtomicCounter _requests_in_progress;
+	// client DATA requests (reads and writes) received, monotonic: the cordon
+	// move's quiet check. stats/ping/quit/version and node operations are not
+	// counted, so the kubelet's probes and the operator's reads never look
+	// like a client (total_connections rises with every probe).
+	AtomicCounter _client_requests;
 	// W: writes waiting now for their partition to get a master, and how the
 	// waits ended (a master came / the wait timed out with an error)
 	AtomicCounter _writes_waiting_for_master;
@@ -200,6 +205,8 @@ public:
 	inline void request_begin() { this->_requests_in_progress.incr(); };
 	inline void request_end() { this->_requests_in_progress.sub(1); };
 	inline uint64_t get_requests_in_progress() { return this->_requests_in_progress.fetch(); };
+	inline void increment_client_requests() { this->_client_requests.incr(); };
+	inline uint64_t get_client_requests() { return this->_client_requests.fetch(); };
 	inline void master_wait_begin() { this->_writes_waiting_for_master.incr(); };
 	inline void master_wait_end(bool ok) { this->_writes_waiting_for_master.sub(1); if (ok) { this->_master_waits_ok.incr(); } else { this->_master_waits_timeout.incr(); } };
 	inline uint64_t get_writes_waiting_for_master() { return this->_writes_waiting_for_master.fetch(); };

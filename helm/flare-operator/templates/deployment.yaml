@@ -75,6 +75,22 @@ spec:
             - name: FLARE_OPERATOR_LEGACY_MASTER_SWITCH
               value: "allow"
             {{- end }}
+            {{- if .Values.nodeReplacement.enabled }}
+            {{- if not .Values.nodeGuard.enabled }}
+            {{- fail "nodeReplacement.enabled needs nodeGuard.enabled: the node guard holds the eviction of a pod on a cordoned node until its move released it" }}
+            {{- end }}
+            - name: FLARE_NODE_REPLACEMENT_MIN_COPIES
+              value: {{ .Values.nodeReplacement.minCopies | quote }}
+            - name: FLARE_NODE_REPLACEMENT_DRAIN_WAIT_SECONDS
+              value: {{ .Values.nodeReplacement.drainWaitSeconds | quote }}
+            - name: FLARE_NODE_REPLACEMENT_QUIET_SECONDS
+              value: {{ .Values.nodeReplacement.quietSeconds | quote }}
+            - name: FLARE_NODE_REPLACEMENT_EVICT_WAIT_SECONDS
+              value: {{ .Values.nodeReplacement.evictWaitSeconds | quote }}
+            {{- else }}
+            - name: FLARE_NODE_REPLACEMENT
+              value: "off"
+            {{- end }}
             {{- if .Values.nodeGuard.enabled }}
             - name: FLARE_NODE_GUARD
               value: "on"

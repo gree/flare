@@ -146,6 +146,12 @@ structure ClusterConfig where
       ValidatingWebhookConfiguration for this namespace's flared pods DELETE
       and StatefulSet (scale) UPDATE. -/
   nodeGuard : Bool := false
+  /-- The cordon move (as the chart's nodeReplacement, which needs nodeGuard):
+      the clients' Service selects the serving label the operator manages.
+      Off, the operator gets FLARE_NODE_REPLACEMENT=off as the chart renders
+      it disabled. -/
+  nodeReplacement : Bool := false
+  nodeReplacementMinCopies : Nat := 3
   tlsSidecarImage : String := "alpine/socat:1.8.0.0"
   deriving Repr
 
@@ -299,7 +305,9 @@ spec:
 def operatorDeploymentYaml (cfg : ClusterConfig) : String :=
   let env := cfg.operatorEnv ++ (if cfg.nodeGuard then
       [("FLARE_NODE_GUARD", "on"), ("FLARE_WEBHOOK_PORT", "9444"), ("FLARE_OPERATOR_SERVICE_ACCOUNT", "flare-operator")]
-    else [])
+    else []) ++ (if cfg.nodeReplacement then
+      [("FLARE_NODE_REPLACEMENT_MIN_COPIES", toString cfg.nodeReplacementMinCopies)]
+    else [("FLARE_NODE_REPLACEMENT", "off")])
   let envBlock :=
     if env.isEmpty then ""
     else "\n          env:" ++ String.join (env.map (fun (k, v) =>
@@ -498,7 +506,7 @@ metadata:
 spec:
   selector:
     app: flare
-    cluster: {cluster}
+    cluster: {cluster}{if cfg.nodeReplacement then "\n    flare.gree.net/serving: \"true\"" else ""}
   ports:
     - port: {cfg.flarePort}
       targetPort: flare
@@ -731,21 +739,33 @@ def setupNodeGuardWebhook (cfg : ClusterConfig) : IO Unit := do
   let ns := cfg.«namespace»
   let svc := s!"{cfg.operatorName}-webhook"
   let dir := s!"/tmp/flare-node-guard-{ns}"
+  -- a short CN: openssl refuses one over 64 characters, and
+  -- "<svc>.flare-node-swt-cordon-operator-restart.svc" is 65 (41222014541 C6);
+  -- the names are in the subjectAltName
   let script := s!"set -e; rm -rf {dir}; mkdir -p {dir}; cd {dir}; " ++
-    "openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=flare-e2e-ca -keyout ca.key -out ca.crt 2>/dev/null; " ++
-    s!"openssl req -newkey rsa:2048 -nodes -subj /CN={svc}.{ns}.svc -keyout tls.key -out tls.csr 2>/dev/null; " ++
+    "openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=flare-e2e-ca -keyout ca.key -out ca.crt 2>>err.txt; " ++
+    s!"openssl req -newkey rsa:2048 -nodes -subj /CN=flare-node-guard -keyout tls.key -out tls.csr 2>>err.txt; " ++
     s!"printf 'subjectAltName=DNS:{svc}.{ns}.svc,DNS:{svc}.{ns}.svc.cluster.local\\n' > ext.cnf; " ++
-    "openssl x509 -req -in tls.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 2 -extfile ext.cnf -out tls.crt 2>/dev/null; " ++
+    "openssl x509 -req -in tls.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 2 -extfile ext.cnf -out tls.crt 2>>err.txt; " ++
     s!"kubectl -n {ns} create secret tls {cfg.operatorName}-webhook-tls --cert tls.crt --key tls.key --dry-run=client -o yaml | kubectl apply -f - >/dev/null; " ++
     "base64 < ca.crt | tr -d '\\n' > ca.b64"
-  let out ← IO.Process.output { cmd := "sh", args := #["-c", script] }
+  -- retried: 41211321783 C6 failed here once with nothing on stderr (openssl's
+  -- output was discarded; it now goes to err.txt and into the error)
+  let mut out ← IO.Process.output { cmd := "sh", args := #["-c", script] }
+  for _ in [0:2] do
+    if out.exitCode == 0 then break
+    let err ← try IO.FS.readFile s!"{dir}/err.txt" catch _ => pure ""
+    IO.eprintln s!"# node guard certificates failed (exit {out.exitCode}): {out.stderr.trim.take 300} {err.trim.take 600}; retrying"
+    IO.sleep 2000
+    out ← IO.Process.output { cmd := "sh", args := #["-c", script] }
   if out.exitCode != 0 then
-    throw (IO.userError s!"node guard certificates: {out.stderr.trim}")
+    let err ← try IO.FS.readFile s!"{dir}/err.txt" catch _ => pure ""
+    throw (IO.userError s!"node guard certificates (exit {out.exitCode}): {out.stderr.trim} {err.trim.take 600}")
   let ca := (← IO.FS.readFile s!"{dir}/ca.b64").trim
   let hook := fun (hname path : String) (rules : String) (objSel : String) =>
     s!"  - name: {hname}
     admissionReviewVersions: [\"v1\"]
-    sideEffects: None
+    sideEffects: NoneOnDryRun
     failurePolicy: Fail
     timeoutSeconds: 5
     matchPolicy: Equivalent
@@ -782,6 +802,11 @@ metadata:
 webhooks:
 " ++ hook "pods.node-guard.flare.gree.net" "/pods"
       "      - apiGroups: [\"\"]\n        apiVersions: [\"v1\"]\n        operations: [\"DELETE\"]\n        resources: [\"pods\"]\n        scope: Namespaced"
+      -- flared pods only (as the chart): the operator's own exited pod must
+      -- stay removable while it is away (41211321783 C8)
+      "\n    objectSelector:\n      matchLabels:\n        app: flare"
+    ++ hook "evictions.node-guard.flare.gree.net" "/pods"
+      "      - apiGroups: [\"\"]\n        apiVersions: [\"v1\"]\n        operations: [\"CREATE\"]\n        resources: [\"pods/eviction\"]\n        scope: Namespaced"
       ""
     ++ hook "statefulsets.node-guard.flare.gree.net" "/statefulsets"
       "      - apiGroups: [\"apps\"]\n        apiVersions: [\"v1\"]\n        operations: [\"UPDATE\", \"DELETE\"]\n        resources: [\"statefulsets\", \"statefulsets/scale\"]\n        scope: Namespaced"

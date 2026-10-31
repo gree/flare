@@ -826,6 +826,108 @@ helm upgrade <release> ... --set nodeGuard.enabled=true
 Without the guard nothing stops a force delete of a master: do one pod at a
 time and only graceful deletes.
 
+## Cordon (`kubectl cordon` / `drain`) moves the pods off a node {#cordon-move}
+
+Design: `flare-ci-inputs/decisions/NODE-OPS-NOSTOP-IMPLEMENTATION-PLAN-2026-10-26.md`
+section C. State machine: `flare_operator/FlareOperator/StateMachine/NodeMove.lean`.
+Chart values: `nodeReplacement.*` (needs `nodeGuard.enabled`; the chart refuses
+`nodeReplacement.enabled` without it). `FLARE_NODE_REPLACEMENT=off` on the
+operator turns the whole feature off.
+
+**What happens.** A Node gets `spec.unschedulable=true`. For each flared pod on
+it, **one pod at a time** (cluster-wide, also with two cordoned nodes), the
+operator records a move in `status.nodeMoves` and walks it through:
+
+| phase | meaning |
+|---|---|
+| `pending` | started; a master asks the ordered handover (demote → drain → promote) for a successor on an uncordoned node, a replica is demoted to a proxy |
+| `handingOver` | (master only) the handover runs |
+| `proxied` | the pod is a proxy; the operator removes its `flare.gree.net/serving` label |
+| `unserved` | waiting until (a) the client Service (`<name>-nodes-external`, which selects the label) no longer lists the pod in its EndpointSlices, (b) `total_connections` did not grow for 10 s (the operator's own stats connections are subtracted), (c) `curr_connections` is 0 (minus the operator's own), and flared's own `own_role` is `proxy` |
+| `released` | written **only by the operator**. The node guard now lets an eviction or delete of this pod through. If nothing evicts within 60 s the operator deletes it (UID precondition) |
+| `deleted` | the old pod is gone |
+| `resyncing` | the StatefulSet recreated it on another node; the operator seats it as a replica; when Active and synced (R3 eligible) it gets the serving label back — never while it is Terminating |
+| `done` | finished |
+| `cancelled` | the node was uncordoned before `released` (see below) |
+
+`kubectl get flarecluster <name> -o jsonpath='{.status.nodeMoves}'` shows the
+record; the operator log lines start with `NODE MOVE`; Events carry
+`FlareCordonMoveStarted / Blocked / Held / Released / Cancelled / Done`.
+
+**Not enough copies (`FlareCordonMoveBlocked`).** The move starts only if the
+partition would keep enough *real* copies. A real copy is on a node that is
+not cordoned, Active (pod Ready), has the master's history (copy identity,
+lineage and source epoch), has no open replica repair and no new drop/failed
+write since the operator saw it. The copy being moved counts toward
+`nodeReplacement.minCopies` (default 3: master + 2 replicas → 2 real copies
+remain); at least one other real copy must always remain. If fewer would
+remain the move does **not** start, the pod is listed in
+`status.nodeMoves.blocked` with the reason, an Event and the alert
+`FlareCordonMoveBlocked` fire, and the eviction of that pod stays refused
+(HTTP 429, `kubectl drain` waits and retries). Fix it by adding a copy
+(`replicas`), waiting for a repair/rebuild to finish, or uncordoning; setting
+`nodeReplacement.minCopies: 2` moves 2-copy partitions too, with the master
+alone while the replica is away — an explicit, accepted risk.
+
+**Held (`FlareCordonMoveHeld`).** Either the client Service still reached the
+pod 120 s (`drainWaitSeconds`) after the label was removed (clients keep
+connecting through a load balancer that has not dropped the pod, or hold
+connections open), or the handover aborted three times. The pod stays a
+proxy / master, **nothing is deleted**, the reason is in
+`status.nodeMoves.moves[].reason`. It releases by itself if the evidence turns
+up later. Look at `kubectl get endpointslices -l kubernetes.io/service-name=<name>-nodes-external`,
+the load balancer's targets, and the pod's `stats` (`total_connections`,
+`curr_connections`). Flared closing a client connection after a response is
+**not implemented yet** (L9): a client that never reconnects keeps the pod
+held; a later change adds it.
+
+**Uncordon.** The operator writes `cancelled` (generation + 1) **first** and
+puts the serving label back **after** that write succeeded, so an eviction
+that races the uncordon either sees `released` (the move completes) or does
+not see it at all. After `released` an uncordon is **refused**: the move
+completes and the recreated pod may come back to the uncordoned node. While
+a master's handover runs it is not interrupted; the move ends right after.
+
+**Eviction/delete rules** (node guard, `pods` DELETE — evictions arrive as
+that DELETE). A pod with a move, or a data pod on a cordoned node without
+one, is refused with 429 until its move is `released` **and** the pod UID
+matches, it has no serving label, and its node is still cordoned. The webhook
+writes only `admitted` (move id, generation, AdmissionReview uid) as a
+compare-and-swap on `status.nodeMoves` just before it allows, only as the
+lease holder with at least 5 s of lease left, and re-checks the lease after
+the write; a dry run writes and allows nothing. If the write fails the
+request is refused and retried by `drain`.
+
+### Break-glass: evicting or deleting a pod before its move is released
+
+Accepting that clients may be dropped and, for a master/replica, that
+unreplicated writes can be lost: use the audited override of the node guard
+(see [Break-glass: deleting a pod anyway](#node-guard)):
+
+```sh
+UID=$(kubectl get pod <pod> -n <ns> -o jsonpath='{.metadata.uid}')
+kubectl annotate pod <pod> -n <ns> --overwrite flare.gree.net/delete-override=$UID
+kubectl drain <node> --delete-emptydir-data --ignore-daemonsets   # or kubectl delete pod
+```
+
+The override names one pod by UID and is logged by the operator (`NODE GUARD:
+allowed ... delete-override names this pod`); it works with the Eviction API,
+so the drain procedure does not change. A move for that pod is then cancelled
+or finished by the operator as the pod disappears. To stop the whole feature
+instead: `nodeReplacement.enabled=false` (or `FLARE_NODE_REPLACEMENT=off`) —
+the node guard's older rules (graceful delete + handover) apply again, and
+the Service selector loses the serving label requirement.
+
+### Limits of this step
+
+- Flared does not yet close client connections after a response (L9); the
+  move relies on clients or the load balancer dropping the pod.
+- Connections from other flared nodes (proxy pools, replication) are also
+  counted by `curr_connections`; whether the 0 condition holds with them is to
+  be confirmed in the E2E job that follows this one.
+- A pod on a node-local PV cannot be recreated elsewhere: use tmpfs or
+  network storage.
+
 ## Seeding a new cluster via cluster replication {#replication-seeding}
 
 Standing up a cluster whose data comes from another flare (classic or

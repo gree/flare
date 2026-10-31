@@ -143,6 +143,14 @@ def suite : TestSuite := {
           if m2 != bPod then
             return .fail s!"{m2} was promoted, but {bPod} (applied {bApplied}) held newer data than {aPod} (applied {aApplied})"
           let some m2Ip ← getPodIp m2 cfg.«namespace» | return .fail s!"no IP for {m2}"
+          -- read only once the promoted node itself applied the map: before
+          -- that it still forwards reads to the lost master and they come
+          -- back as misses (41103383413: read 1 s after the commit)
+          let applied ← waitForCondition s!"{m2} reports own_role master" 60 do
+            match ← execInDebugPod cfg.debugPod cfg.«namespace» s!"printf 'stats\\r\\n' | nc -w 3 {m2Ip} {cfg.flarePort}" with
+            | .ok o => return containsSubstr o "STAT own_role master"
+            | .error _ => return false
+          if !applied then return .fail s!"{m2} never reported itself master (the promotion map was not applied)"
           for (pfx, n) in [("ord_base", 30), ("ord_late", 30)] do
             for i in [0:n] do
               match ← memcachedGet cfg.debugPod cfg.«namespace» m2Ip cfg.flarePort s!"{pfx}_{i}" with

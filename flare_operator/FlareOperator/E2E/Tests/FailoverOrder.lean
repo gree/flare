@@ -608,7 +608,52 @@ def suite : TestSuite := {
         -- the recreated slave is Ready only once it has the map: the
         -- broadcast went out after the delay was removed
         if !(← waitP0Stable) then return .fail "partition 0 did not settle once the renew answered in time again"
-        return .pass }
+        return .pass },
+    { name := "(risk B9) an unreachable master whose only reachable slaves the promotion gate refuses (both followers cut from the master, judged UNFIT by R3) is KEPT: the operator ⇄ master cut does not leave partition 0 masterless for 90 s, and the CRITICAL keep line names it"
+      run := do
+        if !(← graceOver) then return .fail "the operator never logged the end of its startup grace period"
+        if !(← waitP0Stable) then return .fail "precondition: partition 0 is not stable"
+        let opIp ← match ← opIpOf with
+          | .ok ip => pure ip
+          | .error e => return .fail e
+        let some mPod ← p0Master | return .fail "no Active P0 master in the operator's map"
+        let some mIp ← getPodIp mPod cfg.«namespace» | return .fail s!"no IP for {mPod}"
+        let slaves := ((← nodeView).filter fun e => e.partition == 0 && e.role == 1).map (podOf ·.fqdn)
+        if slaves.length != 2 then return .fail s!"precondition: partition 0 has {slaves.length} slave(s), not 2"
+        let mut sIps : List String := []
+        for sp in slaves do
+          match ← getPodIp sp cfg.«namespace» with
+          | some ip => sIps := sIps ++ [ip]
+          | none => return .fail s!"no IP for {sp}"
+        try
+          -- the followers lose the master: R3 judges them UNFIT
+          for ip in sIps do
+            match ← cutLink mIp ip with
+            | .error e => return .fail s!"could not cut {mIp} ⇄ {ip}: {e}"
+            | .ok _ => pure ()
+          discard <| writeKeys cfg.debugPod cfg.«namespace» mIp cfg.flarePort "b9_unfit" 20
+          let unfit ← waitForCondition "both slaves are judged UNFIT by R3" 180 do
+            let logs ← opLogs
+            return slaves.all fun sp => countLines logs "CONTINUOUS REPLICATION eligibility" s!"{sp}." > 0
+              && ((logs.splitOn "\n").reverse.find? (fun l => containsSubstr l "CONTINUOUS REPLICATION eligibility" && containsSubstr l s!"{sp}.")).any (containsSubstr · "UNFIT")
+          if !unfit then return .fail "precondition: the slaves were not judged UNFIT within 180 s"
+          match ← cutLink opIp mIp with
+          | .error e => return .fail s!"could not cut operator ⇄ {mIp}: {e}"
+          | .ok _ => pure ()
+          for i in [0:9] do
+            IO.sleep 10000
+            match ← p0Master with
+            | some m => if m != mPod then return .fail s!"{mPod} was replaced by {m} although every reachable slave is refused by the promotion gate ({(i + 1) * 10} s)"
+            | none => return .fail s!"partition 0 became MASTERLESS {(i + 1) * 10} s after the operator ⇄ master cut (the gate refused the successor the failover counted)"
+          let logs ← opLogs
+          IO.eprintln s!"# [b9] {mPod} kept for 90 s with both slaves UNFIT; keep lines {countLines logs "NO reachable promotable successor" mPod}"
+          if countLines logs "NO reachable promotable successor" mPod == 0 then
+            return .fail s!"no CRITICAL keep line names {mPod}"
+          return .pass
+        finally
+          healLink opIp mIp
+          for ip in sIps do healLink mIp ip
+          discard <| waitP0Stable }
   ]
 }
 

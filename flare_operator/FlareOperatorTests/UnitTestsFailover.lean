@@ -145,10 +145,11 @@ def results : List (String × Bool) := Id.run do
       && (DuplicateMaster.step [] "b" (some true) 1000) == ([("b", 1000)], false)
       && (DuplicateMaster.step [("b", 1000)] "b" (some true) 1200).2 == false
       && (DuplicateMaster.step [("b", 1000)] "b" (some true) (1000 + h)).2 == true)]
-  r := r ++ [("duplicate master: a claim that ends clears it; an unreadable sample keeps what was known and never starts a count",
+  r := r ++ [("duplicate master: a claim that ends clears it; an unreadable sample keeps what was known, never starts a count and never decides the down (B11); the next READ claim past holdMs does",
     (DuplicateMaster.step [("b", 1000)] "b" (some false) 99000) == ([], false)
       && (DuplicateMaster.step [] "b" none 99000) == ([], false)
-      && (DuplicateMaster.step [("b", 1000)] "b" none (1000 + h)).2 == true)]
+      && (DuplicateMaster.step [("b", 1000)] "b" none (1000 + h)) == ([("b", 1000)], false)
+      && (DuplicateMaster.step [("b", 1000)] "b" (some true) (2000 + h)).2 == true)]
   -- the mid-pass lease check (review of fac7410, P1)
   r := r ++ [("lease check: held only from this pod's own renew with a margin left; a failed renew is never held, whatever the earlier read said",
     LeaseFence.held true true 300 15000

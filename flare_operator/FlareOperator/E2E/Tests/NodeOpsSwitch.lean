@@ -1527,11 +1527,14 @@ def cordonStuckTest (c : Ctx) : IO TestResult := do
   if !(← c.startLoad "svc" (svcHost c) 2 50) then return .fail (notSetUp "the client-path load did not start")
   if !(← c.startLoad "peer" s!"{c.cfg.name}-nodes-external.{ns}.svc.cluster.local" 1 50) then
     return .fail (notSetUp "the proxy-path load did not start")
-  -- the held client connection: curr_connections of A never drops to 0
-  let holdTag := "sleep 3607"
+  -- the held client connection: curr_connections of A never drops to 0. It
+  -- sends `version` every 5 s: flared closes a client connection idle for
+  -- its read timeout (30 s in the k8s build), and an idle one was closed
+  -- before the 60 s deadline, so the move was released (41352662024)
+  let holdTag := "flare-e2e-hold-3607"
   let closeHold : IO Unit := do
     discard <| execInDebugPod c.cfg.debugPod ns s!"pkill -f '{holdTag}' ; pkill -f 'nc {ra.ip} {c.cfg.flarePort}' ; true"
-  match ← execInDebugPod c.cfg.debugPod ns s!"setsid sh -c '{holdTag} | nc {ra.ip} {c.cfg.flarePort}' >/dev/null 2>&1 < /dev/null &" with
+  match ← execInDebugPod c.cfg.debugPod ns s!"setsid sh -c ': {holdTag}; while :; do printf \"version\\r\\n\"; sleep 5; done | nc {ra.ip} {c.cfg.flarePort}' >/dev/null 2>&1 < /dev/null &" with
   | .error e => return .fail (notSetUp s!"could not hold a client connection: {e.take 200}")
   | .ok _ => pure ()
   IO.sleep 2000

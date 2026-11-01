@@ -84,26 +84,54 @@ namespace test_handler_reconstruction {
 		return tv.tv_sec * 1000L + tv.tv_usec / 1000;
 	}
 
+	// run() on another thread; its result and completion are shared with the
+	// test thread under `m` (a plain or volatile flag is a data race in C++)
 	struct run_ctx {
 		handler_reconstruction* h;
-		int rc;
-		volatile bool done;
+		pthread_mutex_t m;
+		int rc_;
+		bool done_;
+		run_ctx(): h(NULL), rc_(0), done_(false) { pthread_mutex_init(&this->m, NULL); }
+		~run_ctx() { pthread_mutex_destroy(&this->m); }
 	};
+
+	void reset_ctx(run_ctx& ctx) {
+		pthread_mutex_lock(&ctx.m);
+		ctx.rc_ = 0;
+		ctx.done_ = false;
+		pthread_mutex_unlock(&ctx.m);
+	}
+
+	bool is_done(run_ctx& ctx) {
+		pthread_mutex_lock(&ctx.m);
+		const bool d = ctx.done_;
+		pthread_mutex_unlock(&ctx.m);
+		return d;
+	}
+
+	int get_rc(run_ctx& ctx) {
+		pthread_mutex_lock(&ctx.m);
+		const int r = ctx.rc_;
+		pthread_mutex_unlock(&ctx.m);
+		return r;
+	}
 
 	void* run_handler(void* p) {
 		run_ctx* ctx = static_cast<run_ctx*>(p);
-		ctx->rc = ctx->h->run();
-		__sync_synchronize();
-		ctx->done = true;
+		const int r = ctx->h->run();
+		pthread_mutex_lock(&ctx->m);
+		ctx->rc_ = r;
+		ctx->done_ = true;
+		pthread_mutex_unlock(&ctx->m);
 		return NULL;
 	}
 
 	bool wait_done(run_ctx& ctx, int budget_ms) {
 		const long end = now_ms() + budget_ms;
-		while (!ctx.done && now_ms() < end) {
+		while (!is_done(ctx) && now_ms() < end) {
 			usleep(20 * 1000);
 		}
-		return ctx.done;
+		return is_done(ctx);
 	}
 
 	bool wait_state(shared_thread t, const string& state, int budget_ms) {
@@ -180,8 +208,7 @@ namespace test_handler_reconstruction {
 		shared_thread t = tp->get(thread_pool::thread_type_reconstruction);
 		run_ctx ctx;
 		ctx.h = new_handler(t);
-		ctx.rc = 0;
-		ctx.done = false;
+		reset_ctx(ctx);
 		pthread_t th;
 		pthread_create(&th, NULL, run_handler, &ctx);
 		const bool done = wait_done(ctx, 3000);
@@ -192,7 +219,7 @@ namespace test_handler_reconstruction {
 		stop(t, th, ctx);
 
 		cut_assert_true(done, cut_message("the handler did not end (thread state=%s)", state_seen.c_str()));
-		cut_assert_equal_int(-1, ctx.rc);
+		cut_assert_equal_int(-1, get_rc(ctx));
 		cut_assert_true(state_seen != "connect", cut_message("thread state=%s", state_seen.c_str()));
 		cut_assert_equal_string("", peer_seen.c_str());
 		cut_assert_equal_int(0, connections);
@@ -207,8 +234,7 @@ namespace test_handler_reconstruction {
 		shared_thread t = tp->get(thread_pool::thread_type_reconstruction);
 		run_ctx ctx;
 		ctx.h = new_handler(t);
-		ctx.rc = 0;
-		ctx.done = false;
+		reset_ctx(ctx);
 		pthread_t th;
 		pthread_create(&th, NULL, run_handler, &ctx);
 
@@ -220,7 +246,7 @@ namespace test_handler_reconstruction {
 		while (handler_reconstruction::outstanding_probe_workers() > 0 && now_ms() < wd) {
 			usleep(20 * 1000);
 		}
-		const bool still_running_after_attempt_1 = !ctx.done;
+		const bool still_running_after_attempt_1 = !is_done(ctx);
 		const int before = drain_connections();
 		t->set_state("demoted");	// a new _run_once would set "connect"
 
@@ -231,10 +257,10 @@ namespace test_handler_reconstruction {
 		stop(t, th, ctx);
 
 		cut_assert_true(attempted, cut_message("attempt 1 did not reach the source"));
-		cut_assert_true(still_running_after_attempt_1, cut_message("ended within attempt 1 (rc=%d)", ctx.rc));
+		cut_assert_true(still_running_after_attempt_1, cut_message("ended within attempt 1 (rc=%d)", get_rc(ctx)));
 		cut_assert_true(before >= 1, cut_message("attempt 1 made no connection to the source"));
 		cut_assert_true(done, cut_message("not abandoned at the next attempt (thread state=%s)", state_seen.c_str()));
-		cut_assert_equal_int(-1, ctx.rc);
+		cut_assert_equal_int(-1, get_rc(ctx));
 		cut_assert_equal_string("demoted", state_seen.c_str());
 		cut_assert_equal_int(0, after);
 		cut_assert_equal_string("aborted", rstate.c_str());
@@ -249,14 +275,13 @@ namespace test_handler_reconstruction {
 		shared_thread t = tp->get(thread_pool::thread_type_reconstruction);
 		run_ctx ctx;
 		ctx.h = new_handler(t);
-		ctx.rc = 0;
-		ctx.done = false;
+		reset_ctx(ctx);
 		pthread_t th;
 		pthread_create(&th, NULL, run_handler, &ctx);
 
 		const bool attempted = wait_state(t, "connect", 5000);
 		usleep(1500 * 1000);	// attempt 1 failed (300 ms); now in its 2 s retry wait
-		const bool running = !ctx.done;
+		const bool running = !is_done(ctx);
 		const string peer_seen = t->get_thread_info().peer_name;
 		const int connections = drain_connections();
 		const string rstate = stats_object->get_reconstruction_current_state();
@@ -268,12 +293,12 @@ namespace test_handler_reconstruction {
 		delete ctx.h;
 
 		cut_assert_true(attempted, cut_message("no attempt against the source"));
-		cut_assert_true(running, cut_message("ended without a shutdown request (rc=%d)", ctx.rc));
+		cut_assert_true(running, cut_message("ended without a shutdown request (rc=%d)", get_rc(ctx)));
 		cut_assert_equal_string("127.0.0.1", peer_seen.c_str());
 		cut_assert_true(connections >= 1, cut_message("no connection to the source"));
 		cut_assert_equal_string("running", rstate.c_str());
 		cut_assert_true(done);
-		cut_assert_equal_int(-1, ctx.rc);
+		cut_assert_equal_int(-1, get_rc(ctx));
 		cut_assert_equal_string("aborted", rstate_after.c_str());
 	}
 #ifdef HAVE_LIBROCKSDB
@@ -315,8 +340,7 @@ namespace test_handler_reconstruction {
 	// "connect" and connecting again). The thread state is left at `marker`.
 	bool start_parked(shared_thread t, storage_rocksdb* s, run_ctx& ctx, pthread_t& th, const char* marker, string& why) {
 		ctx.h = new handler_reconstruction(t, cl, s, "127.0.0.1", source_port, 0, 0, cluster::role_slave, 0, 0);
-		ctx.rc = 0;
-		ctx.done = false;
+		reset_ctx(ctx);
 		pthread_create(&th, NULL, run_handler, &ctx);
 		if (!wait_state(t, "connect", 5000)) {
 			why = "attempt 1 did not reach the source";
@@ -333,7 +357,7 @@ namespace test_handler_reconstruction {
 		}
 		t->set_state(marker);
 		usleep(3000 * 1000);	// longer than the 2 s retry wait after attempt 1
-		if (ctx.done) {
+		if (is_done(ctx)) {
 			why = "run() ended while parked";
 			return false;
 		}
@@ -381,7 +405,7 @@ namespace test_handler_reconstruction {
 		cut_assert_true(parked, cut_message("%s", why.c_str()));
 		cut_assert_true(done, cut_message("still waiting parked after the demotion (thread state=%s)", state_seen.c_str()));
 		cut_assert_true(took <= 2500, cut_message("took %ld ms", took));
-		cut_assert_equal_int(-1, ctx.rc);
+		cut_assert_equal_int(-1, get_rc(ctx));
 		cut_assert_equal_string("aborted", rstate.c_str());
 		cut_assert_true(still_parked, cut_message("left the parked wait by a resume"));
 		cut_assert_equal_string("parked", state_seen.c_str());
@@ -408,7 +432,7 @@ namespace test_handler_reconstruction {
 		const bool parked = start_parked(t, s, ctx, th, "parked", why);
 
 		usleep(2000 * 1000);	// still parked, still a slave
-		const bool running = !ctx.done;
+		const bool running = !is_done(ctx);
 		const string state_waiting = t->get_state();
 		const int during = drain_connections();
 		const string rstate = stats_object->get_reconstruction_current_state();
@@ -426,7 +450,7 @@ namespace test_handler_reconstruction {
 		drop_storage(s, dir);
 
 		cut_assert_true(parked, cut_message("%s", why.c_str()));
-		cut_assert_true(running, cut_message("ended while parked as a slave (rc=%d)", ctx.rc));
+		cut_assert_true(running, cut_message("ended while parked as a slave (rc=%d)", get_rc(ctx)));
 		cut_assert_equal_string("parked", state_waiting.c_str());
 		cut_assert_equal_int(0, during);
 		cut_assert_equal_string("running", rstate.c_str());
@@ -434,7 +458,7 @@ namespace test_handler_reconstruction {
 		cut_assert_true(reattempted, cut_message("no fresh attempt after the resume"));
 		cut_assert_true(after_resume >= 1, cut_message("no connection to the source after the resume"));
 		cut_assert_true(done);
-		cut_assert_equal_int(-1, ctx.rc);
+		cut_assert_equal_int(-1, get_rc(ctx));
 		cut_assert_equal_string("aborted", rstate_after.c_str());
 #else
 		cut_omit("built without RocksDB");

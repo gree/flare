@@ -121,6 +121,20 @@ private def p0Master : IO (Option String) := do
 
 private def opLogs : IO String := kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 4000
 
+/-- The operator's log lines written at or after `since` (RFC 3339, UTC):
+    evidence of THIS test, never a stale line of an earlier one. -/
+private def opLogsSince (since : String) : IO String := do
+  match ← kubectl ["logs", "-n", cfg.«namespace», "-l", s!"app={cfg.operatorName}", "--since-time", since, "--tail=-1"] with
+  | .ok o => return o
+  | .error _ => return ""
+
+-- with nanoseconds: a second-precision boundary also admitted the earlier
+-- lines of the same second (review of 9c9f21e); --since-time takes RFC 3339
+-- with a fraction
+private def utcStamp : IO String := do
+  let o ← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%S.%NZ"] }
+  return o.stdout.trim
+
 private def opIpOf : IO (Except String String) := do
   let opPod ← match ← kubectl ["get", "pods", "-n", cfg.«namespace», "-l", s!"app={cfg.operatorName}", "-o", "jsonpath={.items[0].metadata.name}"] with
     | .ok o => pure o.trim
@@ -554,6 +568,13 @@ def suite : TestSuite := {
               | .error _ => return false
             | none => return false
           if !ready then return .fail s!"precondition: {sPod} did not come back Ready on another IP"
+          -- the unreachability verdict concerns a Slave/Master only: the
+          -- recreated pod must be seated as an Active slave again before its
+          -- cut (41333760888: it re-registered as a Proxy, "all partitions
+          -- full", and a proxy is never marked unreachable-down)
+          let seated ← waitForCondition s!"{sPod} is an Active slave again" 180 do
+            return (← nodeView).any fun e => podOf e.fqdn == sPod && e.role == 1 && e.state == 0
+          if !seated then return .fail s!"precondition: the recreated {sPod} was not seated as an Active slave within 180 s"
           let newIp := (← getPodIp sPod cfg.«namespace»).getD ""
           match ← cutLink opIp newIp with
           | .error e => return .fail s!"could not cut operator ⇄ {newIp}: {e}"
@@ -608,7 +629,66 @@ def suite : TestSuite := {
         -- the recreated slave is Ready only once it has the map: the
         -- broadcast went out after the delay was removed
         if !(← waitP0Stable) then return .fail "partition 0 did not settle once the renew answered in time again"
-        return .pass }
+        return .pass },
+    { name := "(risk B9) an unreachable master whose only reachable slaves cannot be proven current (both followers cut from the master, R3 \"promotion ineligible\") never leaves partition 0 masterless for 90 s: it is either kept (CRITICAL keep line) or one of those slaves is promoted for availability with PROMOTION NOT LOSS-FREE naming it (an unproven follower is held, then promoted, not refused: 41331221519)"
+      run := do
+        if !(← graceOver) then return .fail "the operator never logged the end of its startup grace period"
+        if !(← waitP0Stable) then return .fail "precondition: partition 0 is not stable"
+        let opIp ← match ← opIpOf with
+          | .ok ip => pure ip
+          | .error e => return .fail e
+        let some mPod ← p0Master | return .fail "no Active P0 master in the operator's map"
+        let some mIp ← getPodIp mPod cfg.«namespace» | return .fail s!"no IP for {mPod}"
+        let slaves := ((← nodeView).filter fun e => e.partition == 0 && e.role == 1).map (podOf ·.fqdn)
+        if slaves.length != 2 then return .fail s!"precondition: partition 0 has {slaves.length} slave(s), not 2"
+        let mut sIps : List String := []
+        for sp in slaves do
+          match ← getPodIp sp cfg.«namespace» with
+          | some ip => sIps := sIps ++ [ip]
+          | none => return .fail s!"no IP for {sp}"
+        -- every piece of evidence below is from this test's window only
+        let t0 ← utcStamp
+        try
+          -- the followers lose the master: R3 judges them promotion-ineligible (the
+          -- eligibility line is logged on a change: "promotion ineligible: follower
+          -- state is disconnected", 41328793199)
+          for ip in sIps do
+            match ← cutLink mIp ip with
+            | .error e => return .fail s!"could not cut {mIp} ⇄ {ip}: {e}"
+            | .ok _ => pure ()
+          discard <| writeKeys cfg.debugPod cfg.«namespace» mIp cfg.flarePort "b9_unfit" 20
+          let unfit ← waitForCondition "both slaves are judged promotion-ineligible by R3" 180 do
+            let logs ← opLogsSince t0
+            return slaves.all fun sp => countLines logs "CONTINUOUS REPLICATION eligibility" s!"{sp}." > 0
+              && ((logs.splitOn "\n").reverse.find? (fun l => containsSubstr l "CONTINUOUS REPLICATION eligibility" && containsSubstr l s!"{sp}.")).any (containsSubstr · "promotion ineligible")
+          if !unfit then return .fail "precondition: the slaves were not judged promotion-ineligible by R3 within 180 s"
+          let t1 ← utcStamp
+          match ← cutLink opIp mIp with
+          | .error e => return .fail s!"could not cut operator ⇄ {mIp}: {e}"
+          | .ok _ => pure ()
+          let mut finalM := mPod
+          for i in [0:9] do
+            IO.sleep 10000
+            match ← p0Master with
+            | some m =>
+              if m != mPod && !slaves.contains m then
+                return .fail s!"{mPod} was replaced by {m}, not one of its partition's slaves {slaves} ({(i + 1) * 10} s)"
+              finalM := m
+            | none => return .fail s!"partition 0 became MASTERLESS {(i + 1) * 10} s after the operator ⇄ master cut"
+          -- the verdict lines written after the operator ⇄ master cut only
+          let logs ← opLogsSince t1
+          let kept := countLines logs "NO reachable promotable successor" mPod
+          let notLossFree := countLines logs "PROMOTION NOT LOSS-FREE" finalM
+          IO.eprintln s!"# [b9] master after 90 s: {finalM} (was {mPod}); keep lines {kept}; NOT LOSS-FREE lines naming it {notLossFree}"
+          if finalM == mPod then
+            if kept == 0 then return .fail s!"{mPod} was kept but no CRITICAL keep line names it"
+          else if notLossFree == 0 then
+            return .fail s!"{finalM} was promoted without a PROMOTION NOT LOSS-FREE line naming it, although its follow was cut"
+          return .pass
+        finally
+          healLink opIp mIp
+          for ip in sIps do healLink mIp ip
+          discard <| waitP0Stable }
   ]
 }
 

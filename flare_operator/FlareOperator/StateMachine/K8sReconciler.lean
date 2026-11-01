@@ -569,38 +569,6 @@ def drainBlockedKeys (post : FlareClusterState) (drainKeys : List String)
     | some node => node.role == FlareRole.Master
     | none => false
 
-/-- Dead keys we deliberately DO NOT fail over: a master that is STILL
-    PRESENT (flagged by the unhealthy path — its pod exists — rather than by
-    a vanished pod) and has no promotable successor.
-
-    Demoting it achieves nothing: there is nobody to promote, so the only
-    effects are harmful — the partition is declared masterless sooner, the
-    node loses the partition assignment the rejoin path keys off
-    (`old.partition >= 0`), so the process that will most likely be back in
-    seconds takes the messier fresh-registration route, and the cluster pays
-    a topology churn for it. Keeping it master costs nothing either: it is
-    NotReady, so K8s has already pulled it out of the client LB.
-
-    This is exactly the decision the drain guard already makes for a
-    Terminating master (handleDrainWithPromotionSingleKey demotes ONLY
-    together with a successful promotion). A VANISHED pod is a different
-    case — nothing is coming back under that entry — and still fails over.
-
-    A successor counts only if it is an Active Slave of the same partition
-    whose own pod is live and not itself unhealthy. -/
-def unhealthyMastersKept (state : FlareClusterState)
-    (deadKeys unhealthyKeys livePodKeys : List String) : List String :=
-  deadKeys.filter fun key =>
-    unhealthyKeys.contains key &&
-    (match state.lookupNode key with
-     | none => false
-     | some node =>
-       node.role == FlareRole.Master &&
-       !(state.nodeMap.any (fun kv =>
-           kv.2.role == FlareRole.Slave && kv.2.state == FlareState.Active
-             && kv.2.partition == node.partition
-             && livePodKeys.contains kv.1 && !unhealthyKeys.contains kv.1)))
-
 /-- Demote every Master that duplicates an EARLIER Master of the same
     partition in the list (first Master for a partition wins; later ones are
     demoted back to an unassigned Proxy and will be re-assigned by the next
@@ -1094,6 +1062,122 @@ theorem shapePromotionCandidates_nodeMap (ex rk up : List String)
     (shapePromotionCandidates ex rk up s).nodeMap = s.nodeMap := by
   unfold shapePromotionCandidates
   split <;> rfl
+
+/-- What a failover pass knows, before its commit, about which slaves the
+    promotion gates refuse and in which order it tries the rest (the
+    PodListResponse fields of this pass). -/
+structure SuccessorGates where
+  /-- Pods present this pass; a slave without one is not a candidate. -/
+  livePodKeys : List String := []
+  /-- NotReady / operator-unreachable nodes (a slave among them is no successor). -/
+  unhealthyKeys : List String := []
+  /-- Nodes failed over in this same pass (a dead slave is no successor). -/
+  deadKeys : List String := []
+  /-- Replica repair held on the node (SC-03): stays Proxy, never promoted. -/
+  repairHeld : List String := []
+  /-- Followers known unusable: FollowEvidence unfit, R3 source-ineligible or
+      unreadable (`repl_read_source_eligible` 0 / unknown), a PromotionEvidence
+      class that is not normal (lagging / forbidden / unknown), an Active slave
+      whose pod is not Ready (Main, PodListResponse). -/
+  followUnfit : List String := []
+  /-- PromotionEvidence class not promotable this pass. -/
+  promotionBlocked : List String := []
+  /-- Proven-current followers, best first (tried first). -/
+  followRanked : List String := []
+  /-- In the mode but currency unproven (tried last; logged NOT LOSS-FREE). -/
+  followUnproven : List String := []
+  /-- Standby slaves (tried after every non-standby one). -/
+  standby : List String := []
+
+/-- Keys the failover never promotes this pass. -/
+def SuccessorGates.excluded (g : SuccessorGates) (state : FlareClusterState) : List String :=
+  g.repairHeld ++ g.followUnfit ++ g.promotionBlocked ++ g.unhealthyKeys ++ g.deadKeys
+    ++ (state.nodeMap.filter (fun kv => !g.livePodKeys.contains kv.1)).map Prod.fst
+
+/-- THE failover candidate state: every partition's slave list with the
+    refused slaves removed and the rest in the order the failover tries them
+    (ranked first, unproven last, standby after all non-standby). Both the
+    failover itself (`handleFailoverWithPromotion` in AfterHandleFailover and
+    RecoveryRefill) and `unhealthyMastersKept` run on this one value, so the
+    decision to fail a master over and the promotion that follows cannot
+    disagree about the successor. partitionMap only, like the two shapings it
+    composes (`deprioritizeStandbySlaves_nodeMap`,
+    `shapePromotionCandidates_nodeMap`): no promotion function or proof
+    changes. -/
+def failoverCandidates (g : SuccessorGates) (state : FlareClusterState) : FlareClusterState :=
+  deprioritizeStandbySlaves g.standby
+    (shapePromotionCandidates (g.excluded state) g.followRanked g.followUnproven state.rebuildPartitionMap)
+
+/-- This pass's gates, from the PodListResponse fields. -/
+def FlareReconcileState.successorGates (s : FlareReconcileState) : SuccessorGates :=
+  { livePodKeys := s.livePodKeys, unhealthyKeys := s.unhealthyKeys, deadKeys := s.deadNodeKeys,
+    repairHeld := s.repairHeldKeys, followUnfit := s.followUnfitKeys,
+    promotionBlocked := s.promotionBlockedKeys, followRanked := s.followRankedKeys,
+    followUnproven := s.followUnprovenKeys, standby := s.standbyNodeKeys }
+
+/-- The slave `handleFailoverWithPromotionSingleKey` promotes when it fails
+    `key` over on `candidates` (same partition lookup, same
+    `findActiveSuccessor`), `none` when it would leave the partition to the
+    masterless refill. Exact on a `failoverCandidates` state: the fold's
+    earlier keys only demote other dead keys (excluded there) or promote in
+    other partitions. -/
+def failoverSuccessor (candidates : FlareClusterState) (key : String) : Option String :=
+  match candidates.lookupNode key with
+  | none => none
+  | some node =>
+    if node.role == FlareRole.Master then
+      match candidates.partitionMap.find? (fun (idx, _) => Int.ofNat idx == node.partition) with
+      | none => none
+      | some (_, part) => findActiveSuccessor candidates part node.partition
+    else none
+
+/-- Dead keys we deliberately DO NOT fail over: a master that is STILL
+    PRESENT (flagged by the unhealthy path — its pod exists, NotReady or
+    unreachable from the operator — rather than by a vanished pod) for which
+    the failover would promote nobody.
+
+    Demoting it achieves nothing: there is nobody to promote, so the only
+    effects are harmful — the partition is declared masterless sooner, the
+    node loses the partition assignment the rejoin path keys off
+    (`old.partition >= 0`), so the process that will most likely be back in
+    seconds takes the messier fresh-registration route, and the cluster pays
+    a topology churn for it. Keeping it master costs nothing either: it is
+    NotReady, so K8s has already pulled it out of the client LB.
+
+    This is exactly the decision the drain guard already makes for a
+    Terminating master (handleDrainWithPromotionSingleKey demotes ONLY
+    together with a successful promotion). A VANISHED pod is a different
+    case — nothing is coming back under that entry — and still fails over.
+
+    The successor question is answered by the failover's OWN selection
+    (`failoverSuccessor` on the same `failoverCandidates` value the failover
+    runs on): an Active Slave of the partition, pod live, not unhealthy, not
+    dead this pass, no replica repair held, not a known-unfit follower (R3
+    source eligibility / unreadable, FollowEvidence, a non-normal
+    PromotionEvidence class, pod not Ready), not promotion-blocked. Counting a
+    slave a gate then refuses left the partition with NO master (review B9).
+    The masterless refill is deliberately NOT counted: the refill seats its
+    choice in a LATER commit than the failover's demotion (Main commits after
+    AfterHandleFailover and again after AfterAssignRoles), so a refusal there
+    would leave the partition masterless; the failover's own promotion is in
+    the SAME commit as the demotion.
+
+    Remaining gap, NOT decidable here: refusals made only at the commit
+    boundary from fresh reads (Main.commitChecked: R3 Unknown at commit, the
+    pod / boot / copy identity changed since it was read, the commit-time
+    re-classification, the authoritative-history store re-read — partition
+    not KNOWN, HELD, an intent pending, an intent that cannot be persisted).
+    Each of them aborts the WHOLE pass ("nothing from this pass is
+    committed"), the demotion included, so the old master stays master and
+    the next pass decides again; it does not leave the partition masterless.
+    RUNBOOK #node-unreachable. -/
+def unhealthyMastersKept (candidates : FlareClusterState)
+    (deadKeys unhealthyKeys : List String) : List String :=
+  deadKeys.filter fun key =>
+    unhealthyKeys.contains key &&
+    (match candidates.lookupNode key with
+     | none => false
+     | some node => node.role == FlareRole.Master && (failoverSuccessor candidates key).isNone)
 
 /-- SAF-10c: a WAL-mode follower not proven eligible to serve reads is OUT of
     the read set — balance 0 — whatever spec.readBalance.slave says. Applied
@@ -1662,17 +1746,17 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
     -- promotion sees an accurate master/slave grouping.
     -- Keep an unhealthy-but-present master that has no successor (see
     -- unhealthyMastersKept): failing it over would only strip the partition.
-    let keptMasters := unhealthyMastersKept clusterState s.deadNodeKeys s.unhealthyKeys s.livePodKeys
+    -- ONE candidate state for both the keep decision and the promotion
+    -- (failoverCandidates): SAF-10c known-unfit followers, R3-ineligible,
+    -- promotion-blocked, repair-held, dead / unhealthy / pod-less slaves out;
+    -- proven-current first; unproven last (availability still wins, logged
+    -- below); standby after the rest.
+    let candidates := failoverCandidates s.successorGates clusterState
+    let keptMasters := unhealthyMastersKept candidates s.deadNodeKeys s.unhealthyKeys
     let failoverKeys := s.deadNodeKeys.filter (fun k => !keptMasters.contains k)
     let afterFailover :=
       if s.failoverTriggered && !failoverKeys.isEmpty then
-        handleFailoverWithPromotion
-          (deprioritizeStandbySlaves s.standbyNodeKeys
-            -- SAF-10c: known-unfit followers out; proven-current first;
-            -- unproven last (availability still wins, logged below).
-            (shapePromotionCandidates s.followUnfitKeys s.followRankedKeys s.followUnprovenKeys
-              clusterState.rebuildPartitionMap))
-          failoverKeys
+        handleFailoverWithPromotion candidates failoverKeys
       else
         clusterState
     -- Graceful drain: demote Terminating masters/slaves to a LIVE proxy and
@@ -1879,11 +1963,14 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
     | some crd =>
       -- Same guard as the normal path: an unhealthy-but-present master with
       -- no successor is kept, not stripped (see unhealthyMastersKept).
+      -- The same candidate state as the normal path (failoverCandidates), so
+      -- the keep decision and the promotion agree here too.
+      let candidates := failoverCandidates s.successorGates clusterState
       let failoverKeys := s.deadNodeKeys.filter (fun k =>
-        !(unhealthyMastersKept clusterState s.deadNodeKeys s.unhealthyKeys s.livePodKeys).contains k)
+        !(unhealthyMastersKept candidates s.deadNodeKeys s.unhealthyKeys).contains k)
       let afterFailover :=
         if failoverKeys.isEmpty then clusterState
-        else handleFailoverWithPromotion clusterState.rebuildPartitionMap failoverKeys
+        else handleFailoverWithPromotion candidates failoverKeys
       let recovered := promoteMasterlessPartitions afterFailover crd s.livePodKeys [] s.dataBearingKeys s.followUnfitKeys
         s.followHoldEnabled s.followHoldExpiredParts s.knownEmptyKeys s.promotionBlockedKeys s.historyHolders s.followRankedKeys
       let refilled := (List.range crd.spec.partitions).filter (fun p =>

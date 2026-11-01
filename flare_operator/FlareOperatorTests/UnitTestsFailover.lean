@@ -118,10 +118,54 @@ def results : List (String × Bool) := Id.run do
       && !UnreachableNode.deferMasterDown mkState [("m", 3), ("s", 2)] "m"
       && !UnreachableNode.deferMasterDown mkState [("m", 3)] "m"
       && !UnreachableNode.deferMasterDown mkState [("s", 3), ("t", 3)] "s")]
-  let kept := fun (unhealthy : List String) =>
-    K8sReconciler.unhealthyMastersKept mkState unhealthy unhealthy ["m", "s", "t", "p"]
+  -- B9 / rule 12: the keep decision and the promotion run on ONE candidate
+  -- state (K8sReconciler.failoverCandidates); `unhealthy` are the nodes
+  -- flagged this pass (also dead), `g` the other gates of the pass
+  let gatesFor := fun (unhealthy : List String) (g : K8sReconciler.SuccessorGates) =>
+    ({ g with livePodKeys := if g.livePodKeys.isEmpty then ["m", "s", "t", "p"] else g.livePodKeys,
+              unhealthyKeys := unhealthy ++ g.unhealthyKeys,
+              deadKeys := unhealthy ++ g.deadKeys } : K8sReconciler.SuccessorGates)
+  let candOf := fun (unhealthy : List String) (g : K8sReconciler.SuccessorGates) =>
+    K8sReconciler.failoverCandidates (gatesFor unhealthy g) mkState
+  let keptG := fun (unhealthy : List String) (g : K8sReconciler.SuccessorGates) =>
+    K8sReconciler.unhealthyMastersKept (candOf unhealthy g) unhealthy unhealthy
+  let kept := fun (unhealthy : List String) => keptG unhealthy {}
+  -- the master of partition 0 after the failover itself ran on the same candidates
+  let promotedBy := fun (unhealthy : List String) (g : K8sReconciler.SuccessorGates) =>
+    ((K8sReconciler.handleFailoverWithPromotion (candOf unhealthy g) unhealthy).nodeMap.find?
+      (fun kv => kv.2.role == FlareRole.Master && kv.2.partition == 0)).map (·.1)
   r := r ++ [("unreachable master with a reachable slave: not kept -> failed over",
-    (kept ["m"]).isEmpty)]
+    (kept ["m"]).isEmpty && promotedBy ["m"] {} == some "s")]
+  r := r ++ [("B9 repair held: both slaves held -> master kept; only s held -> failed over to t",
+    keptG ["m"] { repairHeld := ["s", "t"] } == ["m"]
+      && (keptG ["m"] { repairHeld := ["s"] }).isEmpty && promotedBy ["m"] { repairHeld := ["s"] } == some "t")]
+  r := r ++ [("B9 follower unfit (FollowEvidence / R3 source-ineligible or unreadable / non-normal evidence / pod not Ready): both unfit -> kept; s unfit -> failed over to t",
+    keptG ["m"] { followUnfit := ["s", "t"] } == ["m"]
+      && (keptG ["m"] { followUnfit := ["s"] }).isEmpty && promotedBy ["m"] { followUnfit := ["s"] } == some "t")]
+  r := r ++ [("B9 promotion blocked (evidence not promotable): both blocked -> kept; s blocked -> failed over to t (the failover no longer picks the blocked head)",
+    keptG ["m"] { promotionBlocked := ["s", "t"] } == ["m"]
+      && (keptG ["m"] { promotionBlocked := ["s"] }).isEmpty && promotedBy ["m"] { promotionBlocked := ["s"] } == some "t")]
+  r := r ++ [("B9 follow unproven is NOT a refusal (availability, logged NOT LOSS-FREE): failed over, the unproven one tried last",
+    (keptG ["m"] { followUnproven := ["s", "t"] }).isEmpty && promotedBy ["m"] { followUnproven := ["s", "t"] } == some "s"
+      && promotedBy ["m"] { followUnproven := ["s"] } == some "t")]
+  r := r ++ [("B9 a proven-current ranked follower is the one promoted; standby slaves last but still successors",
+    promotedBy ["m"] { followRanked := ["t"] } == some "t"
+      && promotedBy ["m"] { standby := ["s"] } == some "t"
+      && (keptG ["m"] { standby := ["s", "t"] }).isEmpty)]
+  r := r ++ [("B9 a slave without a pod, or failed over in the same pass, is no successor -> kept; one left -> failed over to it",
+    keptG ["m"] { livePodKeys := ["m", "p"] } == ["m"]
+      && keptG ["m"] { deadKeys := ["s", "t"] } == ["m"]
+      && promotedBy ["m"] { livePodKeys := ["m", "t", "p"] } == some "t"
+      && promotedBy ["m"] { deadKeys := ["s"] } == some "t")]
+  let gateCases : List K8sReconciler.SuccessorGates :=
+    [{}, { repairHeld := ["s", "t"] }, { followUnfit := ["s"] }, { promotionBlocked := ["s", "t"] },
+     { followUnfit := ["s"], promotionBlocked := ["t"] }, { followUnproven := ["s", "t"] },
+     { followRanked := ["t"] }, { standby := ["s", "t"] }, { livePodKeys := ["m", "p"] },
+     { deadKeys := ["t"], repairHeld := ["s"] }, { unhealthyKeys := ["s"] }]
+  r := r ++ [("B9 agreement: the keep decision says 'no successor' exactly when the failover promotes nobody, and failoverSuccessor names the slave the failover promotes",
+    gateCases.all fun g =>
+      (keptG ["m"] g).contains "m" == (promotedBy ["m"] g).isNone
+        && K8sReconciler.failoverSuccessor (candOf ["m"] g) "m" == promotedBy ["m"] g)]
   r := r ++ [("unreachable master, every slave also unreachable: no successor -> kept as master",
     kept ["m", "s", "t"] == ["m"])]
   r := r ++ [("unreachable master, one slave unreachable and one reachable: failed over to the reachable",

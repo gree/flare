@@ -2092,6 +2092,12 @@ private def checkRebuildConcurrency (ctx : Ctx) : IO Unit := do
   let idleAfter := st [m0, m1, ("a", holdNode .Slave .Prepare 0 "a")]
   check ctx "rebuild concurrency: a node reporting a running reconstruction in its stats counts as well"
     ((gate idle idleAfter 1 1 ["y"]).held.map Prod.fst == ["a"] && (gate idle idleAfter 1 1).held.isEmpty)
+  -- 41278035134: a proxy whose OWN reconstruction still reports running is
+  -- not held by itself; another node's running rebuild still holds it
+  check ctx "rebuild concurrency: a node's own running reconstruction does not hold its own new assignment (another node's does)"
+    ((gate idle idleAfter 1 1 ["a"]).held.isEmpty
+      && ((gate idle idleAfter 1 1 ["a"]).state.lookupNode "a").map (·.role) == some FlareRole.Slave
+      && (gate idle idleAfter 1 1 ["a", "y"]).held.map Prod.fst == ["a"])
   -- R7 (review 2026-10-08): a member the MAP has Active but whose stats
   -- report a running reconstruction counts — for the cluster and for its
   -- partition — and stops new assignments and resumes

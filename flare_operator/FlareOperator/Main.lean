@@ -3604,7 +3604,12 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
     -- pass besides the round robin, so the claim is judged after holdMs and
     -- not after a full audit round (41222065256: ~68 s for 6 nodes; the
     -- round robin advances only on its own key)
-    let pendingDup := ((← duplicateFirstSeenRef.get).map (·.1)).filter fun k => k != key && auditKeys.contains k
+    -- so is a node marked down as unreachable that answers again: back from
+    -- a partition it may still claim the master it lost (41253435088: with 9
+    -- nodes its first round-robin sample came ~100 s after the heal)
+    let reachOkNow ← reachOkRef.get
+    let backFromCut := (← downByReachRef.get).filter fun k => reachOkNow.contains k
+    let pendingDup := (((← duplicateFirstSeenRef.get).map (·.1)) ++ backFromCut).eraseDups.filter fun k => k != key && auditKeys.contains k
     for (k, isRR) in (key, true) :: pendingDup.map (·, false) do
       let key := k
       let pod := extractPodName key

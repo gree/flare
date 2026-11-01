@@ -375,8 +375,9 @@ through the API server, so both stay green.
 
 - **Probe.** At most once per 5 s, the operator lists the flared pods and
   opens a TCP connection to port 12121 of every Ready, non-Terminating pod of
-  that same listing (1 s timeout). The probe is a connect only: a flared that
-  accepts connections but does not answer is not detected here. If the
+  that same listing and asks for its `version` (1 s in all for the connect
+  and the `VERSION …` answer): a flared that accepts connections but does
+  not answer (wedged, stopped) fails the probe like an unreachable one. If the
   listing fails, nothing is probed and nothing is decided that round
   (`reachability: pod listing failed (...) — no probe and no down decision
   this round`). A failure streak belongs to one pod UID: a recreated pod
@@ -2099,9 +2100,9 @@ docs/review-cross-cluster-2026-10-11.md):
 - Selective network partition (pod alive, TCP to operator blocked): since
   spec 12 the node is marked down after 3 failed probes, a master only when
   a reachable promotable successor exists, and nothing happens while no node
-  is reachable ([node-unreachable](#node-unreachable)). The probe is a TCP
-  connect only: a wedged flared that still accepts connections is not failed
-  over by it. A demoted master that is cut off keeps its old map and can
+  is reachable ([node-unreachable](#node-unreachable)). The probe needs a
+  `version` answer within 1 s, so a wedged flared that still accepts
+  connections fails it too. A demoted master that is cut off keeps its old map and can
   take client writes until it is restarted. When the operator reaches only
   some nodes because of its OWN partial network fault, healthy masters can be
   failed over (the guard covers only "no node reachable").

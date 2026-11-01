@@ -60,9 +60,14 @@ private def sendString (sock : Socket) (s : String) : IO Unit := do
     IO.sleep 50
   throw (IO.userError "send timed out after 3s (peer accepted but stalled)")
 
-/-- Can the OPERATOR open a TCP connection to this flared? Connect-only,
-    bounded by the same 3s budget as the topology push, socket closed
-    immediately.
+/-- A flared's answer to `version`: one line starting `VERSION `. -/
+def versionReplyAnswers (reply : String) : Bool :=
+  reply.startsWith "VERSION "
+
+/-- Can the OPERATOR reach this flared? It must accept a TCP connection AND
+    answer `version` (one `VERSION ` line) within `timeoutMs` in all — a
+    connect alone also succeeded for a wedged flared (risk B10). Socket closed
+    right after.
 
     This tests the operator→pod path specifically, which nothing else does:
     the readiness probe runs INSIDE the pod (kubelet asks flared about
@@ -75,6 +80,7 @@ private def sendString (sock : Socket) (s : String) : IO Unit := do
     successor, and nothing at all when no node of the cluster is reachable
     (then the fault is taken to be the operator's own). -/
 def probeNodeReachable (ip : String) (port : Nat) (timeoutMs : Nat := 3000) : IO Bool := do
+  let start ← IO.monoMsNow
   let ipAddr ← match parseIPv4 ip with
     | some addr => pure addr
     | none => return false
@@ -93,7 +99,34 @@ def probeNodeReachable (ip : String) (port : Nat) (timeoutMs : Nat := 3000) : IO
       return false
     match connectTask.get with
     | .error _ => return false
-    | .ok () => return true
+    | .ok () => pure ()
+    -- connected: a flared that accepts but does not answer (wedged, SIGSTOP)
+    -- is not reachable either (risk flare-risk-probe-connect-only). Ask for
+    -- its version within the rest of the same budget.
+    let deadline := start + timeoutMs
+    let sendTask := (← sock.send "version\r\n".toUTF8).result!
+    while !(← IO.hasFinished sendTask) && (← IO.monoMsNow) < deadline do
+      IO.sleep 20
+    if !(← IO.hasFinished sendTask) then return false
+    match sendTask.get with
+    | .error _ => return false
+    | .ok _ => pure ()
+    let mut bytes := ByteArray.empty
+    while (← IO.monoMsNow) < deadline do
+      let t := (← sock.recv? 128).result!
+      while !(← IO.hasFinished t) && (← IO.monoMsNow) < deadline do
+        IO.sleep 20
+      if !(← IO.hasFinished t) then return false
+      match t.get with
+      | .error _ => return false
+      | .ok none => return false
+      | .ok (some chunk) =>
+        if chunk.isEmpty then return false
+        bytes := bytes ++ chunk
+        let reply := String.fromUTF8! bytes
+        if reply.contains '\n' then return versionReplyAnswers reply
+        if bytes.size > 256 then return false
+    return false
   catch _ =>
     return false
   finally

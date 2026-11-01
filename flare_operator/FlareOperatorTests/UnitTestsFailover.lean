@@ -9,6 +9,7 @@ import FlareOperator.StateMachine.K8sReconciler
 import FlareOperator.StateMachine.UnreachableNode
 import FlareOperator.StateMachine.DuplicateMaster
 import FlareOperator.StateMachine.LeaseFence
+import FlareOperator.Server.TcpClient
 
 namespace FlareOperator.UnitTestsFailover
 
@@ -159,6 +160,12 @@ def results : List (String × Bool) := Id.run do
     !LeaseFence.held true true (15000 - LeaseFence.marginMs + 1) 15000
       && !LeaseFence.held true true 16000 15000
       && !LeaseFence.held true true 30000 15000)]
+  -- risk B10: the reachability probe needs flared's answer to `version`
+  r := r ++ [("reachability probe: only a VERSION line counts as an answer (a connect alone, an error or another reply does not)",
+    FlareOperator.Server.versionReplyAnswers "VERSION flare-1.3.4\r\n"
+      && !FlareOperator.Server.versionReplyAnswers "ERROR\r\n"
+      && !FlareOperator.Server.versionReplyAnswers "SERVER_ERROR busy\r\n"
+      && !FlareOperator.Server.versionReplyAnswers "")]
   return r
 
 end FlareOperator.UnitTestsFailover

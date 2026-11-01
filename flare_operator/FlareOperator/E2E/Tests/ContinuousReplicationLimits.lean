@@ -2938,8 +2938,14 @@ def repairLedgerSuite : TestSuite := {
             -- a request for the master's DROPS only: the failover's own
             -- cleanup ("requested by the replica (needs_rebuild)") is another
             -- fault (41284282067: both lines matched, "requested 2 times")
+            -- ... or the drops added to a repair already in flight (the
+            -- failover's cleanup request can start one right after the
+            -- precondition: 41300141347 / 41301448451, "dropped 30 more
+            -- write(s) ... while a repair is in flight", recovered by it)
             let dropReqs := fun (log : String) => (log.splitOn "\n").filter fun l =>
-              containsSubstr l "REPLICA REPAIR requested" && containsSubstr l "dropped"
+              (containsSubstr l "REPLICA REPAIR requested" && containsSubstr l "dropped")
+                || (containsSubstr l "REPLICA REPAIR: master" && containsSubstr l "more write(s)"
+                    && containsSubstr l "while a repair is in flight")
             let reqBefore := (dropReqs (← c.opLog 200000)).length
             match ← c.dropWrites mIp sIp "rs" 30 with
             | .error e => return .fail e

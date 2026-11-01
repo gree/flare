@@ -128,8 +128,11 @@ private def opLogsSince (since : String) : IO String := do
   | .ok o => return o
   | .error _ => return ""
 
+-- with nanoseconds: a second-precision boundary also admitted the earlier
+-- lines of the same second (review of 9c9f21e); --since-time takes RFC 3339
+-- with a fraction
 private def utcStamp : IO String := do
-  let o ← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%SZ"] }
+  let o ← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%S.%NZ"] }
   return o.stdout.trim
 
 private def opIpOf : IO (Except String String) := do

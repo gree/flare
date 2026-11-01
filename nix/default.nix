@@ -72,6 +72,8 @@ stdenv.mkDerivation {
     grep -E 'test_proxy_enqueue_is_not_handed_to_a_reused_thread|test_noreply_client_write_skipped_to_a_proxy_goes_to_the_master_in_force|test_typed_enqueue_is_not_handed_to_a_reused_thread|test_broadcast_is_not_handed_to_a_reused_thread|test_broadcast_to_a_prior_node_is_not_handed_to_a_reused_thread' test/run-tests.sh.log || echo "in-cluster reuse tests NOT found in the cutter log"
     # T24: the identity/size probe retries with a fresh lookup (round 8)
     grep -E 'test_probe_reaches_a_source_that_answers_only_on_a_later_attempt|test_probe_of_an_unreachable_source_is_unanswered_and_bounded' test/run-tests.sh.log || echo "probe retry tests NOT found in the cutter log"
+    # a slave that is a proxy in its own map: reconstruction abandoned (aborted), no source attempt
+    grep -E 'test_reconstruction_of_a_slave_that_is_a_proxy_in_its_map_is_abandoned_before_any_source_attempt|test_reconstruction_of_a_slave_demoted_to_a_proxy_while_retrying_ends_at_the_next_attempt|test_reconstruction_of_a_slave_of_the_partition_is_not_abandoned_and_retries' test/run-tests.sh.log || echo "reconstruction proxy abandon tests NOT found in the cutter log"
     grep -E 'test_write_progress_timeout_ends_a_write_to_a_peer_that_stopped_reading|test_write_deadline_ends_a_write_even_with_a_longer_progress_timeout|test_write_bounds_do_not_end_a_write_the_peer_reads|test_capture_capacity_refuses_unknowns_and_short_space' test/run-tests.sh.log || echo "capture guard tests NOT found in the cutter log"
     # CI 37852139711: the RocksDB and the legacy builds reported the SAME
     # totals, so the RocksDB storage module was built but not run. Show what

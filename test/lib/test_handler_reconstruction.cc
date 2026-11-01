@@ -4,7 +4,9 @@
  *	The reconstruction retry loop (handler_reconstruction::run) of a slave
  *	whose own node is a PROXY in its current map: it is abandoned (-1, stats
  *	"aborted") at the top of the attempt, before any contact with the source;
- *	a node that is still a slave of the partition keeps its attempts.
+ *	a node that is still a slave of the partition keeps its attempts. The
+ *	same holds for a slave PARKED (RocksDB staged rebuild blocked): demoted
+ *	to a proxy while parked, it leaves the parked wait without a resume.
  */
 #include <cppcutter.h>
 #include <app.h>
@@ -12,6 +14,9 @@
 #include <thread_pool.h>
 #include <handler_reconstruction.h>
 #include "mock_cluster.h"
+#ifdef HAVE_LIBROCKSDB
+#include <storage_rocksdb.h>
+#endif
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -21,6 +26,7 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
+#include <stdlib.h>
 
 using namespace std;
 using namespace gree::flare;
@@ -269,6 +275,170 @@ namespace test_handler_reconstruction {
 		cut_assert_true(done);
 		cut_assert_equal_int(-1, ctx.rc);
 		cut_assert_equal_string("aborted", rstate_after.c_str());
+	}
+#ifdef HAVE_LIBROCKSDB
+	// a real (opened) RocksDB storage in a fresh directory, its staged rebuild
+	// PARKED as after rebuild_blocked: run()'s first attempt fails (the silent
+	// source proves nothing) and run() then enters its parked wait
+	storage_rocksdb* new_parked_storage(string& dir) {
+		char tmpl[] = "tmp_handler_reconstruction_XXXXXX";
+		const char* d = mkdtemp(tmpl);
+		dir = d != NULL ? d : "";
+		if (dir.empty()) {
+			return NULL;
+		}
+		storage_rocksdb* s = new storage_rocksdb(dir, 32, 4, 16, 4, 2, 86400, 1024);
+		if (s->open() != 0) {
+			delete s;
+			return NULL;
+		}
+		s->set_rebuild_parked(true);
+		return s;
+	}
+
+	void drop_storage(storage_rocksdb* s, const string& dir) {
+		if (s != NULL) {
+			s->close();
+			delete s;
+		}
+		if (!dir.empty()) {
+			string cmd = "rm -rf '" + dir + "'";
+			if (system(cmd.c_str()) != 0) {
+				// leftover temp directory only
+			}
+		}
+	}
+
+	// starts run() of a slave over a parked storage and waits until it is in
+	// the parked wait: attempt 1 went to the source and failed, and no further
+	// attempt follows (an unparked handler would retry within 2 s, setting
+	// "connect" and connecting again). The thread state is left at `marker`.
+	bool start_parked(shared_thread t, storage_rocksdb* s, run_ctx& ctx, pthread_t& th, const char* marker, string& why) {
+		ctx.h = new handler_reconstruction(t, cl, s, "127.0.0.1", source_port, 0, 0, cluster::role_slave, 0, 0);
+		ctx.rc = 0;
+		ctx.done = false;
+		pthread_create(&th, NULL, run_handler, &ctx);
+		if (!wait_state(t, "connect", 5000)) {
+			why = "attempt 1 did not reach the source";
+			return false;
+		}
+		usleep(1000 * 1000);	// attempt 1's bounded proof wait (300 ms) is over
+		const long wd = now_ms() + 3000;
+		while (handler_reconstruction::outstanding_probe_workers() > 0 && now_ms() < wd) {
+			usleep(20 * 1000);
+		}
+		if (drain_connections() < 1) {
+			why = "attempt 1 made no connection to the source";
+			return false;
+		}
+		t->set_state(marker);
+		usleep(3000 * 1000);	// longer than the 2 s retry wait after attempt 1
+		if (ctx.done) {
+			why = "run() ended while parked";
+			return false;
+		}
+		const int c = drain_connections();
+		if (t->get_state() != marker || c != 0) {
+			why = "not parked: a new attempt followed attempt 1";
+			return false;
+		}
+		if (stats_object->get_reconstruction_current_state() != "running") {
+			why = "not running while parked: " + stats_object->get_reconstruction_current_state();
+			return false;
+		}
+		return true;
+	}
+#endif
+
+	// a slave PARKED (staged rebuild blocked) and then demoted to a proxy in
+	// its map leaves the parked wait within a second or two: -1, stats
+	// aborted, without a resume (still parked, the thread state untouched by
+	// a new attempt) and no connection to the source
+	void test_reconstruction_of_a_parked_slave_demoted_to_a_proxy_leaves_the_parked_wait() {
+#ifdef HAVE_LIBROCKSDB
+		cut_assert_true(listen_fd >= 0);
+		map_with_self_as(cluster::role_slave, cluster::state_prepare);
+		string dir;
+		storage_rocksdb* s = new_parked_storage(dir);
+		cut_assert_not_null(s);
+		shared_thread t = tp->get(thread_pool::thread_type_reconstruction);
+		run_ctx ctx;
+		pthread_t th;
+		string why;
+		const bool parked = start_parked(t, s, ctx, th, "parked", why);
+
+		cl->set_node_locked(own_name, own_port, cluster::role_proxy, cluster::state_active, -1);
+		const long t0 = now_ms();
+		const bool done = parked && wait_done(ctx, 3000);
+		const long took = now_ms() - t0;
+		const string state_seen = t->get_state();
+		const int after = drain_connections();
+		const string rstate = stats_object->get_reconstruction_current_state();
+		const bool still_parked = s->is_rebuild_parked();
+		stop(t, th, ctx);
+		drop_storage(s, dir);
+
+		cut_assert_true(parked, cut_message("%s", why.c_str()));
+		cut_assert_true(done, cut_message("still waiting parked after the demotion (thread state=%s)", state_seen.c_str()));
+		cut_assert_true(took <= 2500, cut_message("took %ld ms", took));
+		cut_assert_equal_int(-1, ctx.rc);
+		cut_assert_equal_string("aborted", rstate.c_str());
+		cut_assert_true(still_parked, cut_message("left the parked wait by a resume"));
+		cut_assert_equal_string("parked", state_seen.c_str());
+		cut_assert_equal_int(0, after);
+#else
+		cut_omit("built without RocksDB");
+#endif
+	}
+
+	// control: a parked node that is still a slave of the partition keeps
+	// waiting ("running", no attempt) until the operator resumes it; the
+	// resume starts a fresh attempt against the source
+	void test_reconstruction_of_a_parked_slave_of_the_partition_keeps_waiting_until_resumed() {
+#ifdef HAVE_LIBROCKSDB
+		cut_assert_true(listen_fd >= 0);
+		map_with_self_as(cluster::role_slave, cluster::state_prepare);
+		string dir;
+		storage_rocksdb* s = new_parked_storage(dir);
+		cut_assert_not_null(s);
+		shared_thread t = tp->get(thread_pool::thread_type_reconstruction);
+		run_ctx ctx;
+		pthread_t th;
+		string why;
+		const bool parked = start_parked(t, s, ctx, th, "parked", why);
+
+		usleep(2000 * 1000);	// still parked, still a slave
+		const bool running = !ctx.done;
+		const string state_waiting = t->get_state();
+		const int during = drain_connections();
+		const string rstate = stats_object->get_reconstruction_current_state();
+
+		const bool was_parked = s->resume_rebuild();
+		const bool reattempted = wait_state(t, "connect", 3000);
+		usleep(500 * 1000);
+		const int after_resume = drain_connections();
+
+		t->shutdown(false, true);
+		const bool done = wait_done(ctx, 10000);
+		const string rstate_after = stats_object->get_reconstruction_current_state();
+		pthread_join(th, NULL);
+		delete ctx.h;
+		drop_storage(s, dir);
+
+		cut_assert_true(parked, cut_message("%s", why.c_str()));
+		cut_assert_true(running, cut_message("ended while parked as a slave (rc=%d)", ctx.rc));
+		cut_assert_equal_string("parked", state_waiting.c_str());
+		cut_assert_equal_int(0, during);
+		cut_assert_equal_string("running", rstate.c_str());
+		cut_assert_true(was_parked);
+		cut_assert_true(reattempted, cut_message("no fresh attempt after the resume"));
+		cut_assert_true(after_resume >= 1, cut_message("no connection to the source after the resume"));
+		cut_assert_true(done);
+		cut_assert_equal_int(-1, ctx.rc);
+		cut_assert_equal_string("aborted", rstate_after.c_str());
+#else
+		cut_omit("built without RocksDB");
+#endif
 	}
 }
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 noexpandtab autoindent

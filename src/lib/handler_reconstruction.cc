@@ -142,16 +142,8 @@ int handler_reconstruction::run() {
 		// retrying (up to 60 attempts, "running" in its stats) held its own
 		// re-seat in the operator's rebuild gate (41278035134: 24 min). The
 		// operator assigns it again; a new reconstruction starts then.
-		if (this->_role == cluster::role_slave) {
-			cluster::node self_node = this->_cluster->get_node(this->_cluster->get_own_node_key());
-			// found in the map only (get_node answers an unknown key as a proxy)
-			if (!self_node.node_server_name.empty() && self_node.node_role == cluster::role_proxy) {
-				log_notice("reconstruction abandoned: this node is a proxy in the current map, no longer a slave of partition %d (attempt %d)", this->_partition, attempt + 1);
-				if (stats_object != NULL) {
-					stats_object->reconstruction_abandoned(this->_reconstruction_id);
-				}
-				return -1;
-			}
+		if (this->_abandoned_as_proxy(attempt)) {
+			return -1;
 		}
 		if (this->_role == cluster::role_slave) {
 			const string cur = this->_cluster->get_partition_master_key(this->_partition);
@@ -205,6 +197,11 @@ int handler_reconstruction::run() {
 			if (prdb != NULL && prdb->is_rebuild_parked()) {
 				log_notice("reconstruction PARKED (rebuild_blocked=%s): no transfer and no retry until the operator resumes it (rebuild_resume)", prdb->get_rebuild_blocked().c_str());
 				while (prdb->is_rebuild_parked()) {
+					// a node demoted to a proxy while parked is no longer
+					// rebuilt either (it waited forever as "running")
+					if (this->_abandoned_as_proxy(attempt)) {
+						return -1;
+					}
 					if (this->_thread->is_shutdown_request()) {
 						log_notice("shutdown requested while parked -> abandoning reconstruction", 0);
 						if (stats_object != NULL) {
@@ -243,6 +240,26 @@ int handler_reconstruction::run() {
 	}
 	this->_cluster->deactivate_node();
 	return result;
+}
+
+/**
+ *	A slave whose own node is a PROXY in its current map (found in the map
+ *	only: get_node answers an unknown key as a proxy) is no longer rebuilt:
+ *	logs, records the reconstruction as abandoned and returns true.
+ */
+bool handler_reconstruction::_abandoned_as_proxy(int attempt) {
+	if (this->_role != cluster::role_slave) {
+		return false;
+	}
+	cluster::node self_node = this->_cluster->get_node(this->_cluster->get_own_node_key());
+	if (self_node.node_server_name.empty() || self_node.node_role != cluster::role_proxy) {
+		return false;
+	}
+	log_notice("reconstruction abandoned: this node is a proxy in the current map, no longer a slave of partition %d (attempt %d)", this->_partition, attempt + 1);
+	if (stats_object != NULL) {
+		stats_object->reconstruction_abandoned(this->_reconstruction_id);
+	}
+	return true;
 }
 
 int handler_reconstruction::_run_once() {

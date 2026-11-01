@@ -386,13 +386,34 @@ through the API server, so both stay green.
   - a **slave** is marked down (proxy) and the rebuild path builds another
     copy: `UNREACHABLE: <key> (<role>) failed 3 consecutive operator probes —
     marked down (proxy) …`;
-  - a **master** is marked down only when its partition has an Active slave
-    whose pod is present and which is not itself unhealthy; the usual
-    promotion rules then choose the successor (`UNREACHABLE: master <key>
-    failed 3 consecutive operator probes — marked down if a reachable slave
-    of its partition can be promoted, otherwise kept as master …`). Without
-    one the master is **kept**: `CRITICAL: master <key> is NOT SERVING or
-    UNREACHABLE … has NO reachable promotable successor — kept as master`.
+  - a **master** is marked down only when the failover itself would promote
+    a successor (`UNREACHABLE: master <key> failed 3 consecutive operator
+    probes — marked down if a reachable slave of its partition can be
+    promoted, otherwise kept as master …`). The decision and the promotion
+    use the same candidate list (`K8sReconciler.failoverCandidates`): an
+    Active slave of the partition whose pod is present, not itself
+    unhealthy, unreachable or down, with no replica repair held on it, not a
+    follower known unfit (continuous-replication evidence, R3 source
+    eligibility 0 or unreadable, a promotion-evidence class other than
+    eligible / legacy / empty, pod not Ready) and not promotion-blocked. An
+    unproven follower or a standby slave still counts (tried last; an
+    unproven one is logged `PROMOTION NOT LOSS-FREE`). The masterless
+    refill's choices (a Prepare or data-bearing last resort, the history
+    holder) do not count: the refill commits after the demotion, so a
+    refusal there would leave the partition without a master. Without a
+    successor the master is **kept**: `CRITICAL: master <key> is NOT SERVING
+    or UNREACHABLE … has NO reachable promotable successor — kept as
+    master`.
+  - **What the check cannot see:** the refusals the commit makes from fresh
+    reads (R3 unreadable at commit, the successor's pod / boot / copy
+    changed since it was read, a different classification at commit, the
+    authoritative history not KNOWN, HELD, an intent pending or not
+    persistable). Each aborts the whole pass (`CRITICAL: PROMOTION ABORTED
+    for <key>: … nothing from this pass is committed`), the demotion
+    included: the old master stays master in the map and the next pass
+    decides again. The partition is not left masterless, but it serves
+    nothing while the aborts repeat; the abort message, not the "kept"
+    message, is then the signal.
   - Down nodes go through the same dead detection as NotReady ones, so the
     [circuit breaker](#circuit-breaker) applies to them too.
 - **Guard: no node reachable.** When every probed node fails, the fault is

@@ -33,6 +33,8 @@
 #include "cluster.h"
 #include "cluster_replication.h"
 #include "op_set.h"
+#include "mock_storage.h"
+#include "connection_iostream.h"
 
 #include <cppcutter.h>
 #include <time.h>
@@ -1014,6 +1016,104 @@ namespace test_handler_cluster_replication {
 			cut_assert_equal_int(0, (int)total);
 			cut_assert_equal_int(0, (int)snap.size());
 		}
+	}
+
+	// SAF-10b replication identity (risk flare-risk-repl-tag-race): the tag
+	// is computed ONCE by the writer, in the ctor, before the item is shared
+	// by every replica's forwarding thread; run() only reads it.
+	struct epoch_storage : public mock_storage {
+		string epoch;
+		epoch_storage(const string& e): mock_storage("", 0, 0), epoch(e) {}
+		virtual string get_source_epoch() { return this->epoch; }
+	};
+	void test_repl_tag_is_set_by_the_ctor() {
+		cluster cl(NULL, NULL, "", 0);
+		epoch_storage st("3:1f2e");
+		storage::entry e = get_entry(" rk 0 0 5 3", storage::parse_type_set, "VALUE");
+		e.seq_label = 4242;
+		vector<string> proxy;
+
+		cl.set_repl_identity_forward(true);
+		{
+			queue_proxy_write q(&cl, &st, proxy, e, "set");
+			cut_assert_equal_string("3:1f2e/4242", q.get_entry().repl_tag.c_str());
+		}
+		// forward off: nothing
+		cl.set_repl_identity_forward(false);
+		{
+			queue_proxy_write q(&cl, &st, proxy, e, "set");
+			cut_assert_equal_string("", q.get_entry().repl_tag.c_str());
+		}
+		cl.set_repl_identity_forward(true);
+		// no label: nothing
+		{
+			storage::entry e0 = e;
+			e0.seq_label = 0;
+			queue_proxy_write q(&cl, &st, proxy, e0, "set");
+			cut_assert_equal_string("", q.get_entry().repl_tag.c_str());
+		}
+		// empty epoch: nothing
+		{
+			epoch_storage st0("");
+			queue_proxy_write q(&cl, &st0, proxy, e, "set");
+			cut_assert_equal_string("", q.get_entry().repl_tag.c_str());
+		}
+		// no cluster / no storage: nothing
+		{
+			queue_proxy_write q1(NULL, &st, proxy, e, "set");
+			cut_assert_equal_string("", q1.get_entry().repl_tag.c_str());
+			queue_proxy_write q2(&cl, NULL, proxy, e, "set");
+			cut_assert_equal_string("", q2.get_entry().repl_tag.c_str());
+		}
+	}
+
+	struct repl_tag_run_arg {
+		queue_proxy_write* q;
+		int n;
+		int sent_with_tag;
+		int failed;
+	};
+	static void* repl_tag_run(void* p) {
+		repl_tag_run_arg* a = static_cast<repl_tag_run_arg*>(p);
+		for (int i = 0; i < a->n; i++) {
+			connection_sstream* cs = new connection_sstream("STORED\r\n");
+			shared_connection c(cs);
+			if (a->q->run(c) < 0) {
+				a->failed++;
+			}
+			if (cs->get_output().find(" rl=3:1f2e/4242") != string::npos) {
+				a->sent_with_tag++;
+			}
+		}
+		return NULL;
+	}
+	// The ONE shared item is run by two forwarding threads at once (as two
+	// replicas' threads do): each sends the ctor's tag and none changes it.
+	void test_repl_tag_is_unchanged_by_run_from_two_threads() {
+		cluster cl(NULL, NULL, "", 0);
+		cl.set_repl_identity_forward(true);
+		epoch_storage st("3:1f2e");
+		storage::entry e = get_entry(" rk 0 0 5 3", storage::parse_type_set, "VALUE");
+		e.seq_label = 4242;
+		vector<string> proxy;
+		shared_queue_proxy_write q(new queue_proxy_write(&cl, &st, proxy, e, "set"));
+		q->set_post_proxy(true);
+		const char* before = q->get_entry().repl_tag.c_str();
+		cut_assert_equal_string("3:1f2e/4242", before);
+		repl_tag_run_arg a1 = { q.get(), 200, 0, 0 };
+		repl_tag_run_arg a2 = { q.get(), 200, 0, 0 };
+		pthread_t t1, t2;
+		pthread_create(&t1, NULL, repl_tag_run, &a1);
+		pthread_create(&t2, NULL, repl_tag_run, &a2);
+		pthread_join(t1, NULL);
+		pthread_join(t2, NULL);
+		cut_assert_equal_int(0, a1.failed);
+		cut_assert_equal_int(0, a2.failed);
+		cut_assert_equal_int(200, a1.sent_with_tag);
+		cut_assert_equal_int(200, a2.sent_with_tag);
+		cut_assert_equal_string("3:1f2e/4242", q->get_entry().repl_tag.c_str());
+		// the very same buffer: run() did not assign the string
+		cut_assert(before == q->get_entry().repl_tag.c_str());
 	}
 
 	// review of 8d64aaf: terminal outcomes of answered in-cluster forwards are

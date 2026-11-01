@@ -32,7 +32,9 @@
                   serving label is restored only AFTER this was persisted)
 
   STUCK (risk B13, flare-risk-cordon-stuck): `unserved` and `resyncing` (and
-  `deleted`, waiting for the replacement; same deadline as `resyncing`) wait
+  `released` / `deleted`, waiting for the old pod to leave the API and the
+  replacement to appear — a pod left Terminating counts too; same deadline
+  as `resyncing`) wait
   for something outside the operator (a client that keeps its connection; a
   recreated pod that never syncs). Only one move runs at a time, so before
   this a move waiting there stopped every later move for ever. Past the
@@ -456,19 +458,30 @@ def step (cfg : Config) (m : Move) (o : Obs) : Move × Action :=
                 reason := s!"the client Service still reaches the pod after {cfg.drainWaitMs / 1000} s ({drainWhy cfg o}); held as a proxy, nothing is deleted" }, .none)
     else ({ m with reason := drainWhy cfg o }, .none)
   | .released =>
-    -- no cancel from here: the move completes
+    -- no cancel from here: the move completes. A pod that stays Terminating
+    -- (a finalizer, a dead kubelet) counts against the resync deadline: the
+    -- move is then stuck, so later moves are not stopped behind it (review of
+    -- 8e76e5b); it keeps its actions and still completes if the pod goes.
     if !o.podPresent m then (goto m .deleted now, .none)
+    else if !m.stuck && pastDeadline m now cfg.resyncTimeoutMs then
+      (markStuck m now s!"the released pod {m.pod} (uid {m.podUid}) is still there (terminating {o.cur.any (·.terminating)}); the next move may start", .none)
     else if o.cur.any (·.terminating) then (m, .none)
     else if now >= m.releasedMs + cfg.evictWaitMs then (m, .deletePod)
     else (m, .none)
   | .deleted =>
-    -- the replacement has not appeared yet: waiting for it counts against the
-    -- resync deadline too (a StatefulSet that never recreates the pod would
-    -- otherwise stop every later move here, risk B13)
+    -- waiting for the old pod to go and the replacement to appear counts
+    -- against the resync deadline (a StatefulSet that never recreates the pod,
+    -- or an old pod left Terminating on the API, would otherwise stop every
+    -- later move here: risk B13, review of 8e76e5b)
+    let stuckNow := !m.stuck && pastDeadline m now cfg.resyncTimeoutMs
     match o.cur with
-    | some c => if c.uid != m.podUid then (goto m .resyncing now, .none) else (m, .none)
+    | some c =>
+      if c.uid != m.podUid then (goto m .resyncing now, .none)
+      else if stuckNow then
+        (markStuck m now s!"the old pod {m.pod} (uid {m.podUid}) is still on the API (terminating {c.terminating}); no replacement yet; the next move may start", .none)
+      else (m, .none)
     | none =>
-      if !m.stuck && pastDeadline m now cfg.resyncTimeoutMs then
+      if stuckNow then
         (markStuck m now s!"no pod named {m.pod} has been recreated; the next move may start", .none)
       else (m, .none)
   | .resyncing =>

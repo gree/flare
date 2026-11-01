@@ -340,6 +340,23 @@ def results : List (String × Bool) := Id.run do
   r := r ++ [("node move: deleted (no replacement yet) past the resync deadline -> stuck",
               (step cfg (mv "slave" .deleted) (obs dl0 none)).1.stuck
               && !(step cfg (mv "slave" .deleted) (obs (dl0 - 1) none)).1.stuck)]
+  -- review of 8e76e5b: the old pod left on the API (Terminating) must not stop every later move
+  let oldTerm := { pod "u1" .Proxy false with terminating := true }
+  let dlOld := step cfg (mv "slave" .deleted) (obs dl0 (some oldTerm))
+  r := r ++ [("node move: deleted with the OLD pod still on the API (Terminating) past the resync deadline -> stuck, not active, no action",
+              dlOld.1.stuck && phaseOf dlOld == .deleted && actOf dlOld == .none
+              && ({ moves := [dlOld.1] } : Ledger).active.isNone
+              && !(step cfg (mv "slave" .deleted) (obs (dl0 - 1) (some oldTerm))).1.stuck)]
+  r := r ++ [("node move: ... the stuck deleted move still finishes once the replacement appears (resyncing, still not active)",
+              let n := step cfg dlOld.1 (obs (dl0 + 1) (some (pod "u2" .Proxy false)))
+              phaseOf n == .resyncing && n.1.stuck && ({ moves := [n.1] } : Ledger).active.isNone)]
+  let rlOld := step cfg { mv "slave" .released with releasedMs := 0 } (obs dl0 (some oldTerm))
+  r := r ++ [("node move: released whose pod stays Terminating past the resync deadline -> stuck (phase kept), not active",
+              rlOld.1.stuck && phaseOf rlOld == .released && ({ moves := [rlOld.1] } : Ledger).active.isNone
+              && !(step cfg { mv "slave" .released with releasedMs := 0 } (obs (dl0 - 1) (some oldTerm))).1.stuck)]
+  r := r ++ [("node move: ... a stuck released move still deletes a pod that is not terminating, and goes to deleted when it is gone",
+              actOf (step cfg rlOld.1 (obs (dl0 + 1) (some (pod "u1" .Proxy false)))) == .deletePod
+              && phaseOf (step cfg rlOld.1 (obs (dl0 + 1) none)) == .deleted)]
   r := r ++ [("node move: deadline 0 = none (resyncing waits as before)",
               !(step { cfg with resyncTimeoutMs := 0 } rs (obs (100 * dl0) (some unsyncedPod))).1.stuck
               && !(step { cfg with unservedTimeoutMs := 0 } un

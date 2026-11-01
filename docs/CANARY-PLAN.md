@@ -43,7 +43,9 @@ clients treat a miss as a cache miss. Where flare is the primary store, set
 - `FlareReplicaNotFollowing` fires and the follower does not recover
   without a rebuild.
 - Any `PROMOTION NOT LOSS-FREE`, `CRITICAL`, `PERSIST FENCE` or
-  `LEASE FENCE` line that the runbook does not explain.
+  `LEASE FENCE` line that the runbook does not explain (`LEASE CHECK` /
+  `LEASE FENCE`: RUNBOOK.md#lease-check — repeated `LEASE CHECK` lines mean a
+  slow kube API and stop the canary too).
 - Reconcile passes are slower than 2× the pre-canary baseline, or the
   operator lease age exceeds half its duration. Measured on kind under
   load: up to 3.4 s per pass, and lease age up to 8 s of 15 s.

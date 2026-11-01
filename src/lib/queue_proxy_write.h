@@ -58,8 +58,11 @@ protected:
 	// classified and counted per op (cross-cluster audit 2026-10-11)
 	bool										_foreign;
 	// the forwarding thread running this item: its shutdown request ends the
-	// retry wait (foreign and held in-cluster forwards)
+	// retry wait (foreign and held in-cluster forwards). One item is shared by
+	// every replica's forwarding thread: set and read under _mutex_owner (a
+	// shared_ptr assigned by two threads at once is a data race)
 	shared_thread						_owner;
+	pthread_mutex_t					_mutex_owner;
 	// counted in stats' in-flight forwards until this item is destroyed
 	bool										_in_flight;
 	// in-cluster replicas this forward is counted in flight for (stats' per-destination gauge);
@@ -127,7 +130,7 @@ public:
 	int incr_reroutes() { return ++this->_reroutes; };
 	void set_foreign(bool foreign);
 	bool is_foreign() { return this->_foreign; };
-	void set_owner(shared_thread t) { this->_owner = t; };
+	void set_owner(shared_thread t);
 	void track_in_flight();
 	void track_repl_in_flight(const string& dest);
 	void release_repl_in_flight(const string& dest);

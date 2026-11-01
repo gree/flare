@@ -965,6 +965,57 @@ namespace test_handler_cluster_replication {
 		cut_assert_equal_int(0, (int)snap.size());
 	}
 
+	// One item is shared by every replica's forwarding thread: the writer
+	// tracks the next replica while the first replica's thread may already
+	// release (41284282067 / 41278035134: an unlocked push_back raced an erase
+	// and the master's flared died with SIGSEGV). Tracking and releasing from
+	// two threads at once must leave every count consistent.
+	struct repl_race_arg {
+		queue_proxy_write* q;
+		int n;
+	};
+	static void* repl_race_track(void* p) {
+		repl_race_arg* a = static_cast<repl_race_arg*>(p);
+		for (int i = 0; i < a->n; i++) {
+			char d[32];
+			snprintf(d, sizeof(d), "t%d:12121", i);
+			a->q->track_repl_in_flight(d);
+		}
+		return NULL;
+	}
+	static void* repl_race_release(void* p) {
+		repl_race_arg* a = static_cast<repl_race_arg*>(p);
+		for (int round = 0; round < 3; round++) {
+			for (int i = 0; i < a->n; i++) {
+				char d[32];
+				snprintf(d, sizeof(d), "t%d:12121", i);
+				a->q->release_repl_in_flight(d);
+			}
+		}
+		return NULL;
+	}
+	void test_repl_in_flight_track_and_release_from_two_threads() {
+		uint64_t total = 1;
+		stats_object->get_repl_in_flight(total);
+		cut_assert_equal_int(0, (int)total);
+		storage::entry e = get_entry(" rk 0 0 5 3", storage::parse_type_set, "VALUE");
+		vector<string> proxy;
+		for (int rep = 0; rep < 20; rep++) {
+			shared_queue_proxy_write q(new queue_proxy_write(NULL, NULL, proxy, e, "set"));
+			q->set_post_proxy(true);
+			repl_race_arg a = { q.get(), 2000 };
+			pthread_t t1, t2;
+			pthread_create(&t1, NULL, repl_race_track, &a);
+			pthread_create(&t2, NULL, repl_race_release, &a);
+			pthread_join(t1, NULL);
+			pthread_join(t2, NULL);
+			q.reset();
+			map<string, uint64_t> snap = stats_object->get_repl_in_flight(total);
+			cut_assert_equal_int(0, (int)total);
+			cut_assert_equal_int(0, (int)snap.size());
+		}
+	}
+
 	// review of 8d64aaf: terminal outcomes of answered in-cluster forwards are
 	// counted per destination (failed / skipped), with totals from one snapshot
 	void test_proxy_write_outcomes_are_counted_per_destination() {

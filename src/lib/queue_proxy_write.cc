@@ -73,6 +73,7 @@ queue_proxy_write::queue_proxy_write(cluster* cl, storage* st, vector<string> pr
 		_skipped(false),
 		_reroutes(0) {
 	pthread_mutex_init(&this->_mutex_repl_dests, NULL);
+	pthread_mutex_init(&this->_mutex_owner, NULL);
 }
 
 /**
@@ -86,6 +87,7 @@ queue_proxy_write::~queue_proxy_write() {
 		stats_object->repl_in_flight_sub(*it);
 	}
 	pthread_mutex_destroy(&this->_mutex_repl_dests);
+	pthread_mutex_destroy(&this->_mutex_owner);
 }
 
 /**
@@ -93,8 +95,23 @@ queue_proxy_write::~queue_proxy_write() {
  *	the item is destroyed. Called before it is queued for `dest`.
  */
 void queue_proxy_write::track_repl_in_flight(const string& dest) {
+	// under the same mutex as release_repl_in_flight: the first replica's
+	// forwarding thread may already release (erase) while the writer tracks the
+	// next replica (push_back may reallocate) — unlocked, that corrupted the
+	// heap (flared SIGSEGV, 41284282067 empty-source; 41278035134 forward-window)
+	// the gauge moves under the same mutex too: added after a concurrent
+	// release had already subtracted (a no-op below 0), it stayed up for ever
+	// (the cutter test below found it)
+	pthread_mutex_lock(&this->_mutex_repl_dests);
 	this->_repl_dests.push_back(dest);
 	stats_object->repl_in_flight_add(dest);
+	pthread_mutex_unlock(&this->_mutex_repl_dests);
+}
+
+void queue_proxy_write::set_owner(shared_thread t) {
+	pthread_mutex_lock(&this->_mutex_owner);
+	this->_owner = t;
+	pthread_mutex_unlock(&this->_mutex_owner);
 }
 
 /**
@@ -117,10 +134,10 @@ void queue_proxy_write::release_repl_in_flight(const string& dest) {
 		this->_repl_dests.erase(it);
 		found = true;
 	}
-	pthread_mutex_unlock(&this->_mutex_repl_dests);
 	if (found) {
 		stats_object->repl_in_flight_sub(dest);
 	}
+	pthread_mutex_unlock(&this->_mutex_repl_dests);
 }
 
 /**
@@ -419,7 +436,10 @@ uint64_t foreign_now_ms() {
 }	// anonymous namespace
 
 bool queue_proxy_write::_owner_stopping() {
-	return this->_owner && this->_owner->is_shutdown_request() != thread::shutdown_request_none;
+	pthread_mutex_lock(&this->_mutex_owner);
+	shared_thread o = this->_owner;
+	pthread_mutex_unlock(&this->_mutex_owner);
+	return o && o->is_shutdown_request() != thread::shutdown_request_none;
 }
 
 int queue_proxy_write::hold_window_ms = 0;

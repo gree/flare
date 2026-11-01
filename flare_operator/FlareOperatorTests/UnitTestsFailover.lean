@@ -22,6 +22,35 @@ private def cp (k : String) (ep : Option String) (n : Option Nat) : Copy :=
 private def node (name : String) (role : FlareRole) (st : FlareState) (part : Int) : FlareNode :=
   { serverName := name, serverPort := 12121, role := role, state := st, partition := part }
 
+open Std.Internal.UV.TCP (Socket) in
+open Std.Net (SocketAddress SocketAddressV4) in
+/-- A local peer for the real probe path (review of a074161, P2): it accepts
+    one connection on 127.0.0.1 and either answers `version` (`answer`) or
+    holds the connection open without a byte (a wedged flared that still
+    accepts). Returns its port. -/
+private def probePeer (answer : Bool) (holdMs : Nat) : IO Nat := do
+  let srv ← Socket.new
+  srv.bind (SocketAddress.v4 (SocketAddressV4.mk ⟨#v[127, 0, 0, 1]⟩ 0))
+  srv.listen 4
+  let port := (← srv.getSockName).port.toNat
+  let _ ← IO.asTask (prio := .dedicated) do
+    match ← IO.wait (← srv.accept).result! with
+    | .error _ => pure ()
+    | .ok c =>
+      if answer then
+        let _ ← IO.wait (← c.recv? 128).result!
+        let _ ← IO.wait (← c.send "VERSION flare-test\r\n".toUTF8).result!
+      IO.sleep holdMs.toUInt32
+      let _ ← c.shutdown
+      let _ ← srv.shutdown
+  return port
+
+/-- The real probe against `ip:port`: its answer and how long it took. -/
+private def timedProbe (ip : String) (port timeoutMs : Nat) : IO (Bool × Nat) := do
+  let t0 ← IO.monoMsNow
+  let ok ← FlareOperator.Server.probeNodeReachable ip port timeoutMs
+  return (ok, (← IO.monoMsNow) - t0)
+
 /-- partition 0 has lost its master; three Active slaves a, b, c in map order. -/
 private def masterless : FlareClusterState :=
   ({ nodeMap := [("a", node "a" .Slave .Active 0), ("b", node "b" .Slave .Active 0),
@@ -166,6 +195,26 @@ def results : List (String × Bool) := Id.run do
       && !FlareOperator.Server.versionReplyAnswers "ERROR\r\n"
       && !FlareOperator.Server.versionReplyAnswers "SERVER_ERROR busy\r\n"
       && !FlareOperator.Server.versionReplyAnswers "")]
+  return r
+
+/-- The real reachability probe over loopback sockets (IO, so apart from
+    `results`). -/
+def probeResults : IO (List (String × Bool)) := do
+  let mut r : List (String × Bool) := []
+  -- the real probe path, bounded by the caller's timeout (review of a074161)
+  let tmo := UnreachableNode.monitorReadTimeoutMs
+  let slack := 300
+  let (stallOk, stallMs) ← timedProbe "127.0.0.1" (← probePeer false 3000) tmo
+  r := r ++ [(s!"reachability probe: a peer that accepts but never answers is unreachable within the {tmo} ms timeout (took {stallMs} ms)",
+    !stallOk && stallMs + 50 ≥ tmo && stallMs ≤ tmo + slack)]
+  let (answerOk, answerMs) ← timedProbe "127.0.0.1" (← probePeer true 1000) tmo
+  r := r ++ [(s!"reachability probe: a peer that answers VERSION is reachable (took {answerMs} ms)",
+    answerOk && answerMs ≤ tmo)]
+  -- a connect that never completes (unroutable address): the whole probe
+  -- still ends by the timeout, whether the network drops or refuses it
+  let (blackOk, blackMs) ← timedProbe "10.255.255.1" 12121 400
+  r := r ++ [(s!"reachability probe: a connect that does not complete ends within the timeout (400 ms, took {blackMs} ms)",
+    !blackOk && blackMs ≤ 400 + slack)]
   return r
 
 end FlareOperator.UnitTestsFailover

@@ -609,7 +609,7 @@ def suite : TestSuite := {
         -- broadcast went out after the delay was removed
         if !(← waitP0Stable) then return .fail "partition 0 did not settle once the renew answered in time again"
         return .pass },
-    { name := "(risk B9) an unreachable master whose only reachable slaves the promotion gate refuses (both followers cut from the master, judged promotion-ineligible by R3) is KEPT: the operator ⇄ master cut does not leave partition 0 masterless for 90 s, and the CRITICAL keep line names it"
+    { name := "(risk B9) an unreachable master whose only reachable slaves cannot be proven current (both followers cut from the master, R3 \"promotion ineligible\") never leaves partition 0 masterless for 90 s: it is either kept (CRITICAL keep line) or one of those slaves is promoted for availability with PROMOTION NOT LOSS-FREE naming it (an unproven follower is held, then promoted, not refused: 41331221519)"
       run := do
         if !(← graceOver) then return .fail "the operator never logged the end of its startup grace period"
         if !(← waitP0Stable) then return .fail "precondition: partition 0 is not stable"
@@ -642,15 +642,23 @@ def suite : TestSuite := {
           match ← cutLink opIp mIp with
           | .error e => return .fail s!"could not cut operator ⇄ {mIp}: {e}"
           | .ok _ => pure ()
+          let mut finalM := mPod
           for i in [0:9] do
             IO.sleep 10000
             match ← p0Master with
-            | some m => if m != mPod then return .fail s!"{mPod} was replaced by {m} although every reachable slave is refused by the promotion gate ({(i + 1) * 10} s)"
-            | none => return .fail s!"partition 0 became MASTERLESS {(i + 1) * 10} s after the operator ⇄ master cut (the gate refused the successor the failover counted)"
+            | some m =>
+              if m != mPod && !slaves.contains m then
+                return .fail s!"{mPod} was replaced by {m}, not one of its partition's slaves {slaves} ({(i + 1) * 10} s)"
+              finalM := m
+            | none => return .fail s!"partition 0 became MASTERLESS {(i + 1) * 10} s after the operator ⇄ master cut"
           let logs ← opLogs
-          IO.eprintln s!"# [b9] {mPod} kept for 90 s with both slaves promotion-ineligible; keep lines {countLines logs "NO reachable promotable successor" mPod}"
-          if countLines logs "NO reachable promotable successor" mPod == 0 then
-            return .fail s!"no CRITICAL keep line names {mPod}"
+          let kept := countLines logs "NO reachable promotable successor" mPod
+          let notLossFree := countLines logs "PROMOTION NOT LOSS-FREE" finalM
+          IO.eprintln s!"# [b9] master after 90 s: {finalM} (was {mPod}); keep lines {kept}; NOT LOSS-FREE lines naming it {notLossFree}"
+          if finalM == mPod then
+            if kept == 0 then return .fail s!"{mPod} was kept but no CRITICAL keep line names it"
+          else if notLossFree == 0 then
+            return .fail s!"{finalM} was promoted without a PROMOTION NOT LOSS-FREE line naming it, although its follow was cut"
           return .pass
         finally
           healLink opIp mIp

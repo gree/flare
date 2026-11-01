@@ -1233,6 +1233,16 @@ Chart values: `nodeReplacement.*` (needs `nodeGuard.enabled`; the chart refuses
 `nodeReplacement.enabled` without it). `FLARE_NODE_REPLACEMENT=off` on the
 operator turns the whole feature off.
 
+**This release supports the cordon move on tmpfs clusters only** (user
+decision 2026-11-01). It is verified there (E2E cordon-master / cordon-replica:
+errors 0, missing 0). On a PVC cluster it is NOT verified: with node-local
+volumes (local PV, local-path) the recreated pod cannot leave the cordoned
+node, stays Pending and the move stays `resyncing` (no data lost; one copy
+fewer and the next moves wait until the uncordon); with network storage the
+recreated pod comes back with its old data, a path not tested yet. On a PVC
+cluster set `nodeReplacement.enabled: false`: drains then go through the node
+guard's handover only, as before.
+
 **Check the copy count first.** The chart defaults are `cluster.replicas: 3`
 (a master and two replicas per partition) and `nodeReplacement.minCopies: 3`
 with `nodeReplacement.enabled: true`: a move keeps a replica besides the

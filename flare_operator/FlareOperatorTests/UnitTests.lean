@@ -233,6 +233,67 @@ def checkFollowOwnership (ctx : Ctx) : IO Unit := do
                      && (back.entries.head?.bind (·.barEpoch)) == some ownEp
       | none => false)
 
+/-- The slave is reconstructing (Slave/Prepare) — e.g. a recreated pod in
+    its boot reconstruction (CI 41278035134). -/
+def rebuilding : FlareClusterState :=
+  { nodeMap := [(masterKey, node .Master .Active 0 "n0.svc"), (slaveKey, node .Slave .Prepare 0 "n1.svc")],
+    nodeMapVersion := 10 }
+
+def checkReconstructingDefer (ctx : Ctx) : IO Unit := do
+  check ctx "reconstructingKeys: a Slave in Prepare only (Slave/Active, masters and proxies are not)"
+    (reconstructingKeys rebuilding == [slaveKey] && reconstructingKeys state == [])
+  -- (1) a request against a reconstructing destination is not demoted, kept
+  -- with its drops and a visible hold, and only a NEWER successful
+  -- reconstruction after a later reseat closes it
+  let lRb := (resolve l2 rebuilding).1
+  let (lDef, actsDef) := plan lRb true "" (reconstructingKeys rebuilding)
+  check ctx "a request against a Slave/Prepare destination is NOT demoted; it stays requested with its drops and a visible hold"
+    (actsDef.isEmpty && firstPhase lDef == some .requested && firstDrops lDef == some 3
+      && firstNodeKey lDef == some slaveKey && firstHold lDef == some reconstructingHold
+      && heldKeys lDef == [])
+  -- the in-progress (boot) reconstruction succeeding does not close it: a
+  -- drop may have happened after its dump passed the key
+  let bootDone := obs (some 10) (some 500) (some 1) (some "succeeded") (some 1) (some masterKey) (some masterKey) (some (.Slave, .Active))
+  let (lAfterBoot, stBoot) := advance lDef [(slaveKey, bootDone)]
+  check ctx "the deferred request is NOT closed by the reconstruction that was in progress when it was deferred"
+    (stBoot.isEmpty && firstPhase lAfterBoot == some .requested && firstDrops lAfterBoot == some 3)
+  let lMore := request lDef masterKey slaveKey 2
+  check ctx "more drops while deferred extend the same request"
+    (lMore.entries.length == 1 && firstDrops lMore == some 5
+      && (plan lMore true "" (reconstructingKeys rebuilding)).2.isEmpty)
+  -- once Active (no longer reconstructing) the ordinary path demotes it
+  let (lAct, actsAct) := plan lAfterBoot true "" (reconstructingKeys state)
+  check ctx "once the destination is Active the deferred request is demoted as usual and the hold clears"
+    (actsAct.map (·.1) == [slaveKey] && firstHold lAct == none)
+  let lDem2 := markDemoted lAct slaveKey 11
+  let lRel2 := (advance lDem2 [(slaveKey, obs (some 11) (some 500) (some 1) (some "succeeded") (some 1) (some masterKey) (some masterKey) (some (.Proxy, .Active)))]).1
+  check ctx "after the reseat the boot reconstruction's success (#1, same boot) is not completion; a NEWER success (#2) is"
+    (firstPhase lRel2 == some .reseated
+      && stepsOf lRel2 (obs (some 12) (some 500) (some 1) (some "succeeded") (some 1) (some masterKey) (some masterKey) (some (.Slave, .Active))) == []
+      && stepsOf lRel2 (obs (some 12) (some 500) (some 2) (some "succeeded") (some 2) (some masterKey) (some masterKey) (some (.Slave, .Active))) == [.completed])
+  -- (2) an Active slave is demoted exactly as before (with or without the list)
+  check ctx "a request against a Slave/Active destination still demotes (reconstructing list empty or naming other nodes)"
+    ((plan l3 true "" (reconstructingKeys state)).2.map (·.1) == [slaveKey]
+      && (plan l3 true "" ["other.svc:12121"]).2.map (·.1) == [slaveKey]
+      && (plan l3 true "").2.map (·.1) == [slaveKey])
+  -- (3) unknown / unresolved / gated: fail closed — kept, never demoted, never dropped
+  let lUnres := request l1 masterKey "ghost.svc:12121" 4
+  let (lU, actsU) := plan (resolve lUnres rebuilding).1 true "" (reconstructingKeys rebuilding)
+  check ctx "an unresolved destination (not a Slave in the map) is kept as a request and not acted on"
+    (actsU.isEmpty && (lU.entries.find? (·.dest == "ghost.svc:12121")).map (·.phase) == some .requested
+      && (lU.entries.find? (·.dest == "ghost.svc:12121")).map (·.drops) == some 4)
+  let (lG, actsG) := plan lRb false "breaker held" (reconstructingKeys rebuilding)
+  check ctx "a closed gate on a reconstructing destination holds it with the gate reason and keeps it"
+    (actsG.isEmpty && firstPhase lG == some .requested && firstHold lG == some "breaker held")
+  let lOwnRb := (resolve (holdOwned l2 slaveKey (some 100) (some ownEp) "follower state unknown (stats unreadable)") rebuilding).1
+  let (lO, actsO) := plan lOwnRb true "" (reconstructingKeys rebuilding)
+  check ctx "an entry held on an unreadable follower keeps its own hold on a reconstructing node (still no demotion)"
+    (actsO.isEmpty && firstHold lO == some "follower state unknown (stats unreadable)")
+  check ctx "a deferred request survives the status round trip (an operator restart) as a request"
+    (match Ledger.fromJson? (Ledger.toJson lDef) with
+      | some back => back == lDef && firstPhase back == some .requested
+      | none => false)
+
 def checkAdvanceHold (ctx : Ctx) : IO Unit := do
   let old := obs (some 10) (some 100) (some 1) (some "succeeded") (some 1) (some masterKey) (some masterKey) (some (.Proxy, .Active))
   check ctx "a node still reporting the OLD version stays held"
@@ -2912,6 +2973,7 @@ def run : IO UInt32 := do
   checkObserve ctx
   checkRequestResolve ctx
   checkGate ctx
+  checkReconstructingDefer ctx
   checkFollowOwnership ctx
   checkAdvanceHold ctx
   checkAdvanceComplete ctx

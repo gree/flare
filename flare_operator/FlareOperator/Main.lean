@@ -3860,13 +3860,20 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
         else if tripped then some "circuit breaker held"
         else if masterless then some "a partition has no Active master"
         else none
-      let (led2, acts) := ReplicaRepair.plan led1 gate.isNone (gate.getD "")
+      -- A Slave in Prepare is reconstructing from its master: demoting it
+      -- breaks that reconstruction (CI 41278035134). Its request is held,
+      -- not consumed, and demoted once the node is Active (see
+      -- ReplicaRepair.reconstructingKeys for why it is not closed by the
+      -- in-progress reconstruction).
+      let (led2, acts) := ReplicaRepair.plan led1 gate.isNone (gate.getD "") (ReplicaRepair.reconstructingKeys preState)
       let mut led3 := led2
       for (rKey, e) in acts do
         let cs ← stateRef.get
         match cs.lookupNode rKey with
         | some rn =>
-          if rn.role == FlareRole.Slave then
+          if rn.role == FlareRole.Slave && rn.state == FlareState.Prepare then
+            IO.eprintln s!"[flare-operator] replica repair DEFERRED for {rKey}: it is reconstructing (Slave/Prepare) — a demotion now would break that reconstruction; the request stays pending until it is Active"
+          else if rn.role == FlareRole.Slave then
             -- SAF-08: the copy is rebuilt from the partition's CURRENT
             -- master, which need not be the one that counted the drops. Read
             -- it now; defer unless it is known to hold data.
@@ -3920,7 +3927,8 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
                 let sourceSame := srcNow.map (·.1) == srcKey && srcNow.map (·.2.regEpoch) == srcEpoch
                 match cur.lookupNode rKey with
                 | some rn2 =>
-                  if sourceSame && rn2.role == FlareRole.Slave && rn2.partition == rn.partition && rn2.regEpoch == rn.regEpoch then
+                  if sourceSame && rn2.role == FlareRole.Slave && rn2.state != FlareState.Prepare
+                      && rn2.partition == rn.partition && rn2.regEpoch == rn.regEpoch then
                     let v := cur.nodeMapVersion + 1
                     let demoted : FlareNode :=
                       { rn2 with role := FlareRole.Proxy, state := FlareState.Active, partition := -1, formerSlaveOf := -1 }
@@ -3933,7 +3941,7 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
                 metrics.replicaResyncs.inc
                 IO.eprintln s!"[flare-operator] REPLICA REPAIR: demoting {rKey} to a live proxy at v{v} — master {e.masterKey} dropped {e.drops} write(s) to it; rebuild source {(srcMaster.map (·.1)).getD "?"} holds data. Held out of assignment until it reports v{v}; then re-seated as Slave/Prepare so flared reconstructs"
               | none =>
-                IO.eprintln s!"[flare-operator] replica repair: {rKey} or its source master changed (re-registered, re-assigned or failed over) while the demotion was being decided; leaving the request pending"
+                IO.eprintln s!"[flare-operator] replica repair: {rKey} or its source master changed (re-registered, re-assigned, failed over, or the replica began reconstructing) while the demotion was being decided; leaving the request pending"
           else
             IO.eprintln s!"[flare-operator] replica repair: {rKey} is no longer a Slave; leaving the request pending"
         | none =>

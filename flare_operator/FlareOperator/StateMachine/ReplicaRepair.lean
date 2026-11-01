@@ -241,15 +241,55 @@ def heldKeys (l : Ledger) : List String :=
     | .demoted _, some k => some k
     | _, _ => none
 
+/-- Why a request against a reconstructing destination is not acted on. -/
+def reconstructingHold : String :=
+  "the destination is reconstructing from its master (Slave/Prepare): demotion deferred until it is Active; the request is kept and then takes the ordinary repair path"
+
+/-- Node keys of the committed map that are reconstructing right now: a
+    Slave in Prepare (a reconstruction from the master in progress — the
+    boot reconstruction of a recreated pod, or a re-seated repair).
+
+    CI 41278035134: drops counted against a replica's OLD pod (its forwards
+    failed while it was cut and deleted) became a request that demoted the
+    RECREATED pod ~1 s into its boot reconstruction; flared kept retrying
+    that reconstruction as a proxy and the cluster wedged for 24 min.
+
+    Why the request is DEFERRED rather than satisfied by this reconstruction:
+    drops cannot be timed individually. A drop counted while the node is in
+    Prepare may have happened after the reconstruction's dump passed the key
+    (a write forwarded to a Prepare slave and dropped is not in its copy), so
+    the in-progress reconstruction does not prove the gap is covered — only a
+    reconstruction that STARTS after the drops does, which is exactly the
+    reseat path's `newEnough` test. Recording the in-progress id as the
+    reseat baseline would wait for a newer reconstruction that nothing
+    starts. So: no demotion while Prepare (the demotion is what breaks the
+    rebuilding node), the request stays `requested` with its drops, and once
+    the node is Active the ordinary path demotes it and closes only on a
+    reconstruction newer than the one current at reseat. Cost: one extra
+    rebuild after a recreation with stale drops; no needed repair is lost. -/
+def reconstructingKeys (state : FlareClusterState) : List String :=
+  state.nodeMap.filterMap fun (k, n) =>
+    if n.role == FlareRole.Slave && n.state == FlareState.Prepare then some k else none
+
 /-- Resolved requests the caller should demote now. When `allowed` is false
-    they are marked with the gate reason instead and nothing is returned. -/
-def plan (l : Ledger) (allowed : Bool) (gateReason : String) : Ledger × List (String × Entry) :=
+    they are marked with the gate reason instead and nothing is returned.
+    A request whose node is in `reconstructing` (see `reconstructingKeys`)
+    is never returned: it is held with `reconstructingHold` and kept. -/
+def plan (l : Ledger) (allowed : Bool) (gateReason : String)
+    (reconstructing : List String := []) : Ledger × List (String × Entry) :=
   if allowed then
+    let deferred := fun (e : Entry) =>
+      match e.phase, e.nodeKey with
+      | .requested, some k => !e.owned && reconstructing.contains k
+      | _, _ => false
     let acts := l.entries.filterMap fun e =>
       match e.phase, e.nodeKey with
-      | .requested, some k => if e.owned then none else some (k, e)
+      | .requested, some k => if e.owned || deferred e then none else some (k, e)
       | _, _ => none
-    ({ l with entries := l.entries.map fun e => if e.owned then e else { e with hold := none } }, acts)
+    ({ l with entries := l.entries.map fun e =>
+        if e.owned then e
+        else if deferred e then { e with hold := some reconstructingHold }
+        else { e with hold := none } }, acts)
   else
     ({ l with entries := l.entries.map fun e =>
         match e.phase, e.nodeKey with

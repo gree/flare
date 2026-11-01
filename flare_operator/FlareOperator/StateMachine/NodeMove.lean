@@ -227,6 +227,16 @@ structure CopyFact where
   dropIncreased : Bool
   deriving Repr, BEq, Inhabited
 
+/-- A copy is on the master's history only when BOTH report the same
+    `rocksdb_master_id` and `rocksdb_source_epoch` — a value missing on
+    either side is not a match (two missing values compared equal: risk
+    B14) — and the copy is not reported inconsistent or quarantined. -/
+def sameHistoryOf (mMasterId mEpoch cMasterId cEpoch : Option String)
+    (consistent quarantined : Option Nat) : Bool :=
+  consistent != some 0 && quarantined != some 1
+    && (match mMasterId, cMasterId with | some a, some b => a == b | _, _ => false)
+    && (match mEpoch, cEpoch with | some a, some b => a == b | _, _ => false)
+
 /-- Copies that still count while the pods of the `excluded` nodes are away:
     on another node, Active, same history, no open repair, no new drop.
     `next` excludes the moving pod's node only (user decision 2026-11-01, C7

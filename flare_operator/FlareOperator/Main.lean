@@ -1301,9 +1301,9 @@ private def runNodeMoves (crName ns : String) (stateRef : IO.Ref FlareClusterSta
           let cStats ← if active then podStatsOf ck ns else pure none
           let sameHistory := match mStats, cStats with
             | some mo, some co =>
-              statNat co "rocksdb_copy_identity_consistent" != some 0 && statNat co "rocksdb_quarantined" != some 1
-                && statStr mo "rocksdb_master_id" == statStr co "rocksdb_master_id"
-                && statStr mo "rocksdb_source_epoch" == statStr co "rocksdb_source_epoch"
+              NodeMove.sameHistoryOf (statStr mo "rocksdb_master_id") (statStr mo "rocksdb_source_epoch")
+                (statStr co "rocksdb_master_id") (statStr co "rocksdb_source_epoch")
+                (statNat co "rocksdb_copy_identity_consistent") (statNat co "rocksdb_quarantined")
             | _, _ => false
           let repairOpen := repairLed.entries.any (·.nodeKey == some ck)
           let dropIncreased ← match mStats, masterKey with

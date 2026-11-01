@@ -163,6 +163,19 @@ def results : List (String × Bool) := Id.run do
               (quietStep (some { q0 with boot := "" }) 5 0 "" 9000).lastIncrease == 9000)]
   r := r ++ [("node move: quiet — the operator's own requests alone do not restart it",
               (quietStep (some { q0 with own := 2 }) 103 5 "boot-a" 9000).lastIncrease == 1000)]
+  -- ── same history (risk B14) ─────────────────────────────────────────
+  r := r ++ [("node move: same history needs both copies to report the same master id and source epoch",
+              sameHistoryOf (some "m1") (some "e1") (some "m1") (some "e1") none none
+                && !sameHistoryOf (some "m1") (some "e1") (some "m2") (some "e1") none none
+                && !sameHistoryOf (some "m1") (some "e1") (some "m1") (some "e2") none none)]
+  r := r ++ [("node move: a missing master id or source epoch on either side is not the same history (two missing values used to compare equal)",
+              !sameHistoryOf none none none none none none
+                && !sameHistoryOf (some "m1") (some "e1") none (some "e1") none none
+                && !sameHistoryOf (some "m1") none (some "m1") none none none)]
+  r := r ++ [("node move: an inconsistent or quarantined copy is not the same history",
+              !sameHistoryOf (some "m1") (some "e1") (some "m1") (some "e1") (some 0) none
+                && !sameHistoryOf (some "m1") (some "e1") (some "m1") (some "e1") none (some 1)
+                && sameHistoryOf (some "m1") (some "e1") (some "m1") (some "e1") (some 1) (some 0))]
   -- ── minCopies ───────────────────────────────────────────────────────
   let others2 := [copy "a" "w2", copy "b" "w3"]
   r := r ++ [("node move: 3 copies (this + 2 real) start with minCopies 3", (startBlock cfg "slave" ["w1"] others2).isNone)]

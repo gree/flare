@@ -145,10 +145,15 @@ def results : List (String × Bool) := Id.run do
       && (DuplicateMaster.step [] "b" (some true) 1000) == ([("b", 1000)], false)
       && (DuplicateMaster.step [("b", 1000)] "b" (some true) 1200).2 == false
       && (DuplicateMaster.step [("b", 1000)] "b" (some true) (1000 + h)).2 == true)]
-  r := r ++ [("duplicate master: a claim that ends clears it; an unreadable sample keeps what was known and never starts a count",
+  r := r ++ [("duplicate master: a claim that ends clears it; an unreadable sample keeps what was known, never starts a count and never decides the down (B11); the next READ claim past holdMs does",
     (DuplicateMaster.step [("b", 1000)] "b" (some false) 99000) == ([], false)
       && (DuplicateMaster.step [] "b" none 99000) == ([], false)
-      && (DuplicateMaster.step [("b", 1000)] "b" none (1000 + h)).2 == true)]
+      -- one timeline: first sighting at 1000, unreadable at 1000 + h (no
+      -- decision, sighting kept), read claim at 1500 + h (down)
+      && (let (fs1, d1) := DuplicateMaster.step [] "b" (some true) 1000
+          let (fs2, d2) := DuplicateMaster.step fs1 "b" none (1000 + h)
+          let (_, d3) := DuplicateMaster.step fs2 "b" (some true) (1500 + h)
+          !d1 && fs2 == [("b", 1000)] && !d2 && d3))]
   -- the mid-pass lease check (review of fac7410, P1)
   r := r ++ [("lease check: held only from this pod's own renew with a margin left; a failed renew is never held, whatever the earlier read said",
     LeaseFence.held true true 300 15000

@@ -503,8 +503,8 @@ the committed one (audit verdict behind or ahead) can conflict.
    the committed map gives to another node after 15 s -> treated as down
    (proxy); the map's master is kept`. The node joins the same dead
    detection as an unreachable one ([node-unreachable](#node-unreachable)).
-   While its stats cannot be read, the first sighting is kept, so it can be
-   marked down at 15 s without a newer reading.
+   While its stats cannot be read, the first sighting is kept but nothing is
+   decided: the down needs a reading that still shows the claim after 15 s.
 3. It is restarted (graceful delete) once it answers the operator's probe,
    after 3 passes, under the stuck-down gates
    ([node-down-stuck](#node-down-stuck)); the new process re-registers and

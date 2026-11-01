@@ -57,9 +57,10 @@ def conflicts (state : FlareClusterState) (key : String) (claim : String × Int)
 def step (firstSeen : List (String × Nat)) (key : String) (conflict : Option Bool) (nowMs : Nat)
     : List (String × Nat) × Bool :=
   match conflict with
-  | none => (firstSeen, match firstSeen.lookup key with
-      | some t => nowMs ≥ t + holdMs
-      | none => false)
+  -- an unreadable sample keeps what was known but decides nothing: the down
+  -- needs a READ claim still standing after holdMs, not an old first-seen
+  -- time (risk B11: an unreadable node was made down on no new evidence)
+  | none => (firstSeen, false)
   | some false => (firstSeen.filter (·.1 != key), false)
   | some true =>
     match firstSeen.lookup key with

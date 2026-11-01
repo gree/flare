@@ -1789,8 +1789,13 @@ def identitySuite : TestSuite := {
           -- the evidence, not by the restart: fresh (read after its NEW
           -- process activated and bound), eligible (not rebuilding, not
           -- lagging), re-checked at commit, and every key and value served
+          -- read once the new master's own flared has taken the role: the
+          -- operator's map can name it a few seconds before its send lands
+          -- (41284282067: a skipped send, the GETs 11 s early, t11_0=none)
+          let ip := (← getPodIp newMaster ns).getD ""
+          discard <| waitForCondition s!"{newMaster} serves as the master" 60 do
+            return (← c.statStr ip "own_role") == some "master"
           let valuesOk ← do
-            let ip := (← getPodIp newMaster ns).getD ""
             let mut bad : List String := []
             for (k, v) in markers do
               let got ← memcachedGet c.cfg.debugPod ns ip c.cfg.flarePort k
@@ -2930,16 +2935,21 @@ def repairLedgerSuite : TestSuite := {
               return (← c.currItems sIp) == (← c.currItems mIp) && (← c.ledgerDests).isEmpty
             if !synced then return .fail "precondition: copies not in sync after the restart"
             let boot1 ← c.statNat mIp "reconstruction_boot_id"
-            let reqBefore := countLines (← c.opLog 200000) "REPLICA REPAIR requested"
+            -- a request for the master's DROPS only: the failover's own
+            -- cleanup ("requested by the replica (needs_rebuild)") is another
+            -- fault (41284282067: both lines matched, "requested 2 times")
+            let dropReqs := fun (log : String) => (log.splitOn "\n").filter fun l =>
+              containsSubstr l "REPLICA REPAIR requested" && containsSubstr l "dropped"
+            let reqBefore := (dropReqs (← c.opLog 200000)).length
             match ← c.dropWrites mIp sIp "rs" 30 with
             | .error e => return .fail e
             | .ok (w, d0, d1) =>
               let requested ← waitForCondition "the new drops are requested" 420 do
-                return countLines (← c.opLog 200000) "REPLICA REPAIR requested" > reqBefore
+                return (dropReqs (← c.opLog 200000)).length > reqBefore
               let repaired ← waitForCondition "repaired and the ledger closes" 600 do
                 return (← c.currItems sIp) == (← c.currItems mIp) && (← c.ledgerDests).isEmpty
               let log ← c.opLog 200000
-              let reqLines := (log.splitOn "\n").filter (containsSubstr · "REPLICA REPAIR requested")
+              let reqLines := dropReqs log
               IO.eprintln s!"# master boot {boot0} -> {boot1}; stored {w}/30 with forwards cut; drops {d0} -> {d1}; requested={requested} ({reqLines.length - reqBefore} new line(s)); repaired={repaired}; {sPod} items {← c.currItems sIp} vs {← c.currItems mIp}\n# {(reqLines.getLast?).getD ""}"
               if !requested then return .fail "the restarted master's drops were not requested"
               if !repaired then return .fail "not repaired"

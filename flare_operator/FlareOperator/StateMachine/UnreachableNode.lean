@@ -72,4 +72,23 @@ def keepStreaksForSamePod (streaks : List (String × Nat)) (prevIds ids : List (
     | some u0, some u1 => !u0.isEmpty && u0 == u1
     | _, _ => false
 
+/-- A master's unreachable verdict waits while every Active slave of its
+    partition is itself failing probes (a streak ≥ 1, not yet down): such a
+    slave is no reachable successor yet, and promoting it is a failover to a
+    copy the operator cannot reach either (41284282067 failover-order 4: the
+    slaves at 2 failed probes when the master reached 3 — promoted). Once
+    they reach the threshold they are down and the master is kept (no
+    successor); once one answers again the master's verdict applies. A
+    partition with no Active slave at all is not deferred here (the keep
+    rule decides it). -/
+def deferMasterDown (state : FlareClusterState) (streaks : List (String × Nat)) (key : String) : Bool :=
+  match state.lookupNode key with
+  | some n =>
+    if n.role != FlareRole.Master then false
+    else
+      let slaves := state.nodeMap.filter fun kv =>
+        kv.2.role == FlareRole.Slave && kv.2.state == FlareState.Active && kv.2.partition == n.partition
+      !slaves.isEmpty && slaves.all fun kv => streaks.any fun (k, c) => k == kv.1 && c ≥ 1
+  | none => false
+
 end FlareOperator.UnreachableNode

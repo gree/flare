@@ -3691,6 +3691,13 @@ private def runReachabilityStep (crName ns : String) (stateRef : IO.Ref FlareClu
   reachOkRef.set ((probed.filter (·.2)).map (·.1) ++ backOk)
   let reachVerdict := FlareOperator.UnreachableNode.step (← unreachCyclesRef.get) probed (← stateRef.get)
   unreachCyclesRef.set reachVerdict.streaks
+  -- a master waits while every Active slave of its partition is failing
+  -- probes too (no reachable successor yet; UnreachableNode.deferMasterDown)
+  let stNow ← stateRef.get
+  let deferred := reachVerdict.down.filter (FlareOperator.UnreachableNode.deferMasterDown stNow reachVerdict.streaks ·)
+  if !deferred.isEmpty then
+    IO.eprintln s!"[flare-operator] UNREACHABLE: master(s) {deferred} not marked down this round: every Active slave of the partition is failing operator probes too (no reachable successor yet)"
+  let reachVerdict := { reachVerdict with down := reachVerdict.down.filter (!deferred.contains ·) }
   unreachableDownRef.set reachVerdict.down
   downByReachRef.modify fun l => l ++ reachVerdict.down.filter (!l.contains ·)
   reachGuardRef.set reachVerdict.guardTripped

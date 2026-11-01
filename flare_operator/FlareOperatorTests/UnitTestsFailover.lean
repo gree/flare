@@ -113,6 +113,11 @@ def results : List (String × Bool) := Id.run do
     !(step [] [] mkState).guardTripped)]
   r := r ++ [("unreachable GUARD: even when only the lone Active node is probed and unreachable",
     (step [("m", 9)] [("m", false)] mkState).guardTripped)]
+  r := r ++ [("unreachable master: down deferred while EVERY Active slave is failing probes too (41284282067), not when one answers, never for a slave",
+    UnreachableNode.deferMasterDown mkState [("m", 3), ("s", 2), ("t", 1)] "m"
+      && !UnreachableNode.deferMasterDown mkState [("m", 3), ("s", 2)] "m"
+      && !UnreachableNode.deferMasterDown mkState [("m", 3)] "m"
+      && !UnreachableNode.deferMasterDown mkState [("s", 3), ("t", 3)] "s")]
   let kept := fun (unhealthy : List String) =>
     K8sReconciler.unhealthyMastersKept mkState unhealthy unhealthy ["m", "s", "t", "p"]
   r := r ++ [("unreachable master with a reachable slave: not kept -> failed over",

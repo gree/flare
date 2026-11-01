@@ -121,6 +121,17 @@ private def p0Master : IO (Option String) := do
 
 private def opLogs : IO String := kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 4000
 
+/-- The operator's log lines written at or after `since` (RFC 3339, UTC):
+    evidence of THIS test, never a stale line of an earlier one. -/
+private def opLogsSince (since : String) : IO String := do
+  match ← kubectl ["logs", "-n", cfg.«namespace», "-l", s!"app={cfg.operatorName}", "--since-time", since, "--tail=-1"] with
+  | .ok o => return o
+  | .error _ => return ""
+
+private def utcStamp : IO String := do
+  let o ← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%SZ"] }
+  return o.stdout.trim
+
 private def opIpOf : IO (Except String String) := do
   let opPod ← match ← kubectl ["get", "pods", "-n", cfg.«namespace», "-l", s!"app={cfg.operatorName}", "-o", "jsonpath={.items[0].metadata.name}"] with
     | .ok o => pure o.trim
@@ -632,6 +643,8 @@ def suite : TestSuite := {
           match ← getPodIp sp cfg.«namespace» with
           | some ip => sIps := sIps ++ [ip]
           | none => return .fail s!"no IP for {sp}"
+        -- every piece of evidence below is from this test's window only
+        let t0 ← utcStamp
         try
           -- the followers lose the master: R3 judges them promotion-ineligible (the
           -- eligibility line is logged on a change: "promotion ineligible: follower
@@ -642,10 +655,11 @@ def suite : TestSuite := {
             | .ok _ => pure ()
           discard <| writeKeys cfg.debugPod cfg.«namespace» mIp cfg.flarePort "b9_unfit" 20
           let unfit ← waitForCondition "both slaves are judged promotion-ineligible by R3" 180 do
-            let logs ← opLogs
+            let logs ← opLogsSince t0
             return slaves.all fun sp => countLines logs "CONTINUOUS REPLICATION eligibility" s!"{sp}." > 0
               && ((logs.splitOn "\n").reverse.find? (fun l => containsSubstr l "CONTINUOUS REPLICATION eligibility" && containsSubstr l s!"{sp}.")).any (containsSubstr · "promotion ineligible")
           if !unfit then return .fail "precondition: the slaves were not judged promotion-ineligible by R3 within 180 s"
+          let t1 ← utcStamp
           match ← cutLink opIp mIp with
           | .error e => return .fail s!"could not cut operator ⇄ {mIp}: {e}"
           | .ok _ => pure ()
@@ -658,7 +672,8 @@ def suite : TestSuite := {
                 return .fail s!"{mPod} was replaced by {m}, not one of its partition's slaves {slaves} ({(i + 1) * 10} s)"
               finalM := m
             | none => return .fail s!"partition 0 became MASTERLESS {(i + 1) * 10} s after the operator ⇄ master cut"
-          let logs ← opLogs
+          -- the verdict lines written after the operator ⇄ master cut only
+          let logs ← opLogsSince t1
           let kept := countLines logs "NO reachable promotable successor" mPod
           let notLossFree := countLines logs "PROMOTION NOT LOSS-FREE" finalM
           IO.eprintln s!"# [b9] master after 90 s: {finalM} (was {mPod}); keep lines {kept}; NOT LOSS-FREE lines naming it {notLossFree}"

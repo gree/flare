@@ -294,9 +294,11 @@ spec:
                     Cordon moves (flare-cordon-proactive-move): the pods of cordoned
                     Nodes the operator moves off, one at a time. `moves[]` holds
                     {id, generation, node, pod, podUid, key, role, partition, phase,
-                    successor, reason, held, attempts, admittedUid, restored,
-                    startedMs, phaseMs, releasedMs}; phase is pending, handingOver,
+                    successor, reason, held, attempts, admittedUid, restored, stuck,
+                    stuckMs, startedMs, phaseMs, releasedMs}; phase is pending, handingOver,
                     proxied, unserved, released, deleted, resyncing, done or cancelled.
+                    `stuck` = past the phase deadline (nodeReplacement.unservedTimeoutSeconds
+                    / resyncTimeoutSeconds): no longer the running move, never released.
                     `blocked[]` lists the pods that cannot be moved now (fewer real
                     copies than nodeReplacement.minCopies, no successor) with the
                     reason. Written only by the operator and the node guard (its

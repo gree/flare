@@ -225,6 +225,19 @@ spec:
             summary: "Flare cluster {{`{{ $labels.cluster }}`}}: a cordon move is held as a proxy (the client Service still reaches the pod, or the handover keeps aborting); nothing is deleted"
             runbook: docs/RUNBOOK.md#cordon-move
 
+        # A cordon move passed its phase deadline (risk B13): unserved longer
+        # than nodeReplacement.unservedTimeoutSeconds (a client keeps reaching
+        # the pod), or waiting for the recreated pod longer than
+        # resyncTimeoutSeconds. The next move runs; this one needs a person:
+        # its pod stays held (unserved) or its replacement never synced.
+        - alert: FlareCordonMoveStuck
+          expr: flare_operator_cordon_moves_stuck > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: "Flare cluster {{`{{ $labels.cluster }}`}}: a cordon move is STUCK past its deadline (status.nodeMoves[].stuck); the next move may run, this one needs an operator"
+            runbook: docs/RUNBOOK.md#cordon-move
+
         # A draining (Terminating) master has NO promotable successor: the
         # operator keeps it serving to the end of its grace period, but the
         # partition loses its only data-bearing node when the pod dies and

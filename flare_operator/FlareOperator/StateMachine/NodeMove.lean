@@ -15,7 +15,8 @@
        ▼
     unserved ── wait: the pod's address left the EndpointSlice, no new
        │        connection for a while, no open connection (bounded: then
-       │        HOLD as a proxy, alert, never delete)
+       │        HOLD as a proxy, alert, never delete; past
+       │        unservedTimeoutMs: STUCK, see below)
        ▼
     released ── written ONLY by the operator (CAS). From here no cancel.
        │        The node guard lets an eviction / delete of THIS pod through
@@ -25,9 +26,26 @@
        ▼
     resyncing ── the recreated pod (other node) is seated as a replica of its
        │         partition; when Active + synced it gets the serving label back
+       │         (past resyncTimeoutMs: STUCK, see below)
        ▼
     done          cancelled: uncordon before `released` (generation + 1; the
                   serving label is restored only AFTER this was persisted)
+
+  STUCK (risk B13, flare-risk-cordon-stuck): `unserved` and `resyncing` (and
+  `deleted`, waiting for the replacement; same deadline as `resyncing`) wait
+  for something outside the operator (a client that keeps its connection; a
+  recreated pod that never syncs). Only one move runs at a time, so before
+  this a move waiting there stopped every later move for ever. Past the
+  phase's deadline the move is marked `stuck` (a flag, the phase is kept):
+  it is reported (status, log, Event, gauge, alert) and no longer counts as
+  THE active move, so the next candidate may start. That next move's safety
+  does not rest on the stuck one: startBlock counts real copies only, and
+  the stuck move's pod holds none (a proxy in `unserved`; a deleted pod and
+  a not-yet-synced replacement in `deleted` / `resyncing`). A stuck move never advances
+  to `released` (its pod stays held by the node guard, which allows only a
+  `released` move) and never becomes the active move again; it still steps
+  for its harmless exits: an uncordon cancels a stuck `unserved` move, and a
+  stuck `resyncing` move whose pod finally syncs gets its label back (done).
 
   The whole record is `status.nodeMoves`, written with a compare-and-swap on
   the FlareCluster's resourceVersion, so an operator restart resumes from it
@@ -117,6 +135,12 @@ structure Config where
   quietMs : Nat := 10000
   /-- released → the operator deletes the pod itself after this -/
   evictWaitMs : Nat := 60000
+  /-- unserved → STUCK after this (0 = no deadline): the move stops being
+      the active one, the pod stays a held proxy (risk B13) -/
+  unservedTimeoutMs : Nat := 1800000
+  /-- resyncing → STUCK after this (0 = no deadline): the recreated pod never
+      became an Active, synced Slave; the move stops being the active one -/
+  resyncTimeoutMs : Nat := 1800000
   /-- handover attempts before the move holds -/
   maxHandoverAttempts : Nat := 3
   retryDelayMs : Nat := 5000
@@ -141,6 +165,11 @@ structure Move where
   reason : String := ""
   /-- unserved: the wait bound passed (the pod is held as a proxy; alert) -/
   held : Bool := false
+  /-- past its phase's deadline (unserved / resyncing; risk B13): no longer
+      the active move, never released; kept across phase changes -/
+  stuck : Bool := false
+  /-- when it was marked stuck (wall ms) -/
+  stuckMs : Nat := 0
   /-- handover attempts so far (master) -/
   attempts : Nat := 0
   /-- AdmissionReview uid the guard last wrote with its allow (audit) -/
@@ -170,7 +199,13 @@ structure Ledger where
 def Move.finished (m : Move) : Bool :=
   m.phase == .done || (m.phase == .cancelled && m.restored)
 
-def Ledger.active (l : Ledger) : Option Move := l.moves.find? (!·.finished)
+/-- THE running move (one at a time). A stuck move is not it: it waits on
+    something outside the operator, holds no copy, and is never released, so
+    it does not stop the next move (risk B13). -/
+def Ledger.active (l : Ledger) : Option Move := l.moves.find? fun m => !m.finished && !m.stuck
+
+/-- moves past their phase's deadline, not finished (status / gauge / alert) -/
+def Ledger.stuckMoves (l : Ledger) : List Move := l.moves.filter fun m => !m.finished && m.stuck
 
 def Ledger.forPod (l : Ledger) (pod : String) : Option Move :=
   l.moves.find? fun m => m.pod == pod && !m.finished
@@ -315,8 +350,25 @@ def Action.label : Action → String
   | .restoreServing => "restoreServing"
   | .deletePod => "deletePod"
 
+/-- `stuck` is kept: a stuck move never becomes the active move again (another
+    may be running by then; two would break "one move at a time"). -/
 private def goto (m : Move) (p : Phase) (now : Nat) (why : String := "") : Move :=
   { m with phase := p, phaseMs := now, reason := why, held := false }
+
+private def roleLabel : Option FlareRole → String
+  | some .Master => "master"
+  | some .Slave => "slave"
+  | some .Proxy => "proxy"
+  | none => "none"
+
+/-- the phase's deadline has passed (0 = none) -/
+private def pastDeadline (m : Move) (now limit : Nat) : Bool :=
+  limit > 0 && now >= m.phaseMs + limit
+
+/-- mark the move stuck in its phase, with the reason -/
+private def markStuck (m : Move) (now : Nat) (why : String) : Move :=
+  { m with stuck := true, stuckMs := now,
+           reason := s!"STUCK in {m.phase} for {(now - m.phaseMs) / 1000} s — {why}" }
 
 /-- uncordon: cancel (generation + 1). The serving label is put back by a
     LATER step, once this is persisted. -/
@@ -392,7 +444,13 @@ def step (cfg : Config) (m : Move) (o : Obs) : Move × Action :=
     if !o.nodeCordoned then (cancel m now "the node was uncordoned", .none)
     else if !o.podPresent m then (cancel m now "the pod went away", .none)
     else if o.cur.any (·.serving) then (m, .removeServing)
+    -- stuck: never released (the guard keeps holding the pod); only an
+    -- uncordon (cancel) or the pod going away ends it
+    else if m.stuck then (m, .none)
     else if drained cfg o then ({ goto m .released now with releasedMs := now }, .none)
+    else if pastDeadline m now cfg.unservedTimeoutMs then
+      (markStuck { m with held := true } now
+        s!"the client Service still reaches the pod ({drainWhy cfg o}); held as a proxy, never released; the next move may start", .none)
     else if now >= m.phaseMs + cfg.drainWaitMs then
       ({ m with held := true,
                 reason := s!"the client Service still reaches the pod after {cfg.drainWaitMs / 1000} s ({drainWhy cfg o}); held as a proxy, nothing is deleted" }, .none)
@@ -404,17 +462,31 @@ def step (cfg : Config) (m : Move) (o : Obs) : Move × Action :=
     else if now >= m.releasedMs + cfg.evictWaitMs then (m, .deletePod)
     else (m, .none)
   | .deleted =>
+    -- the replacement has not appeared yet: waiting for it counts against the
+    -- resync deadline too (a StatefulSet that never recreates the pod would
+    -- otherwise stop every later move here, risk B13)
     match o.cur with
     | some c => if c.uid != m.podUid then (goto m .resyncing now, .none) else (m, .none)
-    | none => (m, .none)
+    | none =>
+      if !m.stuck && pastDeadline m now cfg.resyncTimeoutMs then
+        (markStuck m now s!"no pod named {m.pod} has been recreated; the next move may start", .none)
+      else (m, .none)
   | .resyncing =>
+    let stuckNow := !m.stuck && pastDeadline m now cfg.resyncTimeoutMs
     match o.cur with
-    | none => (m, .none)
+    | none =>
+      if stuckNow then (markStuck m now s!"no pod named {m.pod} has come back; the next move may start", .none)
+      else (m, .none)
     | some c =>
       if c.uid == m.podUid then (goto m .deleted now, .none)  -- the old pod again (it was still going)
-      else if c.terminating then (m, .none)                 -- never label a terminating pod
-      else if c.serving then (goto m .done now, .none)
-      else if c.ready && c.active && c.synced && c.role == some FlareRole.Slave then (m, .restoreServing)
+      -- never label a terminating pod
+      else if !c.terminating && c.serving then (goto m .done now, .none)
+      else if !c.terminating && c.ready && c.active && c.synced && c.role == some FlareRole.Slave then (m, .restoreServing)
+      -- the old pod is gone already: a stuck resyncing move has no data
+      -- action left; it still finishes (label back, done) if the pod syncs
+      else if stuckNow then
+        (markStuck m now
+          s!"the recreated pod {m.pod} (uid {c.uid}) is not an Active, Ready, synced Slave (ready {c.ready}, active {c.active}, synced {c.synced}, terminating {c.terminating}, role {roleLabel c.role}); the next move may start", .none)
       else (m, .none)
   | .cancelled =>
     if m.restored then (m, .none)
@@ -540,7 +612,8 @@ def Move.toJson (m : Move) : Json :=
     ("partition", Json.num m.partition), ("phase", Json.str m.phase.toString),
     ("successor", Json.str m.successor), ("reason", Json.str m.reason), ("held", Json.bool m.held),
     ("attempts", Json.num m.attempts), ("admittedUid", Json.str m.admittedUid),
-    ("restored", Json.bool m.restored), ("startedMs", Json.num m.startedMs),
+    ("restored", Json.bool m.restored), ("stuck", Json.bool m.stuck), ("stuckMs", Json.num m.stuckMs),
+    ("startedMs", Json.num m.startedMs),
     ("phaseMs", Json.num m.phaseMs), ("releasedMs", Json.num m.releasedMs)]
 
 open Lean in
@@ -557,6 +630,7 @@ def Move.fromJson? (j : Json) : Option Move := do
          successor := (s "successor").getD "", reason := (s "reason").getD "",
          held := (j.getObjValAs? Bool "held").toOption.getD false, attempts := (n "attempts").getD 0,
          admittedUid := (s "admittedUid").getD "", restored := (j.getObjValAs? Bool "restored").toOption.getD false,
+         stuck := (j.getObjValAs? Bool "stuck").toOption.getD false, stuckMs := (n "stuckMs").getD 0,
          startedMs := (n "startedMs").getD 0, phaseMs := (n "phaseMs").getD 0, releasedMs := (n "releasedMs").getD 0 }
 
 open Lean in
@@ -584,6 +658,6 @@ def Ledger.summary (l : Ledger) : String :=
   match l.moves.filter (!·.finished) with
   | [] => if l.blocked.isEmpty then "no node moves" else s!"no node move running; {l.blocked.length} blocked"
   | ms => String.intercalate "; " <| ms.map fun m =>
-      s!"{m.pod}@{m.node} {m.phase} g{m.generation}{if m.reason.isEmpty then "" else s!" ({m.reason})"}"
+      s!"{m.pod}@{m.node} {m.phase}{if m.stuck then " STUCK" else ""} g{m.generation}{if m.reason.isEmpty then "" else s!" ({m.reason})"}"
 
 end FlareOperator.NodeMove

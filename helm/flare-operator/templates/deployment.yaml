@@ -87,6 +87,10 @@ spec:
               value: {{ .Values.nodeReplacement.quietSeconds | quote }}
             - name: FLARE_NODE_REPLACEMENT_EVICT_WAIT_SECONDS
               value: {{ .Values.nodeReplacement.evictWaitSeconds | quote }}
+            - name: FLARE_NODE_REPLACEMENT_UNSERVED_TIMEOUT_SECONDS
+              value: {{ .Values.nodeReplacement.unservedTimeoutSeconds | quote }}
+            - name: FLARE_NODE_REPLACEMENT_RESYNC_TIMEOUT_SECONDS
+              value: {{ .Values.nodeReplacement.resyncTimeoutSeconds | quote }}
             {{- else }}
             - name: FLARE_NODE_REPLACEMENT
               value: "off"

@@ -153,10 +153,12 @@ structure OperatorMetrics where
   -- nodes that could not be moved (under nodeReplacement.minCopies, no
   -- successor) — alert FlareCordonMoveBlocked; 1 while a move holds because
   -- the client Service still reaches the pod after its bound, or a handover
-  -- keeps aborting — alert FlareCordonMoveHeld; the number of unfinished moves.
+  -- keeps aborting — alert FlareCordonMoveHeld; the number of unfinished moves;
+  -- the number of moves past their phase deadline — alert FlareCordonMoveStuck.
   cordonMoveBlocked : Gauge
   cordonMoveHeld : Gauge
   cordonMovesActive : Gauge
+  cordonMovesStuck : Gauge
 
   -- Gauge: 1 while the blast-radius circuit breaker is tripped (the FSM's
   -- last pass ended in EmergencyPaused), else 0. Page on this: it means a
@@ -242,6 +244,7 @@ def initMetrics : IO OperatorMetrics := do
   let cordonMoveBlocked ← IO.mkRef 0.0
   let cordonMoveHeld ← IO.mkRef 0.0
   let cordonMovesActive ← IO.mkRef 0.0
+  let cordonMovesStuck ← IO.mkRef 0.0
   let circuitBreakerTripped ← IO.mkRef 0.0
   let partitionsDesired ← IO.mkRef 0.0
   let migrationPhase ← IO.mkRef 0.0
@@ -278,6 +281,7 @@ def initMetrics : IO OperatorMetrics := do
     cordonMoveBlocked := { value := cordonMoveBlocked }
     cordonMoveHeld := { value := cordonMoveHeld }
     cordonMovesActive := { value := cordonMovesActive }
+    cordonMovesStuck := { value := cordonMovesStuck }
     circuitBreakerTripped := { value := circuitBreakerTripped }
     partitionsDesired := { value := partitionsDesired }
     migrationPhase := { value := migrationPhase }
@@ -550,6 +554,9 @@ def exportMetrics (metrics : OperatorMetrics) (clusterName : String) : IO String
   output := output ++ "# HELP flare_operator_cordon_moves_active Cordon moves not finished\n"
   output := output ++ "# TYPE flare_operator_cordon_moves_active gauge\n"
   output := output ++ formatGauge "flare_operator_cordon_moves_active" labels (← metrics.cordonMovesActive.value.get)
+  output := output ++ "# HELP flare_operator_cordon_moves_stuck Cordon moves past their phase deadline (unserved: nodeReplacement.unservedTimeoutSeconds; deleted/resyncing: resyncTimeoutSeconds); no longer the running move, never released\n"
+  output := output ++ "# TYPE flare_operator_cordon_moves_stuck gauge\n"
+  output := output ++ formatGauge "flare_operator_cordon_moves_stuck" labels (← metrics.cordonMovesStuck.value.get)
 
   -- Circuit breaker state (gauge)
   output := output ++ "# HELP flare_operator_circuit_breaker_tripped 1 while failover is paused by the blast-radius breaker\n"

@@ -314,6 +314,69 @@ def results : List (String × Bool) := Id.run do
               let ms := (List.range 10).map fun i => { mv "slave" .done with id := s!"d{i}" }
               let l : Ledger := { moves := ms ++ [mv "slave" .proxied] }
               l.trim.moves.length == 7 && l.trim.active.isSome)]
+  -- ── deadlines: a stalled move becomes STUCK (risk B13) ──────────────
+  let dl0 := cfg.resyncTimeoutMs
+  let unsyncedPod := { pod "u2" .Slave false with synced := false }
+  let rsIn := step cfg rs (obs (dl0 - 1) (some unsyncedPod))
+  r := r ++ [("node move: resyncing within the deadline changes nothing",
+              rsIn.1 == rs && actOf rsIn == .none)]
+  let rsStuck := step cfg rs (obs dl0 (some unsyncedPod))
+  r := r ++ [("node move: resyncing past the deadline -> stuck (phase kept, no action)",
+              rsStuck.1.stuck && phaseOf rsStuck == .resyncing && actOf rsStuck == .none && rsStuck.1.stuckMs == dl0)]
+  let lrs : Ledger := { seq := 1, moves := [rsStuck.1] }
+  r := r ++ [("node move: a stuck resyncing move is not the active move; the next move starts",
+              lrs.active.isNone
+              && (match (next cfg lrs ["w2"] [c1c] 1).1 with | .start m => m.pod == "c-nodes-1" | .idle => false))]
+  r := r ++ [("node move: a stuck move is not marked again (no rewrite every pass)",
+              (step cfg rsStuck.1 (obs (dl0 + 5000) (some unsyncedPod))).1 == rsStuck.1)]
+  r := r ++ [("node move: a stuck resyncing move still finishes if the pod syncs (label back, then done)",
+              actOf (step cfg rsStuck.1 (obs (dl0 + 1) (some (pod "u2" .Slave false)))) == .restoreServing
+              && (step cfg rsStuck.1 (obs (dl0 + 2) (some (pod "u2" .Slave true)))).1.finished)]
+  r := r ++ [("node move: a stuck resyncing move never becomes the active move again (old pod seen: deleted, still stuck)",
+              let d := (step cfg rsStuck.1 (obs (dl0 + 1) (some (pod "u1" .Proxy false)))).1
+              d.phase == .deleted && d.stuck && ({ moves := [d] } : Ledger).active.isNone)]
+  r := r ++ [("node move: a terminating replacement past the deadline is stuck too",
+              (step cfg rs (obs dl0 (some { pod "u2" .Slave false with terminating := true }))).1.stuck)]
+  r := r ++ [("node move: deleted (no replacement yet) past the resync deadline -> stuck",
+              (step cfg (mv "slave" .deleted) (obs dl0 none)).1.stuck
+              && !(step cfg (mv "slave" .deleted) (obs (dl0 - 1) none)).1.stuck)]
+  r := r ++ [("node move: deadline 0 = none (resyncing waits as before)",
+              !(step { cfg with resyncTimeoutMs := 0 } rs (obs (100 * dl0) (some unsyncedPod))).1.stuck
+              && !(step { cfg with unservedTimeoutMs := 0 } un
+                    { drainedObs (100 * dl0) (some (pod "u1" .Proxy false)) with currConnections := some 1 }).1.stuck)]
+  let du := un.phaseMs + cfg.unservedTimeoutMs
+  let unObs := fun (t : Nat) => { drainedObs t (some (pod "u1" .Proxy false)) with currConnections := some 1 }
+  let unIn := step cfg un (unObs (du - 1))
+  r := r ++ [("node move: unserved within the deadline is held, not stuck, and stays the active move",
+              unIn.1.held && !unIn.1.stuck && phaseOf unIn == .unserved && ({ moves := [unIn.1] } : Ledger).active.isSome)]
+  let unStuck := step cfg un (unObs du)
+  r := r ++ [("node move: unserved past the deadline -> stuck, still held as a proxy, nothing deleted",
+              unStuck.1.stuck && unStuck.1.held && phaseOf unStuck == .unserved && actOf unStuck == .none)]
+  let lus : Ledger := { seq := 1, moves := [unStuck.1] }
+  r := r ++ [("node move: a stuck unserved move is not active; the next move starts (another pod)",
+              lus.active.isNone
+              && (match (next cfg lus ["w1", "w2"] [c1c, c0] 1).1 with | .start m => m.pod == "c-nodes-1" | .idle => false))]
+  r := r ++ [("node move: ... but the stuck pod itself gets no new move",
+              match (next cfg lus ["w1"] [c0] 1).1 with | .idle => true | .start _ => false)]
+  r := r ++ [("node guard: the pod of a stuck unserved move stays held (never allowed)",
+              match g lus ["w1"] "u1" "w1" false with | .hold _ => true | _ => false)]
+  r := r ++ [("node move: a stuck unserved move is never released, even if the drain evidence turns up",
+              phaseOf (step cfg unStuck.1 (drainedObs (du + 1000) (some (pod "u1" .Proxy false)))) == .unserved)]
+  r := r ++ [("node move: a stuck unserved move keeps its pod out of assignment",
+              lus.heldKeys == ["k0"])]
+  let unCancel := step cfg unStuck.1 (obs (du + 1) (some (pod "u1" .Proxy false)) false)
+  r := r ++ [("node move: uncordon cancels a stuck unserved move (then the label comes back)",
+              phaseOf unCancel == .cancelled && unCancel.1.generation == 2
+              && actOf (step cfg unCancel.1 (obs (du + 2) (some (pod "u1" .Proxy false)) false)) == .restoreServing)]
+  r := r ++ [("node move: a stuck move is reported with its reason (status, summary, count)",
+              unStuck.1.reason.startsWith "STUCK in unserved for 1800 s"
+              && rsStuck.1.reason.startsWith "STUCK in resyncing"
+              && (lus.summary.splitOn "STUCK").length > 1
+              && lus.stuckMoves.length == 1 && ({ moves := [unIn.1] } : Ledger).stuckMoves.isEmpty)]
+  r := r ++ [("node move: the stuck flag survives a JSON round trip (operator restart)",
+              match Ledger.fromJson? lus.toJson with
+              | some l => l == lus && l.active.isNone
+              | none => false)]
   return r
 
 end FlareOperator.UnitTestsNodeMove

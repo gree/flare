@@ -469,6 +469,14 @@ nodeReplacement:
   quietSeconds: 10
   # no eviction this long after the release: the operator deletes the pod itself
   evictWaitSeconds: 60
+  # a move still `unserved` after this many seconds is marked STUCK (alert
+  # FlareCordonMoveStuck): it stops being the running move so later moves
+  # proceed; its pod stays a held proxy (never released). 0 = no deadline
+  unservedTimeoutSeconds: 1800
+  # a move waiting this long for the recreated pod to come back as an Active,
+  # synced replica (`deleted` / `resyncing`) is marked STUCK the same way.
+  # 0 = no deadline
+  resyncTimeoutSeconds: 1800
 
 nodeGuard:
   enabled: true

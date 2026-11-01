@@ -733,7 +733,7 @@ def approveFirstBuild (cfg : ClusterConfig) : IO Unit := do
 /-- The node-guard webhook objects (cfg.nodeGuard), as the chart's
     node-guard-webhook.yaml: a CA and a serving certificate made with
     openssl, the TLS Secret the sidecar mounts, the Service and a
-    ValidatingWebhookConfiguration (this namespace; pods DELETE of app=flare,
+    ValidatingWebhookConfiguration (this namespace; pods DELETE of every pod but the operator's,
     statefulsets + statefulsets/scale UPDATE; sideEffects None, Fail, 5 s). -/
 def setupNodeGuardWebhook (cfg : ClusterConfig) : IO Unit := do
   let ns := cfg.«namespace»
@@ -802,9 +802,11 @@ metadata:
 webhooks:
 " ++ hook "pods.node-guard.flare.gree.net" "/pods"
       "      - apiGroups: [\"\"]\n        apiVersions: [\"v1\"]\n        operations: [\"DELETE\"]\n        resources: [\"pods\"]\n        scope: Namespaced"
-      -- flared pods only (as the chart): the operator's own exited pod must
-      -- stay removable while it is away (41211321783 C8)
-      "\n    objectSelector:\n      matchLabels:\n        app: flare"
+      -- every pod but the operator's own (as the chart, 3c6c510): the
+      -- operator's exited pod stays removable while it is away (41211321783
+      -- C8), and a flared pod whose labels were removed is still judged
+      -- (41284282067 G1: this copy still selected app: flare)
+      s!"\n    objectSelector:\n      matchExpressions:\n        - key: app\n          operator: NotIn\n          values: [\"{cfg.operatorName}\"]"
     ++ hook "evictions.node-guard.flare.gree.net" "/pods"
       "      - apiGroups: [\"\"]\n        apiVersions: [\"v1\"]\n        operations: [\"CREATE\"]\n        resources: [\"pods/eviction\"]\n        scope: Namespaced"
       ""

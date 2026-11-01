@@ -513,9 +513,11 @@ the committed one (audit verdict behind or ahead) can conflict.
 
 Nothing is decided while the operator reaches no node (the
 [spec 12 guard](#node-unreachable)). A flared that does not report
-`own_role` / `own_partition` is never judged. There is **no metric and no
-alert** for this: search the operator log for `claims to be a MASTER` and
-`DUPLICATE MASTER`. For a node that is ahead the audit also logs
+`own_role` / `own_partition` is never judged. The gauges
+`flare_operator_duplicate_master_claims` (pending claims) and
+`flare_operator_duplicate_master_down` (nodes down for one, until restarted)
+drive the alert `FlareDuplicateMaster` (1 min); the operator log lines are
+`claims to be a MASTER` and `DUPLICATE MASTER`. For a node that is ahead the audit also logs
 `[TopologyAudit] CRITICAL: recipient <key> reports newer authority … the map
 generation is not changed for it (a duplicate master claim is judged
 separately, see DUPLICATE MASTER)` — that line is about the generation only;

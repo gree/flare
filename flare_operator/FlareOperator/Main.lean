@@ -1843,7 +1843,7 @@ private def persistHistory (crName ns : String) (st : AuthoritativeHistory.Store
     | .ok held => pure held
     | .error _ => pure false
   if !leader then
-    IO.eprintln s!"[flare-operator] CRITICAL: the authoritative history is NOT written: this pod does not hold a valid lease"
+    IO.eprintln s!"[flare-operator] CRITICAL: the authoritative history is NOT written: this pod's lease was not confirmed (another holder, or the renew failed or answered late — see the LEASE CHECK line); retried next pass"
     return false
   match ← historyStoreRef.get with
   | some loaded =>
@@ -3029,7 +3029,7 @@ private def publishLiveMap (stateRef : IO.Ref FlareClusterState)
       IO.eprintln s!"[flare-operator] lease fence ({why}): getLease failed ({e}); v{v} held for the next pass"
       pure false
   if !stillLeader then
-    IO.eprintln s!"[flare-operator] LEASE FENCE ({why}): not the lease holder; v{v} held for retry"
+    IO.eprintln s!"[flare-operator] LEASE FENCE ({why}): the lease was not confirmed (another holder, or the renew failed or answered late — see the LEASE CHECK line); v{v} held for retry"
     hold
   else
   let persisted ← if persistedCovers (← persistedVersionRef.get) v then pure true
@@ -4075,7 +4075,7 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
       | .behind =>
         pendingBroadcastRef.modify fun p => some (p.getD finalVersion)
       | .ahead =>
-        IO.eprintln s!"[TopologyAudit] CRITICAL: recipient {key} reports newer authority than committed v{finalVersion}; not inventing a generation or declaring it unhealthy"
+        IO.eprintln s!"[TopologyAudit] CRITICAL: recipient {key} reports newer authority than committed v{finalVersion}; the map generation is not changed for it (a duplicate master claim is judged separately, see DUPLICATE MASTER)"
       | .unknown | .current => pure ()
   let observed := TopologyObservation.summarize (← topologyAuditRef.get) auditKeys
     finalVersion (← IO.monoMsNow) 60000
@@ -4174,7 +4174,7 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
     if !persisted then
       pendingBroadcastRef.modify fun p => match p with | some v => some v | none => some finalVersion
     else if !stillLeader then
-      IO.eprintln s!"[flare-operator] LEASE FENCE: not the lease holder anymore — suppressing topology broadcast (v{oldVersion} → v{finalVersion}); held for retry once authority returns"
+      IO.eprintln s!"[flare-operator] LEASE FENCE: the lease was not confirmed (another holder, or the renew failed or answered late — see the LEASE CHECK line) — suppressing topology broadcast (v{oldVersion} → v{finalVersion}); held for retry once authority returns"
       pendingBroadcastRef.modify fun p => match p with | some v => some v | none => some finalVersion
     else
       -- PublicationGate: from here until the send ends no registration is
@@ -4799,9 +4799,12 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
             IO.eprintln s!"[flare-operator] TEST SEAM: not restarting {key} (the map is withheld from it)"
           else if node.role == FlareRole.Proxy then
             let podName := extractPodName node.serverName
-            IO.eprintln s!"[flare-operator] STUCK-DOWN RECOVERY: {key} has been Down with its pod present for {cycles} ticks (~{cycles * 5 / 60} min); every partition has an Active master, so restarting {podName} to force a clean re-registration (it will rejoin via Prepare and catch up)"
+            IO.eprintln s!"[flare-operator] STUCK-DOWN RECOVERY: {key} has been Down with its pod present for {cycles} ticks (~{cycles * 5} s); every partition has an Active master, so restarting {podName} to force a clean re-registration (it will rejoin via Prepare and catch up)"
+            let dupDown := (← duplicateDownRef.get).contains key
             if reachableAgain.contains key then
-              IO.eprintln s!"[flare-operator] REACHABLE AGAIN: {key} was marked down because the operator could not reach it; it answers again, so it is restarted now to re-register (not after the stuck-down wait)"
+              let reason := if dupDown then "for a duplicate master claim (it claimed a master the committed map gives to another node)"
+                else "as unreachable, or for a duplicate master claim that has since ended"
+              IO.eprintln s!"[flare-operator] REACHABLE AGAIN: {key} was marked down {reason}; it answers again, so it is restarted now to re-register (not after the stuck-down wait)"
             match ← Bridge.deletePodGraceful podName ns with
             | .ok () =>
               downCyclesRef.set (newDown.filter (fun kv => kv.1 != key))

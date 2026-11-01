@@ -167,8 +167,10 @@ Quick orientation:
   incidents are urgent but not instant data outages.
 - The operator's view: `printf 'node sync\r\n' | nc <operator-svc> 12120`
   (roles: 0=master 1=slave 2=proxy; states: 0=active 1=prepare 2=down).
-- Useful log greps (operator): `CIRCUIT BREAKER TRIPPED`, `LEASE FENCE`,
-  `WARNING: node .* Prepare`, `Promoting Slave`, `topology changed`.
+- Useful log greps (operator): `CIRCUIT BREAKER TRIPPED`, `LEASE CHECK`,
+  `LEASE FENCE`, `WARNING: node .* Prepare`, `Promoting Slave`,
+  `topology changed` ([lease check](#lease-check) explains the two LEASE
+  lines).
 - flared data-plane greps: `reconstruction via WAL`, `truncate skipped`,
   `truncating local storage`, `master_id`.
 
@@ -262,6 +264,51 @@ propagation are dead.
    StatefulSet updates are refused. See
    [The operator is down](#node-guard-operator-down).
 
+## `LEASE CHECK: authority NOT confirmed` (mid-pass lease check) {#lease-check}
+
+The leader renews its 15 s lease at the top of every pass, but a pass can
+outlast it. So right before each action that only the leader may take — a
+topology broadcast, a write of the authoritative history, a step of an
+ordered handover (and a rolling or cordon-move delete), the empty-master
+self-heal delete — the operator re-checks the lease **now**
+(`holdLeaseNow`, `StateMachine/LeaseFence.lean`): it reads the lease and
+renews it. The lease counts as held only when
+
+- the lease still names this pod as holder, **and**
+- the renew succeeded, **and**
+- at least 5 s of the 15 s lease are left, counted from **before** the renew
+  was sent (the renew must answer within 10 s).
+
+A failed or late renew is **not** held: the read before it is no evidence
+once the call took that long, and a standby may have taken the lease
+meanwhile. The gated action is then skipped and retried on the next pass;
+nothing is lost, it is only delayed. Logs:
+
+```
+LEASE CHECK: authority NOT confirmed — the renew took <ms>ms, less than 5000ms of the 15s lease left; the gated action is skipped
+LEASE CHECK: authority NOT confirmed — the renew failed after <ms>ms (<error>); the gated action is skipped
+```
+
+followed by the caller's line, e.g. `LEASE FENCE: the lease was not confirmed
+(…) — suppressing topology broadcast (vA → vB); held for retry`,
+`LEASE FENCE (<why>): the lease was not confirmed (…); v<N> held for retry`,
+`CRITICAL: the authoritative history is NOT written: this pod's lease was not
+confirmed …`, `ROLLING: the lease could not be confirmed …` or `NODE MOVE:
+the lease could not be confirmed …`. A `LEASE FENCE` line **without** a
+`LEASE CHECK` line just before it means the lease read named another holder
+(a real leadership change: expect `LOST LEASE -- exiting` at the next loop
+top and a restart, see [operator-down](#operator-down)) or the lease could
+not be read at all (`lease fence …: getLease failed (…)` just before it).
+
+What it means operationally: almost always a **slow kube API** (the renew is
+one PATCH). The leader normally keeps its lease — it renews again at the top
+of the next pass — so a single line is harmless. **Repeated lines** mean the
+API server answers slower than ~10 s: while it lasts, map broadcasts,
+history writes and handovers stay held (the data plane keeps serving the last
+map), so failovers are delayed. There is no metric and no alert for it; check
+the apiserver (latency, throttling, etcd) and the operator pod's network.
+Do not restart the operator for it: a new leader faces the same API.
+
 ## FlareDeadNodeChurn (warning) {#dead-node-churn}
 
 Repeated dead-node detections without a breaker trip: usually crash-looping
@@ -315,9 +362,10 @@ proxying writes into a dead socket and a crashed MASTER got no failover.
 The operator cannot open a TCP connection to a node that K8s still reports
 Ready. The node may well be serving clients — what is broken is at least the
 **operator→pod path**, so topology pushes are not landing and that node
-keeps running on whatever map it last received. (The alert's summary says
-"running on a stale topology"; since spec 12 the operator also acts on it,
-below.)
+keeps running on whatever map it last received. Since spec 12 the operator
+also acts on it (below): the alert's summary says when it did not fail the
+node over (a master kept without a reachable successor, or the guard: no node
+reachable).
 
 Nothing else sees the path itself: the readiness probe runs inside the pod
 (kubelet asking flared about itself) and the operator's stats probes travel
@@ -466,9 +514,10 @@ Nothing is decided while the operator reaches no node (the
 `own_role` / `own_partition` is never judged. There is **no metric and no
 alert** for this: search the operator log for `claims to be a MASTER` and
 `DUPLICATE MASTER`. For a node that is ahead the audit also logs
-`[TopologyAudit] CRITICAL: recipient <key> reports newer authority … not
-inventing a generation or declaring it unhealthy` — that line is about the
-generation only; the duplicate-master check above still applies.
+`[TopologyAudit] CRITICAL: recipient <key> reports newer authority … the map
+generation is not changed for it (a duplicate master claim is judged
+separately, see DUPLICATE MASTER)` — that line is about the generation only;
+the duplicate-master check above still applies.
 
 Do:
 
@@ -853,8 +902,7 @@ S3 tier-2, single-partition vs multi-partition restore and its caveats).
 The chart's alert `FlareBackupStale` fires when
 `time() - flare_node_rocksdb_last_backup_epoch > 172800` (2 days) for 30 min;
 flared exports the metric itself on its `/metrics`. Tune the threshold to
-twice your backup interval. (The alert's runbook link points at
-`docs/BACKUP_RESTORE.md#monitoring`, which has no such heading.)
+twice your backup interval.
 
 ### An in-place restore keeps the copy it replaces {#restore-in-place}
 
@@ -912,6 +960,11 @@ A master that refuses this way is not counted by
 meanwhile.
 
 ## Enabling continuous replication on an existing cluster {#enable-follow}
+
+**Not for this release.** Continuous WAL replication stays **OFF** in this
+release (user decision 2026-10-31: it is turned on in the next release).
+Leave `replFollowEnabled` unset/false; this section is kept for that later
+release and is not an operation to run now.
 
 Rehearsed by E2E `continuous-replication-enable` (a legacy cluster switched
 on live through the CR, and back). Do one cluster at a time.
@@ -976,6 +1029,15 @@ Size the limit as **floor + tmpfs.sizeLimit + at least 256 MiB**. Below a
 the floor is a ceiling the caches grow towards, not an up-front allocation.
 The RSS above excludes tmpfs pages, which the cgroup still charges to the
 pod. A 512Mi limit was OOM-killed in the scale evaluation.
+
+**FlarePodMemoryHigh (warning, >85% for 10m) / FlarePodMemoryCritical
+(critical, >95% for 2m).** Both read the pod cgroup slice (`container=""`),
+the only series that includes the tmpfs data pages (`kubectl top` misses
+them; measure tmpfs with `df`/`du` in the pod). **On a tmpfs cluster treat
+an OOM kill as data loss on that node** (a master without a replica can lose
+its partition), so act before it: size the limit by the rule above (raise
+`cluster.resources.limits.memory`, keep `tmpfs.sizeLimit` within it), or
+lower the cache sizes.
 
 **WAL archive (retention for followers).**
 
@@ -1456,6 +1518,11 @@ CutOver (Service selector flip, same LB/IP) → **AwaitingRetire** (park; set
 `spec.paused: true` freezes any phase; `spec.abort: true` rolls back
 (refused once the forward switch was issued — #migration-forward-abort).
 All gates are machine-checked (Migration/Types.lean).
+
+`target.replicas` (copies per partition) defaults to **3**, like
+`cluster.replicas`. Keep it at least `nodeReplacement.minCopies` (default 3):
+with fewer copies every [cordon move](#cordon-move) of the target cluster is
+blocked.
 
 ### The forward switch is client-visible {#migration-forward-gate}
 
@@ -2019,6 +2086,11 @@ docs/review-cross-cluster-2026-10-11.md):
   take client writes until it is restarted. When the operator reaches only
   some nodes because of its OWN partial network fault, healthy masters can be
   failed over (the guard covers only "no node reachable").
+- A client write sent with `noreply` is forwarded to the other copies as
+  `noreply` too (fire-and-forget). If the forwarding connection is reset,
+  such writes can be lost **without** being counted in
+  `proxy_write_dropped` (FlareProxyWriteDropped stays quiet). Writes that
+  wait for their reply (`STORED` / `DELETED`) are not affected this way.
 - Multi-partition restore requires manual partition-affinity verification
   (BACKUP_RESTORE.md Case C) until partition pinning is implemented.
 - Config changes: hot-reloadable options land within ~2min (kubelet

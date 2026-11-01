@@ -402,8 +402,8 @@ spec:
                       default: 1
                     replicas:
                       type: integer
-                      default: 2
-                      description: Replicas PER PARTITION (master + N-1 slaves).
+                      default: 3
+                      description: Replicas PER PARTITION (master + N-1 slaves). Default 3, like cluster.replicas; keep it at least nodeReplacement.minCopies or every cordon move of the target is blocked.
                     persistenceSize:
                       type: string
                       default: "10Gi"

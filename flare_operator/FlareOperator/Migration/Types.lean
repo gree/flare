@@ -110,7 +110,7 @@ def MigPhase.terminal : MigPhase → Bool
 structure MigTargetSpec where
   name : String
   partitions : Nat := 1
-  replicas : Nat := 2
+  replicas : Nat := 3
   persistenceSize : String := "10Gi"
   drainSeconds : Nat := 60
   deriving Repr, BEq

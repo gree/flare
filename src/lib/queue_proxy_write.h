@@ -52,6 +52,9 @@ protected:
 	string									_op_ident;
 	op::result							_result;
 	string									_result_message;
+	// _success/_result/_result_message: written by each replica's thread on
+	// the shared item, under this mutex (_publish_result)
+	pthread_mutex_t					_mutex_result;
 	bool										_post_proxy;
 	uint64_t								_generic_value;
 	// a forward to ANOTHER cluster (cluster_replication): its answer is
@@ -121,8 +124,8 @@ public:
 	virtual ~queue_proxy_write();
 
 	virtual int run(shared_connection c);
-	op::result get_result() { return this->_result; };
-	string get_result_message() { return this->_result_message; };
+	op::result get_result();
+	string get_result_message();
 	int set_post_proxy(bool post_proxy) { this->_post_proxy = post_proxy; return 0; };
 	bool is_post_proxy() { return this->_post_proxy; };
 	void set_skipped(bool b) { this->_skipped = b; };
@@ -145,6 +148,7 @@ protected:
 	int _run_foreign(shared_connection c);
 	bool _send_held(shared_connection c, op_proxy_write* p);
 	bool _owner_stopping();
+	void _publish_result(op::result r, const string& msg);
 };
 
 }	// namespace flare

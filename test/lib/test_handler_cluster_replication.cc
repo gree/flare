@@ -1116,6 +1116,112 @@ namespace test_handler_cluster_replication {
 		cut_assert(before == q->get_entry().repl_tag.c_str());
 	}
 
+	// An in-memory replica connection: a connection_tcp (so run() attributes
+	// its outcome to host:port, as for a real replica) whose I/O goes to a
+	// string stream holding the replica's answer. Never opens a socket.
+	class answer_tcp : public connection_tcp {
+	public:
+		answer_tcp(const string& host, const string& answer):
+			connection_tcp(host, 12121), _ss(answer) { }
+		virtual int open() { return 0; }
+		virtual int close() { return 0; }
+		virtual bool is_available() const { return true; }
+		virtual int read(char** p, int expect_len, bool readline, bool& actual) { return this->_ss.read(p, expect_len, readline, actual); }
+		virtual int readline(char** p) { return this->_ss.readline(p); }
+		virtual int readsize(int expect_len, char** p) { return this->_ss.readsize(expect_len, p); }
+		virtual int push_back(const char* p, int bufsiz) { return this->_ss.push_back(p, bufsiz); }
+		virtual int write(const char* p, int bufsiz, bool buffered = false) { return this->_ss.write(p, bufsiz, buffered); }
+		virtual int writeline(const char* p) { return this->_ss.writeline(p); }
+	private:
+		connection_sstream _ss;
+	};
+
+	// One post-proxy item is shared by every replica's forwarding thread, and
+	// each thread used to write the item's _result / _result_message (a
+	// std::string) at once and classify its OWN answer by reading _result
+	// back (risk flare-risk-proxy-write-result-race). Each thread's outcome
+	// must follow its own answer, and the published result must be one whole
+	// answer (result and message from the same reply).
+	struct result_race_arg {
+		queue_proxy_write* q;
+		string host;
+		string answer;
+		int n;
+		int bad_returns;
+	};
+	static void* result_race_run(void* p) {
+		result_race_arg* a = static_cast<result_race_arg*>(p);
+		for (int i = 0; i < a->n; i++) {
+			shared_connection c(new answer_tcp(a->host, a->answer));
+			if (a->q->run(c) != 0) {
+				a->bad_returns++;
+			}
+		}
+		return NULL;
+	}
+	void test_proxy_write_result_from_two_threads_follows_each_answer() {
+		queue_proxy_write::hold_window_ms = 0;
+		uint64_t total = 1;
+		stats_object->get_proxy_write_failed(total);
+		cut_assert_equal_int(0, (int)total);
+		stats_object->get_proxy_write_skipped(total);
+		cut_assert_equal_int(0, (int)total);
+		storage::entry e = get_entry(" rk 0 0 5 3", storage::parse_type_set, "VALUE");
+		vector<string> proxy;
+		shared_queue_proxy_write q(new queue_proxy_write(NULL, NULL, proxy, e, "set"));
+		q->set_post_proxy(true);
+		const int n = 200;
+		result_race_arg ok = { q.get(), "stored-replica", "STORED\r\n", n, 0 };
+		result_race_arg ng = { q.get(), "failing-replica", "SERVER_ERROR disk full\r\n", n, 0 };
+		pthread_t t1, t2;
+		pthread_create(&t1, NULL, result_race_run, &ok);
+		pthread_create(&t2, NULL, result_race_run, &ng);
+		pthread_join(t1, NULL);
+		pthread_join(t2, NULL);
+		cut_assert_equal_int(0, ok.bad_returns);
+		cut_assert_equal_int(0, ng.bad_returns);
+		// each answer classified by its own thread: the STORED replica has no
+		// failed/skipped outcome, the failing one exactly one failed per call
+		map<string, uint64_t> f = stats_object->get_proxy_write_failed(total);
+		cut_assert_equal_int(n, (int)total);
+		cut_assert_equal_int(n, (int)f["failing-replica:12121"]);
+		cut_assert_equal_int(0, (int)f.count("stored-replica:12121"));
+		stats_object->get_proxy_write_skipped(total);
+		cut_assert_equal_int(0, (int)total);
+		cut_assert_equal_int(0, (int)stats_object->get_proxy_write_dropped());
+		// the published result is one whole answer
+		cut_assert_equal_boolean(true, q->is_success());
+		const op::result r = q->get_result();
+		const string m = q->get_result_message();
+		if (r == op::result_stored) {
+			cut_assert_equal_string("", m.c_str());
+		} else {
+			cut_assert_equal_int(op::result_server_error, r);
+			cut_assert_equal_string("disk full", m.c_str());
+		}
+	}
+
+	// _publish_result is what get_result / get_result_message / is_success report
+	class publishing_proxy_write : public queue_proxy_write {
+	public:
+		publishing_proxy_write(storage::entry e):
+			queue_proxy_write(NULL, NULL, vector<string>(), e, "set") { }
+		void publish(op::result r, const string& msg) { this->_publish_result(r, msg); }
+	};
+	void test_proxy_write_publish_result_is_reported() {
+		storage::entry e = get_entry(" rk 0 0 5 3", storage::parse_type_set, "VALUE");
+		publishing_proxy_write q(e);
+		cut_assert_equal_boolean(false, q.is_success());
+		q.publish(op::result_server_error, "disk full");
+		cut_assert_equal_boolean(true, q.is_success());
+		cut_assert_equal_int(op::result_server_error, q.get_result());
+		cut_assert_equal_string("disk full", q.get_result_message().c_str());
+		q.publish(op::result_stored, "");
+		cut_assert_equal_boolean(true, q.is_success());
+		cut_assert_equal_int(op::result_stored, q.get_result());
+		cut_assert_equal_string("", q.get_result_message().c_str());
+	}
+
 	// review of 8d64aaf: terminal outcomes of answered in-cluster forwards are
 	// counted per destination (failed / skipped), with totals from one snapshot
 	void test_proxy_write_outcomes_are_counted_per_destination() {

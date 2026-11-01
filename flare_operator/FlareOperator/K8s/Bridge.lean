@@ -18,6 +18,7 @@ import FlareOperator.Kubectl
 import Lean.Data.Json
 import FlareOperator.StateMachine.ReplicaRepair
 import FlareOperator.StateMachine.Handover
+import FlareOperator.StateMachine.LeaseFence
 
 namespace FlareOperator.K8s.Bridge
 
@@ -709,22 +710,41 @@ def renewLease (leaseName ns identity : String) : IO (Except String Unit) := do
   catch e =>
     return .error s!"renewLease error: {e}"
 
-/-- The mid-pass lease fence: true when this pod is the holder, renewing it
-    now. A pass may outlast the 15 s lease that the loop renews at its top;
-    with no other holder that lapse is not a loss, and judging it one fenced
-    every broadcast of every (equally slow) pass after it, for good
-    (41258283045: 18 s passes, the new members never got their map, the
-    cluster never converged). The renew tests the holder, so it and a
-    standby's takeover (which tests the resourceVersion) cannot both succeed.
-    A failed renew falls back to the read's own expiry. -/
+/-- The mid-pass lease fence: true when this pod is the holder and a renew
+    sent now succeeded with a margin of the lease left (StateMachine/
+    LeaseFence). A pass may outlast the 15 s lease that the loop renews at
+    its top; with no other holder that lapse is not a loss, and judging it
+    one fenced every broadcast of every (equally slow) pass after it, for
+    good (41258283045). The renew tests the holder, so it and a standby's
+    takeover (which tests the resourceVersion) cannot both succeed. A failed
+    or late renew is NOT held (review of fac7410, P1): the read before it is
+    no evidence once the call has taken longer than the lease.
+    TEST SEAM (FLARE_TEST_LEASE_RENEW_DELAY_FILE, unset in production):
+    while the named file exists, the renew is sent after the number of ms it
+    holds (an API answering late). -/
 def holdLeaseNow (leaseName ns identity : String) : IO (Except String Bool) := do
   match ← getLease leaseName ns with
   | .error e => return .error e
   | .ok lease =>
     if lease.holderIdentity != identity then return .ok false
-    match ← renewLease leaseName ns identity with
-    | .ok () => return .ok true
-    | .error _ => return .ok (!lease.expired)
+    let t0 ← IO.monoMsNow
+    match ← IO.getEnv "FLARE_TEST_LEASE_RENEW_DELAY_FILE" with
+    | some f =>
+      if ← System.FilePath.pathExists f then
+        let ms := ((← IO.FS.readFile f).trim.toNat?).getD 0
+        IO.eprintln s!"[flare-operator] TEST SEAM: lease renew delayed {ms}ms (FLARE_TEST_LEASE_RENEW_DELAY_FILE)"
+        IO.sleep ms.toUInt32
+    | none => pure ()
+    let renewed ← renewLease leaseName ns identity
+    let elapsed := (← IO.monoMsNow) - t0
+    let ok := match renewed with | .ok () => true | .error _ => false
+    let held := FlareOperator.LeaseFence.held true ok elapsed (lease.leaseDurationSeconds * 1000)
+    if !held then
+      let why := match renewed with
+        | .ok () => s!"the renew took {elapsed}ms, less than {FlareOperator.LeaseFence.marginMs}ms of the {lease.leaseDurationSeconds}s lease left"
+        | .error e => s!"the renew failed after {elapsed}ms ({e})"
+      IO.eprintln s!"[flare-operator] LEASE CHECK: authority NOT confirmed — {why}; the gated action is skipped"
+    return .ok held
 
 /-- Acquire an expired lease using JSON Patch with test-and-set.
 

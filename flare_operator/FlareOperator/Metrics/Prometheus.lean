@@ -98,6 +98,9 @@ structure OperatorMetrics where
   -- detection on purpose — the fault may be on the operator's side, and
   -- failing over a master we merely cannot see is the unsafe action.
   unreachableNodes : Gauge
+  -- spec 12 guard: 1 while the operator reaches NONE of the nodes it probes
+  -- (its own network or the k8s API is suspect: nothing is marked down)
+  noNodeReachable : Gauge
   -- Last observed topology, with a 60s freshness bound. Diagnostics only.
   topologyBehindNodes : Gauge
   topologyAheadNodes : Gauge
@@ -222,6 +225,7 @@ def initMetrics : IO OperatorMetrics := do
   let unhealthyNodes ← IO.mkRef 0.0
   let stuckDownNodes ← IO.mkRef 0.0
   let unreachableNodes ← IO.mkRef 0.0
+  let noNodeReachable ← IO.mkRef 0.0
   let nodeRoles ← IO.mkRef ([] : List NodeRoleSample)
   let topologyBehindNodes ← IO.mkRef 0.0
   let topologyAheadNodes ← IO.mkRef 0.0
@@ -258,6 +262,7 @@ def initMetrics : IO OperatorMetrics := do
     unhealthyNodes := { value := unhealthyNodes }
     stuckDownNodes := { value := stuckDownNodes }
     unreachableNodes := { value := unreachableNodes }
+    noNodeReachable := { value := noNodeReachable }
     topologyBehindNodes := { value := topologyBehindNodes }
     topologyAheadNodes := { value := topologyAheadNodes }
     topologyUnknownNodes := { value := topologyUnknownNodes }
@@ -476,6 +481,11 @@ def exportMetrics (metrics : OperatorMetrics) (clusterName : String) : IO String
   output := output ++ "# TYPE flare_operator_nodes_unreachable gauge\n"
   let unreachable ← metrics.unreachableNodes.value.get
   output := output ++ formatGauge "flare_operator_nodes_unreachable" labels unreachable
+
+  -- spec 12 guard: no probed node reachable (gauge 0/1)
+  output := output ++ "# HELP flare_operator_no_node_reachable 1 while the operator reaches none of the flare nodes it probes: its own network or the k8s API is suspect, so no node is marked down and no master promoted (spec 12)\n"
+  output := output ++ "# TYPE flare_operator_no_node_reachable gauge\n"
+  output := output ++ formatGauge "flare_operator_no_node_reachable" labels (← metrics.noNodeReachable.value.get)
 
   for (name, help, gauge) in [
       ("flare_operator_topology_observed_behind_nodes", "Mapped nodes last observed below committed topology version within 60s", metrics.topologyBehindNodes),

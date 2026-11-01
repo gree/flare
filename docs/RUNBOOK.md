@@ -400,8 +400,10 @@ through the API server, so both stay green.
   no master is promoted, and every streak restarts. Log:
   `CRITICAL: the operator cannot reach ANY of the N flare node(s) it probed …
   NO node is marked down and no master is promoted (alert only) until a node
-  answers`. **No alert fires for this** (the gauge below is 0 then): search
-  the operator log.
+  answers`. The gauge `flare_operator_no_node_reachable` is 1 meanwhile and
+  the alert `FlareOperatorReachesNoNode` fires after 2 min (spec 12: alert
+  only). Check the operator pod's network and the API server first; the flare
+  nodes themselves are probably fine.
 - **Back again.** A node marked down for unreachability that answers the
   latest probe round again is restarted (graceful pod delete) after 3
   passes, not after the stuck-down wait: `REACHABLE AGAIN: <key> … restarted

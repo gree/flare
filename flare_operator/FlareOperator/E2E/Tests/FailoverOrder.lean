@@ -186,6 +186,21 @@ private def ownRole (ip : String) : IO (Option String) := do
       | _ => none
   | .error _ => return none
 
+/-- One operator metric value, integer part (gauges render as floats). -/
+private def operatorMetric (name : String) : IO (Option Nat) := do
+  let ips ← getPodIps s!"app={cfg.operatorName}" cfg.«namespace»
+  match ips.head? with
+  | none => return none
+  | some ip =>
+    match ← execInDebugPod cfg.debugPod cfg.«namespace» s!"printf 'GET /metrics HTTP/1.0\\r\\nHost: x\\r\\n\\r\\n' | nc -w 3 {ip} 9090" with
+    | .error _ => return none
+    | .ok out =>
+      return (out.splitOn "\n").findSome? fun line =>
+        let t := line.trim
+        if t.startsWith (name ++ "{") || t.startsWith (name ++ " ") then
+          ((t.splitOn " ").getLast?.map fun v => ((v.trim.splitOn ".").headD v.trim)).bind String.toNat?
+        else none
+
 private def countLines (logs needle1 needle2 : String) : Nat :=
   ((logs.splitOn "\n").filter fun l => containsSubstr l needle1 && containsSubstr l needle2).length
 
@@ -331,6 +346,10 @@ def suite : TestSuite := {
           let alerted ← waitForCondition "the operator alerts that it reaches NO node" 120 do
             return containsSubstr (← opLogs) "cannot reach ANY of the"
           if !alerted then return .fail "no 'cannot reach ANY' alert within 120 s (the cuts did not take)"
+          -- spec 12 "alert only": the guard is a gauge the alert rule reads
+          let gauge ← waitForCondition "flare_operator_no_node_reachable is 1" 30 do
+            return (← operatorMetric "flare_operator_no_node_reachable") == some 1
+          if !gauge then return .fail s!"flare_operator_no_node_reachable is {(← operatorMetric "flare_operator_no_node_reachable")}, not 1, while the operator reaches no node"
           for i in [0:9] do
             IO.sleep 10000
             match ← p0Master with

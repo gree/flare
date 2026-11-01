@@ -137,6 +137,18 @@ spec:
             summary: "Flare cluster {{`{{ $labels.cluster }}`}}: operator cannot reach a Ready node — not failed over (a master kept without a reachable successor, or the guard: no node reachable)"
             runbook: docs/RUNBOOK.md#node-unreachable
 
+        # spec 12 guard: the operator reaches NONE of the flare nodes it
+        # probes. Its own network or the k8s API is suspect, so it marks
+        # nothing down and promotes no master — this alert is the action.
+        - alert: FlareOperatorReachesNoNode
+          expr: flare_operator_no_node_reachable > 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Flare cluster {{`{{ $labels.cluster }}`}}: the operator reaches none of its flare nodes — nothing is failed over (its network or the k8s API is suspect)"
+            runbook: docs/RUNBOOK.md#node-unreachable
+
         # Master and replica key counts have drifted apart. Live replication
         # is op-level proxying with NO per-write acknowledgement, so a
         # dropped or refused replica write leaves the replica quietly behind

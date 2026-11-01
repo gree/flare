@@ -4829,6 +4829,8 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
       if streak ≥ 1 then
         IO.eprintln s!"[flare-operator] CRITICAL: node {key} is READY but the OPERATOR cannot connect to it ({streak} consecutive probes, ~{streak * FlareOperator.UnreachableNode.monitorIntervalSec}s). Topology pushes are not landing — that node is running on a stale map. At {FlareOperator.UnreachableNode.monitorThreshold} probes it is treated as down (a master only if a reachable successor exists). See RUNBOOK #node-unreachable"
     metrics.unreachableNodes.set (← unreachCyclesRef.get).length.toFloat
+  -- spec 12: the guard's "alert only" (no node reachable) as a gauge, every pass
+  metrics.noNodeReachable.set (if (← reachGuardRef.get) then 1.0 else 0.0)
 
   -- 5. Handle rocksdb config propagation + cluster replication migration
   let crd ← crdRef.get

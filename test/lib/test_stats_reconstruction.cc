@@ -154,4 +154,13 @@ namespace test_stats_reconstruction {
 		st->reconstruction_aborted_by_shutdown(b);
 		cut_assert_equal_string("aborted", st->get_reconstruction_record().current_state.c_str());
 	}
+
+	// a reconstruction abandoned because its node was demoted to a proxy is no
+	// longer "running" (the operator's rebuild gate counted it, 41278035134)
+	void test_abandoned_reconstruction_is_not_running() {
+		uint64_t a = st->reconstruction_begin();
+		cut_assert_equal_string("running", st->get_reconstruction_record().current_state.c_str());
+		st->reconstruction_abandoned(a);
+		cut_assert_equal_string("aborted", st->get_reconstruction_record().current_state.c_str());
+	}
 }

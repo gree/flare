@@ -8,6 +8,7 @@ import FlareOperator.StateMachine.FailoverOrder
 import FlareOperator.StateMachine.K8sReconciler
 import FlareOperator.StateMachine.UnreachableNode
 import FlareOperator.StateMachine.DuplicateMaster
+import FlareOperator.StateMachine.LeaseFence
 
 namespace FlareOperator.UnitTestsFailover
 
@@ -143,6 +144,16 @@ def results : List (String × Bool) := Id.run do
     (DuplicateMaster.step [("b", 1000)] "b" (some false) 99000) == ([], false)
       && (DuplicateMaster.step [] "b" none 99000) == ([], false)
       && (DuplicateMaster.step [("b", 1000)] "b" none (1000 + h)).2 == true)]
+  -- the mid-pass lease check (review of fac7410, P1)
+  r := r ++ [("lease check: held only from this pod's own renew with a margin left; a failed renew is never held, whatever the earlier read said",
+    LeaseFence.held true true 300 15000
+      && LeaseFence.held true true (15000 - LeaseFence.marginMs) 15000
+      && !LeaseFence.held true false 0 15000
+      && !LeaseFence.held false true 0 15000)]
+  r := r ++ [("lease check: a renew answered late (API delay) is not held — 10.001 s of a 15 s lease leaves less than the 5 s margin, and one past the lease is not held either",
+    !LeaseFence.held true true (15000 - LeaseFence.marginMs + 1) 15000
+      && !LeaseFence.held true true 16000 15000
+      && !LeaseFence.held true true 30000 15000)]
   return r
 
 end FlareOperator.UnitTestsFailover

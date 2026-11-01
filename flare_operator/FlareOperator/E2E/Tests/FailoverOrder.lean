@@ -64,7 +64,10 @@ private def cfg : ClusterConfig := {
     ("FLARE_TEST_BROADCAST_SKIP_FILE", "/tmp/bskip"),
     -- review of ae8ac49: while this file exists the reachability step's pod
     -- listing fails
-    ("FLARE_TEST_REACH_LIST_FAIL_FILE", "/tmp/reachfail")]
+    ("FLARE_TEST_REACH_LIST_FAIL_FILE", "/tmp/reachfail"),
+    -- review of fac7410: while this file exists the mid-pass lease renew is
+    -- sent after the ms it holds (an API answering late)
+    ("FLARE_TEST_LEASE_RENEW_DELAY_FILE", "/tmp/renewdelay")]
 }
 
 /-- every kind node: pods may be placed on any of them (the multi-node
@@ -556,7 +559,37 @@ def suite : TestSuite := {
           match ← getPodIp sPod cfg.«namespace» with
           | some ip => if ip != oldIp then healLink opIp ip
           | none => pure ()
-          discard <| waitP0Stable }
+          discard <| waitP0Stable },
+    { name := "(review of fac7410) the mid-pass lease check affirms authority only from a renew answered with 5 s of the 15 s lease left: with every renew answered 11 s late (FLARE_TEST_LEASE_RENEW_DELAY_FILE) a slave's pod is deleted — the check refuses and no node map is broadcast for 40 s; with the delay removed the map goes out and partition 0 settles"
+      run := do
+        if !(← graceOver) then return .fail "the operator never logged the end of its startup grace period"
+        if !(← waitP0Stable) then return .fail "precondition: partition 0 is not stable"
+        let some sPod := ((← nodeView).filter fun e => e.partition == 0 && e.role == 1).head?.map (podOf ·.fqdn)
+          | return .fail "precondition: no slave of partition 0"
+        let refused0 := countLines (← opLogs) "LEASE CHECK: authority NOT confirmed" "the renew took"
+        match ← opExec "echo 11000 > /tmp/renewdelay" with
+        | .error e => return .fail s!"could not arm the renew-delay seam: {e}"
+        | .ok _ => pure ()
+        try
+          discard <| kubectl ["delete", "pod", sPod, "-n", cfg.«namespace», "--wait=false"]
+          -- the deletion moves the map; its broadcast is checked first
+          let refused ← waitForCondition "the lease check refuses a renew answered 11 s late" 120 do
+            return countLines (← opLogs) "LEASE CHECK: authority NOT confirmed" "the renew took" > refused0
+          if !refused then return .fail "the lease check never refused a renew answered 11 s late (less than the 5 s margin of the 15 s lease left)"
+          IO.sleep 40000
+          -- this window's log alone (a tail of fixed length scrolls)
+          let win ← match ← kubectl ["logs", "-n", cfg.«namespace», "-l", s!"app={cfg.operatorName}", "--since=39s", "--tail=-1"] with
+            | .ok o => pure o
+            | .error e => return .fail s!"could not read the operator log of the window: {e}"
+          let sent := countLines win "[TopologyBroadcast] Broadcasting node sync" "to"
+          IO.eprintln s!"# renew delayed 11 s: refusals in the window {countLines win "LEASE CHECK: authority NOT confirmed" "the renew took"}, broadcasts {sent}"
+          if sent > 0 then return .fail s!"{sent} node map broadcast(s) went out in 39 s while every renew was answered with less than the margin of the lease left"
+        finally
+          discard <| opExec "rm -f /tmp/renewdelay"
+        -- the recreated slave is Ready only once it has the map: the
+        -- broadcast went out after the delay was removed
+        if !(← waitP0Stable) then return .fail "partition 0 did not settle once the renew answered in time again"
+        return .pass }
   ]
 }
 

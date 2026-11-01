@@ -554,6 +554,13 @@ def suite : TestSuite := {
               | .error _ => return false
             | none => return false
           if !ready then return .fail s!"precondition: {sPod} did not come back Ready on another IP"
+          -- the unreachability verdict concerns a Slave/Master only: the
+          -- recreated pod must be seated as an Active slave again before its
+          -- cut (41333760888: it re-registered as a Proxy, "all partitions
+          -- full", and a proxy is never marked unreachable-down)
+          let seated ← waitForCondition s!"{sPod} is an Active slave again" 180 do
+            return (← nodeView).any fun e => podOf e.fqdn == sPod && e.role == 1 && e.state == 0
+          if !seated then return .fail s!"precondition: the recreated {sPod} was not seated as an Active slave within 180 s"
           let newIp := (← getPodIp sPod cfg.«namespace»).getD ""
           match ← cutLink opIp newIp with
           | .error e => return .fail s!"could not cut operator ⇄ {newIp}: {e}"

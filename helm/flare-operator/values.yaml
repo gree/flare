@@ -137,7 +137,11 @@ cluster:
   enabled: false
   name: "default"
   partitions: 2
-  replicas: 2
+  # copies per partition (master + replicas). 3 so a cordon move keeps a
+  # replica besides the master (nodeReplacement.minCopies, default 3) and a
+  # rebuild never leaves the master alone (user decision 2026-11-01). With 2,
+  # every cordon move is blocked unless nodeReplacement.minCopies is 2.
+  replicas: 3
   image:
     repository: ghcr.io/gree/flare-node-rocksdb
     tag: latest

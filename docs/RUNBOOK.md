@@ -80,6 +80,14 @@ and the node guard refuses its delete. To accept that risk for this upgrade:
 
 See also [Upgrading from rc68 or older](#node-guard) under the node guard.
 
+**The default copy count is now 3 (`cluster.replicas`, was 2).** A release
+that never set `cluster.replicas` gets one more flared pod per partition on
+this upgrade (memory and pods x1.5); the new pods join as replicas and
+rebuild from their masters. To keep 2 copies, set `cluster.replicas: 2`
+before upgrading — cordon moves are then blocked unless
+`nodeReplacement.minCopies: 2` ([cordon moves](#cordon-move)). A release that
+sets it already (pf-dev) is unchanged.
+
 **The webhook during an upgrade.** The node guard judges StatefulSet UPDATEs
 too (`failurePolicy: Fail`). An update that does not reduce `replicas` is
 allowed, but while no operator leader answers (for example the operator
@@ -1160,13 +1168,13 @@ Chart values: `nodeReplacement.*` (needs `nodeGuard.enabled`; the chart refuses
 `nodeReplacement.enabled` without it). `FLARE_NODE_REPLACEMENT=off` on the
 operator turns the whole feature off.
 
-**Check the copy count first: with the chart defaults every move is
-blocked.** The chart defaults are `cluster.replicas: 2` (a master and one
-replica per partition) and `nodeReplacement.minCopies: 3` with
-`nodeReplacement.enabled: true`. Whenever `cluster.replicas` is below
-`nodeReplacement.minCopies`, no master or replica can be moved: every such
-move is blocked, the guard keeps refusing those evictions, and `kubectl
-drain` waits until it times out. Choose one:
+**Check the copy count first.** The chart defaults are `cluster.replicas: 3`
+(a master and two replicas per partition) and `nodeReplacement.minCopies: 3`
+with `nodeReplacement.enabled: true`: a move keeps a replica besides the
+master. A cluster that sets fewer copies explicitly (pf-dev: 1 master + 1
+replica) is below `nodeReplacement.minCopies`: no master or replica can be
+moved, every such move is blocked, the guard keeps refusing those evictions,
+and `kubectl drain` waits until it times out. For such a cluster choose one:
 
 - `cluster.replicas: 3` (or more): moves run with two copies left; or
 - `nodeReplacement.minCopies: 2`: 2-copy partitions move, with the master

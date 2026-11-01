@@ -140,6 +140,18 @@ spec:
         # spec 12 guard: the operator reaches NONE of the flare nodes it
         # probes. Its own network or the k8s API is suspect, so it marks
         # nothing down and promotes no master — this alert is the action.
+        # spec 13: a node claims a master the committed map gives to another
+        # node (it runs on another map version). Down after 15 s; the alert
+        # covers the claim and the down until the node is restarted.
+        - alert: FlareDuplicateMaster
+          expr: flare_operator_duplicate_master_claims > 0 or flare_operator_duplicate_master_down > 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Flare cluster {{`{{ $labels.cluster }}`}}: a node claims a master the committed node map gives to another node (treated as down after 15 s)"
+            runbook: docs/RUNBOOK.md#duplicate-master
+
         - alert: FlareOperatorReachesNoNode
           expr: flare_operator_no_node_reachable > 0
           for: 2m

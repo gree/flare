@@ -101,6 +101,9 @@ structure OperatorMetrics where
   -- spec 12 guard: 1 while the operator reaches NONE of the nodes it probes
   -- (its own network or the k8s API is suspect: nothing is marked down)
   noNodeReachable : Gauge
+  -- spec 13: nodes whose duplicate master claim is pending / treated as down
+  duplicateMasterClaims : Gauge
+  duplicateMasterDown : Gauge
   -- Last observed topology, with a 60s freshness bound. Diagnostics only.
   topologyBehindNodes : Gauge
   topologyAheadNodes : Gauge
@@ -226,6 +229,8 @@ def initMetrics : IO OperatorMetrics := do
   let stuckDownNodes ← IO.mkRef 0.0
   let unreachableNodes ← IO.mkRef 0.0
   let noNodeReachable ← IO.mkRef 0.0
+  let duplicateMasterClaims ← IO.mkRef 0.0
+  let duplicateMasterDown ← IO.mkRef 0.0
   let nodeRoles ← IO.mkRef ([] : List NodeRoleSample)
   let topologyBehindNodes ← IO.mkRef 0.0
   let topologyAheadNodes ← IO.mkRef 0.0
@@ -263,6 +268,8 @@ def initMetrics : IO OperatorMetrics := do
     stuckDownNodes := { value := stuckDownNodes }
     unreachableNodes := { value := unreachableNodes }
     noNodeReachable := { value := noNodeReachable }
+    duplicateMasterClaims := { value := duplicateMasterClaims }
+    duplicateMasterDown := { value := duplicateMasterDown }
     topologyBehindNodes := { value := topologyBehindNodes }
     topologyAheadNodes := { value := topologyAheadNodes }
     topologyUnknownNodes := { value := topologyUnknownNodes }
@@ -486,6 +493,14 @@ def exportMetrics (metrics : OperatorMetrics) (clusterName : String) : IO String
   output := output ++ "# HELP flare_operator_no_node_reachable 1 while the operator reaches none of the flare nodes it probes: its own network or the k8s API is suspect, so no node is marked down and no master promoted (spec 12)\n"
   output := output ++ "# TYPE flare_operator_no_node_reachable gauge\n"
   output := output ++ formatGauge "flare_operator_no_node_reachable" labels (← metrics.noNodeReachable.value.get)
+
+  -- spec 13: duplicate master claims (gauges)
+  output := output ++ "# HELP flare_operator_duplicate_master_claims Nodes claiming a master the committed node map gives to another node (pending: down if the claim still stands after 15 s)\n"
+  output := output ++ "# TYPE flare_operator_duplicate_master_claims gauge\n"
+  output := output ++ formatGauge "flare_operator_duplicate_master_claims" labels (← metrics.duplicateMasterClaims.value.get)
+  output := output ++ "# HELP flare_operator_duplicate_master_down Nodes treated as down for a duplicate master claim, until restarted\n"
+  output := output ++ "# TYPE flare_operator_duplicate_master_down gauge\n"
+  output := output ++ formatGauge "flare_operator_duplicate_master_down" labels (← metrics.duplicateMasterDown.value.get)
 
   for (name, help, gauge) in [
       ("flare_operator_topology_observed_behind_nodes", "Mapped nodes last observed below committed topology version within 60s", metrics.topologyBehindNodes),

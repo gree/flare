@@ -315,6 +315,11 @@ def suite : TestSuite := {
           if !claims then return .fail s!"precondition: {mPod} does not claim master after the heal (it got a map anyway?)"
           let detected ← waitForCondition s!"the operator treats {mPod} as a duplicate master" 120 do
             return countLines (← opLogs) s!"DUPLICATE MASTER: {mPod}" "treated as down" > 0
+          -- risk B12: the down is a metric the alert FlareDuplicateMaster reads
+          if detected then
+            let gauge ← waitForCondition "flare_operator_duplicate_master_down is at least 1" 30 do
+              return ((← operatorMetric "flare_operator_duplicate_master_down").getD 0) ≥ 1
+            if !gauge then return .fail s!"{mPod} was treated as down but flare_operator_duplicate_master_down stayed {(← operatorMetric "flare_operator_duplicate_master_down")}"
           let logs ← opLogs
           for l in (logs.splitOn "\n").filter (fun l => containsSubstr l "DUPLICATE MASTER" || containsSubstr l "claims to be a MASTER") do
             IO.eprintln s!"# {l.trim.take 300}"

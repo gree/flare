@@ -208,6 +208,10 @@ def results : List (String × Bool) := Id.run do
     !LeaseFence.held true true (15000 - LeaseFence.marginMs + 1) 15000
       && !LeaseFence.held true true 16000 15000
       && !LeaseFence.held true true 30000 15000)]
+  -- review of 2596f25: a node removed from the map leaves both lists
+  r := r ++ [("duplicate master: a key no longer in the node map is pruned from the pending claims and the down list (gauges and the unhealthy list fall back)",
+    DuplicateMaster.prune dm [("b", 1000), ("gone", 1000)] ["b", "gone"] == ([("b", 1000)], ["b"])
+      && DuplicateMaster.prune dm [] [] == ([], []))]
   return r
 
 end FlareOperator.UnitTestsFailover

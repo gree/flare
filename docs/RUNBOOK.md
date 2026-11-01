@@ -1307,8 +1307,9 @@ than the pod being moved (a cordoned one counts too), Active in the map with its
 `rocksdb_master_id` and `rocksdb_source_epoch` as the master, is not
 quarantined and not reported `rocksdb_copy_identity_consistent 0`, has no
 open replica repair and no new drop/failed write from the master since the
-operator saw it. (A copy that does not report these stats at all is not told
-apart: missing values compare equal.) The copy being moved counts toward
+operator saw it. (A copy, or a master, that does not report its master id
+and source epoch is not a real copy: a missing value never matches.) The
+copy being moved counts toward
 `nodeReplacement.minCopies` (default 3: master + 2 replicas → 2 real copies
 remain); at least one other real copy must always remain. If fewer would
 remain the move does **not** start, the pod is listed in

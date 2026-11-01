@@ -249,6 +249,9 @@ public:
 	int reconstruction_succeeded_from(uint64_t id, const string& source);
 	int reconstruction_failed_final(uint64_t id);
 	int reconstruction_aborted_by_shutdown(uint64_t id);
+	// the node stopped being the slave this reconstruction was for (demoted to
+	// a proxy): no longer running, not failed
+	int reconstruction_abandoned(uint64_t id) { return this->reconstruction_aborted_by_shutdown(id); }
 	struct reconstruction_record {
 		uint64_t boot_id;
 		uint64_t current_id;

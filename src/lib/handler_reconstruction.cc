@@ -138,6 +138,21 @@ int handler_reconstruction::run() {
 		// source it was created with retried a drained ex-master for up to
 		// ~30 min and could dump from it after it came back as a non-master
 		// (CI 37386580971, empty-source test 4).
+		// A slave demoted to a PROXY in its own map is no longer rebuilt:
+		// retrying (up to 60 attempts, "running" in its stats) held its own
+		// re-seat in the operator's rebuild gate (41278035134: 24 min). The
+		// operator assigns it again; a new reconstruction starts then.
+		if (this->_role == cluster::role_slave) {
+			cluster::node self_node = this->_cluster->get_node(this->_cluster->get_own_node_key());
+			// found in the map only (get_node answers an unknown key as a proxy)
+			if (!self_node.node_server_name.empty() && self_node.node_role == cluster::role_proxy) {
+				log_notice("reconstruction abandoned: this node is a proxy in the current map, no longer a slave of partition %d (attempt %d)", this->_partition, attempt + 1);
+				if (stats_object != NULL) {
+					stats_object->reconstruction_abandoned(this->_reconstruction_id);
+				}
+				return -1;
+			}
+		}
 		if (this->_role == cluster::role_slave) {
 			const string cur = this->_cluster->get_partition_master_key(this->_partition);
 			const string was = this->_cluster->to_node_key(this->_node_server_name, this->_node_server_port);

@@ -1150,10 +1150,11 @@ cluster-autoscaler or a descheduler: their evictions are judged like
 **What the webhook sees.** Two pod webhooks, both limited to the release's
 namespace:
 
-- `pods.node-guard.flare.gree.net` (pods DELETE) has `objectSelector: app:
-  flare`, so it sees only flared pods. A pod whose `app: flare` label was
-  removed is not sent to the guard: its delete is not judged. Do not remove
-  that label from a pod holding data.
+- `pods.node-guard.flare.gree.net` (pods DELETE) sees every pod of the
+  namespace except the operator's own (`objectSelector` on
+  `app.kubernetes.io/name` NotIn the chart name). The operator judges only
+  this cluster's flared pods, told apart by `spec.subdomain`, so removing a
+  flared pod's labels does not hide its delete; other pods are allowed.
 - `evictions.node-guard.flare.gree.net` (pods/eviction CREATE) has no
   selector (an Eviction carries none of the pod's labels), so it sees every
   eviction in the namespace. The operator reads the pod and judges only this
@@ -1200,15 +1201,15 @@ an error naming that new pod after the old one is already gone; check with
 `failurePolicy: Fail`: with no operator leader answering, every call to the
 webhook fails, so in the release's namespace these are refused:
 
-- the DELETE of every flared pod (`app: flare`): `failed calling webhook
-  "pods.node-guard.flare.gree.net"`;
+- the DELETE of every pod but the operator's own (flared pods, backup Job
+  pods, debug pods): `failed calling webhook "pods.node-guard.flare.gree.net"`;
 - **every eviction of every pod**, not only flared ones (the operator's own
   pods, backup Jobs, anything else in the namespace): `kubectl drain` keeps
   failing with `failed calling webhook "evictions.node-guard.flare.gree.net"`;
 - every StatefulSet UPDATE and DELETE (`"statefulsets.node-guard.flare.gree.net"`),
   which also makes a `helm upgrade` that touches the flared StatefulSet fail.
 
-A plain `kubectl delete pod` of a pod without `app: flare` is not affected.
+A `kubectl delete pod` of the operator's own pod is not affected.
 The override annotation does not help here (nothing answers to read it).
 Bring the operator back first. If that is not possible, turn the guard off
 and back on after the work:

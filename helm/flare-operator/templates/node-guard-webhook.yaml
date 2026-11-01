@@ -3,11 +3,11 @@
   Node guard (A0 stage 6b, flare-ci-inputs/decisions/A0-DESIGN-rc68.md): the
   leader operator judges deletes of this cluster's flared pods, and UPDATEs
   and DELETEs of its StatefulSet (and the scale subresource). The pod DELETE
-  rule selects `app: flare` pods only (3df6954, 41211321783 C8): without a
-  selector, with the operator away (failurePolicy Fail) the kubelet could not
-  remove the operator's own exited pod. The accepted cost: removing that label
-  from a live flared pod (pod patch rights) hides its delete from the guard
-  (RUNBOOK #node-guard). Evictions have their own rule with no selector (an
+  rule selects every pod but the operator's own (41211321783 C8: with the
+  operator away, failurePolicy Fail, the kubelet could not remove the
+  operator's exited pod). It does not select on the flared pods' label:
+  removing that label from a live master hid its delete from the guard
+  (41275671570 G1). Evictions have their own rule with no selector (an
   Eviction carries none of the pod's labels); there the operator tells the
   cluster's flared pods apart by their immutable spec.subdomain and allows
   every other pod of the namespace (review of 62dddf9). It writes nothing
@@ -67,12 +67,17 @@ webhooks:
     namespaceSelector:
       matchLabels:
         kubernetes.io/metadata.name: {{ $ns }}
-    # flared pods only: with the operator away (failurePolicy Fail) the
-    # kubelet could not remove the operator's own exited pod, and it never
-    # went away (41211321783 C8)
+    # every pod but the operator's own: with the operator away (failurePolicy
+    # Fail) the kubelet could not remove the operator's exited pod, and it
+    # never went away (41211321783 C8). NOT a selector on the flared pods'
+    # label: a label removed from a live master hid its delete from the
+    # guard (41275671570 G1). NotIn also matches a pod without the key; the
+    # operator tells the flared pods apart by spec.subdomain.
     objectSelector:
-      matchLabels:
-        app: flare
+      matchExpressions:
+        - key: app.kubernetes.io/name
+          operator: NotIn
+          values: [{{ include "flare-operator.name" . | quote }}]
     rules:
       - apiGroups: [""]
         apiVersions: ["v1"]

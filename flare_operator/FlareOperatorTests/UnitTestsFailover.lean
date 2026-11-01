@@ -122,6 +122,9 @@ def results : List (String × Bool) := Id.run do
     K8sReconciler.unhealthyMastersKept mkState unhealthy unhealthy ["m", "s", "t", "p"]
   r := r ++ [("unreachable master with a reachable slave: not kept -> failed over",
     (kept ["m"]).isEmpty)]
+  r := r ++ [("unreachable master whose only reachable slaves the promotion gates refuse (repair held, follower unfit, promotion blocked): kept as master, not left masterless (B9)",
+    K8sReconciler.unhealthyMastersKept mkState ["m"] ["m"] ["m", "s", "t", "p"] ["s", "t"] == ["m"]
+      && (K8sReconciler.unhealthyMastersKept mkState ["m"] ["m"] ["m", "s", "t", "p"] ["s"]).isEmpty)]
   r := r ++ [("unreachable master, every slave also unreachable: no successor -> kept as master",
     kept ["m", "s", "t"] == ["m"])]
   r := r ++ [("unreachable master, one slave unreachable and one reachable: failed over to the reachable",

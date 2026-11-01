@@ -587,9 +587,13 @@ def drainBlockedKeys (post : FlareClusterState) (drainKeys : List String)
     case — nothing is coming back under that entry — and still fails over.
 
     A successor counts only if it is an Active Slave of the same partition
-    whose own pod is live and not itself unhealthy. -/
+    whose own pod is live and not itself unhealthy, and which the promotion
+    gates would accept (`ineligible`: a replica repair held on it, a follower
+    known unfit, a promotion blocked by a handover or repair). Counting a
+    slave the gate then refuses left the partition with NO master (review
+    B9, STAGE10-RUNBOOK-AUDIT). -/
 def unhealthyMastersKept (state : FlareClusterState)
-    (deadKeys unhealthyKeys livePodKeys : List String) : List String :=
+    (deadKeys unhealthyKeys livePodKeys : List String) (ineligible : List String := []) : List String :=
   deadKeys.filter fun key =>
     unhealthyKeys.contains key &&
     (match state.lookupNode key with
@@ -599,7 +603,8 @@ def unhealthyMastersKept (state : FlareClusterState)
        !(state.nodeMap.any (fun kv =>
            kv.2.role == FlareRole.Slave && kv.2.state == FlareState.Active
              && kv.2.partition == node.partition
-             && livePodKeys.contains kv.1 && !unhealthyKeys.contains kv.1)))
+             && livePodKeys.contains kv.1 && !unhealthyKeys.contains kv.1
+             && !ineligible.contains kv.1)))
 
 /-- Demote every Master that duplicates an EARLIER Master of the same
     partition in the list (first Master for a partition wins; later ones are
@@ -1663,6 +1668,7 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
     -- Keep an unhealthy-but-present master that has no successor (see
     -- unhealthyMastersKept): failing it over would only strip the partition.
     let keptMasters := unhealthyMastersKept clusterState s.deadNodeKeys s.unhealthyKeys s.livePodKeys
+      (s.repairHeldKeys ++ s.followUnfitKeys ++ s.promotionBlockedKeys)
     let failoverKeys := s.deadNodeKeys.filter (fun k => !keptMasters.contains k)
     let afterFailover :=
       if s.failoverTriggered && !failoverKeys.isEmpty then
@@ -1880,7 +1886,8 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
       -- Same guard as the normal path: an unhealthy-but-present master with
       -- no successor is kept, not stripped (see unhealthyMastersKept).
       let failoverKeys := s.deadNodeKeys.filter (fun k =>
-        !(unhealthyMastersKept clusterState s.deadNodeKeys s.unhealthyKeys s.livePodKeys).contains k)
+        !(unhealthyMastersKept clusterState s.deadNodeKeys s.unhealthyKeys s.livePodKeys
+          (s.repairHeldKeys ++ s.followUnfitKeys ++ s.promotionBlockedKeys)).contains k)
       let afterFailover :=
         if failoverKeys.isEmpty then clusterState
         else handleFailoverWithPromotion clusterState.rebuildPartitionMap failoverKeys

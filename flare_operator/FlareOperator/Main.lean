@@ -1455,8 +1455,8 @@ private def loadHistory (crName ns : String) (partitions : Nat) : IO (Option Aut
 private def persistHistory (crName ns : String) (st : AuthoritativeHistory.Store) : IO Bool := do
   let (leaseName, identity) ← historyLeaseRef.get
   let leader ← if leaseName.isEmpty then pure false else
-    match ← getLease leaseName ns with
-    | .ok lease => pure (lease.holderIdentity == identity && !lease.expired)
+    match ← holdLeaseNow leaseName ns identity with
+    | .ok held => pure held
     | .error _ => pure false
   if !leader then
     IO.eprintln s!"[flare-operator] CRITICAL: the authoritative history is NOT written: this pod does not hold a valid lease"
@@ -2639,8 +2639,8 @@ private def publishLiveMap (stateRef : IO.Ref FlareClusterState)
   let hold : IO Bool := do
     pendingBroadcastRef.modify fun p => some (p.getD v)
     pure false
-  let stillLeader ← match ← getLease leaseName ns with
-    | .ok lease => pure (lease.holderIdentity == identity && !lease.expired)
+  let stillLeader ← match ← holdLeaseNow leaseName ns identity with
+    | .ok held => pure held
     | .error e =>
       IO.eprintln s!"[flare-operator] lease fence ({why}): getLease failed ({e}); v{v} held for the next pass"
       pure false
@@ -3494,12 +3494,8 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
   -- the lease, renewed and confirmed now (the handover's fast loop and a
   -- rolling delete act between the leader loop's renewals)
   let leaseHeldNow : IO Bool := do
-    match ← getLease leaseName ns with
-    | .ok l =>
-      if l.holderIdentity != identity then pure false
-      else match ← renewLease leaseName ns identity with
-        | .ok () => pure true
-        | .error _ => pure false
+    match ← holdLeaseNow leaseName ns identity with
+    | .ok held => pure held
     | .error _ => pure false
   passLeaseLostRef.set false
 
@@ -3728,8 +3724,8 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
     -- operator.
     preSendBarrier finalVersion
     let stillLeader ← do
-      match ← getLease leaseName ns with
-      | .ok lease => pure (lease.holderIdentity == identity && !lease.expired)
+      match ← holdLeaseNow leaseName ns identity with
+      | .ok held => pure held
       | .error e =>
         IO.eprintln s!"[flare-operator] lease fence: getLease failed ({e}); skipping broadcast this tick"
         pure false
@@ -4280,8 +4276,8 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
                 if !succStable then
                   IO.eprintln s!"[flare-operator] EMPTY-MASTER SELF-HEAL: successor {sKey} changed during the revalidation reads (incarnation {sIdBefore} -> {sIdAfter}); not deleting"
                 let holdsLease ← do
-                  match ← getLease leaseName ns with
-                  | .ok lease => pure (lease.holderIdentity == identity && !lease.expired)
+                  match ← holdLeaseNow leaseName ns identity with
+                  | .ok held => pure held
                   | .error _ => pure false
                 match StatsObservation.deleteGate verdictNow successorOk survivorFollowOk (uidStable && succStable) holdsLease, uidBefore with
                 | .ok (), some uid =>

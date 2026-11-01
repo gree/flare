@@ -709,6 +709,23 @@ def renewLease (leaseName ns identity : String) : IO (Except String Unit) := do
   catch e =>
     return .error s!"renewLease error: {e}"
 
+/-- The mid-pass lease fence: true when this pod is the holder, renewing it
+    now. A pass may outlast the 15 s lease that the loop renews at its top;
+    with no other holder that lapse is not a loss, and judging it one fenced
+    every broadcast of every (equally slow) pass after it, for good
+    (41258283045: 18 s passes, the new members never got their map, the
+    cluster never converged). The renew tests the holder, so it and a
+    standby's takeover (which tests the resourceVersion) cannot both succeed.
+    A failed renew falls back to the read's own expiry. -/
+def holdLeaseNow (leaseName ns identity : String) : IO (Except String Bool) := do
+  match ← getLease leaseName ns with
+  | .error e => return .error e
+  | .ok lease =>
+    if lease.holderIdentity != identity then return .ok false
+    match ← renewLease leaseName ns identity with
+    | .ok () => return .ok true
+    | .error _ => return .ok (!lease.expired)
+
 /-- Acquire an expired lease using JSON Patch with test-and-set.
 
     The precondition is the lease's metadata.resourceVersion from the SAME

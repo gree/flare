@@ -174,8 +174,22 @@ def results : List (String × Bool) := Id.run do
               (startBlock { cfg with minCopies := 1 } "slave" ["w1"] []).isSome)]
   r := r ++ [("node move: a copy on the cordoned node does not count",
               (startBlock cfg "slave" ["w1"] [copy "a" "w1", copy "b" "w3"]).isSome)]
-  r := r ++ [("node move: a copy on ANOTHER cordoned node does not count either",
+  r := r ++ [("node move: copies on every excluded node do not count",
               (startBlock cfg "slave" ["w1", "w2"] [copy "a" "w2", copy "b" "w3"]).isSome)]
+  -- C7 option B (user decision 2026-11-01): a copy on ANOTHER cordoned node counts
+  r := r ++ [("node move: two copies, both workers cordoned (minCopies 2): the replica starts, counting the master on the other cordoned node",
+              match next { cfg with minCopies := 2 } {} ["w1", "w2"]
+                  [cand "c-nodes-0" "w1" "master" [copy "r" "w2"] none, cand "c-nodes-1" "w2" "slave" [copy "m" "w1"]] 1 with
+              | (.start m, _) => m.pod == "c-nodes-1" && m.role == "slave"
+              | _ => false)]
+  r := r ++ [("node move: starting with only copies on another cordoned node left is flagged (a warning), not with a copy on an uncordoned node",
+              leavesOnlyCordoned ["w1", "w2"] "w2" [copy "m" "w1"]
+                && !leavesOnlyCordoned ["w1", "w2"] "w2" [copy "m" "w1", copy "x" "w3"]
+                && !leavesOnlyCordoned ["w2"] "w2" [copy "m" "w1"])]
+  r := r ++ [("node move: ... and the master still needs a successor on an uncordoned node (blocked until the moved replica is back)",
+              match next { cfg with minCopies := 2 } {} ["w1", "w2"] [cand "c-nodes-0" "w1" "master" [copy "r" "w2"] none] 1 with
+              | (.idle, bl) => bl.length == 1
+              | _ => false)]
   r := r ++ [("node move: a copy that is not Active does not count",
               (startBlock cfg "slave" ["w1"] [copy "a" "w2" false, copy "b" "w3"]).isSome)]
   r := r ++ [("node move: a copy with another history does not count",

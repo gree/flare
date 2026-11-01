@@ -227,23 +227,33 @@ structure CopyFact where
   dropIncreased : Bool
   deriving Repr, BEq, Inhabited
 
-/-- Copies that still count with `cordoned` nodes going away: on a node that
-    is not cordoned, Active, same history, no open repair, no new drop. -/
-def realCopies (cordoned : List String) (cs : List CopyFact) : Nat :=
-  (cs.filter fun c => !c.nodeName.isEmpty && !cordoned.contains c.nodeName
+/-- Copies that still count while the pods of the `excluded` nodes are away:
+    on another node, Active, same history, no open repair, no new drop.
+    `next` excludes the moving pod's node only (user decision 2026-11-01, C7
+    option B): a copy on ANOTHER cordoned node counts — the node guard holds
+    that pod's eviction until its own move is released, and one move runs at
+    a time, so it stays while this one is away. -/
+def realCopies (excluded : List String) (cs : List CopyFact) : Nat :=
+  (cs.filter fun c => !c.nodeName.isEmpty && !excluded.contains c.nodeName
     && c.active && c.sameHistory && !c.repairOpen && !c.dropIncreased).length
+
+/-- A move that may start, but every real copy left while it runs is on
+    ANOTHER cordoned node (C7 option B): allowed, with a warning (user
+    2026-11-01) — that node is about to be drained too. -/
+def leavesOnlyCordoned (cordoned : List String) (node : String) (others : List CopyFact) : Bool :=
+  realCopies [node] others > 0 && realCopies cordoned others == 0
 
 /-- Why a pod may NOT be moved now, or none. `movingCopy` = the pod itself
     holds a copy of the partition (master / replica); `others` are the other
     copies of the partition. The partition keeps `real` copies while this one
     is away and must still have `minCopies` counting the moving copy. -/
-def startBlock (cfg : Config) (role : String) (cordoned : List String) (others : List CopyFact) : Option String :=
+def startBlock (cfg : Config) (role : String) (excluded : List String) (others : List CopyFact) : Option String :=
   if role == "proxy" then none
   else
-    let real := realCopies cordoned others
+    let real := realCopies excluded others
     let need := cfg.minCopies - 1
     if real < 1 then
-      some s!"no other real copy of the partition would remain (0 of {others.length} other copies are Active, on an uncordoned node, with the same history, without an open repair); not started — it starts when one is"
+      some s!"no other real copy of the partition would remain (0 of {others.length} other copies are Active, on another node, with the same history, without an open repair); not started — it starts when one is"
     else if real < need then
       some s!"only {real} real copy(ies) would remain besides this one; nodeReplacement.minCopies is {cfg.minCopies} (needs {need}); not started — add a copy or lower minCopies (an accepted risk)"
     else none
@@ -459,7 +469,7 @@ def next (cfg : Config) (l : Ledger) (cordoned : List String) (cs : List Cand) (
     if !c.movable then some "the pod is not Ready or is terminating"
     else if c.role == "master" && c.successor.isNone then
       some "no caught-up replica on an uncordoned node to take the master over"
-    else startBlock cfg c.role cordoned c.others
+    else startBlock cfg c.role [c.node] c.others
   let blocked := sorted.filterMap fun c => (why c).map fun w => ({ pod := c.pod, node := c.node, reason := w } : Blocked)
   if (l.active).isSome then (.idle, blocked)
   else match sorted.find? (fun c => (why c).isNone) with

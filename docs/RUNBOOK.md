@@ -1266,11 +1266,12 @@ operator records a move in `status.nodeMoves` and walks it through:
 
 `kubectl get flarecluster <name> -o jsonpath='{.status.nodeMoves}'` shows the
 record; the operator log lines start with `NODE MOVE`; Events carry
-`FlareCordonMoveStarted / Blocked / Held / Released / Cancelled / Done`.
+`FlareCordonMoveStarted / Blocked / Held / Released / Cancelled / Done`, and the
+Warning `FlareCordonMoveOnCordonedCopy` (below).
 
 **Not enough copies (`FlareCordonMoveBlocked`).** The move starts only if the
-partition would keep enough *real* copies. A real copy is on a node that is
-not cordoned, Active in the map with its pod Ready, has the same
+partition would keep enough *real* copies. A real copy is on another node
+than the pod being moved (a cordoned one counts too), Active in the map with its pod Ready, has the same
 `rocksdb_master_id` and `rocksdb_source_epoch` as the master, is not
 quarantined and not reported `rocksdb_copy_identity_consistent 0`, has no
 open replica repair and no new drop/failed write from the master since the
@@ -1289,9 +1290,14 @@ risk.
 - The alert `FlareCordonMoveBlocked` is raised only while NO move is
   running; a blocked pod behind a running move shows in
   `status.nodeMoves.blocked` only.
-- Copies on cordoned nodes do not count. **Cordon one node at a time**: two
-  cordoned nodes that hold the two copies of a 2-copy partition block both
-  moves (no data is lost, but neither drain finishes).
+- A copy on ANOTHER cordoned node counts: the node guard holds that pod's
+  eviction until its own move is released, and one move runs at a time, so it
+  stays while this one is away. When every copy left during a move is on
+  cordoned nodes, the move still starts, with the log line `WARNING: NODE
+  MOVE <pod>: … other copies are only on cordoned node(s)` and the Warning
+  Event `FlareCordonMoveOnCordonedCopy`. Do not let those nodes be removed
+  (forcibly, outside the API) before the move is done: uncordon one or add a
+  copy if they must go.
 - Also blocked: a pod that is not Ready, is Terminating, is not in the map
   or has no serving label (`the pod is not Ready or is terminating`), and a
   master with no caught-up replica on an uncordoned node (`no caught-up

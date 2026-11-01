@@ -1332,6 +1332,12 @@ private def runNodeMoves (crName ns : String) (stateRef : IO.Ref FlareClusterSta
     if ← save led then
       IO.eprintln s!"[flare-operator] NODE MOVE started: {m.pod} ({m.role}) on cordoned node {m.node}, request {m.id}"
       Bridge.emitEvent crName ns "FlareCordonMoveStarted" s!"moving pod {m.pod} ({m.role}) off cordoned node {m.node}" false
+      -- C7 option B: allowed with only copies on other cordoned nodes left
+      if let some c := cands.find? (·.pod == m.pod) then
+        if NodeMove.leavesOnlyCordoned cordoned c.node c.others then
+          IO.eprintln s!"[flare-operator] WARNING: NODE MOVE {m.pod}: while it runs, the partition's other copies are only on cordoned node(s) — uncordon one or add a copy if those nodes go away before the move is done"
+          Bridge.emitEvent crName ns "FlareCordonMoveOnCordonedCopy"
+            s!"moving pod {m.pod} off {m.node}: the partition's other copies are only on cordoned node(s) until it is back" true
   else if led.active.isNone && blocked != led.blocked then
     if ← save { led with blocked } then
       for b in blocked do

@@ -1237,13 +1237,15 @@ def cordonOperatorRestartTest (c : Ctx) : IO TestResult := do
       fails := fails ++ ["the pair is not redundant after the move"]
     return if fails.isEmpty then .pass else .fail (String.intercalate "; " fails)
 
-/-- C7: both workers that hold a flared pod are cordoned at once (no drain),
-    two copies: neither copy has another real copy on an uncordoned node
-    (NodeMove.realCopies counts uncordoned nodes only), so NO move starts —
-    both are reported blocked (FlareCordonMoveBlocked), both pods keep their
-    UID and serving label, and the pair is redundant after the uncordons.
-    41211321783 expected the moves to run one at a time and none could start;
-    one-at-a-time is unit-tested (NodeMove.next with an active move). -/
+/-- C7 (option B, user decision 2026-11-01): both workers that hold a flared
+    pod are cordoned at once (no drain), two copies, minCopies 2. A copy on
+    ANOTHER cordoned node counts, so the replica's move starts — with the
+    warning FlareCordonMoveOnCordonedCopy (its only other copy, the master, is
+    on a cordoned node) — and it is recreated on the free third worker. The
+    master's move then hands over to it: the replica's pod becomes the
+    master. The old master's pod cannot be placed (required anti-affinity,
+    the free worker is taken) until the uncordons; then the pair is
+    redundant again. -/
 def cordonTwoNodesTest (c : Ctx) : IO TestResult := do
   match ← cordonPrecond c with
   | .error e => return .fail e
@@ -1251,36 +1253,30 @@ def cordonTwoNodesTest (c : Ctx) : IO TestResult := do
     c.conditions ["C7: minCopies 2; the master's and the replica's workers cordoned together (no drain)"]
     let ns := c.cfg.«namespace»
     let opLogs := do return (← kubectlLogsLabel s!"app={c.cfg.operatorName}" ns 30000)
-    let (uidM, _) ← podUidServing c p.master.name
     let (uidR, _) ← podUidServing c p.replica.name
     for n in [p.master.node, p.replica.node] do discard <| kubectl ["cordon", n]
     let mut fails : List String := []
     try
-      let blockedEv := do
-        match ← kubectl ["get", "events", "-n", ns, "--field-selector", "reason=FlareCordonMoveBlocked", "-o", "jsonpath={.items[*].message}"] with
+      let events := fun (reason : String) => do
+        match ← kubectl ["get", "events", "-n", ns, "--field-selector", s!"reason={reason}", "-o", "jsonpath={.items[*].message}"] with
         | .ok o => pure o
         | .error _ => pure ""
-      let both ← waitForCondition "both pods are reported blocked" 180 do
-        let ev ← blockedEv
-        return containsSubstr ev p.master.name && containsSubstr ev p.replica.name
-      let ev ← blockedEv
-      c.event s!"blocked events: {ev.take 400}"
-      if !both then fails := fails ++ ["not both pods were reported blocked (FlareCordonMoveBlocked) within 180 s"]
-      -- a further minute: still nothing starts
-      IO.sleep 60000
-      let lines := (← opLogs).splitOn "\n"
-      for x in lines.filter (containsSubstr · "NODE MOVE") do c.art "cordon-move.txt" x
-      if lines.any (containsSubstr · "NODE MOVE started: ") then
-        fails := fails ++ ["a move started although neither copy keeps a real copy on an uncordoned node"]
-      let (uidM1, _) ← podUidServing c p.master.name
-      let (uidR1, _) ← podUidServing c p.replica.name
-      if uidM1 != uidM || uidR1 != uidR then fails := fails ++ [s!"a pod was replaced ({uidM} -> {uidM1}, {uidR} -> {uidR1})"]
-      match (← c.roles).bind (·.1) with
-      | some m => if m != p.master.name then fails := fails ++ [s!"the master moved to {m}"]
-      | none => fails := fails ++ ["partition 0 has no master"]
+      let warned ← waitForCondition s!"the move of {p.replica.name} starts with the warning" 180 do
+        return containsSubstr (← events "FlareCordonMoveOnCordonedCopy") p.replica.name
+      c.event s!"warning events: {(← events "FlareCordonMoveOnCordonedCopy").take 400}"
+      if !warned then fails := fails ++ [s!"no FlareCordonMoveOnCordonedCopy warning for {p.replica.name} within 180 s (the replica's move did not start, or started without the warning)"]
+      let moved ← waitForCondition s!"{p.replica.name} recreated off the cordoned workers" 420 do
+        let ps := (← c.pods).getD []
+        return ps.any fun (r : PodRow) => r.name == p.replica.name && r.uid != uidR
+          && r.node != p.replica.node && r.node != p.master.node && r.ready
+      if !moved then fails := fails ++ [s!"{p.replica.name} was not recreated on the free worker within 420 s"]
+      let handed ← waitForCondition s!"the master's move hands over to {p.replica.name}" 420 do
+        return (← c.roles).bind (·.1) == some p.replica.name
+      if !handed then fails := fails ++ [s!"the master did not move to {p.replica.name} (on the uncordoned worker) within 420 s"]
+      for x in ((← opLogs).splitOn "\n").filter (fun x => containsSubstr x "NODE MOVE" || containsSubstr x "HANDOVER") do c.art "cordon-move.txt" x
     finally
       for n in [p.master.node, p.replica.node] do uncordon n
-    if !(← waitForCondition "the pair is redundant again" 300 (redundant c none)) then
+    if !(← waitForCondition "the pair is redundant again" 420 (redundant c none)) then
       fails := fails ++ ["the pair is not redundant after the cordons were removed"]
     return if fails.isEmpty then .pass else .fail (String.intercalate "; " fails)
 
@@ -1458,7 +1454,7 @@ def Scenario.title : Scenario → String
   | .cordonBlocked => "(C3) cordon + drain of the replica's worker with fewer copies than minCopies (2 vs 3): no move starts, the evictions are held (the drain times out), the replica keeps its pod, role and serving label, a FlareCordonMoveBlocked event names it; the pair is redundant after the uncordon"
   | .cordonNoSuccessor => "(C5) cordon + drain of the master's worker while its successor cannot catch up (master <-> replica cut): the handover aborts and never completes, the master stays on the same pod, the evictions are held (the drain times out); redundant again after the cut and the cordon are removed"
   | .cordonOperatorRestart => "(C6) the operator restarts in the middle of a move (replica's worker cordoned, move proxied): the new operator resumes the recorded move (no second move of the pod), a drain then completes and the pod is recreated on another worker; redundant again"
-  | .cordonTwoNodes => "(C7) the master's and the replica's workers cordoned together (two copies): neither has a real copy left on an uncordoned node, so no move starts, both are reported blocked, both pods keep their UID; redundant again after the cordons are removed"
+  | .cordonTwoNodes => "(C7) the master's and the replica's workers cordoned together (two copies, minCopies 2): a copy on the other cordoned node counts, so the replica moves first (warning FlareCordonMoveOnCordonedCopy) onto the free worker, then the master hands over to it; redundant again after the cordons are removed"
   | .cordonRestartQuiet => "(C9) flared restarts after the serving label is removed (a client connection held, so not yet released) and gets one request: the move is not released until a full quiet interval after it"
   | .cordonNoOperator => "(C8) the operator is away (scaled to 0): the node guard fails closed, cordon + drain of the replica's worker evicts nothing (the drain fails), the replica keeps its pod; redundant after the operator returns"
   | .cordonCancel => "(C4) cordon of the replica's worker, uncordon once its move is proxied: the move is cancelled, the replica gets the serving label back on the same pod and is a synced replica again"

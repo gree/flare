@@ -66,4 +66,12 @@ def step (firstSeen : List (String × Nat)) (key : String) (conflict : Option Bo
     | some t => (firstSeen, nowMs ≥ t + holdMs)
     | none => (firstSeen ++ [(key, nowMs)], false)
 
+/-- Keep only the keys still in the node map: a node removed (pod gone,
+    scaled down) is no claim and no down any more — left in, it kept the
+    gauges up for ever and stayed in the unhealthy list (review of 2596f25). -/
+def prune (state : FlareClusterState) (firstSeen : List (String × Nat)) (down : List String)
+    : List (String × Nat) × List String :=
+  (firstSeen.filter fun (k, _) => (state.lookupNode k).isSome,
+   down.filter fun k => (state.lookupNode k).isSome)
+
 end FlareOperator.DuplicateMaster

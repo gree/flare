@@ -4867,7 +4867,11 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
     metrics.unreachableNodes.set (← unreachCyclesRef.get).length.toFloat
   -- spec 12: the guard's "alert only" (no node reachable) as a gauge, every pass
   metrics.noNodeReachable.set (if (← reachGuardRef.get) then 1.0 else 0.0)
-  -- spec 13: claims pending and nodes down for one, every pass
+  -- spec 13: claims pending and nodes down for one, every pass (a key no
+  -- longer in the node map is dropped first)
+  let (fsPruned, downPruned) := DuplicateMaster.prune (← stateRef.get) (← duplicateFirstSeenRef.get) (← duplicateDownRef.get)
+  duplicateFirstSeenRef.set fsPruned
+  duplicateDownRef.set downPruned
   metrics.duplicateMasterClaims.set (← duplicateFirstSeenRef.get).length.toFloat
   metrics.duplicateMasterDown.set (← duplicateDownRef.get).length.toFloat
 

@@ -675,8 +675,39 @@ private def switchRun (c : Ctx) (op : SwitchOp) : IO (Except String SwitchObs) :
     c.art "report.txt" (o.peer.summary "peer")
     return .ok o
 
+/-- Every flared pod of the cluster: name, UID, restart count, container ID
+    and its last termination (reason / exitCode / signal / finishedAt). -/
+private def podIncarnations (c : Ctx) : IO (List (String × String × String × String × String)) := do
+  match ← kubectl ["get", "pods", "-n", c.cfg.«namespace», "-l", s!"cluster={c.cfg.name}", "-o",
+      "jsonpath={range .items[*]}{.metadata.name}|{.metadata.uid}|{.status.containerStatuses[0].restartCount}|{.status.containerStatuses[0].containerID}|{.status.containerStatuses[0].lastState.terminated.reason}/{.status.containerStatuses[0].lastState.terminated.exitCode}/{.status.containerStatuses[0].lastState.terminated.signal}/{.status.containerStatuses[0].lastState.terminated.finishedAt}{\"\\n\"}{end}"] with
+  | .ok o => return (o.splitOn "\n").filterMap fun l =>
+      match l.trim.splitOn "|" with
+      | [n, u, r, cid, last] => some (n, u, r, cid, last)
+      | _ => none
+  | .error _ => return []
+
 def switchTest (c : Ctx) (op : SwitchOp) : IO TestResult := do
-  match ← switchRun c op with
+  -- a flared that restarts INSIDE its pod (same UID) during an operation
+  -- that only replaces or keeps pods is no part of the operation
+  -- (41278035134: a master's flared died with no log line): recorded before
+  -- and after with its last termination, and a broken precondition — told
+  -- apart from the data verdict
+  let inc0 ← podIncarnations c
+  for (n, u, r, cid, last) in inc0 do
+    IO.eprintln s!"# [{c.test}] before: {n} uid {u} restarts {r} container {cid} lastState.terminated {last}"
+  let run ← switchRun c op
+  let inc1 ← podIncarnations c
+  let mut unexpected : List String := []
+  for (n, u, r, cid, last) in inc1 do
+    IO.eprintln s!"# [{c.test}] after: {n} uid {u} restarts {r} container {cid} lastState.terminated {last}"
+    match inc0.find? (fun (n0, u0, _, _, _) => n0 == n && u0 == u) with
+    | some (_, _, r0, cid0, _) =>
+      if r0 != r || cid0 != cid then
+        unexpected := unexpected ++ [s!"{n} (restarts {r0} -> {r}, container {cid0} -> {cid}, lastState.terminated {last})"]
+    | none => pure ()
+  if !unexpected.isEmpty then
+    return .fail s!"PRECONDITION NOT MET: flared restarted inside its pod during {op.label} (no part of the operation): {unexpected} — not a verdict on the switch"
+  match run with
   | .error e => return .fail e
   | .ok o =>
     IO.eprintln s!"# [{c.test}] {op.label}: operation ok={o.opOk} ({o.opDetail}); moved={o.moved} ({o.movedDetail}); master -> {o.newMaster}; redundancy={o.redundant}; missing on master {o.missingMaster}, on replica {o.missingReplica} when settled and {o.missingReplicaLater} 120 s later; {o.svc.summary "svc"}; errors by pod {o.svcByPod}; {o.peer.summary "peer"}; errors by pod {o.peerByPod}"

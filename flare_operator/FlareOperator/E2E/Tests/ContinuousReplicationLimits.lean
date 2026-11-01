@@ -6326,11 +6326,23 @@ private def Ctx.stepEvents (c : Ctx) (since : String) (pods : List String) : IO 
     | .error _ => pure ()
   return ev
 
+/-- One pod's incarnation: UID, restart count, container ID and its last
+    termination (reason / exitCode / signal / finishedAt), read in one get. -/
+private def Ctx.podIncarnation (c : Ctx) (pod : String) : IO (String × String × String × String) := do
+  match ← kubectlGetJsonpath "pod" pod c.cfg.«namespace»
+      "{.metadata.uid}|{.status.containerStatuses[0].restartCount}|{.status.containerStatuses[0].containerID}|{.status.containerStatuses[0].lastState.terminated.reason}/{.status.containerStatuses[0].lastState.terminated.exitCode}/{.status.containerStatuses[0].lastState.terminated.signal}/{.status.containerStatuses[0].lastState.terminated.finishedAt}" with
+  | .ok o =>
+    match o.trim.splitOn "|" with
+    | [u, r, cid, last] => return (u, r, cid, last)
+    | _ => return ("", "", "", s!"(unparsed: {o.trim})")
+  | .error e => return ("", "", "", s!"(unreadable: {e.take 120})")
+
 /-- Run one step: precondition (three equal copies) -> writer on -> `fault` ->
     follow the master (re-target the writer), until every pod is Ready and
     the map shows one master and two Active slaves (at least `minSecs` after
     the fault) -> 10 s more writes -> writer off -> 15 s -> compare. -/
 private def Ctx.forwardStep (c : Ctx) (label : String) (minSecs : Nat) (uncordonOnNewMaster : Bool)
+    (restarted : String → String → String → List String)
     (fault : String → String → String → IO (Except String Unit)) : IO TestResult := do
   let ns := c.cfg.«namespace»
   let dbg := c.cfg.debugPod
@@ -6345,6 +6357,12 @@ private def Ctx.forwardStep (c : Ctx) (label : String) (minSecs : Nat) (uncordon
     return .fail s!"could not start the marker writer: {e}"
   IO.sleep 3000
   IO.eprintln s!"# [{label}] master {m}, slaves {a} {b}; writer on (target {mIp}) since {since}"
+  -- every pod's incarnation before the fault: a flared exit the fault did
+  -- not cause (41278035134: the master's flared died with no log line) is a
+  -- broken precondition, told apart from a data verdict, with its reason
+  let inc0 ← pods.mapM fun p => do return (p, ← c.podIncarnation p)
+  for (p, (u, r, cid, last)) in inc0 do
+    IO.eprintln s!"# [{label}] before the fault: {p} uid {u} restarts {r} container {cid} lastState.terminated {last}"
   if let .error e ← fault m a b then
     discard <| execInDebugPod dbg ns "touch /tmp/w.stop"
     discard <| kubectl ["uncordon", kindNode]
@@ -6410,6 +6428,15 @@ private def Ctx.forwardStep (c : Ctx) (label : String) (minSecs : Nat) (uncordon
     else none
   let tl := (ev ++ wev).toArray.qsort (fun x y => decide (x.1 < y.1))
   IO.eprintln s!"# [{label}] timeline ({tl.size} line(s), UTC time of day):\n{String.intercalate "\n" (tl.toList.map fun (t, l) => s!"#   {t} {l}")}"
+  let expected := restarted m a b
+  let mut unexpected : List String := []
+  for (p, (u0, r0, cid0, _)) in inc0 do
+    let (u1, r1, cid1, last1) ← c.podIncarnation p
+    IO.eprintln s!"# [{label}] after the step: {p} uid {u1} restarts {r1} container {cid1} lastState.terminated {last1}"
+    if !expected.contains p && !u0.isEmpty && u0 == u1 && (r0 != r1 || cid0 != cid1) then
+      unexpected := unexpected ++ [s!"{p} (restarts {r0} -> {r1}, container {cid0} -> {cid1}, lastState.terminated {last1})"]
+  if !unexpected.isEmpty then
+    return .fail s!"[{label}] PRECONDITION NOT MET: flared restarted outside the fault (the fault restarts only {expected}): {unexpected} — not a verdict on the forwards"
   if !settled then return .fail s!"[{label}] the cluster did not return to one master and two Active, Ready slaves (masters seen {masters})"
   if stored.isEmpty then return .fail s!"[{label}] no marker was acknowledged"
   let lost := missingBy.filter fun (_, ms) => !ms.isEmpty
@@ -6469,17 +6496,17 @@ def forwardStepSuite : TestSuite := {
     let ns := fwdStepCfg.«namespace»
     [
     { name := "S1 (3 replicas): markers acknowledged every ~0.2 s while a slave's flared is restarted are all in every copy's own keys once the slave is Active again"
-      run := c.forwardStep "s1" 20 false fun _ a _ => do
+      run := c.forwardStep "s1" 20 false (fun _ a _ => [a]) fun _ a _ => do
         match ← c.killFlaredIn a with
         | .error e => return .error s!"could not kill flared in {a}: {e}"
         | .ok o => IO.eprintln s!"# [s1] kill -9 flared in {a}: {o.trim}"; return .ok () },
     { name := "S2 (+ promotion just before): the master is drained, a slave promoted, the ex-master rejoins Proxy -> Prepare slave (staged); markers acknowledged throughout are all in every copy's own keys"
-      run := c.forwardStep "s2" 40 false fun m _ _ => do
+      run := c.forwardStep "s2" 40 false (fun m _ _ => [m]) fun m _ _ => do
         match ← kubectl ["delete", "pod", m, "-n", ns, "--wait=false"] with
         | .error e => return .error s!"could not drain {m}: {e}"
         | .ok _ => IO.eprintln s!"# [s2] master {m} deleted (drain)"; return .ok () },
     { name := "S3 (+ concurrent replacement): a slave replaced under the same name (Pending) and the master drained at once (copy-identity 10's fixture); markers acknowledged throughout are all in every copy's own keys"
-      run := c.forwardStep "s3" 40 true fun m a _ => do
+      run := c.forwardStep "s3" 40 true (fun m a _ => [m, a]) fun m a _ => do
         if let .error e ← kubectl ["cordon", kindNode] then return .error s!"could not cordon: {e}"
         discard <| kubectl ["delete", "pod", a, "-n", ns, "--grace-period=0", "--force", "--wait=false"]
         let pending ← waitForCondition s!"{a} is replaced under the same name and Pending" 60 do

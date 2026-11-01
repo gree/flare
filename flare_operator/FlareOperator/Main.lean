@@ -2545,7 +2545,16 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       -- spec 12: nodes the OPERATOR cannot reach join the same list (flarei's
       -- retry count; a master without a reachable successor is kept, see
       -- unhealthyMastersKept; no action at all when no node is reachable)
-      let unreachableDown := (← unreachableDownRef.get) ++ (← duplicateDownRef.get).filter (!(← unreachableDownRef.get).contains ·)
+      -- the verdict belongs to the pod it was probed on: a pod recreated and
+      -- registered since (another UID) is not marked down for it
+      -- (41275671570 test 8: the old pod's verdict made the new one Down 1 s
+      -- after it registered)
+      let verdictIds ← reachPodIdRef.get
+      let reachDown := (← unreachableDownRef.get).filter fun k =>
+        match verdictIds.find? (·.1 == k), pods.find? (fun p => Bridge.PodInfo.toNodeKey p == k) with
+        | some (_, u0), some p => !u0.isEmpty && u0 == p.uid
+        | _, _ => false
+      let unreachableDown := reachDown ++ (← duplicateDownRef.get).filter (!reachDown.contains ·)
       let unhealthyKeys := (newUnready.filter (fun kv => kv.2 ≥ unreadyDeadCycles)).map Prod.fst
         ++ unreachableDown.filter (fun k => !(newUnready.filter (fun kv => kv.2 ≥ unreadyDeadCycles)).any (·.1 == k))
       for (k, n) in newUnready do
@@ -3659,13 +3668,27 @@ private def runReachabilityStep (crName ns : String) (stateRef : IO.Ref FlareClu
   unreachCyclesRef.modify fun l => FlareOperator.UnreachableNode.keepStreaksForSamePod l prevIds ids
   let probeTasks ← probeAddrs.mapM fun (_, ip) =>
     IO.asTask (prio := .dedicated) (Server.probeNodeReachable ip 12121 FlareOperator.UnreachableNode.monitorReadTimeoutMs)
+  -- a node marked down as unreachable is NotReady once it applies that map
+  -- (its readiness needs `active`), so the Ready filter above leaves it out;
+  -- it is probed too, for "reachable again" only (no streak, no verdict):
+  -- else it waited the whole stuck-down time (41275671570: ~13.5 min)
+  let downByReach ← downByReachRef.get
+  let backAddrs := (pods.filter fun p => !p.ready && !p.terminating && !p.ip.isEmpty
+      && downByReach.contains (Bridge.PodInfo.toNodeKey p)).map fun p => (Bridge.PodInfo.toNodeKey p, p.ip)
+  let backTasks ← backAddrs.mapM fun (_, ip) =>
+    IO.asTask (prio := .dedicated) (Server.probeNodeReachable ip 12121 FlareOperator.UnreachableNode.monitorReadTimeoutMs)
   let mut probed : List (String × Bool) := []
   for ((key, _), t) in probeAddrs.zip probeTasks do
     let ok ← match ← IO.wait t with
       | .ok b => pure b
       | .error _ => pure true
     probed := probed ++ [(key, ok)]
-  reachOkRef.set ((probed.filter (·.2)).map (·.1))
+  let mut backOk : List String := []
+  for ((key, _), t) in backAddrs.zip backTasks do
+    match ← IO.wait t with
+    | .ok true => backOk := backOk ++ [key]
+    | _ => pure ()
+  reachOkRef.set ((probed.filter (·.2)).map (·.1) ++ backOk)
   let reachVerdict := FlareOperator.UnreachableNode.step (← unreachCyclesRef.get) probed (← stateRef.get)
   unreachCyclesRef.set reachVerdict.streaks
   unreachableDownRef.set reachVerdict.down

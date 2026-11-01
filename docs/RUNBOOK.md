@@ -1262,7 +1262,9 @@ decision 2026-11-01). It is verified there (E2E cordon-master / cordon-replica:
 errors 0, missing 0). On a PVC cluster it is NOT verified: with node-local
 volumes (local PV, local-path) the recreated pod cannot leave the cordoned
 node, stays Pending and the move stays `resyncing` (no data lost; one copy
-fewer and the next moves wait until the uncordon); with network storage the
+fewer; after `resyncTimeoutSeconds` the move is marked
+[stuck](#cordon-move-stuck) and the next moves run, those of the same
+partition blocked by the copy count); with network storage the
 recreated pod comes back with its old data, a path not tested yet. On a PVC
 cluster set `nodeReplacement.enabled: false`: drains then go through the node
 guard's handover only, as before.
@@ -1292,16 +1294,16 @@ operator records a move in `status.nodeMoves` and walks it through:
 | `pending` | started; a master asks the ordered handover (demote → drain → promote) for a successor on an uncordoned node, a replica is demoted to a proxy |
 | `handingOver` | (master only) the handover runs |
 | `proxied` | the pod is a proxy; the operator removes its `flare.gree.net/serving` label |
-| `unserved` | waiting until (a) the client Service (`<name>-nodes-external`, which selects the label) no longer lists the pod in its EndpointSlices, (b) the pod's `client_requests` (data requests) did not grow for 10 s (`quietSeconds`; an older flared without it: `total_connections` minus the operator's own stats connections), (c) `curr_connections` is 0 (minus the operator's own one), and flared's own `own_role` is `proxy`. The quiet baseline is bound to the flared process (`reconstruction_boot_id`): a restarted flared, or a counter that went down, starts the 10 s again |
+| `unserved` | (bounded: held after `drainWaitSeconds`, [stuck](#cordon-move-stuck) after `unservedTimeoutSeconds`) waiting until (a) the client Service (`<name>-nodes-external`, which selects the label) no longer lists the pod in its EndpointSlices, (b) the pod's `client_requests` (data requests) did not grow for 10 s (`quietSeconds`; an older flared without it: `total_connections` minus the operator's own stats connections), (c) `curr_connections` is 0 (minus the operator's own one), and flared's own `own_role` is `proxy`. The quiet baseline is bound to the flared process (`reconstruction_boot_id`): a restarted flared, or a counter that went down, starts the 10 s again |
 | `released` | written **only by the operator**. The node guard now lets an eviction or delete of this pod through. If nothing evicts within 60 s the operator deletes it (UID precondition) |
-| `deleted` | the old pod is gone |
-| `resyncing` | the StatefulSet recreated it on another node; the operator seats it as a replica; when Ready, Active and synced (R3 eligible) as a Slave it gets the serving label back — never while it is Terminating. No timeout: a pod that never becomes such a Slave keeps the move here, and the next move does not start |
+| `deleted` | the old pod is gone; waiting for the StatefulSet to recreate it (counts against `resyncTimeoutSeconds`, like `resyncing`) |
+| `resyncing` | the StatefulSet recreated it on another node; the operator seats it as a replica; when Ready, Active and synced (R3 eligible) as a Slave it gets the serving label back — never while it is Terminating. Bounded: a pod that does not become such a Slave within `nodeReplacement.resyncTimeoutSeconds` (1800 s, counted from entering `deleted` / `resyncing`) makes the move [stuck](#cordon-move-stuck) |
 | `done` | finished |
 | `cancelled` | the node was uncordoned before `released` (see below) |
 
 `kubectl get flarecluster <name> -o jsonpath='{.status.nodeMoves}'` shows the
 record; the operator log lines start with `NODE MOVE`; Events carry
-`FlareCordonMoveStarted / Blocked / Held / Released / Cancelled / Done`, and the
+`FlareCordonMoveStarted / Blocked / Held / Stuck / Released / Cancelled / Done`, and the
 Warning `FlareCordonMoveOnCordonedCopy` (below).
 
 **Not enough copies (`FlareCordonMoveBlocked`).** The move starts only if the
@@ -1351,7 +1353,8 @@ up later. Look at `kubectl get endpointslices -l kubernetes.io/service-name=<nam
 the load balancer's targets, and the pod's `stats` (`client_requests`,
 `curr_connections`). Flared closing a client connection after a response is
 **not implemented yet** (L9): a client that never reconnects keeps the pod
-held; a later change adds it.
+held; a later change adds it. A held move turns [stuck](#cordon-move-stuck)
+after `unservedTimeoutSeconds`.
 
 **Uncordon.** The operator writes `cancelled` (generation + 1) **first** and
 puts the serving label back **after** that write succeeded, so an eviction
@@ -1372,6 +1375,49 @@ compare-and-swap on `status.nodeMoves` just before it allows, only as the
 lease holder with at least 5 s of lease left, and re-checks the lease after
 the write; a dry run writes and allows nothing. If the write fails the
 request is refused and retried by `drain`.
+
+### Stuck moves (`FlareCordonMoveStuck`) {#cordon-move-stuck}
+
+Only one move runs at a time, so a move that waits for ever on something
+outside the operator would stop every later move. Two phases have a deadline (chart values, seconds; 0 =
+no deadline):
+
+| value | default | phase | waits for |
+|---|---|---|---|
+| `nodeReplacement.unservedTimeoutSeconds` | 1800 | `unserved` (from entering it) | the client Service / connections to leave the pod |
+| `nodeReplacement.resyncTimeoutSeconds` | 1800 | `deleted` + `resyncing` (from entering each) | the recreated pod to come back as a Ready, Active, synced Slave |
+
+Past it the operator marks the move `stuck: true` (`stuckMs`, the phase is
+kept) with the reason `STUCK in <phase> for <n> s — …` in
+`status.nodeMoves.moves[].reason`, logs `NODE MOVE <pod>@<node>: STUCK in
+<phase> for <n> s — …`, emits the Warning Event `FlareCordonMoveStuck`, and
+sets `flare_operator_cordon_moves_stuck` (the number of stuck moves; alert
+`FlareCordonMoveStuck`, no `for`). A stuck move **no longer counts as the
+running move**: the next candidate starts. That is safe because the start
+check counts *real* copies only and a stuck move's pod holds none (a proxy,
+or a deleted pod with an unsynced replacement): a partition the stuck move
+left short blocks every move that would drop it further
+(`FlareCordonMoveBlocked`). A stuck move never becomes the running move again.
+
+- **Stuck in `unserved`**: the pod stays a proxy and **is never released**:
+  the node guard keeps refusing its eviction / delete (429), `kubectl drain`
+  of that node keeps waiting, even if the drain evidence turns up later.
+  Find what keeps reaching it: `kubectl get endpointslices -l
+  kubernetes.io/service-name=<name>-nodes-external`, the load balancer's
+  targets, and the pod's `stats` (`curr_connections`, `client_requests`);
+  `ss -tnp` / the client side for a persistent connection (L9). Then either
+  uncordon the node (cancels the move as for any move before `released`;
+  the label comes back; cordon again for a new move), or accept dropping
+  that client and use the [break-glass](#cordon-move-break-glass) override.
+- **Stuck in `deleted` / `resyncing`**: the old pod is already gone; there is
+  no data action left. The partition has one copy fewer until the
+  replacement syncs. Find why: `kubectl get pod <pod> -o wide` (Pending:
+  scheduling, node-local PV, resources), `kubectl describe pod`, its flared
+  log and `stats` (`repl_read_source_eligible`, role/state in the map), an
+  open replica repair. If it later becomes a synced Slave the move still
+  finishes by itself (label back, `done`). The node guard still holds
+  evictions / deletes of the recreated pod while the move is unfinished: use
+  the break-glass override to replace it.
 
 ### Break-glass: evicting or deleting a pod before its move is released {#cordon-move-break-glass}
 
@@ -1400,7 +1446,11 @@ the Service selector loses the serving label requirement.
 - `curr_connections` counts every open connection to the pod; the operator
   subtracts only its own one. Any other connection still open (a client's,
   or another flared node's) keeps the move `unserved` and, after
-  `drainWaitSeconds`, held.
+  `drainWaitSeconds`, held; after `unservedTimeoutSeconds` stuck (the next
+  move runs; this pod stays held).
+- `pending` / `handingOver` / `proxied` have no deadline: a handover that
+  keeps aborting is held (alert `FlareCordonMoveHeld`) and still the running
+  move.
 - A pod on a node-local PV cannot be recreated elsewhere: use tmpfs or
   network storage.
 

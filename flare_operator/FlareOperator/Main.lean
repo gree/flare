@@ -1084,7 +1084,9 @@ private def nodeReplacementCfg : IO NodeMove.Config := do
   return { minCopies := ← envNat "FLARE_NODE_REPLACEMENT_MIN_COPIES" 3,
            drainWaitMs := (← envNat "FLARE_NODE_REPLACEMENT_DRAIN_WAIT_SECONDS" 120) * 1000,
            quietMs := (← envNat "FLARE_NODE_REPLACEMENT_QUIET_SECONDS" 10) * 1000,
-           evictWaitMs := (← envNat "FLARE_NODE_REPLACEMENT_EVICT_WAIT_SECONDS" 60) * 1000 }
+           evictWaitMs := (← envNat "FLARE_NODE_REPLACEMENT_EVICT_WAIT_SECONDS" 60) * 1000,
+           unservedTimeoutMs := (← envNat "FLARE_NODE_REPLACEMENT_UNSERVED_TIMEOUT_SECONDS" 1800) * 1000,
+           resyncTimeoutMs := (← envNat "FLARE_NODE_REPLACEMENT_RESYNC_TIMEOUT_SECONDS" 1800) * 1000 }
 
 /-- how long total_connections of `pod` has not increased by more than the
     operator's own stats connections (none = not readable) -/
@@ -1192,8 +1194,9 @@ private def runNodeMoves (crName ns : String) (stateRef : IO.Ref FlareClusterSta
           else .running
     let successorIsMaster := !m.successor.isEmpty
       && (st.lookupNode m.successor).any (fun n => n.role == FlareRole.Master && n.state == FlareState.Active)
-    -- the drain evidence is read only while it can matter
-    let (inEndpoints, quiet, curr, ownProxy) ← if m.phase == .unserved && cur.any (·.uid == m.podUid) then do
+    -- the drain evidence is read only while it can matter (a stuck move is
+    -- never released: its evidence is not read)
+    let (inEndpoints, quiet, curr, ownProxy) ← if m.phase == .unserved && !m.stuck && cur.any (·.uid == m.podUid) then do
         let ep ← match ← Bridge.serviceEndpointPods s!"{crName}-nodes-external" ns with
           | .ok names => pure (some (names.contains m.pod))
           | .error _ => pure none
@@ -1219,6 +1222,11 @@ private def runNodeMoves (crName ns : String) (stateRef : IO.Ref FlareClusterSta
           Bridge.emitEvent crName ns "FlareCordonMoveDone" s!"pod {m.pod} moved off node {m.node}; its replacement serves again" false
       if m1.held && !m.held then
         Bridge.emitEvent crName ns "FlareCordonMoveHeld" s!"{m1.reason} (pod {m.pod}, node {m.node})" true
+      -- risk B13: past the phase's deadline; no longer the active move (the
+      -- next one may start), never released (the guard keeps holding the pod)
+      if m1.stuck && !m.stuck then
+        IO.eprintln s!"[flare-operator] NODE MOVE {m.pod}@{m.node}: {m1.reason}"
+        Bridge.emitEvent crName ns "FlareCordonMoveStuck" s!"{m1.reason} (pod {m.pod}, node {m.node}, request {m.id})" true
     else if m1.held && m.held && m1.reason != m.reason then pure ()
     -- the action follows the persisted state
     match act with
@@ -1349,6 +1357,7 @@ private def runNodeMoves (crName ns : String) (stateRef : IO.Ref FlareClusterSta
   nodeMoveLedgerCacheRef.set final
   metrics.cordonMovesActive.set (final.moves.filter (!·.finished)).length.toFloat
   metrics.cordonMoveHeld.set (if final.moves.any (fun m => !m.finished && m.held) then 1.0 else 0.0)
+  metrics.cordonMovesStuck.set final.stuckMoves.length.toFloat
   metrics.cordonMoveBlocked.set (if final.active.isNone then final.blocked.length.toFloat else 0.0)
   return heldNow
 
@@ -4004,7 +4013,9 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
   -- A0: the operator replaces the pods not on the StatefulSet's update
   -- revision, one at a time, while the cluster is stable
   let busyNow := !(← ledgerRef.get).entries.isEmpty || (← handoverActiveRef.get) || !heldKeys.isEmpty
-    || (← nodeMoveLedgerCacheRef.get).active.isSome
+    -- any unfinished move, a stuck one too (risk B13: a stuck move lets the
+    -- next cordon move start, but rolling stays paused as before)
+    || (← nodeMoveLedgerCacheRef.get).moves.any (!·.finished)
   runRolling crName ns stateRef (← crdRef.get).spec.replicas busyNow leaseHeldNow
   runServingLabels crName ns stateRef
   if ← passLeaseLostRef.get then

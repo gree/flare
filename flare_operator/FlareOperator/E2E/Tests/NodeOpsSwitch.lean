@@ -1423,6 +1423,326 @@ def cordonNoOperatorTest (c : Ctx) : IO TestResult := do
       fails := fails ++ ["the pair is not redundant after the operator came back"]
     return if fails.isEmpty then .pass else .fail (String.intercalate "; " fails)
 
+/-! ## C10: a cordon move that goes stuck (risk B13, flare-risk-cordon-stuck) -/
+
+/-- One move of the FlareCluster's `status.nodeMoves` as the harness reads it. -/
+private structure MoveRow where
+  id : String
+  pod : String
+  uid : String
+  phase : String
+  stuck : Bool
+  held : Bool
+  reason : String
+  deriving Repr
+
+private def MoveRow.label (m : MoveRow) : String :=
+  s!"{m.id} {m.pod} (uid {m.uid.take 8}) phase {m.phase} stuck {m.stuck} held {m.held}{if m.reason.isEmpty then "" else s!" ({m.reason.take 300})"}"
+
+/-- `status.nodeMoves.moves` of the cluster's CR (`none` = unreadable). -/
+private def nodeMoveRows (c : Ctx) : IO (Option (List MoveRow)) := do
+  match ← kubectl ["get", "flarecluster", c.cfg.name, "-n", c.cfg.«namespace», "-o",
+      "jsonpath={range .status.nodeMoves.moves[*]}{.id}|{.pod}|{.podUid}|{.phase}|{.stuck}|{.held}|{.reason}{\"\\n\"}{end}"] with
+  | .error _ => return none
+  | .ok out =>
+    return some ((out.splitOn "\n").filterMap fun l =>
+      match l.splitOn "|" with
+      | i :: p :: u :: ph :: s :: h :: rest =>
+        if i.trim.isEmpty then none
+        else some ({ id := i.trim, pod := p, uid := u, phase := ph, stuck := s == "true", held := h == "true",
+                     reason := String.intercalate "|" rest } : MoveRow)
+      | _ => none)
+
+/-- The move of `pod` recorded for the incarnation `uid` (the latest one). -/
+private def moveOf (rows : List MoveRow) (pod uid : String) : Option MoveRow :=
+  (rows.filter fun r => r.pod == pod && r.uid == uid).getLast?
+
+/-- Log `status.nodeMoves` with a timestamp; the rows read (`[]` = unreadable). -/
+private def logMoves (c : Ctx) (tag : String) : IO (List MoveRow) := do
+  match ← nodeMoveRows c with
+  | none => c.event s!"{tag}: status.nodeMoves unreadable"; return []
+  | some rs =>
+    c.event s!"{tag}: status.nodeMoves = {if rs.isEmpty then "(none)" else String.intercalate " ; " (rs.map MoveRow.label)}"
+    return rs
+
+/-- One operator metric (integer part; gauges render as floats), scraped from
+    the operator's /metrics through the debug pod; `none` = unreadable. -/
+private def operatorMetric (c : Ctx) (name : String) : IO (Option Nat) := do
+  let some ip := ((← getPodIps s!"app={c.cfg.operatorName}" c.cfg.«namespace»).filter (!·.trim.isEmpty)).head? | return none
+  match ← execInDebugPod c.cfg.debugPod c.cfg.«namespace» s!"printf 'GET /metrics HTTP/1.0\\r\\nHost: x\\r\\n\\r\\n' | nc -w 3 {ip.trim} 9090" with
+  | .error _ => return none
+  | .ok out =>
+    return (out.splitOn "\n").findSome? fun line =>
+      let t := line.trim
+      if t.startsWith (name ++ "{") || t.startsWith (name ++ " ") then
+        ((t.splitOn " ").getLast?.map fun v => ((v.trim.splitOn ".").headD v.trim)).bind String.toNat?
+      else none
+
+/-- (type, message) of the namespace's Events with `reason`. -/
+private def eventsOf (c : Ctx) (reason : String) : IO (List (String × String)) := do
+  match ← kubectl ["get", "events", "-n", c.cfg.«namespace», "--field-selector", s!"reason={reason}", "-o",
+      "jsonpath={range .items[*]}{.type}|{.message}{\"\\n\"}{end}"] with
+  | .error _ => return []
+  | .ok o =>
+    return (o.splitOn "\n").filterMap fun l =>
+      match l.splitOn "|" with
+      | t :: rest => if t.trim.isEmpty then none else some (t.trim, String.intercalate "|" rest)
+      | [] => none
+
+/-- A master and TWO active replicas of partition 0, all Ready and not
+    deleting, on three different workers, each replica on the master's
+    history and read-eligible (as `redundant`): (master, replica A, replica
+    B), the replicas by name. -/
+private def trio (c : Ctx) : IO (Option (PodRow × PodRow × PodRow)) := do
+  let some ps ← c.pods | return none
+  let some (some m, rs) ← c.roles | return none
+  let v ← c.nodeView
+  let activeR := rs.filter fun r => v.any fun e => podOfFqdn e.fqdn == r && e.state == 0
+  let some mp := ps.find? (·.name == m) | return none
+  let rps := (activeR.filterMap fun r => ps.find? (·.name == r)).toArray.qsort (fun a b => a.name < b.name) |>.toList
+  match rps with
+  | [a, b] =>
+    let all := [mp, a, b]
+    if !(all.all fun p => p.ready && !p.deleting && !p.ip.isEmpty) then return none
+    if (all.map (·.node)).eraseDups.length != 3 then return none
+    let some mo ← c.stats mp.ip | return none
+    for r in [a, b] do
+      let some ro ← c.stats r.ip | return none
+      let sameHistory := (statOf mo "rocksdb_source_epoch").isSome && statOf mo "rocksdb_source_epoch" == statOf ro "rocksdb_source_epoch"
+      let eligible := statOf ro "repl_read_source_eligible" == some "1"
+        && (statOf ro "repl_read_source_state").all (· == "eligible")
+      if !(sameHistory && eligible) then return none
+    return some (mp, a, b)
+  | _ => return none
+
+/-- C10 (risk B13, flare-risk-cordon-stuck; review): a cordon move goes STUCK
+    on the real path and does not stop the next move. Three copies (a master
+    and two replicas, one per worker), minCopies 2, the unserved deadline
+    shortened to 60 s for this scenario. A client keeps a TCP connection open
+    to replica A, and A's worker is cordoned: the move goes proxied ->
+    unserved and cannot be released (curr_connections never drops to 0);
+    past 60 s it is marked stuck (phase kept, held), with a Warning
+    FlareCordonMoveStuck and flare_operator_cordon_moves_stuck >= 1. A drain
+    of that worker is refused (429, it retries and times out) and the pod
+    keeps its UID; the move is never released. Replica B's worker is then
+    cordoned: a NEW move of B starts and completes (B released, recreated on
+    its uncordoned worker and served again) while A's stays stuck. Even with
+    the connection closed the stuck move is not released; the uncordon
+    cancels it, A gets the serving label back on the same pod, and the
+    partition has three synced copies again. A write load runs throughout:
+    0 errors, 0 acknowledged writes missing. -/
+def cordonStuckTest (c : Ctx) : IO TestResult := do
+  if !(← operatorSettled c) then
+    return .fail (notSetUp "the operator did not finish its startup grace period")
+  let found ← IO.mkRef (none : Option (PodRow × PodRow × PodRow))
+  discard <| waitForCondition "a master and two synced replicas on three workers" 300 do
+    let t ← trio c
+    found.set t
+    return t.isSome
+  let some (m, ra, rb) ← found.get
+    | return .fail (notSetUp "the cluster did not start this test with a master and two synced replicas on three workers")
+  let ns := c.cfg.«namespace»
+  c.conditions ["C10: 1 partition x 3 copies (master + 2 replicas, one per worker), minCopies 2, FLARE_NODE_REPLACEMENT_UNSERVED_TIMEOUT_SECONDS=60 (nodeReplacement.unservedTimeoutSeconds); a client connection held to replica A, A's worker cordoned (move -> unserved -> stuck), drain (90 s) of A's worker, then replica B's worker cordoned (the next move); the connection closed, the uncordons; write load 2 x 50/s via the partition Service + 1 x 50/s via the all-pods Service",
+    s!"master {m.name}@{m.node}; replica A (stuck) {ra.name}@{ra.node} uid {ra.uid}; replica B (next move) {rb.name}@{rb.node} uid {rb.uid}"]
+  let opLogs : IO String := kubectlLogsLabel s!"app={c.cfg.operatorName}" ns 30000
+  let logHas := fun (needles : List String) => do
+    return ((← opLogs).splitOn "\n").any fun l => needles.all (containsSubstr l ·)
+  match ← c.ensureLoadWriter with
+  | .error e => return .fail (notSetUp e)
+  | .ok () => pure ()
+  let labelled ← waitForCondition "every flared pod carries the serving label" 120 do
+    match ← kubectl ["get", "pods", "-n", ns, "-l", s!"app=flare,cluster={c.cfg.name},flare.gree.net/serving=true", "-o", "jsonpath={.items[*].metadata.name}"] with
+    | .ok o => return ((o.trim.splitOn " ").filter (!·.isEmpty)).length == c.cfg.replicas * c.cfg.partitions
+    | .error _ => return false
+  if !labelled then return .fail (notSetUp "the operator did not label every pod serving")
+  if !(← c.startLoad "svc" (svcHost c) 2 50) then return .fail (notSetUp "the client-path load did not start")
+  if !(← c.startLoad "peer" s!"{c.cfg.name}-nodes-external.{ns}.svc.cluster.local" 1 50) then
+    return .fail (notSetUp "the proxy-path load did not start")
+  -- the held client connection: curr_connections of A never drops to 0. It
+  -- sends `version` every 5 s: flared closes a client connection idle for
+  -- its read timeout (30 s in the k8s build), and an idle one was closed
+  -- before the 60 s deadline, so the move was released (41352662024)
+  let holdTag := "flare-e2e-hold-3607"
+  let closeHold : IO Unit := do
+    discard <| execInDebugPod c.cfg.debugPod ns s!"pkill -f '{holdTag}' ; pkill -f 'nc {ra.ip} {c.cfg.flarePort}' ; true"
+  match ← execInDebugPod c.cfg.debugPod ns s!"setsid sh -c ': {holdTag}; while :; do printf \"version\\r\\n\"; sleep 5; done | nc {ra.ip} {c.cfg.flarePort}' >/dev/null 2>&1 < /dev/null &" with
+  | .error e => return .fail (notSetUp s!"could not hold a client connection: {e.take 200}")
+  | .ok _ => pure ()
+  IO.sleep 2000
+  let conns := fun (ip : String) => do
+    return ((← c.stats ip).bind (statOf · "curr_connections")).getD "unreadable"
+  c.event s!"client connection held to {ra.name} ({ra.ip}:{c.cfg.flarePort}); its curr_connections = {← conns ra.ip} (this stats read included)"
+  let mut fails : List String := []
+  try
+    -- 1-3. A's move: unserved, then stuck past the 60 s deadline
+    match ← kubectl ["cordon", ra.node] with
+    | .error e => return .fail (notSetUp s!"cordon failed: {e.take 200}")
+    | .ok _ => pure ()
+    c.event s!"cordoned {ra.node} ({ra.name}) with the client connection held"
+    let unserved ← waitForCondition s!"the move of {ra.name} reaches unserved" 240 do
+      return (← nodeMoveRows c).any fun rs => (moveOf rs ra.name ra.uid).any (·.phase == "unserved")
+    let tUnserved ← IO.monoMsNow
+    discard <| logMoves c "unserved"
+    if !unserved then return .fail (notSetUp s!"the move of {ra.name} never reached unserved within 240 s")
+    let stuck ← waitForCondition s!"the move of {ra.name} is marked stuck" 240 do
+      return (← nodeMoveRows c).any fun rs => (moveOf rs ra.name ra.uid).any (·.stuck)
+    let tStuck ← IO.monoMsNow
+    let rows ← logMoves c "stuck"
+    c.event s!"stuck observed {(tStuck - tUnserved) / 1000} s after unserved was observed (deadline 60 s); {ra.name} curr_connections = {← conns ra.ip}"
+    if !stuck then
+      for x in ((← opLogs).splitOn "\n").filter (containsSubstr · "NODE MOVE") do c.art "cordon-move.txt" x
+      return .fail s!"the move of {ra.name} was not marked stuck within 240 s of reaching unserved (unservedTimeoutSeconds 60)"
+    if tStuck - tUnserved < 45000 then
+      fails := fails ++ [s!"the move was marked stuck {(tStuck - tUnserved) / 1000} s after unserved: before its 60 s deadline"]
+    match moveOf rows ra.name ra.uid with
+    | none => fails := fails ++ ["the stuck move is not in status.nodeMoves"]
+    | some mv =>
+      if mv.phase != "unserved" then fails := fails ++ [s!"the stuck move left unserved (phase {mv.phase})"]
+      if !mv.held then fails := fails ++ ["the stuck move is not held"]
+      if !containsSubstr mv.reason "STUCK in unserved" then fails := fails ++ [s!"the stuck move's reason is not a STUCK in unserved: {mv.reason.take 200}"]
+      if !containsSubstr mv.reason "open connection" then fails := fails ++ [s!"the stuck move's reason does not name the open client connection: {mv.reason.take 200}"]
+    if !(← logHas [s!"NODE MOVE {ra.name}@{ra.node}: STUCK in unserved"]) then
+      fails := fails ++ ["no STUCK line for the move was logged by the operator"]
+    let evOk ← waitForCondition s!"a Warning FlareCordonMoveStuck names {ra.name}" 60 do
+      return (← eventsOf c "FlareCordonMoveStuck").any fun (t, msg) => t == "Warning" && containsSubstr msg ra.name
+    c.event s!"FlareCordonMoveStuck events: {(← eventsOf c "FlareCordonMoveStuck").map (fun (t, msg) => s!"{t}: {msg.take 300}")}"
+    if !evOk then fails := fails ++ [s!"no Warning event FlareCordonMoveStuck names {ra.name}"]
+    let gaugeOk ← waitForCondition "flare_operator_cordon_moves_stuck >= 1" 60 do
+      return (← operatorMetric c "flare_operator_cordon_moves_stuck").any (· ≥ 1)
+    c.event s!"flare_operator_cordon_moves_stuck = {← operatorMetric c "flare_operator_cordon_moves_stuck"}"
+    if !gaugeOk then fails := fails ++ ["flare_operator_cordon_moves_stuck did not read >= 1"]
+    -- 4. the held pod is never released: a drain of its worker is refused
+    -- (429: kubectl retries) and times out; the pod keeps its UID
+    let stem ← startDrain ra.node 90
+    c.event s!"drain of {ra.node} started (timeout 90 s)"
+    discard <| waitForCondition "the drain ended" 150 (return (← drainResult stem).isSome)
+    match ← drainResult stem with
+    | some (rc, out) =>
+      for l in out.splitOn "\n" do c.art "drain.txt" l
+      let retries := (out.splitOn "\n").filter fun l => containsSubstr l "will retry" && containsSubstr l ra.name
+      c.event s!"drain rc={rc}; {retries.length} eviction(s) of {ra.name} refused for a retry; last: {(retries.getLast?.getD "-").take 300}"
+      if rc == "0" then fails := fails ++ ["the drain completed: the stuck move's pod was evicted"]
+      if retries.length < 2 then fails := fails ++ [s!"only {retries.length} refused-and-retried eviction(s) of {ra.name} in the drain output (429 expected for its whole length)"]
+      if !(retries.any (containsSubstr · "phase unserved")) then fails := fails ++ ["the drain's refusals do not name the move's unserved phase"]
+    | none => fails := fails ++ ["the drain did not end within 150 s"]
+    let (uidA1, servingA1) ← podUidServing c ra.name
+    c.event s!"after the drain: {ra.name} uid {uidA1} serving {servingA1}"
+    if uidA1 != ra.uid then fails := fails ++ [s!"{ra.name} was replaced or deleted while its move was stuck ({ra.uid} -> {uidA1})"]
+    if servingA1 then fails := fails ++ [s!"{ra.name} carries the serving label while its move is stuck"]
+    match moveOf ((← logMoves c "after the drain")) ra.name ra.uid with
+    | some mv => if mv.phase != "unserved" || !mv.stuck then fails := fails ++ [s!"after the drain the move is {mv.label}, not stuck in unserved"]
+    | none => fails := fails ++ ["the stuck move is gone from status.nodeMoves after the drain"]
+    -- 5. the next move starts and completes while A's stays stuck
+    match ← kubectl ["cordon", rb.node] with
+    | .error e => return .fail (notSetUp s!"cordon of the second worker failed: {e.take 200}")
+    | .ok _ => pure ()
+    c.event s!"cordoned {rb.node} ({rb.name}) while the move of {ra.name} is stuck"
+    let started ← waitForCondition s!"a move of {rb.name} starts" 180 do
+      return (← nodeMoveRows c).any fun rs => (moveOf rs rb.name rb.uid).isSome
+    discard <| logMoves c "next move"
+    if !started then
+      fails := fails ++ [s!"no move of {rb.name} started within 180 s while the move of {ra.name} was stuck (the stuck move blocked the next one)"]
+    else
+      let released ← waitForCondition s!"the move of {rb.name} is released" 300 do
+        return (← nodeMoveRows c).any fun rs => (moveOf rs rb.name rb.uid).any fun r => ["released", "deleted", "resyncing", "done"].contains r.phase
+      discard <| logMoves c "next move released"
+      if !released then fails := fails ++ [s!"the move of {rb.name} did not reach released within 300 s"]
+      else
+        -- the operator deletes the released pod itself (evictWait 60 s); its
+        -- replacement cannot be placed while every other worker holds a
+        -- flared pod (required anti-affinity) and its own is cordoned
+        let gone ← waitForCondition s!"the old pod of {rb.name} is gone" 300 do
+          return (← nodeMoveRows c).any fun rs => (moveOf rs rb.name rb.uid).any fun r => ["deleted", "resyncing", "done"].contains r.phase
+        discard <| logMoves c "next move deleted"
+        if !gone then fails := fails ++ [s!"the released pod {rb.name} was not deleted within 300 s"]
+        uncordon rb.node
+        c.event s!"uncordoned {rb.node} so the replacement of {rb.name} can be placed"
+        let done ← waitForCondition s!"the move of {rb.name} is done" 600 do
+          if ← logHas [s!"NODE MOVE {rb.name}@{rb.node}:", "-> done"] then return true
+          return (← nodeMoveRows c).any fun rs => (moveOf rs rb.name rb.uid).any (·.phase == "done")
+        discard <| logMoves c "next move done"
+        if !done then fails := fails ++ [s!"the move of {rb.name} was not done within 600 s"]
+    -- A's move is still stuck, its pod still held
+    let (uidA2, servingA2) ← podUidServing c ra.name
+    match moveOf ((← logMoves c "stuck move after the next move")) ra.name ra.uid with
+    | some mv => if mv.phase != "unserved" || !mv.stuck || !mv.held then fails := fails ++ [s!"after the next move the move of {ra.name} is {mv.label}, not stuck and held in unserved"]
+    | none => fails := fails ++ ["the stuck move is gone from status.nodeMoves after the next move"]
+    if uidA2 != ra.uid || servingA2 then fails := fails ++ [s!"{ra.name} changed while its move was stuck (uid {uidA2}, serving {servingA2})"]
+    let g2 ← operatorMetric c "flare_operator_cordon_moves_stuck"
+    c.event s!"flare_operator_cordon_moves_stuck = {g2} after the next move"
+    if !(g2.any (· ≥ 1)) then fails := fails ++ [s!"flare_operator_cordon_moves_stuck reads {g2} while the move of {ra.name} is stuck"]
+    -- 6. the connection closed: a stuck move is still never released
+    closeHold
+    c.event s!"client connection to {ra.name} closed; curr_connections = {← conns ra.ip} (this stats read included)"
+    IO.sleep 30000
+    match moveOf ((← logMoves c "30 s after the connection closed")) ra.name ra.uid with
+    | some mv => if mv.phase != "unserved" || !mv.stuck then fails := fails ++ [s!"after the connection closed the stuck move became {mv.label}: a stuck move must never be released"]
+    | none => fails := fails ++ ["the stuck move is gone from status.nodeMoves after the connection closed"]
+    if ← logHas [s!"NODE MOVE {ra.name}@{ra.node}:", "-> released"] then
+      fails := fails ++ [s!"the stuck move of {ra.name} was released"]
+    -- the uncordon cancels the stuck unserved move; A serves again, same pod
+    uncordon ra.node
+    c.event s!"uncordoned {ra.node}"
+    let cancelled ← waitForCondition s!"the stuck move of {ra.name} is cancelled" 180 do
+      return (← nodeMoveRows c).any fun rs => (moveOf rs ra.name ra.uid).any (·.phase == "cancelled")
+    discard <| logMoves c "after the uncordon"
+    if !cancelled then fails := fails ++ ["the uncordon did not cancel the stuck move"]
+    let back ← waitForCondition s!"{ra.name} serves again" 180 do
+      return (← podUidServing c ra.name).2
+    let (uidA3, _) ← podUidServing c ra.name
+    c.event s!"{ra.name} serving label back={back}, uid {uidA3}"
+    if !back then fails := fails ++ [s!"{ra.name} did not get the serving label back after the cancel"]
+    if uidA3 != ra.uid then fails := fails ++ [s!"{ra.name} was replaced ({ra.uid} -> {uidA3}) although its move was cancelled"]
+    let g0 ← waitForCondition "flare_operator_cordon_moves_stuck is 0" 120 do
+      return (← operatorMetric c "flare_operator_cordon_moves_stuck") == some 0
+    if !g0 then fails := fails ++ [s!"flare_operator_cordon_moves_stuck reads {← operatorMetric c "flare_operator_cordon_moves_stuck"} after the stuck move was cancelled"]
+  finally
+    closeHold
+    uncordon ra.node
+    uncordon rb.node
+  for x in ((← opLogs).splitOn "\n").filter (fun x => containsSubstr x "NODE MOVE" || containsSubstr x "NODE GUARD" || containsSubstr x "serving label") do c.art "cordon-move.txt" x
+  if !(← waitForCondition "a master and two synced replicas again" 600 (return (← trio c).isSome)) then
+    fails := fails ++ ["the partition does not have a master and two synced replicas again"]
+  -- the write load: 0 errors, no acknowledged write missing
+  let svc? ← c.stopLoad "svc" 2
+  let peer? ← c.stopLoad "peer" 1
+  match svc?, peer? with
+  | some svcRes, some peerRes =>
+    let ss := loadStats svcRes
+    let ps := loadStats peerRes
+    c.art "report.txt" (ss.summary "svc")
+    c.art "report.txt" (ps.summary "peer")
+    c.event (ss.summary "svc")
+    c.event (ps.summary "peer")
+    if ss.errors + ps.errors > 0 then fails := fails ++ [s!"{ss.errors} + {ps.errors} write errors (svc + peer)"]
+    let acks : List WriteRec := ((svcRes.recs ++ peerRes.recs).filter (fun (r : LoadRec) => r.ack)).map (fun (r : LoadRec) => r.toWrite)
+    let master := (← c.roles).bind (·.1)
+    let copies ← finalCopies c "settled"
+    let mut late : List String := []
+    for (pod, cp) in copies do
+      match cp with
+      | none => fails := fails ++ [unobservable s!"the copy of {pod} could not be read"]
+      | some d =>
+        let n ← recordMissing c pod acks d
+        c.event s!"{pod}{if master == some pod then " (master)" else ""}: {n} of {acks.length} acknowledged writes missing"
+        if n > 0 then
+          if master == some pod then fails := fails ++ [s!"{n} acknowledged writes missing on the master {pod}"]
+          else late := late ++ [pod]
+    -- a replica gap that a repair fills is delayed, not lost: read it again after 120 s
+    if !late.isEmpty then
+      IO.sleep 120000
+      let copies2 ← finalCopies c "later"
+      for pod in late do
+        match (copies2.lookup pod).join with
+        | none => fails := fails ++ [unobservable s!"the copy of {pod} could not be read 120 s later"]
+        | some d =>
+          let n ← recordMissing c s!"{pod}-later" acks d
+          c.event s!"{pod} 120 s later: {n} acknowledged writes missing"
+          if n > 0 then fails := fails ++ [s!"{n} acknowledged writes missing on the replica {pod} 120 s after it settled"]
+  | _, _ => fails := fails ++ [unobservable "a load log could not be read or failed its integrity check (never counted as 'no error')"]
+  IO.eprintln s!"# [{c.test}] cordon stuck: {if fails.isEmpty then "every check held" else String.intercalate "; " fails}"
+  return if fails.isEmpty then .pass else .fail (String.intercalate "; " fails)
+
 /-- One scenario per suite, each on a FRESH cluster: a scenario that leaves the
     pair broken (e.g. a replica on an older history after S3) no longer makes
     the next one fail on its precondition, and each leg stays well inside the
@@ -1441,6 +1761,7 @@ inductive Scenario where
   | cordonTwoNodes
   | cordonNoOperator
   | cordonRestartQuiet
+  | cordonStuck
   deriving BEq
 
 def Scenario.slug : Scenario → String
@@ -1466,6 +1787,7 @@ def Scenario.slug : Scenario → String
   | .cordonTwoNodes => "cordon-two-nodes"
   | .cordonNoOperator => "cordon-no-operator"
   | .cordonRestartQuiet => "cordon-restart-quiet"
+  | .cordonStuck => "cordon-stuck"
 
 def Scenario.title : Scenario → String
   | .op .deleteMaster => "(S1) kubectl delete pod of the MASTER under a client-like load: the pod is replaced; 0 write errors, 0 acknowledged writes missing on the final master and replica"
@@ -1488,6 +1810,7 @@ def Scenario.title : Scenario → String
   | .cordonTwoNodes => "(C7) the master's and the replica's workers cordoned together (two copies, minCopies 2): a copy on the other cordoned node counts, so the replica moves first (warning FlareCordonMoveOnCordonedCopy) onto the free worker, then the master hands over to it; redundant again after the cordons are removed"
   | .cordonRestartQuiet => "(C9) flared restarts after the serving label is removed (a client connection held, so not yet released) and gets one request: the move is not released until a full quiet interval after it"
   | .cordonNoOperator => "(C8) the operator is away (scaled to 0): the node guard fails closed, cordon + drain of the replica's worker evicts nothing (the drain fails), the replica keeps its pod; redundant after the operator returns"
+  | .cordonStuck => "(C10) a cordon move goes STUCK: a client keeps a connection to replica A, A's worker is cordoned, the move stays unserved and past the 60 s unserved deadline is marked stuck (held, Warning FlareCordonMoveStuck, flare_operator_cordon_moves_stuck >= 1); a drain of A's worker is refused (429) and A keeps its pod; a NEW move of replica B (its worker cordoned next) runs to done meanwhile; the closed connection does not release the stuck move, the uncordon cancels it and A serves again on the same pod; 0 write errors, 0 missing"
   | .cordonCancel => "(C4) cordon of the replica's worker, uncordon once its move is proxied: the move is cancelled, the replica gets the serving label back on the same pod and is a synced replica again"
   | .sigtermHold => "(S6) a sync client write held on a cut replica across a SIGTERM (cut removed 40 s after it): the client gets STORED and the replica holds the value"
 
@@ -1515,6 +1838,11 @@ private def scenarioSuite (sc : Scenario) (tmpfs : Bool) : TestSuite :=
       { cfg0 with nodeGuard := true, nodeReplacement := true, nodeReplacementMinCopies := 2 }
     else if sc == .cordonCancel then
       { cfg0 with nodeGuard := true, nodeReplacement := true, nodeReplacementMinCopies := 2 }
+    -- C10: three copies, so a second move is legal (minCopies 2) while the
+    -- first is stuck; the unserved deadline shortened from 1800 s to 60 s
+    else if sc == .cordonStuck then
+      { cfg0 with replicas := 3, nodeGuard := true, nodeReplacement := true, nodeReplacementMinCopies := 2,
+                  operatorEnv := [("FLARE_NODE_REPLACEMENT_UNSERVED_TIMEOUT_SECONDS", "60")] }
     else if sc == .cordonBlocked then
       { cfg0 with nodeGuard := true, nodeReplacement := true, nodeReplacementMinCopies := 3 }
     else cfg0
@@ -1530,7 +1858,7 @@ private def scenarioSuite (sc : Scenario) (tmpfs : Bool) : TestSuite :=
       cleanupCluster cfg
     onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
     afterEach := fun i => saveFullLogs cfg.«namespace» s!"after-test-{i}"
-    tests := [{ name := sc.title, run := match sc with | .op o => switchTest c o | .gate => gateTest c | .sigtermHold => sigtermHoldTest c | .abortExhaust => abortExhaustTest c | .nodeGuard => nodeGuardTest c | .cordonBlocked => cordonBlockedTest c | .cordonCancel => cordonCancelTest c | .cordonNoSuccessor => cordonNoSuccessorTest c | .cordonOperatorRestart => cordonOperatorRestartTest c | .cordonTwoNodes => cordonTwoNodesTest c | .cordonNoOperator => cordonNoOperatorTest c | .cordonRestartQuiet => cordonRestartQuietTest c }] }
+    tests := [{ name := sc.title, run := match sc with | .op o => switchTest c o | .gate => gateTest c | .sigtermHold => sigtermHoldTest c | .abortExhaust => abortExhaustTest c | .nodeGuard => nodeGuardTest c | .cordonBlocked => cordonBlockedTest c | .cordonCancel => cordonCancelTest c | .cordonNoSuccessor => cordonNoSuccessorTest c | .cordonOperatorRestart => cordonOperatorRestartTest c | .cordonTwoNodes => cordonTwoNodesTest c | .cordonNoOperator => cordonNoOperatorTest c | .cordonRestartQuiet => cordonRestartQuietTest c | .cordonStuck => cordonStuckTest c }] }
 
 def scenarios : List Scenario := [.op .deleteMaster, .op .rollingRestart, .op .rollBoth, .op .drainMaster, .gate, .sigtermHold, .op .deleteMasterSaveFail, .op .deleteMasterAbortRetry, .abortExhaust, .nodeGuard, .op .deleteMasterLeaseTakeover, .op .deleteMasterObserveFail, .op .helmUpgrade]
 
@@ -1538,6 +1866,6 @@ def scenarios : List Scenario := [.op .deleteMaster, .op .rollingRestart, .op .r
 def switchSuites : List TestSuite :=
   scenarios.map (fun sc => scenarioSuite sc false) ++ scenarios.map (fun sc => scenarioSuite sc true)
     -- the cordon move needs storage that can leave its node: tmpfs only
-    ++ [Scenario.op .cordonMaster, .op .cordonReplica, .cordonBlocked, .cordonCancel, .cordonNoSuccessor, .cordonOperatorRestart, .cordonTwoNodes, .cordonNoOperator, .cordonRestartQuiet].map (fun sc => scenarioSuite sc true)
+    ++ [Scenario.op .cordonMaster, .op .cordonReplica, .cordonBlocked, .cordonCancel, .cordonNoSuccessor, .cordonOperatorRestart, .cordonTwoNodes, .cordonNoOperator, .cordonRestartQuiet, .cordonStuck].map (fun sc => scenarioSuite sc true)
 
 end FlareOperator.E2E.Tests.NodeOpsSwitch

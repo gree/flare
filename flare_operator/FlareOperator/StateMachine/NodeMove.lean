@@ -539,6 +539,10 @@ structure Cand where
   successor : Option String
   /-- Terminating / not Ready pods are not moved -/
   movable : Bool := true
+  /-- why its data cannot follow it to another node (a node-local PV: the
+      recreated pod would stay Pending and the move `resyncing`); none =
+      tmpfs or network storage -/
+  pinned : Option String := none
   deriving Repr
 
 inductive Start where
@@ -562,6 +566,8 @@ def next (cfg : Config) (l : Ledger) (cordoned : List String) (cs : List Cand) (
     if ra != rb then ra < rb else a.pod < b.pod).toList
   let why : Cand → Option String := fun c =>
     if !c.movable then some "the pod is not Ready or is terminating"
+    else if let some p := c.pinned then
+      some s!"{p}: its data cannot leave the node (use tmpfs or network storage; uncordon to keep it here)"
     else if c.role == "master" && c.successor.isNone then
       some "no caught-up replica on an uncordoned node to take the master over"
     else startBlock cfg c.role [c.node] c.others

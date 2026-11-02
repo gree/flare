@@ -116,6 +116,7 @@ jobs:
             {"group":"node-ops-cordon","suites":"node-ops-switch-tmpfs-cordon-master,node-ops-switch-tmpfs-cordon-replica,node-ops-switch-tmpfs-cordon-blocked,node-ops-switch-tmpfs-cordon-cancel"},
             {"group":"node-ops-cordon-b","suites":"node-ops-switch-tmpfs-cordon-no-successor,node-ops-switch-tmpfs-cordon-operator-restart,node-ops-switch-tmpfs-cordon-two-nodes,node-ops-switch-tmpfs-cordon-no-operator,node-ops-switch-tmpfs-cordon-restart-quiet"},
             {"group":"node-ops-cordon-c","suites":"node-ops-switch-tmpfs-cordon-stuck"},
+            {"group":"node-ops-cordon-pvc","suites":"node-ops-switch-nfs-cordon-master,node-ops-switch-nfs-cordon-replica,node-ops-switch-cordon-pinned"},
             {"group":"stats-cost","suites":"stats-cost"},
             {"group":"continuous-replication","suites":"copy-retention-measure,continuous-replication,continuous-replication-scale,continuous-replication-sustained,continuous-replication-outage,continuous-replication-outage-tmpfs,visibility-bench"}
           ]'
@@ -370,6 +371,50 @@ jobs:
           else
             kind create cluster --name flare-e2e --wait 120s
           fi
+
+      # The PVC cordon move needs storage a pod can take to another node:
+      # an NFS server on the control-plane and csi-driver-nfs's `flare-nfs`
+      # class (.github/kind/nfs-storage.yaml). Only the legs that run a
+      # node-ops-switch-nfs-* suite; local-path stays the default class.
+      - name: Install network storage (NFS)
+        env:
+          SUITE_GROUP: ${{ matrix.group }}
+          SUITES: ${{ matrix.suites }}
+        run: |
+          if ! echo ",$SUITES," | grep -q ',node-ops-switch-nfs-'; then echo "no NFS suite in this leg"; exit 0; fi
+          sudo modprobe nfs || true
+          sudo modprobe nfsd || true
+          helm repo add csi-driver-nfs https://raw.githubusercontent.com/kubernetes-csi/csi-driver-nfs/master/charts
+          helm install csi-driver-nfs csi-driver-nfs/csi-driver-nfs --namespace kube-system --version v4.9.0 --wait --timeout 5m
+          kubectl apply -f .github/kind/nfs-storage.yaml
+          kubectl -n nfs-server rollout status deployment/nfs-server --timeout=300s
+          # a claim must bind and a pod on a worker must write to it
+          cat <<'YAML' | kubectl apply -f -
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata: {name: nfs-probe, namespace: default}
+          spec:
+            accessModes: [ReadWriteOnce]
+            storageClassName: flare-nfs
+            resources: {requests: {storage: 10Mi}}
+          ---
+          apiVersion: v1
+          kind: Pod
+          metadata: {name: nfs-probe, namespace: default}
+          spec:
+            nodeSelector: {flare-e2e/data: "true"}
+            restartPolicy: Never
+            containers:
+              - name: w
+                image: busybox:1.36
+                command: [sh, -c, "echo ok > /d/probe && cat /d/probe"]
+                volumeMounts: [{name: d, mountPath: /d}]
+            volumes: [{name: d, persistentVolumeClaim: {claimName: nfs-probe}}]
+          YAML
+          kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/nfs-probe --timeout=300s || { kubectl describe pod nfs-probe; kubectl get pvc,pv -A; kubectl -n kube-system logs -l app=csi-nfs-controller --all-containers --tail=80; exit 1; }
+          kubectl logs nfs-probe
+          kubectl delete pod/nfs-probe pvc/nfs-probe --wait=true
+          kubectl get storageclass
 
       # The two flared images are C++ builds (~3 min each) whose builder
       # stage copies only the C++ build inputs, so their layers are cached

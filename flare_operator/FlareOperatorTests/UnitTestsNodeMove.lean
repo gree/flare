@@ -251,6 +251,16 @@ def results : List (String × Bool) := Id.run do
               match next cfg l0 ["w1", "w2"] [cand "c-nodes-0" "w1" "slave" [copy "a" "w3"], cand "c-nodes-1" "w2" "slave" others34] 1 with
               | (.start m, bl) => m.pod == "c-nodes-1" && bl.length == 1
               | _ => false)]
+  r := r ++ [("node move: a pod whose data is on a node-local volume is blocked, not started; the reason names the volume and another pod still moves",
+              let pinned := { cand "c-nodes-0" "w1" "slave" others34 with pinned := some "its claim data-c-nodes-0 is on node-local volume pv-1" }
+              match next cfg l0 ["w1", "w2"] [pinned, c1c] 1 with
+              | (.start m, bl) => m.pod == "c-nodes-1" && bl.length == 1 && bl.head!.pod == "c-nodes-0"
+                  && (bl.head!.reason.splitOn "pv-1").length > 1 && (bl.head!.reason.splitOn "cannot leave the node").length > 1
+              | _ => false)]
+  r := r ++ [("node move: a pinned master is blocked too, even with a successor",
+              match next cfg l0 ["w1"] [{ cand "c-nodes-0" "w1" "master" others2 (some "k1") with pinned := some "pinned" }] 1 with
+              | (.idle, bl) => bl.length == 1
+              | _ => false)]
   r := r ++ [("node move: pods on schedulable nodes are not candidates",
               match (next cfg l0 ["w9"] [c0] 1).1 with | .idle => true | _ => false)]
   r := r ++ [("node move: bl0 reports nothing for startable pods", bl0.isEmpty)]

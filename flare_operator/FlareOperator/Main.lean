@@ -3681,11 +3681,12 @@ private def prepareStuckThresholdCycles : Nat := 720
 /-- The replica repair ledger's node keys, or `none` while the ledger is
     unavailable (its status read failed and the in-memory ledger is only the
     empty default): callers that must not act on a slave under repair treat
-    `none` as "cannot tell" and fail closed (review of 7738d8f). -/
+    `none` as "cannot tell" and fail closed (review of 7738d8f). A request
+    not yet resolved to a node counts too (`ReplicaRepair.pendingNodeKeys`). -/
 private def repairKeysIfAvailable (availableRef : IO.Ref Bool) (ledgerRef : IO.Ref ReplicaRepair.Ledger)
-    : IO (Option (List String)) := do
+    (stateRef : IO.Ref FlareClusterState) : IO (Option (List String)) := do
   if !(← availableRef.get) then return none
-  return some ((← ledgerRef.get).entries.filterMap (·.nodeKey))
+  return some (ReplicaRepair.pendingNodeKeys (← ledgerRef.get) (← stateRef.get))
 
 /-- 2c. OPERATOR-SIDE REACHABILITY (spec 12, 2026-10-31), once per pass before
     the FSM. Every Ready pod's flared port is probed (flarei: 1 s timeout, 5 s
@@ -4769,7 +4770,7 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
         -- an Active slave of the same partition to compare against / promote,
         -- none with a replica repair pending (it missed the master's writes)
         -- (none while the ledger is unavailable: fail closed)
-        let repairKeys ← repairKeysIfAvailable ledgerAvailableRef ledgerRef
+        let repairKeys ← repairKeysIfAvailable ledgerAvailableRef ledgerRef stateRef
         match StatsObservation.selfHealComparand finalState mNode.partition repairKeys with
         | some (sKey, sNode) =>
           let mOut ← Bridge.queryPodStats (extractPodName mNode.serverName) ns "stats"
@@ -4844,7 +4845,7 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
                 -- opened for the successor in this pass (its drops counted)
                 -- makes it no successor (4a52e0d empty-source)
                 -- (availability re-checked too: unavailable = no delete)
-                let repairNow ← repairKeysIfAvailable ledgerAvailableRef ledgerRef
+                let repairNow ← repairKeysIfAvailable ledgerAvailableRef ledgerRef stateRef
                 let successorClean := StatsObservation.successorRepairClean repairNow sKey
                 if !successorClean then
                   IO.eprintln s!"[flare-operator] EMPTY-MASTER SELF-HEAL: successor {sKey} has a replica repair pending (it missed the master's writes) or the repair ledger is unavailable; not deleting {mPod}"

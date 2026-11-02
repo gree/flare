@@ -277,6 +277,22 @@ def resolveKey (state : FlareClusterState) (dest : String) : Option (String × F
   let host := (dest.splitOn ":").head?.getD dest
   state.nodeMap.find? fun (k, n) => k == dest || n.serverName == host
 
+/-- Every node a ledger entry names, resolved or not: a request opened this
+    pass has `nodeKey = none` until `resolve` runs in a later pass, and it
+    must already count (full matrix 41399431858, empty-source 2: the request
+    and the empty-master self-heal's third streak landed in one pass, and the
+    successor that missed the master's writes was not seen as under repair).
+    An unresolved destination is listed through `resolveKey`, and as its raw
+    text when the map does not name it. -/
+def pendingNodeKeys (l : Ledger) (state : FlareClusterState) : List String :=
+  l.entries.foldl (fun acc e =>
+    let ks := match e.nodeKey with
+      | some k => [k]
+      | none => match resolveKey state e.dest with
+        | some (k, _) => [k, e.dest]
+        | none => [e.dest]
+    acc ++ ks.filter (!acc.contains ·)) []
+
 /-- Resolve unresolved requests against the committed map. A destination
     that is now a MASTER cannot be repaired by demotion and its missed
     writes are on a primary: the entry is VOIDED and returned so the caller

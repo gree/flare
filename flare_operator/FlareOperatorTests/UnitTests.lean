@@ -493,6 +493,10 @@ def checkAdoptBeforePlan (ctx : Ctx) : IO Unit := do
   check ctx "gate open, not adoptable (recorded or grown in Prepare): demoted, not closed"
     (demotedAfter adoptB (activeObs 100 2 "succeeded" 2) == [slaveKey]
       && demotedAfter adoptC (activeObs 100 2 "succeeded" 2) == [slaveKey])
+  check ctx "pending repair keys: a request opened this pass (not yet resolved) already names its node; an unknown destination is listed as is"
+    ((request ({} : Ledger) masterKey slaveKey 3).entries.all (·.nodeKey.isNone)
+      && (pendingNodeKeys (request ({} : Ledger) masterKey slaveKey 3) state).contains slaveKey
+      && pendingNodeKeys (request ({} : Ledger) masterKey "nX.svc:12121" 3) state == ["nX.svc:12121"])
 
 /-- A status entry written before adoption existed. -/
 def preAdoptionStatus : Lean.Json :=

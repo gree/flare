@@ -233,6 +233,294 @@ def checkFollowOwnership (ctx : Ctx) : IO Unit := do
                      && (back.entries.head?.bind (·.barEpoch)) == some ownEp
       | none => false)
 
+/-- The slave is reconstructing (Slave/Prepare) — e.g. a recreated pod in
+    its boot reconstruction (CI 41278035134). -/
+def rebuilding : FlareClusterState :=
+  { nodeMap := [(masterKey, node .Master .Active 0 "n0.svc"), (slaveKey, node .Slave .Prepare 0 "n1.svc")],
+    nodeMapVersion := 10 }
+
+def checkReconstructingDefer (ctx : Ctx) : IO Unit := do
+  check ctx "reconstructingKeys: a Slave in Prepare only (Slave/Active, masters and proxies are not)"
+    (reconstructingKeys rebuilding == [slaveKey] && reconstructingKeys state == [])
+  -- (1) a request against a reconstructing destination is not demoted, kept
+  -- with its drops and a visible hold, and only a NEWER successful
+  -- reconstruction after a later reseat closes it
+  let lRb := (resolve l2 rebuilding).1
+  let (lDef, actsDef) := plan lRb true "" (reconstructingKeys rebuilding)
+  check ctx "a request against a Slave/Prepare destination is NOT demoted; it stays requested with its drops and a visible hold"
+    (actsDef.isEmpty && firstPhase lDef == some .requested && firstDrops lDef == some 3
+      && firstNodeKey lDef == some slaveKey && firstHold lDef == some reconstructingHold
+      && heldKeys lDef == [])
+  -- the in-progress (boot) reconstruction succeeding does not close it: a
+  -- drop may have happened after its dump passed the key
+  let bootDone := obs (some 10) (some 500) (some 1) (some "succeeded") (some 1) (some masterKey) (some masterKey) (some (.Slave, .Active))
+  let (lAfterBoot, stBoot) := advance lDef [(slaveKey, bootDone)]
+  check ctx "the deferred request is NOT closed by the reconstruction that was in progress when it was deferred"
+    (stBoot.isEmpty && firstPhase lAfterBoot == some .requested && firstDrops lAfterBoot == some 3)
+  let lMore := request lDef masterKey slaveKey 2
+  check ctx "more drops while deferred extend the same request"
+    (lMore.entries.length == 1 && firstDrops lMore == some 5
+      && (plan lMore true "" (reconstructingKeys rebuilding)).2.isEmpty)
+  -- once Active (no longer reconstructing) the ordinary path demotes it
+  let (lAct, actsAct) := plan lAfterBoot true "" (reconstructingKeys state)
+  check ctx "once the destination is Active the deferred request is demoted as usual and the hold clears"
+    (actsAct.map (·.1) == [slaveKey] && firstHold lAct == none)
+  let lDem2 := markDemoted lAct slaveKey 11
+  let lRel2 := (advance lDem2 [(slaveKey, obs (some 11) (some 500) (some 1) (some "succeeded") (some 1) (some masterKey) (some masterKey) (some (.Proxy, .Active)))]).1
+  check ctx "after the reseat the boot reconstruction's success (#1, same boot) is not completion; a NEWER success (#2) is"
+    (firstPhase lRel2 == some .reseated
+      && stepsOf lRel2 (obs (some 12) (some 500) (some 1) (some "succeeded") (some 1) (some masterKey) (some masterKey) (some (.Slave, .Active))) == []
+      && stepsOf lRel2 (obs (some 12) (some 500) (some 2) (some "succeeded") (some 2) (some masterKey) (some masterKey) (some (.Slave, .Active))) == [.completed])
+  -- (2) an Active slave is demoted exactly as before (with or without the list)
+  check ctx "a request against a Slave/Active destination still demotes (reconstructing list empty or naming other nodes)"
+    ((plan l3 true "" (reconstructingKeys state)).2.map (·.1) == [slaveKey]
+      && (plan l3 true "" ["other.svc:12121"]).2.map (·.1) == [slaveKey]
+      && (plan l3 true "").2.map (·.1) == [slaveKey])
+  -- (3) unknown / unresolved / gated: fail closed — kept, never demoted, never dropped
+  let lUnres := request l1 masterKey "ghost.svc:12121" 4
+  let (lU, actsU) := plan (resolve lUnres rebuilding).1 true "" (reconstructingKeys rebuilding)
+  check ctx "an unresolved destination (not a Slave in the map) is kept as a request and not acted on"
+    (actsU.isEmpty && (lU.entries.find? (·.dest == "ghost.svc:12121")).map (·.phase) == some .requested
+      && (lU.entries.find? (·.dest == "ghost.svc:12121")).map (·.drops) == some 4)
+  let (lG, actsG) := plan lRb false "breaker held" (reconstructingKeys rebuilding)
+  check ctx "a closed gate on a reconstructing destination holds it with the gate reason and keeps it"
+    (actsG.isEmpty && firstPhase lG == some .requested && firstHold lG == some "breaker held")
+  let lOwnRb := (resolve (holdOwned l2 slaveKey (some 100) (some ownEp) "follower state unknown (stats unreadable)") rebuilding).1
+  let (lO, actsO) := plan lOwnRb true "" (reconstructingKeys rebuilding)
+  check ctx "an entry held on an unreadable follower keeps its own hold on a reconstructing node (still no demotion)"
+    (actsO.isEmpty && firstHold lO == some "follower state unknown (stats unreadable)")
+  check ctx "a deferred request survives the status round trip (an operator restart) as a request"
+    (match Ledger.fromJson? (Ledger.toJson lDef) with
+      | some back => back == lDef && firstPhase back == some .requested
+      | none => false)
+
+/-- What `requestSightOf` returns for a destination that is NOT
+    reconstructing: flared's reading (boot, latest reconstruction id) taken
+    after the drops, and its pod UID. -/
+def sightOut (boot cid : Option Nat) (uid : Option String := some "uid-old") : RequestSight :=
+  { outsidePrepare := true, bootId := boot, currentId := cid, podUid := uid }
+
+/-- A resolved request for 3 drops recorded with `sight`. -/
+def requestedWith (sight : RequestSight) : Ledger :=
+  (resolve (request l1 masterKey slaveKey 3 sight) state).1
+
+/-- The slave reconstructing (Prepare), with flared's completion record and
+    (optionally) its pod UID. -/
+def prepObs (boot cid : Nat) (st : String) (lsid : Nat) (uid : Option String := none) : Observation :=
+  { reportedVersion := some 10, bootId := some boot, currentId := some cid, currentState := some st,
+    lastSuccessId := some lsid, lastSuccessSource := some masterKey, currentMaster := some masterKey,
+    mapped := some (.Slave, .Prepare), podUid := uid }
+
+/-- The slave Active, with flared's completion record. -/
+def activeObs (boot cid : Nat) (st : String) (lsid : Nat) (src : String := masterKey) : Observation :=
+  { reportedVersion := some 10, bootId := some boot, currentId := some cid, currentState := some st,
+    lastSuccessId := some lsid, lastSuccessSource := some src, currentMaster := some masterKey,
+    mapped := some (.Slave, .Active) }
+
+/-- The slave reconstructing, its stats unreadable. -/
+def prepUnreadable : Observation :=
+  { reportedVersion := some 10, currentMaster := some masterKey, mapped := some (.Slave, .Prepare) }
+
+def firstAdoptable (l : Ledger) : Option Bool := l.entries.head?.map (·.adoptable)
+def firstBootIdAtReseat (l : Ledger) : Option Nat := l.entries.head?.bind (·.bootIdAtReseat)
+def actKeys (l : Ledger) (reconstructing : List String) : List String :=
+  (plan l true "" reconstructing).2.map (·.1)
+def advanced (l : Ledger) (o : Observation) : Ledger := (advance l [(slaveKey, o)]).1
+
+/-- Survives the status round trip unchanged. -/
+def roundTrips (l : Ledger) : Bool :=
+  match Ledger.fromJson? (Ledger.toJson l) with
+  | some back => back == l
+  | none => false
+
+/-- (a) recorded while Slave/Active (process 100, last reconstruction #1). -/
+def adoptA : Ledger := requestedWith (sightOut (some 100) (some 1))
+/-- ...planned while it reconstructs (#2), then adopted. -/
+def adoptA1 : Ledger := (plan adoptA true "" (reconstructingKeys rebuilding)).1
+def adoptA2 : Ledger := advanced adoptA1 (prepObs 100 2 "running" 1)
+/-- Same pod, Prepare seen before flared began the new handler (#1 still current). -/
+def adoptS : Ledger := advanced adoptA (prepObs 100 1 "succeeded" 1)
+def adoptSL : Ledger := advanced adoptS (activeObs 100 1 "succeeded" 1)
+
+def checkAdoptRecordedOutside (ctx : Ctx) : IO Unit := do
+  check ctx "a request recorded outside Prepare is adoptable with the reading taken after the drops"
+    (firstAdoptable adoptA == some true
+      && (adoptA.entries.head?.bind (·.bootAtRequest)) == some 100
+      && (adoptA.entries.head?.bind (·.currentIdAtRequest)) == some 1)
+  check ctx "adoption: while Prepare the request is not demoted"
+    ((plan adoptA true "" (reconstructingKeys rebuilding)).2.isEmpty)
+  check ctx "adoption: recorded outside Prepare, later Slave/Prepare → ADOPTED, baseline = the reading after the drops"
+    (stepsOf adoptA1 (prepObs 100 2 "running" 1) == [.adopted]
+      && firstPhase adoptA2 == some .adopted && firstCurrentIdAtReseat adoptA2 == some 1)
+  check ctx "an adopted entry is not held out of assignment"
+    (heldKeys adoptA2 == [])
+
+def checkAdoptNeverDemoted (ctx : Ctx) : IO Unit := do
+  check ctx "an adopted entry is not demoted while Prepare"
+    (actKeys adoptA2 (reconstructingKeys rebuilding) == [])
+  check ctx "an adopted entry is not demoted in the pass that first sees it Active"
+    (actKeys adoptA2 (reconstructingKeys state) == [])
+  check ctx "an adopted entry is not acted on with the gate closed"
+    ((plan adoptA2 false "breaker held").2.isEmpty)
+  check ctx "an adopted entry waits while Prepare"
+    (stepsOf adoptA2 (prepObs 100 2 "running" 1) == [])
+  check ctx "an adopted entry waits while Active with its newer handler still running"
+    (stepsOf adoptA2 (activeObs 100 2 "running" 1) == [])
+
+def checkAdoptCompletes (ctx : Ctx) : IO Unit := do
+  check ctx "adoption: the adopted reconstruction's success (newer than the baseline, from the current master) CLOSES the request"
+    (stepsOf adoptA2 (activeObs 100 2 "succeeded" 2) == [.adoptedCompleted])
+  check ctx "adoption: the closed request leaves the ledger"
+    ((advanced adoptA2 (activeObs 100 2 "succeeded" 2)).entries.isEmpty)
+  check ctx "adoption: a success from another source does not close it; the request returns to the ordinary path"
+    (stepsOf adoptA2 (activeObs 100 2 "succeeded" 2 "nX.svc:12121") == [.adoptionLapsed])
+
+def checkAdoptSamePod (ctx : Ctx) : IO Unit := do
+  check ctx "same pod: Prepare seen before flared began the handler still adopts with the post-drop baseline (#1)"
+    (stepsOf adoptA (prepObs 100 1 "succeeded" 1) == [.adopted] && firstCurrentIdAtReseat adoptS == some 1)
+  check ctx "same pod: Active with no reconstruction newer than the baseline lapses"
+    (stepsOf adoptS (activeObs 100 1 "succeeded" 1) == [.adoptionLapsed])
+  check ctx "same pod: a lapsed adoption is requested again, not adoptable, drops kept"
+    (firstPhase adoptSL == some .requested && firstAdoptable adoptSL == some false && firstDrops adoptSL == some 3)
+  check ctx "same pod: a lapsed adoption is demoted as usual"
+    (actKeys adoptSL (reconstructingKeys state) == [slaveKey])
+  check ctx "same pod: the newer reconstruction (#2) closes the adopted entry"
+    (stepsOf adoptS (activeObs 100 2 "succeeded" 2) == [.adoptedCompleted])
+
+/-- (b) recorded while ALREADY reconstructing. -/
+def adoptB : Ledger := requestedWith {}
+def adoptB2 : Ledger := advanced adoptB (prepObs 100 2 "running" 1)
+
+def checkAdoptRecordedInPrepare (ctx : Ctx) : IO Unit := do
+  check ctx "recorded while already Slave/Prepare: not adoptable and deferred"
+    (firstAdoptable adoptB == some false && actKeys adoptB (reconstructingKeys rebuilding) == [])
+  check ctx "recorded while already Slave/Prepare: not adopted when observed in Prepare"
+    (stepsOf adoptB (prepObs 100 2 "running" 1) == [] && firstPhase adoptB2 == some .requested)
+  check ctx "recorded while already Slave/Prepare: that reconstruction's success does not close it"
+    (stepsOf adoptB2 (activeObs 100 2 "succeeded" 2) == [])
+  check ctx "recorded while already Slave/Prepare: demoted once Active"
+    (actKeys adoptB2 (reconstructingKeys state) == [slaveKey])
+
+/-- (c) recorded outside Prepare, then more drops while Prepare. -/
+def adoptC : Ledger := request adoptA masterKey slaveKey 2 {}
+/-- ...or more drops during an ADOPTED reconstruction. -/
+def adoptCa : Ledger := request adoptA2 masterKey slaveKey 2 {}
+
+def checkAdoptGrowth (ctx : Ctx) : IO Unit := do
+  check ctx "drops that grow while Prepare clear adoption (drops added up)"
+    (firstAdoptable adoptC == some false && firstDrops adoptC == some 5)
+  check ctx "drops that grow while Prepare: not adopted when observed in Prepare"
+    (stepsOf adoptC (prepObs 100 2 "running" 1) == [])
+  check ctx "drops that grow while Prepare: the reconstruction's success does not close it"
+    (stepsOf adoptC (activeObs 100 2 "succeeded" 2) == [])
+  check ctx "drops that grow while Prepare: deferred while Prepare, demoted once Active"
+    (actKeys adoptC (reconstructingKeys rebuilding) == [] && actKeys adoptC (reconstructingKeys state) == [slaveKey])
+  check ctx "drops that grow during an ADOPTED reconstruction return it to requested, not adoptable"
+    (firstPhase adoptCa == some .requested && firstAdoptable adoptCa == some false && firstDrops adoptCa == some 5)
+  check ctx "drops that grow during an ADOPTED reconstruction: its success no longer closes it; demoted once Active"
+    (stepsOf adoptCa (activeObs 100 2 "succeeded" 2) == [] && actKeys adoptCa (reconstructingKeys state) == [slaveKey])
+
+/-- (d) recreated pod: the old pod was read after the drops (boot 100, #7). -/
+def adoptD : Ledger := requestedWith (sightOut (some 100) (some 7))
+def adoptD1 : Ledger := advanced adoptD (prepObs 200 1 "running" 0)
+/-- No pod existed when the drops were read. -/
+def adoptDu : Ledger := requestedWith (sightOut none none (some ""))
+def adoptDu1 : Ledger := advanced adoptDu (prepObs 200 1 "running" 0 (some "uid-new"))
+/-- The old pod existed but flared could not be read. -/
+def adoptDo : Ledger := requestedWith (sightOut none none (some "uid-old"))
+
+def checkAdoptRecreatedPod (ctx : Ctx) : IO Unit := do
+  check ctx "recreated pod (old pod read after the drops): adopted against the old boot"
+    (stepsOf adoptD (prepObs 200 1 "running" 0) == [.adopted])
+  check ctx "recreated pod (old pod read after the drops): its boot reconstruction #1 (counter restarted) closes it"
+    (stepsOf adoptD1 (activeObs 200 1 "succeeded" 1) == [.adoptedCompleted])
+  check ctx "recreated pod (no pod when the drops were read): adopted with baseline (its boot, 0)"
+    (stepsOf adoptDu (prepObs 200 1 "running" 0 (some "uid-new")) == [.adopted]
+      && firstCurrentIdAtReseat adoptDu1 == some 0 && firstBootIdAtReseat adoptDu1 == some 200)
+  check ctx "recreated pod (no pod when the drops were read): its first success closes it"
+    (stepsOf adoptDu1 (activeObs 200 1 "succeeded" 1) == [.adoptedCompleted])
+  check ctx "old pod unreadable when the drops were read: a pod with another UID adopts"
+    (stepsOf adoptDo (prepObs 200 1 "running" 0 (some "uid-new")) == [.adopted])
+  check ctx "old pod unreadable when the drops were read: the same UID (or an unread UID) cannot be ordered"
+    (stepsOf adoptDo (prepObs 200 1 "running" 0 (some "uid-old")) == [.adoptionUnproven]
+      && stepsOf adoptDo (prepObs 200 1 "running" 0) == [.adoptionUnproven])
+  check ctx "an unproven adoption is no longer adoptable"
+    (firstAdoptable (advanced adoptDo (prepObs 200 1 "running" 0 (some "uid-old"))) == some false)
+  check ctx "an unreadable reconstructing node decides nothing yet"
+    (stepsOf adoptDo prepUnreadable == [])
+  check ctx "an owned (follower) request is never adopted"
+    (stepsOf (holdOwned adoptA slaveKey (some 100) (some ownEp)) (prepObs 100 2 "running" 1) == [])
+
+def checkAdoptShortPrepare (ctx : Ctx) : IO Unit := do
+  check ctx "a Prepare shorter than one pass: an adoptable request seen only Active with a success newer than the baseline closes directly"
+    (stepsOf adoptA (activeObs 100 2 "succeeded" 2) == [.adoptedCompleted]
+      && (advanced adoptA (activeObs 100 2 "succeeded" 2)).entries.isEmpty)
+  check ctx "a Prepare shorter than one pass: a recreated pod's first success (another boot) closes it directly"
+    (stepsOf adoptD (activeObs 200 1 "succeeded" 1) == [.adoptedCompleted])
+
+def checkAdoptShortPrepareGuards (ctx : Ctx) : IO Unit := do
+  check ctx "seen only Active: a success not newer than the baseline does not close it (the ordinary path demotes it)"
+    (stepsOf adoptA (activeObs 100 1 "succeeded" 1) == [] && actKeys adoptA (reconstructingKeys state) == [slaveKey])
+  check ctx "seen only Active: a request recorded in Prepare, or grown in Prepare, is never closed directly"
+    (stepsOf adoptB (activeObs 100 2 "succeeded" 2) == [] && stepsOf adoptC (activeObs 100 2 "succeeded" 2) == [])
+  check ctx "seen only Active: a success from another source, or without a flared baseline, does not close it"
+    (stepsOf adoptA (activeObs 100 2 "succeeded" 2 "nX.svc:12121") == []
+      && stepsOf adoptDu (activeObs 200 1 "succeeded" 1) == [])
+
+/-- Part 1 with the gate open, as Main runs it: the adoption decided
+    before the plan, then the plan with the finishing keys held out. -/
+def beforePlan (l : Ledger) (o : Observation) : Ledger × List Entry × List String :=
+  adoptBeforePlan l [(slaveKey, o)]
+def demotedAfter (l : Ledger) (o : Observation) : List String :=
+  let (l', _, fin) := beforePlan l o
+  actKeys l' (reconstructingKeys state ++ fin)
+
+def checkAdoptBeforePlan (ctx : Ctx) : IO Unit := do
+  check ctx "gate open, Prepare ended between passes: closed before the plan, nothing demoted"
+    ((beforePlan adoptA (activeObs 100 2 "succeeded" 2)).2.1.length == 1
+      && (beforePlan adoptA (activeObs 100 2 "succeeded" 2)).1.entries.isEmpty
+      && demotedAfter adoptA (activeObs 100 2 "succeeded" 2) == [])
+  check ctx "gate open, recreated pod already Active with a later boot's success: not demoted"
+    (demotedAfter adoptD (activeObs 200 1 "succeeded" 1) == [])
+  check ctx "gate open, no flared baseline: a pod with another UID already Active closes it"
+    (demotedAfter adoptDu ({ activeObs 200 1 "succeeded" 1 with podUid := some "uid-new" }) == [])
+  check ctx "gate open, Active while the newer handler is still running: held, not demoted"
+    ((beforePlan adoptA (activeObs 100 2 "running" 1)).2.2 == [slaveKey]
+      && demotedAfter adoptA (activeObs 100 2 "running" 1) == [])
+  check ctx "gate open, Active with no newer success: demoted by the ordinary path"
+    (demotedAfter adoptA (activeObs 100 1 "succeeded" 1) == [slaveKey]
+      && demotedAfter adoptA (activeObs 100 2 "succeeded" 2 "nX.svc:12121") == [slaveKey])
+  check ctx "gate open, not adoptable (recorded or grown in Prepare): demoted, not closed"
+    (demotedAfter adoptB (activeObs 100 2 "succeeded" 2) == [slaveKey]
+      && demotedAfter adoptC (activeObs 100 2 "succeeded" 2) == [slaveKey])
+
+/-- A status entry written before adoption existed. -/
+def preAdoptionStatus : Lean.Json :=
+  let entry := Lean.Json.mkObj [("dest", Lean.Json.str slaveKey), ("masterKey", Lean.Json.str masterKey),
+    ("phase", Lean.Json.mkObj [("kind", Lean.Json.str "requested")]), ("drops", Lean.Json.num 3),
+    ("nodeKey", Lean.Json.str slaveKey), ("dropsAtReseat", Lean.Json.num 0)]
+  Lean.Json.mkObj [("initialized", Lean.Json.bool true), ("counters", Lean.Json.arr #[]),
+    ("entries", Lean.Json.arr #[entry])]
+
+def preAdoptionLedger : Option Ledger := Ledger.fromJson? preAdoptionStatus
+def restartedAdopted : Option Ledger := Ledger.fromJson? (Ledger.toJson adoptA2)
+
+def checkAdoptPersistence (ctx : Ctx) : IO Unit := do
+  check ctx "adoption evidence survives the status round trip"
+    (roundTrips adoptA && roundTrips adoptDu && roundTrips adoptC)
+  check ctx "the adopted phase and its baseline survive the status round trip"
+    (roundTrips adoptA2 && roundTrips adoptDu1)
+  check ctx "a status written before adoption existed reads back NOT adoptable"
+    ((preAdoptionLedger.bind firstAdoptable) == some false)
+  check ctx "a status written before adoption existed: Prepare does not adopt it (7be3ca6 behaviour)"
+    ((preAdoptionLedger.map fun l => stepsOf l (prepObs 100 2 "running" 1)) == some []
+      && (preAdoptionLedger.map fun l => actKeys l (reconstructingKeys rebuilding)) == some [])
+  check ctx "an adoption in flight survives an operator restart (ledger from status)"
+    ((restartedAdopted.bind firstPhase) == some .adopted
+      && (restartedAdopted.map fun l => actKeys l (reconstructingKeys state)) == some [])
+  check ctx "after an operator restart the adopted reconstruction's success closes it"
+    ((restartedAdopted.map fun l => stepsOf l (activeObs 100 2 "succeeded" 2)) == some [.adoptedCompleted])
+
 def checkAdvanceHold (ctx : Ctx) : IO Unit := do
   let old := obs (some 10) (some 100) (some 1) (some "succeeded") (some 1) (some masterKey) (some masterKey) (some (.Proxy, .Active))
   check ctx "a node still reporting the OLD version stays held"
@@ -2914,6 +3202,18 @@ def run : IO UInt32 := do
   checkObserve ctx
   checkRequestResolve ctx
   checkGate ctx
+  checkReconstructingDefer ctx
+  checkAdoptRecordedOutside ctx
+  checkAdoptNeverDemoted ctx
+  checkAdoptCompletes ctx
+  checkAdoptSamePod ctx
+  checkAdoptRecordedInPrepare ctx
+  checkAdoptGrowth ctx
+  checkAdoptRecreatedPod ctx
+  checkAdoptShortPrepare ctx
+  checkAdoptShortPrepareGuards ctx
+  checkAdoptBeforePlan ctx
+  checkAdoptPersistence ctx
   checkFollowOwnership ctx
   checkAdvanceHold ctx
   checkAdvanceComplete ctx

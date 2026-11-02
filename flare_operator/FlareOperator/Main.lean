@@ -2383,6 +2383,59 @@ def followReadingOf (state : FlareClusterState) (dest : String) (ns : String)
              appliedLsn := statNat out "repl_applied_lsn",
              sourceEpoch := statStr out "repl_follow_source_epoch" }
 
+/-- The pod's UID: `some ""` ONLY on an empty --ignore-not-found answer (no
+    such pod); any failure is `none` (unknown). -/
+private def podUidOrAbsent (pod ns : String) : IO (Option String) := do
+  match ← kubectl ["get", "pod", pod, "-n", ns, "--ignore-not-found=true", "-o", "jsonpath={.metadata.uid}"] with
+  | .ok u => pure (some u.trim)
+  | .error _ => pure none
+
+/-- What `key` reports now about its reconstructions, for the adoption
+    decided before the demotion plan (ReplicaRepair.adoptBeforePlan). The
+    success must have copied from the node's CURRENT master in `state`. With
+    `withUid` (no flared baseline was read after the drops) the pod's UID is
+    read before and after the stats; a change in between proves nothing. -/
+private def adoptionObservationNow (state : FlareClusterState) (key ns : String) (withUid : Bool) :
+    IO ReplicaRepair.Observation := do
+  let mapped := (state.lookupNode key).map fun n => (n.role, n.state)
+  let currentMaster := (state.lookupNode key).bind fun n =>
+    (state.nodeMap.find? fun kv =>
+      kv.2.role == FlareRole.Master && kv.2.state == FlareState.Active && kv.2.partition == n.partition).map (·.1)
+  let pod := extractPodName key
+  let u0 ← if withUid then podUidOrAbsent pod ns else pure none
+  let o : ReplicaRepair.Observation ← match ← Bridge.queryPodStats pod ns "stats" with
+    | .ok out => pure { reportedVersion := statNat out "node_map_version",
+                        bootId := statNat out "reconstruction_boot_id",
+                        currentId := statNat out "reconstruction_current_id",
+                        currentState := statStr out "reconstruction_current_state",
+                        lastSuccessId := statNat out "reconstruction_last_success_id",
+                        lastSuccessSource := statStr out "reconstruction_last_success_source",
+                        currentMaster := currentMaster, mapped := mapped }
+    | .error _ => pure { mapped := mapped, currentMaster := currentMaster }
+  if !withUid then return o
+  let u1 ← podUidOrAbsent pod ns
+  pure { o with podUid := if u0 == u1 then u0 else none }
+
+/-- ADOPTION evidence for a drop just counted to `dest` (see
+    ReplicaRepair.reconstructingKeys). MUST be called AFTER the master's
+    counter was read: every reading here then postdates the drops. `state`
+    is read fresh by the caller for the same reason. While the destination
+    is reconstructing nothing more is read: such drops are never adopted. -/
+private def requestSightOf (state : FlareClusterState) (dest ns : String) : IO ReplicaRepair.RequestSight := do
+  if ReplicaRepair.destReconstructing state dest then return {}
+  let pod := match ReplicaRepair.resolveKey state dest with
+    | some (_, n) => extractPodName n.serverName
+    | none => extractPodName ((dest.splitOn ":").head?.getD dest)
+  let uid ← podUidOrAbsent pod ns
+  let (boot, cid) ← if uid.any (!·.isEmpty) then
+      match ← Bridge.queryPodStats pod ns "stats" with
+      | .ok out => pure (statNat out "reconstruction_boot_id", statNat out "reconstruction_current_id")
+      | .error _ => pure (none, none)
+    else pure (none, none)
+  -- both or neither: a half reading is no baseline
+  let (boot, cid) := if boot.isSome && cid.isSome then (boot, cid) else (none, none)
+  return { outsidePrepare := true, bootId := boot, currentId := cid, podUid := uid }
+
 /-- Detect unsafe partition reduction and warn the user.
     Returns true if partition reduction was detected (and blocked). -/
 private def detectPartitionReduction (state : FlareClusterState) (crd : FlareClusterView)
@@ -3869,13 +3922,41 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
         else if tripped then some "circuit breaker held"
         else if masterless then some "a partition has no Active master"
         else none
+      -- A Slave in Prepare is reconstructing from its master: demoting it
+      -- breaks that reconstruction (CI 41278035134). Its request is held,
+      -- not consumed: closed by that reconstruction when it began after the
+      -- drops (adopted in part 2), otherwise demoted once the node is Active
+      -- (see ReplicaRepair.reconstructingKeys).
+      -- A Prepare shorter than the time between two passes is seen only as
+      -- Slave/Active: its adoption is decided HERE, before the plan, or the
+      -- plan would demote it first (review of a549080, P1).
+      let mut adoptObs : List (String × ReplicaRepair.Observation) := []
+      if gate.isNone then
+        for e in led1.entries do
+          match e.nodeKey with
+          | some k =>
+            let mapped := (preState.lookupNode k).map fun n => (n.role, n.state)
+            if e.phase == .requested && e.adoptable && !e.owned
+                && mapped == some (FlareRole.Slave, FlareState.Active) then
+              adoptObs := adoptObs ++ [(e.dest, ← adoptionObservationNow preState k ns (e.bootAtRequest.isNone))]
+          | none => pure ()
+      let (ledA, adoptClosed, adoptFinishing) := ReplicaRepair.adoptBeforePlan led1 adoptObs
+      led1 := ledA
+      for e in adoptClosed do
+        metrics.replicaRepairCompleted.inc
+        IO.eprintln s!"[flare-operator] REPLICA REPAIR COMPLETE (adopted): {e.nodeKey.getD e.dest} is Slave/Active; the reconstruction that began after the drops (newer than #{e.currentIdAtRequest.getD 0}, boot {e.bootAtRequest.getD 0}) SUCCEEDED from its current master; {e.drops} dropped write(s) recovered without a demotion (decided before the demotion plan)"
+      for k in adoptFinishing do
+        IO.eprintln s!"[flare-operator] replica repair DEFERRED for {k}: Slave/Active, but the reconstruction that began after the drops is still finishing; no demotion"
       let (led2, acts) := ReplicaRepair.plan led1 gate.isNone (gate.getD "")
+        (ReplicaRepair.reconstructingKeys preState ++ adoptFinishing)
       let mut led3 := led2
       for (rKey, e) in acts do
         let cs ← stateRef.get
         match cs.lookupNode rKey with
         | some rn =>
-          if rn.role == FlareRole.Slave then
+          if rn.role == FlareRole.Slave && rn.state == FlareState.Prepare then
+            IO.eprintln s!"[flare-operator] replica repair DEFERRED for {rKey}: it is reconstructing (Slave/Prepare) — a demotion now would break that reconstruction; the request stays pending until it is Active"
+          else if rn.role == FlareRole.Slave then
             -- SAF-08: the copy is rebuilt from the partition's CURRENT
             -- master, which need not be the one that counted the drops. Read
             -- it now; defer unless it is known to hold data.
@@ -3929,7 +4010,8 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
                 let sourceSame := srcNow.map (·.1) == srcKey && srcNow.map (·.2.regEpoch) == srcEpoch
                 match cur.lookupNode rKey with
                 | some rn2 =>
-                  if sourceSame && rn2.role == FlareRole.Slave && rn2.partition == rn.partition && rn2.regEpoch == rn.regEpoch then
+                  if sourceSame && rn2.role == FlareRole.Slave && rn2.state != FlareState.Prepare
+                      && rn2.partition == rn.partition && rn2.regEpoch == rn.regEpoch then
                     let v := cur.nodeMapVersion + 1
                     let demoted : FlareNode :=
                       { rn2 with role := FlareRole.Proxy, state := FlareState.Active, partition := -1, formerSlaveOf := -1 }
@@ -3942,7 +4024,7 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
                 metrics.replicaResyncs.inc
                 IO.eprintln s!"[flare-operator] REPLICA REPAIR: demoting {rKey} to a live proxy at v{v} — master {e.masterKey} dropped {e.drops} write(s) to it; rebuild source {(srcMaster.map (·.1)).getD "?"} holds data. Held out of assignment until it reports v{v}; then re-seated as Slave/Prepare so flared reconstructs"
               | none =>
-                IO.eprintln s!"[flare-operator] replica repair: {rKey} or its source master changed (re-registered, re-assigned or failed over) while the demotion was being decided; leaving the request pending"
+                IO.eprintln s!"[flare-operator] replica repair: {rKey} or its source master changed (re-registered, re-assigned, failed over, or the replica began reconstructing) while the demotion was being decided; leaving the request pending"
           else
             IO.eprintln s!"[flare-operator] replica repair: {rKey} is no longer a Slave; leaving the request pending"
         | none =>
@@ -4469,6 +4551,22 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
                                   lastSuccessSource := statStr out "reconstruction_last_success_source",
                                   currentMaster := currentMaster, mapped := mapped }
               | .error _ => pure { mapped := mapped, currentMaster := currentMaster }
+            -- ADOPTION without a flared baseline: the pod's UID, the same
+            -- before and after the stats (else the reading proves nothing)
+            let o ← if e.phase == .requested && e.adoptable && !e.owned && e.bootAtRequest.isNone
+                && mapped == some (FlareRole.Slave, FlareState.Prepare) then do
+                let pod := extractPodName k
+                let u0 ← podUidOrAbsent pod ns
+                let o2 : ReplicaRepair.Observation ← match ← Bridge.queryPodStats pod ns "stats" with
+                  | .ok out => pure { o with bootId := statNat out "reconstruction_boot_id",
+                                             currentId := statNat out "reconstruction_current_id",
+                                             currentState := statStr out "reconstruction_current_state",
+                                             lastSuccessId := statNat out "reconstruction_last_success_id",
+                                             lastSuccessSource := statStr out "reconstruction_last_success_source" }
+                  | .error _ => pure { o with bootId := none }
+                let u1 ← podUidOrAbsent pod ns
+                pure { o2 with podUid := if u0 == u1 then u0 else none }
+              else pure o
             -- R3-D: the release (demoted → re-seated → reconstruction) is
             -- decided AGAIN against the master as it is now; a deferral holds
             -- the replica demoted (its copy kept) instead of releasing it
@@ -4508,6 +4606,9 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
         -- (no completion without a fresh count).
         let mut ledFresh := ledOwned
         let mut unreadMasters : List String := []
+        -- requests that gained drops just now: their observation above was
+        -- read BEFORE these drops, so it must not adopt or close them
+        let mut grownDests : List String := []
         for mKey in ((ledOwned.entries.filter fun (e : ReplicaRepair.Entry) => !e.owned && e.phase != .requested).map (·.masterKey)).eraseDups do
           match ← Bridge.queryPodStats (extractPodName mKey) ns "stats" with
           | .ok mo =>
@@ -4523,7 +4624,9 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
             let (l1, newDrops, _) := ReplicaRepair.observe ledFresh mKey drops (statNat mo "reconstruction_boot_id")
             let mut l2 := l1
             for (dest, d) in newDrops do
-              l2 := ReplicaRepair.request l2 mKey dest d
+              let sight ← requestSightOf (← stateRef.get) dest ns
+              l2 := ReplicaRepair.request l2 mKey dest d sight
+              grownDests := grownDests ++ [dest]
               metrics.replicaRepairRequested.inc
               IO.eprintln s!"[flare-operator] REPLICA REPAIR: master {mKey} dropped {d} more write(s) to {dest} while a repair is in flight (its counter is read every pass until the repair completes)"
             ledFresh := l2
@@ -4532,7 +4635,9 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
         let heldDests := (ledFresh.entries.filter fun (e : ReplicaRepair.Entry) => unreadMasters.contains e.masterKey).map (·.dest)
         if !heldDests.isEmpty then
           IO.eprintln s!"[flare-operator] REPLICA REPAIR: the master's drop counter could not be read for {heldDests}; their repair does not advance this pass (no completion without a fresh count)"
-        let (led1, steps) := ReplicaRepair.advance ledFresh (obs.filter fun (d, _) => !heldDests.contains d)
+        let staleObs := (ledFresh.entries.filter fun (e : ReplicaRepair.Entry) =>
+          grownDests.contains e.dest && e.phase == .requested).map (·.dest)
+        let (led1, steps) := ReplicaRepair.advance ledFresh (obs.filter fun (d, _) => !heldDests.contains d && !staleObs.contains d)
         for (e, st) in steps do
           let who := e.nodeKey.getD e.dest
           match st with
@@ -4552,6 +4657,16 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
           | .voided =>
             metrics.replicaRepairVoided.inc
             IO.eprintln s!"[flare-operator] CRITICAL: replica repair VOIDED for {who}: it became a MASTER while under repair; the {e.drops} write(s) it missed are now missing on a primary"
+          | .adopted =>
+            -- not a demotion resync and not a release: nothing was started
+            IO.eprintln s!"[flare-operator] REPLICA REPAIR ADOPTED: {who} began reconstructing (Slave/Prepare) after master {e.masterKey}'s {e.drops} dropped write(s) to it were recorded outside Prepare; that reconstruction copies them, so it is the repair — no demotion, no extra rebuild. Closes on a success newer than the reading taken after the drops"
+          | .adoptedCompleted =>
+            metrics.replicaRepairCompleted.inc
+            IO.eprintln s!"[flare-operator] REPLICA REPAIR COMPLETE (adopted): {who} is Slave/Active; the reconstruction that began after the drops (newer than #{(e.currentIdAtReseat <|> e.currentIdAtRequest).getD 0}, boot {(e.bootIdAtReseat <|> e.bootAtRequest).getD 0}) SUCCEEDED from its current master; {e.drops} dropped write(s) recovered without a demotion"
+          | .adoptionLapsed =>
+            IO.eprintln s!"[flare-operator] REPLICA REPAIR adoption lapsed for {who}: it is Slave/Active without a success newer than the baseline from its current master; the {e.drops} dropped write(s) take the ordinary repair path (demote → reseat → reconstruction)"
+          | .adoptionUnproven =>
+            IO.eprintln s!"[flare-operator] REPLICA REPAIR not adopted for {who}: it is reconstructing, but nothing read after the drops proves this reconstruction began after them; held while Prepare, then the ordinary repair path once Active"
           | .none => pure ()
         ledgerRef.set led1
         persistLedger crName ns led0 led1 metrics ledgerDirtyRef
@@ -4593,7 +4708,9 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
       let mut led2 := led1
       for (dest, d) in newDrops do
         metrics.replicaRepairRequested.inc
-        led2 := ReplicaRepair.request led2 mKey dest d
+        -- adoption evidence, read now: after the master's counter
+        let sight ← requestSightOf (← stateRef.get) dest ns
+        led2 := ReplicaRepair.request led2 mKey dest d sight
         -- SAF-10c: if the destination runs a continuous follower, the
         -- follower OWNS this repair (design §5.4). Record the request,
         -- hold it with a visible reason and the position it must

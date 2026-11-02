@@ -1263,17 +1263,25 @@ Chart values: `nodeReplacement.*` (needs `nodeGuard.enabled`; the chart refuses
 `nodeReplacement.enabled` without it). `FLARE_NODE_REPLACEMENT=off` on the
 operator turns the whole feature off.
 
-**This release supports the cordon move on tmpfs clusters only** (user
-decision 2026-11-01). It is verified there (E2E cordon-master / cordon-replica:
-errors 0, missing 0). On a PVC cluster it is NOT verified: with node-local
-volumes (local PV, local-path) the recreated pod cannot leave the cordoned
-node, stays Pending and the move stays `resyncing` (no data lost; one copy
-fewer; after `resyncTimeoutSeconds` the move is marked
-[stuck](#cordon-move-stuck) and the next moves run, those of the same
-partition blocked by the copy count); with network storage the
-recreated pod comes back with its old data, a path not tested yet. On a PVC
-cluster set `nodeReplacement.enabled: false`: drains then go through the node
-guard's handover only, as before.
+**Storage.** The cordon move needs storage the recreated pod can take to
+another node:
+
+- **tmpfs**: the pod comes back empty on another node and resyncs (E2E
+  `node-ops-switch-tmpfs-cordon-*`: errors 0, missing 0).
+- **PVC on network storage** (NFS, EBS, Ceph and other volumes that attach
+  to any node): the recreated pod comes back on another node with its old
+  data and resyncs as a replica (E2E `node-ops-switch-nfs-cordon-master` /
+  `-replica` on an NFS class: errors 0, missing 0).
+- **PVC on a node-local volume** (local PV, hostPath, local-path, or any PV
+  whose `nodeAffinity` pins it to nodes): the move is **not started**. The
+  operator reads each claim's PersistentVolume before it starts a move; a
+  pinned one (or one it cannot read) reports the pod blocked
+  (`FlareCordonMoveBlocked`: "… its data cannot leave the node"), the node
+  guard keeps holding its eviction (429) and the pod keeps serving where it
+  is (E2E `node-ops-switch-cordon-pinned`). Uncordon to end it; to move such
+  a pod anyway, the data has to be given up (delete the claim with the pod,
+  the copy reseeds from its partition) — the
+  [break-glass](#cordon-move-break-glass) path, not the cordon move.
 
 **Check the copy count first.** The chart defaults are `cluster.replicas: 3`
 (a master and two replicas per partition) and `nodeReplacement.minCopies: 3`
@@ -1457,7 +1465,8 @@ the Service selector loses the serving label requirement.
 - `pending` / `handingOver` / `proxied` have no deadline: a handover that
   keeps aborting is held (alert `FlareCordonMoveHeld`) and still the running
   move.
-- A pod on a node-local PV cannot be recreated elsewhere: use tmpfs or
+- A pod on a node-local PV cannot be recreated elsewhere: the move is not
+  started for it (blocked, "its data cannot leave the node"); use tmpfs or
   network storage.
 
 ## Seeding a new cluster via cluster replication {#replication-seeding}

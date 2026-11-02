@@ -1801,6 +1801,9 @@ initialize downByReachRef : IO.Ref (List String) ← IO.mkRef []
 initialize reachOkRef : IO.Ref (List String) ← IO.mkRef []
 /-- (node key, pod UID) of the pods the latest probe round listed -/
 initialize reachPodIdRef : IO.Ref (List (String × String)) ← IO.mkRef []
+/-- (node key, pod UID) of the pods the latest ListPods listed, for the
+    NotReady streaks (one pod incarnation each, as the reachability streaks). -/
+initialize unreadyPodIdRef : IO.Ref (List (String × String)) ← IO.mkRef []
 /-- The last reachability probe reached NO node (UnreachableNode's guard). -/
 initialize reachGuardRef : IO.Ref Bool ← IO.mkRef false
 /-- spec 13: node -> when its conflicting master claim was first seen (ms),
@@ -2592,7 +2595,16 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       -- for a dead process. Prepare nodes are legitimately NotReady for the
       -- whole reconstruction — detectDeadNodesPure excludes them by state.
       let unreadyDeadCycles := ((← IO.getEnv "FLARE_UNREADY_DEAD_CYCLES").bind (·.toNat?)).getD 6
-      let prevUnready ← unreadyCyclesRef.get
+      -- a NotReady streak belongs to one pod incarnation: a pod recreated
+      -- under the same name (another UID) starts it again — the old pod's
+      -- ticks made the new one dead in the second it registered
+      -- (41418772808 failover-order 8: NotReady 6 ticks fired on the
+      -- recreated pod, which then stayed down)
+      let unreadyIds := pods.map fun p => (Bridge.PodInfo.toNodeKey p, p.uid)
+      let prevUnreadyIds ← unreadyPodIdRef.get
+      unreadyPodIdRef.set unreadyIds
+      let prevUnready := FlareOperator.UnreachableNode.keepStreaksForSamePod
+        (← unreadyCyclesRef.get) prevUnreadyIds unreadyIds
       let notReadyKeys := (pods.filter (fun p => !p.ready && !p.terminating)).map Bridge.PodInfo.toNodeKey
       -- a node Down in the last committed map that is a member again now
       -- (it rejoined) starts its NotReady window again

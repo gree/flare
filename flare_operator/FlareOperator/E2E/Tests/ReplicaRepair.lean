@@ -460,8 +460,9 @@ private def recreatePod (pod : String) : IO (Except String String) := do
     stamp s!"recreated {pod} (uid {(← podUidOf pod).getD "?"}) is Ready at {ip}"
     return .ok ip
 
-/-- Wait for ADOPTED and then COMPLETE (adopted), with the gate still
-    closed; any demotion seen meanwhile fails the test. -/
+/-- Wait for COMPLETE (adopted), with the gate still closed (ADOPTED comes
+    first only when a pass saw the Prepare); any demotion seen meanwhile
+    fails the test. -/
 private def awaitAdoptedCompletion (mIp sIp : String) : IO TestResult := do
   let sawDemote ← IO.mkRef false
   let sawAdopted ← IO.mkRef false
@@ -479,9 +480,15 @@ private def awaitAdoptedCompletion (mIp sIp : String) : IO TestResult := do
       else if !adoptedSeen then " (no ADOPTED line: the Prepare of the recreated pod was never observed with the request adoptable)"
       else ""
     return .fail s!"the recreated pod's reconstruction did not close the held request within 360 s{why}"
-  if !(← sawAdopted.get) then return .fail "COMPLETE (adopted) was logged without an ADOPTED line"
   if (← sawDemote.get) then return .fail "the replica was demoted although its own reconstruction was adopted"
-  stamp "the recreated pod's boot reconstruction was ADOPTED and closed the request"
+  -- with the gate closed only an adoption can close the request: either
+  -- seen in Prepare (ADOPTED, then COMPLETE) or, when the boot copy finished
+  -- between two passes, closed directly on its newer success (COMPLETE
+  -- alone, 41372172476)
+  if (← sawAdopted.get) then
+    stamp "the recreated pod's boot reconstruction was ADOPTED in Prepare and closed the request"
+  else
+    stamp "the recreated pod's boot reconstruction finished between two passes and closed the request directly (no Prepare seen)"
   return .pass
 
 /-- After the adopted completion: ledger empty, the recreated replica holds

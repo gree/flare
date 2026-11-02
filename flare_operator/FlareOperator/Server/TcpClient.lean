@@ -60,9 +60,20 @@ private def sendString (sock : Socket) (s : String) : IO Unit := do
     IO.sleep 50
   throw (IO.userError "send timed out after 3s (peer accepted but stalled)")
 
-/-- Can the OPERATOR open a TCP connection to this flared? Connect-only,
-    bounded by the same 3s budget as the topology push, socket closed
-    immediately.
+/-- A flared's answer to `version`: one line starting `VERSION `. -/
+def versionReplyAnswers (reply : String) : Bool :=
+  reply.startsWith "VERSION "
+
+/-- Wait for `t` until the monotonic `deadline` (ms); true when it finished. -/
+private def finishedBy {α : Type} (t : Task α) (deadline : Nat) : IO Bool := do
+  while !(← IO.hasFinished t) && (← IO.monoMsNow) < deadline do
+    IO.sleep 10
+  IO.hasFinished t
+
+/-- Can the OPERATOR reach this flared? It must accept a TCP connection AND
+    answer `version` (one `VERSION ` line) within `timeoutMs` in all — a
+    connect alone also succeeded for a wedged flared (risk B10). Socket closed
+    right after.
 
     This tests the operator→pod path specifically, which nothing else does:
     the readiness probe runs INSIDE the pod (kubelet asks flared about
@@ -70,40 +81,53 @@ private def sendString (sock : Socket) (s : String) : IO Unit := do
     node can therefore be perfectly healthy for clients while the operator
     cannot push topology to it — it then runs on a stale map indefinitely.
 
-    Deliberately NOT wired into dead detection: unreachability is a loss of
-    OUR feedback, and the fault may be on our side, so acting on it (failing
-    over a master we merely cannot see) is the unsafe control action. It is
-    an alerting signal only. -/
-def probeNodeReachable (ip : String) (port : Nat) : IO Bool := do
+    Feeds dead detection through StateMachine/UnreachableNode (spec 12,
+    2026-10-31): flarei's retry count and wait, a master only with a reachable
+    successor, and nothing at all when no node of the cluster is reachable
+    (then the fault is taken to be the operator's own). -/
+def probeNodeReachable (ip : String) (port : Nat) (timeoutMs : Nat := 3000) : IO Bool := do
+  -- connect, send, receive and the socket shutdown all share ONE monotonic
+  -- deadline: the caller's `timeoutMs` bounds the whole probe (review of
+  -- a074161, P1 — the connect wait used to count sleeps, not time).
+  let deadline := (← IO.monoMsNow) + timeoutMs
   let ipAddr ← match parseIPv4 ip with
     | some addr => pure addr
     | none => return false
   let sock ← Socket.new
   let addr := SocketAddress.v4 (SocketAddressV4.mk ipAddr port.toUInt16)
   try
-    let connectPromise ← sock.connect addr
-    let connectTask := connectPromise.result!
-    let mut connected := false
-    for _ in [0:60] do
-      if (← IO.hasFinished connectTask) then
-        connected := true
-        break
-      IO.sleep 50
-    if !connected then
-      return false
+    let connectTask := (← sock.connect addr).result!
+    if !(← finishedBy connectTask deadline) then return false
     match connectTask.get with
     | .error _ => return false
-    | .ok () => return true
+    | .ok () => pure ()
+    -- connected: a flared that accepts but does not answer (wedged, SIGSTOP)
+    -- is not reachable either (risk flare-risk-probe-connect-only). Ask for
+    -- its version within the rest of the same budget.
+    let sendTask := (← sock.send "version\r\n".toUTF8).result!
+    if !(← finishedBy sendTask deadline) then return false
+    match sendTask.get with
+    | .error _ => return false
+    | .ok _ => pure ()
+    let mut bytes := ByteArray.empty
+    while (← IO.monoMsNow) < deadline do
+      let t := (← sock.recv? 128).result!
+      if !(← finishedBy t deadline) then return false
+      match t.get with
+      | .error _ => return false
+      | .ok none => return false
+      | .ok (some chunk) =>
+        if chunk.isEmpty then return false
+        bytes := bytes ++ chunk
+        if bytes.data.contains 10 then
+          return versionReplyAnswers (String.fromUTF8? bytes |>.getD "")
+        if bytes.size > 256 then return false
+    return false
   catch _ =>
     return false
   finally
     try
-      let shutdownPromise ← sock.shutdown
-      let t := shutdownPromise.result!
-      for _ in [0:20] do
-        if (← IO.hasFinished t) then
-          break
-        IO.sleep 50
+      let _ ← finishedBy (← sock.shutdown).result! deadline
     catch _ =>
       pure ()
 

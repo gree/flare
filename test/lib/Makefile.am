@@ -48,6 +48,7 @@ noinst_LTLIBRARIES =	\
 	test_stats_reconstruction.la	\
 	test_source_eligibility.la	\
 	test_copy_protection.la	\
+	test_handler_reconstruction.la	\
 	test_copy_switch.la	\
 	test_signal_interrupt.la	\
 	test_op_touch.la	\
@@ -91,7 +92,7 @@ test_connection_tcp_la_SOURCES	= test_connection_tcp.cc common_connection_tests.
 test_cluster_la_SOURCES	= test_cluster.cc
 test_connection_iostream_la_SOURCES	= test_connection_iostream.cc common_connection_tests.cc connection_iostream.cc
 test_handler_proxy_la_SOURCES	= test_handler_proxy.cc mock_cluster.cc
-test_handler_cluster_replication_la_SOURCES	= test_handler_cluster_replication.cc
+test_handler_cluster_replication_la_SOURCES	= test_handler_cluster_replication.cc connection_iostream.cc mock_storage.cc
 test_handler_dump_replication_la_SOURCES	= test_handler_dump_replication.cc mock_cluster.cc mock_storage.cc
 test_storage_la_SOURCES	= test_storage.cc
 test_storage_entry_la_SOURCES	= test_storage_entry.cc
@@ -140,6 +141,7 @@ test_op_stats_la_SOURCES	= test_op_stats.cc connection_iostream.cc
 test_stats_reconstruction_la_SOURCES	= test_stats_reconstruction.cc
 test_source_eligibility_la_SOURCES	= test_source_eligibility.cc
 test_copy_protection_la_SOURCES	= test_copy_protection.cc
+test_handler_reconstruction_la_SOURCES	= test_handler_reconstruction.cc mock_cluster.cc
 test_copy_switch_la_SOURCES	= test_copy_switch.cc
 test_signal_interrupt_la_SOURCES	= test_signal_interrupt.cc
 test_op_touch_la_SOURCES	= test_op_touch.cc connection_iostream.cc

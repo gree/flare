@@ -82,6 +82,13 @@ cluster::node mock_cluster::set_node(string server_name, int server_port, role r
 	return n;
 }
 
+cluster::node mock_cluster::set_node_locked(string server_name, int server_port, role r, state s, int partition, int balance) {
+	pthread_rwlock_wrlock(&this->_mutex_node_map);
+	node n = this->set_node(server_name, server_port, r, s, partition, balance);
+	pthread_rwlock_unlock(&this->_mutex_node_map);
+	return n;
+}
+
 void mock_cluster::clear_node_map() {
 	this->_node_map.clear();
 }

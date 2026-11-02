@@ -137,7 +137,11 @@ cluster:
   enabled: false
   name: "default"
   partitions: 2
-  replicas: 2
+  # copies per partition (master + replicas). 3 so a cordon move keeps a
+  # replica besides the master (nodeReplacement.minCopies, default 3) and a
+  # rebuild never leaves the master alone (user decision 2026-11-01). With 2,
+  # every cordon move is blocked unless nodeReplacement.minCopies is 2.
+  replicas: 3
   image:
     repository: ghcr.io/gree/flare-node-rocksdb
     tag: latest
@@ -438,6 +442,41 @@ cluster:
 # with a caught-up replica. Set it back to false once every pod runs this
 # release.
 legacyMasterSwitch: false
+
+# Cordon move (flare-cordon-proactive-move; docs/RUNBOOK.md#cordon-move): when a
+# Node is cordoned (spec.unschedulable) the operator moves its flared pods off,
+# one at a time and without a write error: a master is handed over to a
+# replica on another node, a replica is demoted to a proxy; the pod leaves the
+# client Service (it needs the serving label, which the operator manages), and
+# only then may it be evicted (the node guard refuses before that, 429).
+# Needs nodeGuard.enabled. Supported on tmpfs clusters only in this release (verified
+# there); on a PVC cluster set enabled: false (a local PV cannot move, network
+# storage is not verified yet) — RUNBOOK #cordon-move.
+nodeReplacement:
+  enabled: true
+  # A partition needs at least this many real copies (master + replicas, counting
+  # the one being moved; on other nodes, Active, same history, no open repair, no
+  # new drop). Below it the move does not start: status.nodeMoves[].blocked, an
+  # Event and the alert FlareCordonMoveBlocked say so, and the eviction stays
+  # held. 2 moves a 2-copy partition and leaves the master alone while it runs
+  # (an accepted risk).
+  minCopies: 3
+  # the client Service must stop reaching the pod within this many seconds,
+  # else the move holds (the pod stays a proxy, alert FlareCordonMoveHeld)
+  drainWaitSeconds: 120
+  # no new client request for this long (flared client_requests, its baseline
+  # bound to the flared process; total_connections on an older flared)
+  quietSeconds: 10
+  # no eviction this long after the release: the operator deletes the pod itself
+  evictWaitSeconds: 60
+  # a move still `unserved` after this many seconds is marked STUCK (alert
+  # FlareCordonMoveStuck): it stops being the running move so later moves
+  # proceed; its pod stays a held proxy (never released). 0 = no deadline
+  unservedTimeoutSeconds: 1800
+  # a move waiting this long for the recreated pod to come back as an Active,
+  # synced replica (`deleted` / `resyncing`) is marked STUCK the same way.
+  # 0 = no deadline
+  resyncTimeoutSeconds: 1800
 
 nodeGuard:
   enabled: true

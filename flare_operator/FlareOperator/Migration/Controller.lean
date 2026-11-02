@@ -70,7 +70,7 @@ private def parseMigJson (j : Lean.Json) : Option MigCR := do
       target := {
         name := targetName
         partitions := getNat targetObj "partitions" 1
-        replicas := getNat targetObj "replicas" 2
+        replicas := getNat targetObj "replicas" 3
         persistenceSize := getStr targetObj "persistenceSize" "10Gi"
         drainSeconds := getNat targetObj "drainSeconds" 60
       }

@@ -135,8 +135,12 @@ def gate (before after : FlareClusterState) (perPartition clusterWide : Nat)
   let mut held : List (String × String) := []
   for (k, a) in after.nodeMap do
     if newAssignment (before.lookupNode k) a then
-      let inPart := (admitted.filter fun (_, p) => p == a.partition).length
-      if clusterCount ≥ clusterWide || inPart ≥ perPartition then
+      -- k's OWN running reconstruction is not another rebuild in its way: a
+      -- recreated pod demoted to proxy while its boot reconstruction still
+      -- retried held its own re-seat for ever (41278035134: 24 min)
+      let self := if counted.contains k && !parkedIdle.contains k then 1 else 0
+      let inPart := (admitted.filter fun (k', p) => k' != k && p == a.partition).length
+      if clusterCount - self ≥ clusterWide || inPart ≥ perPartition then
         let why := if inPart ≥ perPartition
           then s!"partition {a.partition} already has {inPart} rebuild(s) (limit {perPartition})"
           else s!"the cluster already has {clusterCount} running rebuild(s) (limit {clusterWide})"
@@ -145,8 +149,8 @@ def gate (before after : FlareClusterState) (perPartition clusterWide : Nat)
         | none => pure ()
         held := held ++ [(k, why)]
       else
-        admitted := admitted ++ [(k, a.partition)]
-        clusterCount := clusterCount + 1
+        admitted := (admitted.filter (·.1 != k)) ++ [(k, a.partition)]
+        clusterCount := clusterCount - self + 1
   let st := FlareClusterState.rebuildPartitionMap { after with nodeMap := nodeMap }
   return { state := st, held := held }
 

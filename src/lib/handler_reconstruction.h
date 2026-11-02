@@ -133,6 +133,9 @@ public:
 	virtual int run();
 
 protected:
+	// a slave that is a proxy in its own map: abandoned (logged, stats
+	// "aborted"); checked at each attempt and every second while parked
+	bool _abandoned_as_proxy(int attempt);
 	int _run_once();
 	int _activate_with_retry(bool skip_ready_state);
 	// R3-D: the protection rule (copy_protection.h) evaluated NOW, right

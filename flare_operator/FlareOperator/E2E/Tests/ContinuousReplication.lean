@@ -879,10 +879,17 @@ def suite : TestSuite := {
             discard <| kubectlPatch "flarecluster" cfg.name cfg.«namespace» "{\"spec\":{\"readBalance\":{\"master\":100,\"slave\":0}}}"
             -- The failed transport now stays pending through the lease
             -- fence. No explicit 50→0 recovery transition is needed.
+            -- the replica's address now: cut from the operator for ~22 s,
+            -- spec 12 marks it down and it may be recreated under a new IP
+            -- (41275671570: the old IP was asked until the timeout)
             let recovered ← waitForCondition "isolated read-guard fault is fully restored" 240 do
-              return (← localBalance) == some "0" &&
-                (← statStr sIp "repl_follow_state") == some "following" &&
-                (← statNat sIp "repl_applied_lsn") == (← statNat mIp "rocksdb_latest_sequence_number")
+              let ip := (← getPodIp sPod cfg.«namespace»).getD sIp
+              let bal ← match ← execInDebugPod cfg.debugPod cfg.«namespace» s!"printf 'stats nodes\\r\\n' | nc -w 3 {ip} {cfg.flarePort}" with
+                | .error _ => pure none
+                | .ok out => pure (statVal out s!"{slave.fqdn}:{cfg.flarePort}:balance")
+              return bal == some "0" &&
+                (← statStr ip "repl_follow_state") == some "following" &&
+                (← statNat ip "repl_applied_lsn") == (← statNat mIp "rocksdb_latest_sequence_number")
             if !recovered then throw (IO.userError "read-guard cleanup did not restore balance and catch-up")
     },
 

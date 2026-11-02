@@ -74,7 +74,7 @@ def kubectl (args : List String) : IO (Except String String) := do
     a deadlock (the child blocks on stdin EOF while we block on its stdout). A temp
     file sidesteps that entirely and is still shell-free. The file is unlinked in
     a `finally`-style cleanup regardless of the apply result. -/
-def kubectlApplyManifest (manifest : String) : IO (Except String String) := do
+def kubectlApplyManifest (manifest : String) (verb : String := "apply") : IO (Except String String) := do
   try
     -- Unique-per-call temp path (pid + monotonic clock) to avoid collisions
     -- between concurrent operator goroutines / reconcile ticks.
@@ -84,16 +84,16 @@ def kubectlApplyManifest (manifest : String) : IO (Except String String) := do
     IO.FS.writeFile tmpPath manifest
     let result ← IO.Process.output {
       cmd := "kubectl"
-      args := #["apply", "-f", tmpPath.toString]
+      args := #[verb, "-f", tmpPath.toString]
     }
     -- Best-effort cleanup; ignore errors (e.g. already gone).
     try IO.FS.removeFile tmpPath catch _ => pure ()
     if result.exitCode == 0 then
       return .ok result.stdout
     else
-      return .error s!"kubectl apply failed (exit {result.exitCode}): {result.stderr}"
+      return .error s!"kubectl {verb} failed (exit {result.exitCode}): {result.stderr}"
   catch e =>
-    return .error s!"kubectl apply error: {e}"
+    return .error s!"kubectl {verb} error: {e}"
 
 /-- Parse a FlareClusterView from a Lean.Json object. -/
 private def getFlareClusterFromJson (json : Lean.Json) (name ns : String)

@@ -33,6 +33,8 @@
 #include "cluster.h"
 #include "cluster_replication.h"
 #include "op_set.h"
+#include "mock_storage.h"
+#include "connection_iostream.h"
 
 #include <cppcutter.h>
 #include <time.h>
@@ -963,6 +965,261 @@ namespace test_handler_cluster_replication {
 		snap = stats_object->get_repl_in_flight(total);
 		cut_assert_equal_int(0, (int)total);
 		cut_assert_equal_int(0, (int)snap.size());
+	}
+
+	// One item is shared by every replica's forwarding thread: the writer
+	// tracks the next replica while the first replica's thread may already
+	// release (41284282067 / 41278035134: an unlocked push_back raced an erase
+	// and the master's flared died with SIGSEGV). Tracking and releasing from
+	// two threads at once must leave every count consistent.
+	struct repl_race_arg {
+		queue_proxy_write* q;
+		int n;
+	};
+	static void* repl_race_track(void* p) {
+		repl_race_arg* a = static_cast<repl_race_arg*>(p);
+		for (int i = 0; i < a->n; i++) {
+			char d[32];
+			snprintf(d, sizeof(d), "t%d:12121", i);
+			a->q->track_repl_in_flight(d);
+		}
+		return NULL;
+	}
+	static void* repl_race_release(void* p) {
+		repl_race_arg* a = static_cast<repl_race_arg*>(p);
+		for (int round = 0; round < 3; round++) {
+			for (int i = 0; i < a->n; i++) {
+				char d[32];
+				snprintf(d, sizeof(d), "t%d:12121", i);
+				a->q->release_repl_in_flight(d);
+			}
+		}
+		return NULL;
+	}
+	void test_repl_in_flight_track_and_release_from_two_threads() {
+		uint64_t total = 1;
+		stats_object->get_repl_in_flight(total);
+		cut_assert_equal_int(0, (int)total);
+		storage::entry e = get_entry(" rk 0 0 5 3", storage::parse_type_set, "VALUE");
+		vector<string> proxy;
+		for (int rep = 0; rep < 20; rep++) {
+			shared_queue_proxy_write q(new queue_proxy_write(NULL, NULL, proxy, e, "set"));
+			q->set_post_proxy(true);
+			repl_race_arg a = { q.get(), 2000 };
+			pthread_t t1, t2;
+			pthread_create(&t1, NULL, repl_race_track, &a);
+			pthread_create(&t2, NULL, repl_race_release, &a);
+			pthread_join(t1, NULL);
+			pthread_join(t2, NULL);
+			q.reset();
+			map<string, uint64_t> snap = stats_object->get_repl_in_flight(total);
+			cut_assert_equal_int(0, (int)total);
+			cut_assert_equal_int(0, (int)snap.size());
+		}
+	}
+
+	// SAF-10b replication identity (risk flare-risk-repl-tag-race): the tag
+	// is computed ONCE by the writer, in the ctor, before the item is shared
+	// by every replica's forwarding thread; run() only reads it.
+	struct epoch_storage : public mock_storage {
+		string epoch;
+		epoch_storage(const string& e): mock_storage("", 0, 0), epoch(e) {}
+		virtual string get_source_epoch() { return this->epoch; }
+	};
+	void test_repl_tag_is_set_by_the_ctor() {
+		cluster cl(NULL, NULL, "", 0);
+		epoch_storage st("3:1f2e");
+		storage::entry e = get_entry(" rk 0 0 5 3", storage::parse_type_set, "VALUE");
+		e.seq_label = 4242;
+		vector<string> proxy;
+
+		cl.set_repl_identity_forward(true);
+		{
+			queue_proxy_write q(&cl, &st, proxy, e, "set");
+			cut_assert_equal_string("3:1f2e/4242", q.get_entry().repl_tag.c_str());
+		}
+		// forward off: nothing
+		cl.set_repl_identity_forward(false);
+		{
+			queue_proxy_write q(&cl, &st, proxy, e, "set");
+			cut_assert_equal_string("", q.get_entry().repl_tag.c_str());
+		}
+		cl.set_repl_identity_forward(true);
+		// no label: nothing
+		{
+			storage::entry e0 = e;
+			e0.seq_label = 0;
+			queue_proxy_write q(&cl, &st, proxy, e0, "set");
+			cut_assert_equal_string("", q.get_entry().repl_tag.c_str());
+		}
+		// empty epoch: nothing
+		{
+			epoch_storage st0("");
+			queue_proxy_write q(&cl, &st0, proxy, e, "set");
+			cut_assert_equal_string("", q.get_entry().repl_tag.c_str());
+		}
+		// no cluster / no storage: nothing
+		{
+			queue_proxy_write q1(NULL, &st, proxy, e, "set");
+			cut_assert_equal_string("", q1.get_entry().repl_tag.c_str());
+			queue_proxy_write q2(&cl, NULL, proxy, e, "set");
+			cut_assert_equal_string("", q2.get_entry().repl_tag.c_str());
+		}
+	}
+
+	struct repl_tag_run_arg {
+		queue_proxy_write* q;
+		int n;
+		int sent_with_tag;
+		int failed;
+	};
+	static void* repl_tag_run(void* p) {
+		repl_tag_run_arg* a = static_cast<repl_tag_run_arg*>(p);
+		for (int i = 0; i < a->n; i++) {
+			connection_sstream* cs = new connection_sstream("STORED\r\n");
+			shared_connection c(cs);
+			if (a->q->run(c) < 0) {
+				a->failed++;
+			}
+			if (cs->get_output().find(" rl=3:1f2e/4242") != string::npos) {
+				a->sent_with_tag++;
+			}
+		}
+		return NULL;
+	}
+	// The ONE shared item is run by two forwarding threads at once (as two
+	// replicas' threads do): each sends the ctor's tag and none changes it.
+	void test_repl_tag_is_unchanged_by_run_from_two_threads() {
+		cluster cl(NULL, NULL, "", 0);
+		cl.set_repl_identity_forward(true);
+		epoch_storage st("3:1f2e");
+		storage::entry e = get_entry(" rk 0 0 5 3", storage::parse_type_set, "VALUE");
+		e.seq_label = 4242;
+		vector<string> proxy;
+		shared_queue_proxy_write q(new queue_proxy_write(&cl, &st, proxy, e, "set"));
+		q->set_post_proxy(true);
+		const char* before = q->get_entry().repl_tag.c_str();
+		cut_assert_equal_string("3:1f2e/4242", before);
+		repl_tag_run_arg a1 = { q.get(), 200, 0, 0 };
+		repl_tag_run_arg a2 = { q.get(), 200, 0, 0 };
+		pthread_t t1, t2;
+		pthread_create(&t1, NULL, repl_tag_run, &a1);
+		pthread_create(&t2, NULL, repl_tag_run, &a2);
+		pthread_join(t1, NULL);
+		pthread_join(t2, NULL);
+		cut_assert_equal_int(0, a1.failed);
+		cut_assert_equal_int(0, a2.failed);
+		cut_assert_equal_int(200, a1.sent_with_tag);
+		cut_assert_equal_int(200, a2.sent_with_tag);
+		cut_assert_equal_string("3:1f2e/4242", q->get_entry().repl_tag.c_str());
+		// the very same buffer: run() did not assign the string
+		cut_assert(before == q->get_entry().repl_tag.c_str());
+	}
+
+	// An in-memory replica connection: a connection_tcp (so run() attributes
+	// its outcome to host:port, as for a real replica) whose I/O goes to a
+	// string stream holding the replica's answer. Never opens a socket.
+	class answer_tcp : public connection_tcp {
+	public:
+		answer_tcp(const string& host, const string& answer):
+			connection_tcp(host, 12121), _ss(answer) { }
+		virtual int open() { return 0; }
+		virtual int close() { return 0; }
+		virtual bool is_available() const { return true; }
+		virtual int read(char** p, int expect_len, bool readline, bool& actual) { return this->_ss.read(p, expect_len, readline, actual); }
+		virtual int readline(char** p) { return this->_ss.readline(p); }
+		virtual int readsize(int expect_len, char** p) { return this->_ss.readsize(expect_len, p); }
+		virtual int push_back(const char* p, int bufsiz) { return this->_ss.push_back(p, bufsiz); }
+		virtual int write(const char* p, int bufsiz, bool buffered = false) { return this->_ss.write(p, bufsiz, buffered); }
+		virtual int writeline(const char* p) { return this->_ss.writeline(p); }
+	private:
+		connection_sstream _ss;
+	};
+
+	// One post-proxy item is shared by every replica's forwarding thread, and
+	// each thread used to write the item's _result / _result_message (a
+	// std::string) at once and classify its OWN answer by reading _result
+	// back (risk flare-risk-proxy-write-result-race). Each thread's outcome
+	// must follow its own answer, and the published result must be one whole
+	// answer (result and message from the same reply).
+	struct result_race_arg {
+		queue_proxy_write* q;
+		string host;
+		string answer;
+		int n;
+		int bad_returns;
+	};
+	static void* result_race_run(void* p) {
+		result_race_arg* a = static_cast<result_race_arg*>(p);
+		for (int i = 0; i < a->n; i++) {
+			shared_connection c(new answer_tcp(a->host, a->answer));
+			if (a->q->run(c) != 0) {
+				a->bad_returns++;
+			}
+		}
+		return NULL;
+	}
+	void test_proxy_write_result_from_two_threads_follows_each_answer() {
+		queue_proxy_write::hold_window_ms = 0;
+		uint64_t total = 1;
+		stats_object->get_proxy_write_failed(total);
+		cut_assert_equal_int(0, (int)total);
+		stats_object->get_proxy_write_skipped(total);
+		cut_assert_equal_int(0, (int)total);
+		storage::entry e = get_entry(" rk 0 0 5 3", storage::parse_type_set, "VALUE");
+		vector<string> proxy;
+		shared_queue_proxy_write q(new queue_proxy_write(NULL, NULL, proxy, e, "set"));
+		q->set_post_proxy(true);
+		const int n = 200;
+		result_race_arg ok = { q.get(), "stored-replica", "STORED\r\n", n, 0 };
+		result_race_arg ng = { q.get(), "failing-replica", "SERVER_ERROR disk full\r\n", n, 0 };
+		pthread_t t1, t2;
+		pthread_create(&t1, NULL, result_race_run, &ok);
+		pthread_create(&t2, NULL, result_race_run, &ng);
+		pthread_join(t1, NULL);
+		pthread_join(t2, NULL);
+		cut_assert_equal_int(0, ok.bad_returns);
+		cut_assert_equal_int(0, ng.bad_returns);
+		// each answer classified by its own thread: the STORED replica has no
+		// failed/skipped outcome, the failing one exactly one failed per call
+		map<string, uint64_t> f = stats_object->get_proxy_write_failed(total);
+		cut_assert_equal_int(n, (int)total);
+		cut_assert_equal_int(n, (int)f["failing-replica:12121"]);
+		cut_assert_equal_int(0, (int)f.count("stored-replica:12121"));
+		stats_object->get_proxy_write_skipped(total);
+		cut_assert_equal_int(0, (int)total);
+		cut_assert_equal_int(0, (int)stats_object->get_proxy_write_dropped());
+		// the published result is one whole answer
+		cut_assert_equal_boolean(true, q->is_success());
+		const op::result r = q->get_result();
+		const string m = q->get_result_message();
+		if (r == op::result_stored) {
+			cut_assert_equal_string("", m.c_str());
+		} else {
+			cut_assert_equal_int(op::result_server_error, r);
+			cut_assert_equal_string("disk full", m.c_str());
+		}
+	}
+
+	// _publish_result is what get_result / get_result_message / is_success report
+	class publishing_proxy_write : public queue_proxy_write {
+	public:
+		publishing_proxy_write(storage::entry e):
+			queue_proxy_write(NULL, NULL, vector<string>(), e, "set") { }
+		void publish(op::result r, const string& msg) { this->_publish_result(r, msg); }
+	};
+	void test_proxy_write_publish_result_is_reported() {
+		storage::entry e = get_entry(" rk 0 0 5 3", storage::parse_type_set, "VALUE");
+		publishing_proxy_write q(e);
+		cut_assert_equal_boolean(false, q.is_success());
+		q.publish(op::result_server_error, "disk full");
+		cut_assert_equal_boolean(true, q.is_success());
+		cut_assert_equal_int(op::result_server_error, q.get_result());
+		cut_assert_equal_string("disk full", q.get_result_message().c_str());
+		q.publish(op::result_stored, "");
+		cut_assert_equal_boolean(true, q.is_success());
+		cut_assert_equal_int(op::result_stored, q.get_result());
+		cut_assert_equal_string("", q.get_result_message().c_str());
 	}
 
 	// review of 8d64aaf: terminal outcomes of answered in-cluster forwards are

@@ -1,6 +1,6 @@
 # Flare Operator Runbook
 
-## Upgrading a release (READ THIS FIRST)
+## Upgrading a release (READ THIS FIRST) {#upgrading}
 
 The CRDs live in `templates/crds.yaml`, gated by `crds.install` — **not** in
 Helm's install-only `crds/` dir. So whoever owns them (`crds.install=true`)
@@ -18,10 +18,82 @@ were PRUNED) is gone. Which release owns the CRDs depends on the layout:
 Standalone upgrade:
 
 ```bash
-helm upgrade flare ./helm/flare-operator -n flare-system --reuse-values \
+# Helm >= 3.14: the new chart's defaults, then the release's values on top
+helm upgrade flare ./helm/flare-operator -n flare-system --reset-then-reuse-values \
+  --set image.tag=<version> --set cluster.image.tag=<version>
+# or pass the release's values file explicitly (no --reuse-values):
+helm upgrade flare ./helm/flare-operator -n flare-system -f <values.yaml> \
   --set image.tag=<version> --set cluster.image.tag=<version>
 # CRDs upgrade in-band because crds.install defaults to true.
 ```
+
+**Do not use `--reuse-values` for the first upgrade from rc68 or older.** It
+builds on the old release's values and ignores the new chart's defaults. The
+values added since rc68 (`nodeGuard`, `nodeReplacement`, `legacyMasterSwitch`)
+are then missing: the templates that read them fail to render, or render
+with the node guard and the cordon move off. Check the rendered result
+before applying (`helm template` / `helm diff`): the operator Deployment has
+`FLARE_NODE_GUARD=on` and the `<release>-flare-operator-node-guard-<ns>`
+ValidatingWebhookConfiguration exists.
+
+**What the upgrade does to the flared pods.** The flared StatefulSet uses
+`updateStrategy: OnDelete`: applying the chart replaces no pod. The operator
+replaces the pods that are not on the StatefulSet's update revision, one at a
+time, the highest ordinal first and a master last through the ordered
+handover, and only while every partition has its master and its replicas
+Active, Ready and caught up (details: [node guard](#node-guard)). Follow it in
+the operator log:
+
+```bash
+kubectl -n <ns> logs deploy/<release>-flare-operator | grep 'ROLLING:'
+#   ROLLING: delete <pod> (...)                 one pod replaced
+#   ROLLING: waiting (...)                      why it is not replacing now
+#   ROLLING: idle (every pod is on the update revision)   done
+kubectl -n <ns> get sts <cluster>-nodes -o jsonpath='{.status.updateRevision}'
+kubectl -n <ns> get pods -l app=flare -L controller-revision-hash
+```
+
+It is done when every flared pod's `controller-revision-hash` equals the
+update revision. To stop it, set `FLARE_OPERATOR_ROLLING=off` in the
+operator's `env` (values `env:`); pods are then replaced by hand, one at a
+time, with graceful deletes ([node guard](#node-guard)). With `replicas: 1`
+(no replica) a master has nobody to hand over to: rolling waits on it and
+the master is not replaced.
+
+**First upgrade from rc68 or older: `legacyMasterSwitch`.** A master running
+an rc68-or-older flared cannot be handed over without possible loss, so by
+default the operator does not replace it: rolling waits with
+`ROLLING: waiting (master … runs a flared from before the ordered handover …)`
+and the node guard refuses its delete. To accept that risk for this upgrade:
+
+1. Upgrade with `--set legacyMasterSwitch=true` (operator env
+   `FLARE_OPERATOR_LEGACY_MASTER_SWITCH=allow`).
+2. Wait out the operator's startup grace (`FLARE_STARTUP_GRACE_SECONDS`,
+   default 120 s, counted from when it became leader). Until then the log
+   says `… it is replaced only after the operator's startup grace, when the
+   drain is active` and nothing is deleted.
+3. Each such master is then deleted for the drain's promotion, only while a
+   caught-up replica exists (`ROLLING: delete … NOT loss-free`). Writes the
+   master acknowledged but had not forwarded can be lost.
+4. Once every flared pod runs the new release (`ROLLING: idle (every pod is
+   on the update revision)`), upgrade again with `legacyMasterSwitch=false`.
+
+See also [Upgrading from rc68 or older](#node-guard) under the node guard.
+
+**The default copy count is now 3 (`cluster.replicas`, was 2).** A release
+that never set `cluster.replicas` gets one more flared pod per partition on
+this upgrade (memory and pods x1.5); the new pods join as replicas and
+rebuild from their masters. To keep 2 copies, set `cluster.replicas: 2`
+before upgrading — cordon moves are then blocked unless
+`nodeReplacement.minCopies: 2` ([cordon moves](#cordon-move)). A release that
+sets it already (pf-dev) is unchanged.
+
+**The webhook during an upgrade.** The node guard judges StatefulSet UPDATEs
+too (`failurePolicy: Fail`). An update that does not reduce `replicas` is
+allowed, but while no operator leader answers (for example the operator
+Deployment is rolling in the same upgrade) the call itself fails and Helm
+reports `failed calling webhook "statefulsets.node-guard.flare.gree.net"`.
+Run the same upgrade again once the operator is Ready.
 
 Verify the schema took: `kubectl patch flarecluster <name> --dry-run=server
 --type=merge -p '{"spec":{"circuitBreaker":{"tripThresholdPercent":50}}}'`
@@ -39,9 +111,54 @@ enough, the chart renders `spec.rocksdb` with `toYaml` and keeps the key),
 then drop the patch once the new CRD is in. Check the PR's diff report for
 the instance before merging (pf-dev PR moc2-k8s#9362).
 
+### Rolling a release back {#rollback}
+
+**A `helm rollback` to rc68 or older is not loss-free.** The rc68 chart has
+no `updateStrategy`, so the StatefulSet goes back to the Kubernetes default
+`RollingUpdate`, and the node-guard webhook is removed. The StatefulSet
+controller then replaces EVERY flared pod itself, highest ordinal first,
+masters included, with no ordered handover: each master goes through the
+drain's promotion, and acknowledged writes it had not forwarded can be lost.
+On tmpfs every replaced pod also reseeds its copy. Nothing stops it: the
+webhook is gone, and the StatefulSet controller is a trusted requester anyway.
+
+Before any rollback:
+
+- No cordon move in progress: `kubectl get flarecluster <name> -o
+  jsonpath='{.status.nodeMoves}'` shows no move other than `done` /
+  `cancelled` (uncordon and wait, or let the moves finish).
+- No handover running (`HANDOVER` in the operator log) and no rolling in
+  progress (the last `ROLLING:` line is `idle (…)`).
+- Take a backup (docs/BACKUP_RESTORE.md).
+
+Prefer, when only the operator has to go back: keep the new chart and roll
+back only the operator image, with the features it does not have turned off.
+
+```bash
+helm upgrade flare ./helm/flare-operator -n <ns> --reset-then-reuse-values \
+  --set image.tag=<old version> \
+  --set nodeGuard.enabled=false --set nodeReplacement.enabled=false
+```
+
+The StatefulSet stays `OnDelete`, so no flared pod is replaced. An rc68 or
+older operator does not replace pods (it has no rolling) and does not serve
+the webhook, so `nodeGuard.enabled=false` is required (otherwise every flared
+pod delete and every eviction in the namespace is refused); the chart
+refuses `nodeReplacement.enabled` without the guard. Any flared change after
+that is by hand: graceful deletes, one pod at a time, a master last. This
+combination is not exercised by a test.
+
+The node map format is unchanged since rc68. For an operator older than the
+history record, see
+[Rolling the operator back past the history record](#history-record).
+
+## On-call overview {#on-call}
+
 On-call procedures for the Lean-operator-managed Flare cluster. Alert names
-match `deploy/monitoring/prometheus-rules.yaml` /
-`helm/flare-operator/templates/prometheusrule.yaml`.
+match `helm/flare-operator/templates/prometheusrule.yaml` (the chart's rules).
+`deploy/monitoring/prometheus-rules.yaml` holds only five of them
+(MasterMissing, CircuitBreakerTripped, PrepareStuck, OperatorAbsent,
+DeadNodeChurn); use the chart's rules.
 
 Quick orientation:
 - Control plane = the operator (leader-elected, FSM tick every 5s). Data
@@ -50,8 +167,10 @@ Quick orientation:
   incidents are urgent but not instant data outages.
 - The operator's view: `printf 'node sync\r\n' | nc <operator-svc> 12120`
   (roles: 0=master 1=slave 2=proxy; states: 0=active 1=prepare 2=down).
-- Useful log greps (operator): `CIRCUIT BREAKER TRIPPED`, `LEASE FENCE`,
-  `WARNING: node .* Prepare`, `Promoting Slave`, `topology changed`.
+- Useful log greps (operator): `CIRCUIT BREAKER TRIPPED`, `LEASE CHECK`,
+  `LEASE FENCE`, `WARNING: node .* Prepare`, `Promoting Slave`,
+  `topology changed` ([lease check](#lease-check) explains the two LEASE
+  lines).
 - flared data-plane greps: `reconstruction via WAL`, `truncate skipped`,
   `truncating local storage`, `master_id`.
 
@@ -140,6 +259,55 @@ propagation are dead.
    ConfigMap; the cluster shape must NOT churn (verified by the
    operator-restart e2e). A fresh 120s dead-detection grace follows — factor
    it into any concurrent incident.
+3. While no operator leader answers, the node guard fails closed: flared pod
+   deletes, every eviction in the namespace (`kubectl drain` included) and
+   StatefulSet updates are refused. See
+   [The operator is down](#node-guard-operator-down).
+
+## `LEASE CHECK: authority NOT confirmed` (mid-pass lease check) {#lease-check}
+
+The leader renews its 15 s lease at the top of every pass, but a pass can
+outlast it. So right before each action that only the leader may take — a
+topology broadcast, a write of the authoritative history, a step of an
+ordered handover (and a rolling or cordon-move delete), the empty-master
+self-heal delete — the operator re-checks the lease **now**
+(`holdLeaseNow`, `StateMachine/LeaseFence.lean`): it reads the lease and
+renews it. The lease counts as held only when
+
+- the lease still names this pod as holder, **and**
+- the renew succeeded, **and**
+- at least 5 s of the 15 s lease are left, counted from **before** the renew
+  was sent (the renew must answer within 10 s).
+
+A failed or late renew is **not** held: the read before it is no evidence
+once the call took that long, and a standby may have taken the lease
+meanwhile. The gated action is then skipped and retried on the next pass;
+nothing is lost, it is only delayed. Logs:
+
+```
+LEASE CHECK: authority NOT confirmed — the renew took <ms>ms, less than 5000ms of the 15s lease left; the gated action is skipped
+LEASE CHECK: authority NOT confirmed — the renew failed after <ms>ms (<error>); the gated action is skipped
+```
+
+followed by the caller's line, e.g. `LEASE FENCE: the lease was not confirmed
+(…) — suppressing topology broadcast (vA → vB); held for retry`,
+`LEASE FENCE (<why>): the lease was not confirmed (…); v<N> held for retry`,
+`CRITICAL: the authoritative history is NOT written: this pod's lease was not
+confirmed …`, `ROLLING: the lease could not be confirmed …` or `NODE MOVE:
+the lease could not be confirmed …`. A `LEASE FENCE` line **without** a
+`LEASE CHECK` line just before it means the lease read named another holder
+(a real leadership change: expect `LOST LEASE -- exiting` at the next loop
+top and a restart, see [operator-down](#operator-down)) or the lease could
+not be read at all (`lease fence …: getLease failed (…)` just before it).
+
+What it means operationally: almost always a **slow kube API** (the renew is
+one PATCH). The leader normally keeps its lease — it renews again at the top
+of the next pass — so a single line is harmless. **Repeated lines** mean the
+API server answers slower than ~10 s: while it lasts, map broadcasts,
+history writes and handovers stay held (the data plane keeps serving the last
+map), so failovers are delayed. There is no metric and no alert for it; check
+the apiserver (latency, throttling, etcd) and the operator pod's network.
+Do not restart the operator for it: a new leader faces the same API.
 
 ## FlareDeadNodeChurn (warning) {#dead-node-churn}
 
@@ -152,7 +320,10 @@ reconstruction bandwidth.
 ## FlareNodeUnhealthy (critical) {#node-unhealthy}
 
 A node's POD IS PRESENT but it stopped being Ready long enough that the
-operator treated it as dead and failed over. This is NOT a rescheduling
+operator treated it as dead and failed over. The gauge
+(`flare_operator_nodes_unhealthy`) counts NotReady nodes only: a Ready node
+the operator cannot connect to is
+[FlareNodeUnreachableFromOperator](#node-unreachable) instead. This is NOT a rescheduling
 event — the pod is there, so the flared PROCESS is broken: segfault (the
 container restarts under the same pod name and IP), a hang, or a wedge.
 Before this detection existed the operator's only liveness signal was pod
@@ -170,8 +341,9 @@ proxying writes into a dead socket and a crashed MASTER got no failover.
    tcpSocket probe, ~30s), flared re-registers, goes Prepare, catches up via
    WAL, and returns Active. If it does not, see
    [node-down-stuck](#node-down-stuck).
-3b. **If the log says the master was KEPT** ("has NO promotable successor —
-   kept as master"), the partition has no replica to promote, so the
+3b. **If the log says the master was KEPT** (`CRITICAL: master <key> is NOT
+   SERVING or UNREACHABLE … has NO reachable promotable successor — kept as
+   master`), the partition has no replica to promote, so the
    operator deliberately did not demote it: demoting would only make the
    partition masterless sooner and break the returning process's clean
    rejoin. Note `FlareMasterMissing` will NOT fire here (the map still shows
@@ -188,22 +360,104 @@ proxying writes into a dead socket and a crashed MASTER got no failover.
 ## FlareNodeUnreachableFromOperator (critical) {#node-unreachable}
 
 The operator cannot open a TCP connection to a node that K8s still reports
-Ready. Almost certainly the node is serving clients normally — what is
-broken is the **operator→pod path**, so topology pushes are not landing and
-that node keeps running on whatever map it last received. Wrong roles
-(a demoted node still believing it is master, a promoted one not knowing it
-is) persist until the path heals.
+Ready. The node may well be serving clients — what is broken is at least the
+**operator→pod path**, so topology pushes are not landing and that node
+keeps running on whatever map it last received. Since spec 12 the operator
+also acts on it (below): the alert's summary says when it did not fail the
+node over (a master kept without a reachable successor, or the guard: no node
+reachable).
 
-Nothing else sees this: the readiness probe runs inside the pod (kubelet
-asking flared about itself) and the operator's stats probes travel through
-the API server, so both stay green.
+Nothing else sees the path itself: the readiness probe runs inside the pod
+(kubelet asking flared about itself) and the operator's stats probes travel
+through the API server, so both stay green.
 
-**The operator deliberately does NOT fail the node over.** Unreachability is
-a loss of the operator's own feedback and the fault may be on the operator's
-side; demoting a master we merely cannot see would be the damaging move.
+**What the operator does (spec 12, as the EC2 index server does).**
+
+- **Probe.** At most once per 5 s, the operator lists the flared pods and
+  opens a TCP connection to port 12121 of every Ready, non-Terminating pod of
+  that same listing and asks for its `version` (1 s in all for the connect
+  and the `VERSION …` answer): a flared that accepts connections but does
+  not answer (wedged, stopped) fails the probe like an unreachable one. If the
+  listing fails, nothing is probed and nothing is decided that round
+  (`reachability: pod listing failed (...) — no probe and no down decision
+  this round`). A failure streak belongs to one pod UID: a recreated pod
+  starts from zero.
+- **Down after 3 failed probes in a row** (~15 s), for an Active master or
+  slave:
+  - a **slave** is marked down (proxy) and the rebuild path builds another
+    copy: `UNREACHABLE: <key> (<role>) failed 3 consecutive operator probes —
+    marked down (proxy) …`;
+  - a **master** is marked down only when the failover itself would promote
+    a successor (`UNREACHABLE: master <key> failed 3 consecutive operator
+    probes — marked down if a reachable slave of its partition can be
+    promoted, otherwise kept as master …`). The decision and the promotion
+    use the same candidate list (`K8sReconciler.failoverCandidates`): an
+    Active slave of the partition whose pod is present, not itself
+    unhealthy, unreachable or down, with no replica repair held on it, not a
+    follower known unfit (continuous-replication evidence, R3 source
+    eligibility 0 or unreadable, a promotion-evidence class other than
+    eligible / legacy / empty, pod not Ready) and not promotion-blocked. An
+    unproven follower or a standby slave still counts (tried last; an
+    unproven one is logged `PROMOTION NOT LOSS-FREE`). The masterless
+    refill's choices (a Prepare or data-bearing last resort, the history
+    holder) do not count: the refill commits after the demotion, so a
+    refusal there would leave the partition without a master. Without a
+    successor the master is **kept**: `CRITICAL: master <key> is NOT SERVING
+    or UNREACHABLE … has NO reachable promotable successor — kept as
+    master`.
+    **Exception, the lag hold:** a follower excluded only as unfit (live,
+    holding data, not repair-held, not promotion-blocked) is the
+    [failover lag hold](#failover-lag-hold)'s case. The master is marked
+    down, the partition is reported `has NO master` while the ex-master's
+    wait runs, and the follower is seated `NOT LOSS-FREE` when the wait
+    expires. Keeping the master would never start that wait.
+  - **What the check cannot see:** the refusals the commit makes from fresh
+    reads (R3 unreadable at commit, the successor's pod / boot / copy
+    changed since it was read, a different classification at commit, the
+    authoritative history not KNOWN, HELD, an intent pending or not
+    persistable). Each aborts the whole pass (`CRITICAL: PROMOTION ABORTED
+    for <key>: … nothing from this pass is committed`), the demotion
+    included: the old master stays master in the map and the next pass
+    decides again. The partition is not left masterless, but it serves
+    nothing while the aborts repeat; the abort message, not the "kept"
+    message, is then the signal.
+  - Down nodes go through the same dead detection as NotReady ones, so the
+    [circuit breaker](#circuit-breaker) applies to them too.
+- **Guard: no node reachable.** When every probed node fails, the fault is
+  taken to be on the operator's side (API, network): nothing is marked down,
+  no master is promoted, and every streak restarts. Log:
+  `CRITICAL: the operator cannot reach ANY of the N flare node(s) it probed …
+  NO node is marked down and no master is promoted (alert only) until a node
+  answers`. The gauge `flare_operator_no_node_reachable` is 1 meanwhile and
+  the alert `FlareOperatorReachesNoNode` fires after 2 min (spec 12: alert
+  only). Check the operator pod's network and the API server first; the flare
+  nodes themselves are probably fine.
+- **Back again.** A node marked down for unreachability that answers the
+  latest probe round again is restarted (graceful pod delete) after 3
+  passes, not after the stuck-down wait: `REACHABLE AGAIN: <key> … restarted
+  now to re-register`. The restart has the same gates as the stuck-down
+  recovery ([node-down-stuck](#node-down-stuck)): every partition has an
+  Active master and the breaker is not tripped. The pod re-registers, goes
+  Prepare and catches up.
+
+While the path is cut the operator logs, about every 30 s, `CRITICAL: node
+<key> is READY but the OPERATOR cannot connect to it (<n> consecutive probes,
+~<s>s) …`.
+
+**The alert.** `flare_operator_nodes_unreachable` counts the Active masters
+and slaves with at least one failed probe in a row. A node marked down
+(proxy) leaves the count, so with `for: 5m` the alert means a node stayed
+unreachable WITHOUT being failed over: typically a master kept for lack of a
+promotable successor (or failover paused by the circuit breaker).
+
+**A demoted master that is cut off keeps its old map.** It never receives
+the map that demoted it, so clients that still reach it can keep writing to
+it until it is restarted — when it answers again (3 passes) or by the
+stuck-down recovery (`FLARE_DOWN_RESTART_CYCLES`). Those writes are not on
+the new master. Fix the path quickly, or delete that pod (step 5).
 
 1. Establish which side is broken. From the operator pod:
-   `kubectl -n <ns> exec deploy/<cluster>-flare-operator -- sh -c 'timeout 3
+   `kubectl -n <ns> exec deploy/<release>-flare-operator -- sh -c 'timeout 3
    bash -c "</dev/tcp/<pod-ip>/12121" && echo ok'`. Then try the same from a
    different pod in the namespace. If only the operator fails, suspect its
    node's networking or a NetworkPolicy.
@@ -213,12 +467,14 @@ side; demoting a master we merely cannot see would be the damaging move.
    `printf 'stats nodes\r\n' | nc <pod-ip> 12121` versus
    `kubectl -n <ns> get cm <cluster>-node-map -o jsonpath='{.data.nodeMap}'`.
    A mismatch confirms it is running on a stale map.
-4. Fix the path (CNI, NetworkPolicy, node networking). Once reachable, the
-   next topology change is pushed automatically; force one sooner by
-   restarting the operator, which re-broadcasts on its first tick.
+4. Fix the path (CNI, NetworkPolicy, node networking). Once it answers, a
+   node that was marked down is restarted automatically (above); one that
+   was kept receives the next topology push.
 5. If the path cannot be fixed quickly and the node's role is wrong in a way
    that matters (it believes it is master for a partition someone else now
-   masters), delete that pod — it re-registers with a clean view.
+   masters), delete that pod gracefully — it re-registers with a clean view.
+   A master that was KEPT is the partition's only master: do not delete it
+   unless its data is on another copy or a backup.
 
 ## FlareNodeDownStuck (warning) {#node-down-stuck}
 
@@ -227,11 +483,23 @@ operator only re-seats a node that RE-REGISTERS, and while the committed map
 says Down the readiness probe keeps failing (it asks flared for its own
 Active state), so only a fresh flared process breaks the loop.
 
-The operator restarts such a pod itself after ~5 min
-(`FLARE_DOWN_RESTART_CYCLES`), but only when **every partition already has an
-Active master** and the circuit breaker is not tripped — deleting a pod on a
-tmpfs cluster erases that node's copy, so the gate exists to never destroy
-the last one. This alert firing for 15 min means the gate is holding.
+The operator restarts such a pod itself (graceful delete, one per pass, a
+Down proxy only), but only when **every partition already has an Active
+master** and the circuit breaker is not tripped — deleting a pod on a tmpfs
+cluster erases that node's copy, so the gate exists to never destroy the
+last one. Log: `STUCK-DOWN RECOVERY: <key> has been Down with its pod present
+for <n> ticks …`. When:
+
+- after `FLARE_DOWN_RESTART_CYCLES` passes (default 60, about 5 min at the
+  normal 5 s pass; passes run every ~100 ms while a handover is in flight,
+  so it can come sooner);
+- after 3 passes for a node marked down because the operator could not reach
+  it ([node-unreachable](#node-unreachable)) or for a
+  [duplicate master claim](#duplicate-master), once it answers the latest
+  probe round again (`REACHABLE AGAIN: …`).
+
+This alert firing for 15 min means the gate is holding (or the node is still
+unreachable and the restart did not bring it back).
 
 1. Why is the gate closed? `node sync` — is a partition masterless
    ([master-missing](#master-missing)), or is the breaker tripped
@@ -241,6 +509,59 @@ the last one. This alert firing for 15 min means the gate is holding.
    (`printf 'stats\r\n' | nc <pod-ip> 12121`, compare `curr_items`) BEFORE
    deleting the Down pod.
 3. Never delete both replicas of a partition on a tmpfs cluster.
+
+## A node claims a master the map gives to another node (spec 13) {#duplicate-master}
+
+Every node receives the same node map, so a node that says it is the master
+of a partition whose master in the committed map is ANOTHER node runs on a
+different map: it missed the push, or it is ahead of the operator. Two
+masters of one partition take writes that diverge, so the operator does not
+tolerate it.
+
+**What the operator does.** The topology audit reads each node's `stats`
+(one node per pass, in turn) and compares its `own_role` / `own_partition`
+with the committed map. Only a node that reports a map version OTHER than
+the committed one (audit verdict behind or ahead) can conflict.
+
+1. First sighting: `CRITICAL: <key> claims to be a MASTER the committed map
+   v<N> gives to another node (reports v<M>); the map is re-sent, and it is
+   treated as down if the claim still stands in 15 s`. A node that is behind
+   is sent the map again. From then on that node is read every pass.
+2. Still claiming after 15 s: `DUPLICATE MASTER: <key> still claims a master
+   the committed map gives to another node after 15 s -> treated as down
+   (proxy); the map's master is kept`. The node joins the same dead
+   detection as an unreachable one ([node-unreachable](#node-unreachable)).
+   While its stats cannot be read, the first sighting is kept but nothing is
+   decided: the down needs a reading that still shows the claim after 15 s.
+3. It is restarted (graceful delete) once it answers the operator's probe,
+   after 3 passes, under the stuck-down gates
+   ([node-down-stuck](#node-down-stuck)); the new process re-registers and
+   gets the current map. `DUPLICATE MASTER: <key> no longer claims a
+   conflicting master role` when a later reading agrees.
+
+Nothing is decided while the operator reaches no node (the
+[spec 12 guard](#node-unreachable)). A flared that does not report
+`own_role` / `own_partition` is never judged. The gauges
+`flare_operator_duplicate_master_claims` (pending claims) and
+`flare_operator_duplicate_master_down` (nodes down for one, until restarted)
+drive the alert `FlareDuplicateMaster` (1 min); the operator log lines are
+`claims to be a MASTER` and `DUPLICATE MASTER`. For a node that is ahead the audit also logs
+`[TopologyAudit] CRITICAL: recipient <key> reports newer authority … the map
+generation is not changed for it (a duplicate master claim is judged
+separately, see DUPLICATE MASTER)` — that line is about the generation only;
+the duplicate-master check above still applies.
+
+Do:
+
+1. `node sync` and the node's `printf 'stats nodes\r\n' | nc <pod-ip> 12121`:
+   which node is the map's master, and which map version does the claimant
+   hold?
+2. A node that is ahead of the operator points at a competing leader or a
+   rewritten map: follow [Topology observation](#topology-observation) step
+   4 and keep the evidence.
+3. Writes the claimant took while it acted as master are not on the map's
+   master. Compare `curr_items` and sample keys before deciding whether
+   anything has to be carried over by hand.
 
 ## FlareResyncFailing (critical) {#resync-failing}
 
@@ -506,6 +827,10 @@ kubectl annotate flarecluster <name> -n <ns> \
   halts; only `FLARE_NODE_MAP_RESET=1` accepts a fresh start then.
 - Blue/green migration approves the target cluster it provisions. The E2E
   setup approves each cluster it deploys.
+- A first build (proven new or approved) creates the history record
+  `<cluster>-history` with `origin first-build`. Only such a record allows the
+  first-build exception for a partition that was never recorded
+  ([First-build exception](#first-build-exception)).
 
 Automatic reconstruction of a lost map from the nodes is not implemented yet.
 
@@ -554,13 +879,62 @@ truncate gate refuses to truncate toward an empty/not-newer source, so a
 wipe-and-rebuild cannot cascade emptiness; promotion always picks a
 data-bearing Active slave.
 
+## Storage corruption alerts {#storage-corruption}
+
+Three alerts from flared's own `/metrics`:
+
+| Alert | Fires on | Meaning |
+|---|---|---|
+| `FlareStorageCorruption` (critical) | `flare_node_rocksdb_corrupted == 1` for 1 min | a RocksDB write returned Corruption, or the periodic checksum check (`VerifyChecksum`) failed; flared latched `rocksdb_corrupted 1` |
+| `FlareStorageCorruptionRecurring` (warning) | `increase(flare_node_rocksdb_corruption_detected[1h]) > 0` | new detections in the last hour, also on a pod that has since recovered (the latch is clear again) |
+| `FlareReplicationCrcMismatch` (warning) | `increase(flare_node_rocksdb_wal_sync_crc_mismatch[1h]) > 0` | a WAL sync or snapshot-push batch failed its CRC-32 check and was rejected before it was applied |
+
+flared log lines: `STORAGE CORRUPTION detected at <where>: … -> latching
+corrupted`, `STORAGE CORRUPTION found by periodic verify: …`, `WAL sync
+batch CRC mismatch at LSN … -> aborting sync before apply (transport
+corruption; falling back to full dump)`, `snapshot push: WAL tail batch CRC
+mismatch …`.
+
+A corrupt copy is never chosen for promotion (the operator's promotion
+evidence rejects it: `the copy is flagged corrupted`).
+
+**FlareStorageCorruption on a REPLICA.** On its next reconstruction a
+corrupt replica moves its copy aside (`quarantine-…` in the data dir, never
+deleted) and reseeds from the master (log `local storage is corrupted ->
+moving it aside (quarantine) before reseed`). The fastest trigger is a
+graceful `kubectl delete pod <replica>`. If one quarantined copy is already
+kept, it stops instead (`rebuild_blocked=quarantine_full`, nothing moved or
+deleted): inspect and discard the old quarantine with a
+`FlareCopyDiscardApproval`, or follow [replace-corrupt](#replace-corrupt)
+Case A.
+
+**FlareStorageCorruption on a MASTER.** Its data may be the last copy and
+writes to it fail. Do not wipe it. Confirm a replica is Active and holds the
+data (`curr_items`, sample keys), then hand the master over with a graceful
+delete through the [node guard](#node-guard) and rebuild the old master as a
+replica: [replace-corrupt](#replace-corrupt) Case B. With no healthy replica,
+take what a backup holds: Case C.
+
+**FlareStorageCorruptionRecurring.** Repeated detections on one pod point at
+its volume or host: move the pod off that node (cordon it, see
+[cordon-move](#cordon-move)) or replace the volume.
+
+**FlareReplicationCrcMismatch.** Nothing was written from the bad batch; the
+replica falls back to a full dump. Recurrence points at the network between
+the two pods or at the source's volume: check which source the replica
+follows and whether the mismatches follow one source or one path.
+
 ## Backup / Restore
 
 See docs/BACKUP_RESTORE.md for the full procedures (tier-1 checkpoints,
 S3 tier-2, single-partition vs multi-partition restore and its caveats).
-Monitoring: alert when `time() - rocksdb_last_backup_epoch` exceeds twice
-the backup interval (exposed via flared `stats`; needs a memcached
-exporter).
+
+### FlareBackupStale (warning) {#backup-stale}
+
+The chart's alert `FlareBackupStale` fires when
+`time() - flare_node_rocksdb_last_backup_epoch > 172800` (2 days) for 30 min;
+flared exports the metric itself on its `/metrics`. Tune the threshold to
+twice your backup interval.
 
 ### An in-place restore keeps the copy it replaces {#restore-in-place}
 
@@ -618,6 +992,11 @@ A master that refuses this way is not counted by
 meanwhile.
 
 ## Enabling continuous replication on an existing cluster {#enable-follow}
+
+**Not for this release.** Continuous WAL replication stays **OFF** in this
+release (user decision 2026-10-31: it is turned on in the next release).
+Leave `replFollowEnabled` unset/false; this section is kept for that later
+release and is not an operation to run now.
 
 Rehearsed by E2E `continuous-replication-enable` (a legacy cluster switched
 on live through the CR, and back). Do one cluster at a time.
@@ -683,6 +1062,15 @@ the floor is a ceiling the caches grow towards, not an up-front allocation.
 The RSS above excludes tmpfs pages, which the cgroup still charges to the
 pod. A 512Mi limit was OOM-killed in the scale evaluation.
 
+**FlarePodMemoryHigh (warning, >85% for 10m) / FlarePodMemoryCritical
+(critical, >95% for 2m).** Both read the pod cgroup slice (`container=""`),
+the only series that includes the tmpfs data pages (`kubectl top` misses
+them; measure tmpfs with `df`/`du` in the pod). **On a tmpfs cluster treat
+an OOM kill as data loss on that node** (a master without a replica can lose
+its partition), so act before it: size the limit by the rule above (raise
+`cluster.resources.limits.memory`, keep `tmpfs.sizeLimit` within it), or
+lower the cache sizes.
+
 **WAL archive (retention for followers).**
 
     archive budget ≈ walSizeLimitMb + bytes written between two cleanups
@@ -740,8 +1128,9 @@ Pod replacement is lossless when it goes through the operator:
   (the highest ordinal first, a master last), and only while every replica is
   caught up. A master is handed over first (ordered handover); its pod is
   deleted only once it is no longer the master. Progress is in the operator log
-  (`ROLLING`). `FLARE_OPERATOR_ROLLING=off` on the operator stops it; then
-  delete pods by hand, one at a time, as below.
+  (`ROLLING:`; how to follow it: [Upgrading a release](#upgrading)).
+  `FLARE_OPERATOR_ROLLING=off` on the operator stops it; then delete pods by
+  hand, one at a time, as below.
 - **`kubectl delete pod <pod>`** (with its grace period): a replica or a
   proxy is allowed. A master is refused the first time: the refusal starts
   its ordered handover to a caught-up replica (operator log
@@ -753,12 +1142,14 @@ Pod replacement is lossless when it goes through the operator:
 **Upgrading from rc68 or older.** A master whose flared predates the
 ordered handover (it reports no `proxy_write_in_flight` / `proxy_write_failed`)
 cannot be handed over without possible loss. By default the operator does not
-replace it: rolling waits (`ROLLING: waiting: master … runs a flared from before
-the ordered handover`) and the node guard refuses its delete. To accept the
+replace it: rolling waits (`ROLLING: waiting (master … runs a flared from before
+the ordered handover …)`) and the node guard refuses its delete. To accept the
 risk for this one upgrade, set `legacyMasterSwitch: true` (operator env
 `FLARE_OPERATOR_LEGACY_MASTER_SWITCH=allow`): such a master is then replaced by
-the drain's promotion, only while a caught-up replica exists, logged NOT
-loss-free. Set it back to false once every pod runs this release.
+the drain's promotion, only while a caught-up replica exists and only after
+the operator's startup grace (`FLARE_STARTUP_GRACE_SECONDS`, default 120 s
+after it became leader), logged NOT loss-free. Set it back to false once every
+pod runs this release. Step by step: [Upgrading a release](#upgrading).
 
 The node-guard webhook (`nodeGuard.enabled`, default true) refuses what
 skips that path. The refusal message says why:
@@ -769,15 +1160,39 @@ skips that path. The refusal message says why:
 | graceful delete of a master with a caught-up replica | it is handed over first (this refusal starts it) | run the delete again after `HANDOVER p<N> done` |
 | delete of a master whose partition has no caught-up replica (Active, Ready, R3 eligible with a complete pod / boot / copy identity, idle, no replica repair pending) | nothing the handover can promote (on tmpfs the data is lost) | wait until the replica has caught up |
 | delete of a pod the operator's node map does not know (for example still starting) | it may hold data on its volume | wait until it registered, or use the override |
+| delete of a pod whose ordered handover is still completing (the map may already show it as a proxy) | the promote map is not on every pod yet | retry in a few seconds |
+| delete of a master when the operator could not list the pods (`the pods could not be read to judge this delete`) | the successor cannot be checked | retry |
+| eviction or delete of any flared pod on a cordoned node (HTTP 429) | its [cordon move](#cordon-move) has not released it (waiting for its turn, blocked, or in progress) | wait (`kubectl drain` retries), see `status.nodeMoves` |
 | any data-pod delete or scale-down right after the operator started or a new leader took over | the operator has not read the cluster yet | retry after a few seconds |
 | `kubectl scale` / a StatefulSet edit removing ordinals that hold data | the removed pods are masters or replicas (or not in the map) | reduce partitions or replicas in the FlareCluster spec (the operator moves the data first) |
 | `kubectl delete statefulset <name>-nodes` (cascading, the default) | every pod goes at once, masters with no handover (on tmpfs their data) | `--cascade=orphan` (the pods stay and each delete is judged), or the teardown below |
 
-The operator and Kubernetes' own controllers are never refused; the kubelet
-only when it confirms the removal of a pod already terminating on its node.
-The guard tells the cluster's flared pods apart by their `spec.subdomain`
-(`<name>-nodes`, immutable), not by a label: removing a label from a pod
-does not hide its delete. Other pods of the namespace are allowed.
+**Who is never refused.** The operator's own service account,
+`system:kube-controller-manager`, and only these kube-system service
+accounts of the controller manager: `namespace-controller`,
+`generic-garbage-collector`, `statefulset-controller`,
+`pod-garbage-collector`, `node-controller`. The kubelet only when it confirms
+the removal of a pod already terminating on its node. Every other requester
+goes through the guard, including other kube-system accounts such as the
+cluster-autoscaler or a descheduler: their evictions are judged like
+`kubectl drain` (handover, cordon move).
+
+**What the webhook sees.** Two pod webhooks, both limited to the release's
+namespace:
+
+- `pods.node-guard.flare.gree.net` (pods DELETE) sees every pod of the
+  namespace except the operator's own (`objectSelector` on
+  `app.kubernetes.io/name` NotIn the chart name). The operator judges only
+  this cluster's flared pods, told apart by `spec.subdomain`, so removing a
+  flared pod's labels does not hide its delete; other pods are allowed.
+- `evictions.node-guard.flare.gree.net` (pods/eviction CREATE) has no
+  selector (an Eviction carries none of the pod's labels), so it sees every
+  eviction in the namespace. The operator reads the pod and judges only this
+  cluster's flared pods, told apart by `spec.subdomain` (`<name>-nodes`);
+  other pods' evictions are allowed. A pod it cannot read is held (429).
+
+A third webhook judges UPDATE / DELETE of StatefulSets in the namespace
+(only `<name>-nodes` is gated).
 
 ### Tearing the whole cluster down
 
@@ -791,11 +1206,14 @@ UID=$(kubectl get statefulset <name>-nodes -n <ns> -o jsonpath='{.metadata.uid}'
 kubectl annotate statefulset <name>-nodes -n <ns> --overwrite flare.gree.net/delete-override=$UID
 ```
 
-### Break-glass: deleting a pod anyway
+### Break-glass: deleting a pod anyway {#node-guard-break-glass}
 
 Use this only when you accept losing that pod's unreplicated writes (for
 example the pod is stuck and its data is already gone). It is recorded: the
-operator logs `NODE GUARD: allowed DELETE pods <pod> (uid ...)` with "delete-override names this pod".
+operator logs `NODE GUARD: allowed DELETE pods <pod> (uid …) by <user>:
+flare.gree.net/delete-override names this pod (uid …): allowed as an
+explicit exception`. The override is checked before the cordon move, so it
+works for an eviction too.
 
 ```sh
 UID=$(kubectl get pod <pod> -n <ns> -o jsonpath='{.metadata.uid}')
@@ -808,23 +1226,239 @@ place has a new UID and is guarded again. `kubectl delete --force` may print
 an error naming that new pod after the old one is already gone; check with
 `kubectl get pod <pod> -o jsonpath='{.metadata.uid}'`.
 
-### The operator is down (the webhook fails closed)
+### The operator is down (the webhook fails closed) {#node-guard-operator-down}
 
-`failurePolicy: Fail`: with no operator leader answering, deletes of every
-pod in the cluster's namespace (the webhook judges which are flared pods)
-and StatefulSet updates and deletes are refused (`failed calling webhook
-"pods.node-guard.flare.gree.net"`). Bring the operator back first. If that
-is not possible, either use the override above per pod, or turn the guard
-off and back on after the work:
+`failurePolicy: Fail`: with no operator leader answering, every call to the
+webhook fails, so in the release's namespace these are refused:
+
+- the DELETE of every pod but the operator's own (flared pods, backup Job
+  pods, debug pods): `failed calling webhook "pods.node-guard.flare.gree.net"`;
+- **every eviction of every pod**, not only flared ones (the operator's own
+  pods, backup Jobs, anything else in the namespace): `kubectl drain` keeps
+  failing with `failed calling webhook "evictions.node-guard.flare.gree.net"`;
+- every StatefulSet UPDATE and DELETE (`"statefulsets.node-guard.flare.gree.net"`),
+  which also makes a `helm upgrade` that touches the flared StatefulSet fail.
+
+A `kubectl delete pod` of the operator's own pod is not affected.
+The override annotation does not help here (nothing answers to read it).
+Bring the operator back first. If that is not possible, turn the guard off
+and back on after the work:
 
 ```sh
-helm upgrade <release> ... --set nodeGuard.enabled=false   # removes the webhook
+helm upgrade <release> ... --set nodeGuard.enabled=false \
+  --set nodeReplacement.enabled=false      # removes the webhook (the chart refuses
+                                           # nodeReplacement without the guard)
 # ... the operation ...
-helm upgrade <release> ... --set nodeGuard.enabled=true
+helm upgrade <release> ... --set nodeGuard.enabled=true --set nodeReplacement.enabled=true
 ```
 
 Without the guard nothing stops a force delete of a master: do one pod at a
 time and only graceful deletes.
+
+## Cordon (`kubectl cordon` / `drain`) moves the pods off a node {#cordon-move}
+
+Design: `flare-ci-inputs/decisions/NODE-OPS-NOSTOP-IMPLEMENTATION-PLAN-2026-10-26.md`
+section C. State machine: `flare_operator/FlareOperator/StateMachine/NodeMove.lean`.
+Chart values: `nodeReplacement.*` (needs `nodeGuard.enabled`; the chart refuses
+`nodeReplacement.enabled` without it). `FLARE_NODE_REPLACEMENT=off` on the
+operator turns the whole feature off.
+
+**This release supports the cordon move on tmpfs clusters only** (user
+decision 2026-11-01). It is verified there (E2E cordon-master / cordon-replica:
+errors 0, missing 0). On a PVC cluster it is NOT verified: with node-local
+volumes (local PV, local-path) the recreated pod cannot leave the cordoned
+node, stays Pending and the move stays `resyncing` (no data lost; one copy
+fewer; after `resyncTimeoutSeconds` the move is marked
+[stuck](#cordon-move-stuck) and the next moves run, those of the same
+partition blocked by the copy count); with network storage the
+recreated pod comes back with its old data, a path not tested yet. On a PVC
+cluster set `nodeReplacement.enabled: false`: drains then go through the node
+guard's handover only, as before.
+
+**Check the copy count first.** The chart defaults are `cluster.replicas: 3`
+(a master and two replicas per partition) and `nodeReplacement.minCopies: 3`
+with `nodeReplacement.enabled: true`: a move keeps a replica besides the
+master. A cluster that sets fewer copies explicitly (pf-dev: 1 master + 1
+replica) is below `nodeReplacement.minCopies`: no master or replica can be
+moved, every such move is blocked, the guard keeps refusing those evictions,
+and `kubectl drain` waits until it times out. For such a cluster choose one:
+
+- `cluster.replicas: 3` (or more): moves run with two copies left; or
+- `nodeReplacement.minCopies: 2`: 2-copy partitions move, with the master
+  as the only copy while the moved replica is rebuilt — an explicit,
+  accepted risk (if the master fails meanwhile there is no replica to
+  promote; on tmpfs its data is lost); or
+- `nodeReplacement.enabled: false`: no cordon move; drains go through the
+  node guard's older rules (graceful delete + handover).
+
+**What happens.** A Node gets `spec.unschedulable=true`. For each flared pod on
+it, **one pod at a time** (cluster-wide, also with two cordoned nodes), the
+operator records a move in `status.nodeMoves` and walks it through:
+
+| phase | meaning |
+|---|---|
+| `pending` | started; a master asks the ordered handover (demote → drain → promote) for a successor on an uncordoned node, a replica is demoted to a proxy |
+| `handingOver` | (master only) the handover runs |
+| `proxied` | the pod is a proxy; the operator removes its `flare.gree.net/serving` label |
+| `unserved` | (bounded: held after `drainWaitSeconds`, [stuck](#cordon-move-stuck) after `unservedTimeoutSeconds`) waiting until (a) the client Service (`<name>-nodes-external`, which selects the label) no longer lists the pod in its EndpointSlices, (b) the pod's `client_requests` (data requests) did not grow for 10 s (`quietSeconds`; an older flared without it: `total_connections` minus the operator's own stats connections), (c) `curr_connections` is 0 (minus the operator's own one), and flared's own `own_role` is `proxy`. The quiet baseline is bound to the flared process (`reconstruction_boot_id`): a restarted flared, or a counter that went down, starts the 10 s again |
+| `released` | written **only by the operator**. The node guard now lets an eviction or delete of this pod through. If nothing evicts within 60 s the operator deletes it (UID precondition) |
+| `deleted` | the old pod is gone; waiting for the StatefulSet to recreate it (counts against `resyncTimeoutSeconds`, like `resyncing`) |
+| `resyncing` | the StatefulSet recreated it on another node; the operator seats it as a replica; when Ready, Active and synced (R3 eligible) as a Slave it gets the serving label back — never while it is Terminating. Bounded: a pod that does not become such a Slave within `nodeReplacement.resyncTimeoutSeconds` (1800 s, counted from entering `deleted` / `resyncing`) makes the move [stuck](#cordon-move-stuck) |
+| `done` | finished |
+| `cancelled` | the node was uncordoned before `released` (see below) |
+
+`kubectl get flarecluster <name> -o jsonpath='{.status.nodeMoves}'` shows the
+record; the operator log lines start with `NODE MOVE`; Events carry
+`FlareCordonMoveStarted / Blocked / Held / Stuck / Released / Cancelled / Done`, and the
+Warning `FlareCordonMoveOnCordonedCopy` (below).
+
+**Not enough copies (`FlareCordonMoveBlocked`).** The move starts only if the
+partition would keep enough *real* copies. A real copy is on another node
+than the pod being moved (a cordoned one counts too), Active in the map with its pod Ready, has the same
+`rocksdb_master_id` and `rocksdb_source_epoch` as the master, is not
+quarantined and not reported `rocksdb_copy_identity_consistent 0`, has no
+open replica repair and no new drop/failed write from the master since the
+operator saw it. (A copy, or a master, that does not report its master id
+and source epoch is not a real copy: a missing value never matches.) The
+copy being moved counts toward
+`nodeReplacement.minCopies` (default 3: master + 2 replicas → 2 real copies
+remain); at least one other real copy must always remain. If fewer would
+remain the move does **not** start, the pod is listed in
+`status.nodeMoves.blocked` with the reason, an Event fires, and the eviction
+of that pod stays refused (HTTP 429, `kubectl drain` waits and retries). Fix
+it by adding a copy (`replicas`), waiting for a repair/rebuild to finish, or
+uncordoning; setting `nodeReplacement.minCopies: 2` moves 2-copy partitions
+too, with the master alone while the replica is away — an explicit, accepted
+risk.
+
+- The alert `FlareCordonMoveBlocked` is raised only while NO move is
+  running; a blocked pod behind a running move shows in
+  `status.nodeMoves.blocked` only.
+- A copy on ANOTHER cordoned node counts: the node guard holds that pod's
+  eviction until its own move is released, and one move runs at a time, so it
+  stays while this one is away. When every copy left during a move is on
+  cordoned nodes, the move still starts, with the log line `WARNING: NODE
+  MOVE <pod>: … other copies are only on cordoned node(s)` and the Warning
+  Event `FlareCordonMoveOnCordonedCopy`. Do not let those nodes be removed
+  (forcibly, outside the API) before the move is done: uncordon one or add a
+  copy if they must go.
+- Also blocked: a pod that is not Ready, is Terminating, is not in the map
+  or has no serving label (`the pod is not Ready or is terminating`), and a
+  master with no caught-up replica on an uncordoned node (`no caught-up
+  replica on an uncordoned node to take the master over`). A Down flared pod
+  on a cordoned node therefore stops the drain until it is Ready again or is
+  removed with the [break-glass](#cordon-move-break-glass) override.
+
+**Held (`FlareCordonMoveHeld`).** Either the client Service still reached the
+pod 120 s (`drainWaitSeconds`) after the label was removed (clients keep
+connecting through a load balancer that has not dropped the pod, or hold
+connections open), or the handover aborted three times. The pod stays a
+proxy / master, **nothing is deleted**, the reason is in
+`status.nodeMoves.moves[].reason`. It releases by itself if the evidence turns
+up later. Look at `kubectl get endpointslices -l kubernetes.io/service-name=<name>-nodes-external`,
+the load balancer's targets, and the pod's `stats` (`client_requests`,
+`curr_connections`). Flared closing a client connection after a response is
+**not implemented yet** (L9): a client that never reconnects keeps the pod
+held; a later change adds it. A held move turns [stuck](#cordon-move-stuck)
+after `unservedTimeoutSeconds`.
+
+**Uncordon.** The operator writes `cancelled` (generation + 1) **first** and
+puts the serving label back **after** that write succeeded, so an eviction
+that races the uncordon either sees `released` (the move completes) or does
+not see it at all. After `released` an uncordon does **not** cancel the move:
+the guard now holds evictions of the pod (its node is no longer cordoned),
+and the operator deletes the pod itself `evictWaitSeconds` (60 s) after the
+release; the recreated pod may come back to the uncordoned node. While
+a master's handover runs it is not interrupted; the move ends right after.
+
+**Eviction/delete rules** (node guard: a pod DELETE, or an eviction judged as
+that pod's delete). A pod with a move, or any flared pod (a proxy too) on a
+cordoned node without one, is refused with 429 until its move is `released`
+**and** the pod UID matches, it has no serving label, and its node is still
+cordoned. The webhook
+writes only `admitted` (move id, generation, AdmissionReview uid) as a
+compare-and-swap on `status.nodeMoves` just before it allows, only as the
+lease holder with at least 5 s of lease left, and re-checks the lease after
+the write; a dry run writes and allows nothing. If the write fails the
+request is refused and retried by `drain`.
+
+### Stuck moves (`FlareCordonMoveStuck`) {#cordon-move-stuck}
+
+Only one move runs at a time, so a move that waits for ever on something
+outside the operator would stop every later move. Two phases have a deadline (chart values, seconds; 0 =
+no deadline):
+
+| value | default | phase | waits for |
+|---|---|---|---|
+| `nodeReplacement.unservedTimeoutSeconds` | 1800 | `unserved` (from entering it) | the client Service / connections to leave the pod |
+| `nodeReplacement.resyncTimeoutSeconds` | 1800 | `deleted` + `resyncing` (from entering each) | the recreated pod to come back as a Ready, Active, synced Slave |
+
+Past it the operator marks the move `stuck: true` (`stuckMs`, the phase is
+kept) with the reason `STUCK in <phase> for <n> s — …` in
+`status.nodeMoves.moves[].reason`, logs `NODE MOVE <pod>@<node>: STUCK in
+<phase> for <n> s — …`, emits the Warning Event `FlareCordonMoveStuck`, and
+sets `flare_operator_cordon_moves_stuck` (the number of stuck moves; alert
+`FlareCordonMoveStuck`, no `for`). A stuck move **no longer counts as the
+running move**: the next candidate starts. That is safe because the start
+check counts *real* copies only and a stuck move's pod holds none (a proxy,
+or a deleted pod with an unsynced replacement): a partition the stuck move
+left short blocks every move that would drop it further
+(`FlareCordonMoveBlocked`). A stuck move never becomes the running move again.
+
+- **Stuck in `unserved`**: the pod stays a proxy and **is never released**:
+  the node guard keeps refusing its eviction / delete (429), `kubectl drain`
+  of that node keeps waiting, even if the drain evidence turns up later.
+  Find what keeps reaching it: `kubectl get endpointslices -l
+  kubernetes.io/service-name=<name>-nodes-external`, the load balancer's
+  targets, and the pod's `stats` (`curr_connections`, `client_requests`);
+  `ss -tnp` / the client side for a persistent connection (L9). Then either
+  uncordon the node (cancels the move as for any move before `released`;
+  the label comes back; cordon again for a new move), or accept dropping
+  that client and use the [break-glass](#cordon-move-break-glass) override.
+- **Stuck in `deleted` / `resyncing`**: the old pod is already gone; there is
+  no data action left. The partition has one copy fewer until the
+  replacement syncs. Find why: `kubectl get pod <pod> -o wide` (Pending:
+  scheduling, node-local PV, resources), `kubectl describe pod`, its flared
+  log and `stats` (`repl_read_source_eligible`, role/state in the map), an
+  open replica repair. If it later becomes a synced Slave the move still
+  finishes by itself (label back, `done`). The node guard still holds
+  evictions / deletes of the recreated pod while the move is unfinished: use
+  the break-glass override to replace it.
+
+### Break-glass: evicting or deleting a pod before its move is released {#cordon-move-break-glass}
+
+Accepting that clients may be dropped and, for a master/replica, that
+unreplicated writes can be lost: use the audited override of the node guard
+(see [Break-glass: deleting a pod anyway](#node-guard-break-glass)):
+
+```sh
+UID=$(kubectl get pod <pod> -n <ns> -o jsonpath='{.metadata.uid}')
+kubectl annotate pod <pod> -n <ns> --overwrite flare.gree.net/delete-override=$UID
+kubectl drain <node> --delete-emptydir-data --ignore-daemonsets   # or kubectl delete pod
+```
+
+The override names one pod by UID and is logged by the operator (`NODE GUARD:
+allowed ... delete-override names this pod`); it works with the Eviction API,
+so the drain procedure does not change. A move for that pod is then cancelled
+or finished by the operator as the pod disappears. To stop the whole feature
+instead: `nodeReplacement.enabled=false` (or `FLARE_NODE_REPLACEMENT=off`) —
+the node guard's older rules (graceful delete + handover) apply again, and
+the Service selector loses the serving label requirement.
+
+### Limits of this step
+
+- Flared does not yet close client connections after a response (L9); the
+  move relies on clients or the load balancer dropping the pod.
+- `curr_connections` counts every open connection to the pod; the operator
+  subtracts only its own one. Any other connection still open (a client's,
+  or another flared node's) keeps the move `unserved` and, after
+  `drainWaitSeconds`, held; after `unservedTimeoutSeconds` stuck (the next
+  move runs; this pod stays held).
+- `pending` / `handingOver` / `proxied` have no deadline: a handover that
+  keeps aborting is held (alert `FlareCordonMoveHeld`) and still the running
+  move.
+- A pod on a node-local PV cannot be recreated elsewhere: use tmpfs or
+  network storage.
 
 ## Seeding a new cluster via cluster replication {#replication-seeding}
 
@@ -984,6 +1618,11 @@ CutOver (Service selector flip, same LB/IP) → **AwaitingRetire** (park; set
 `spec.paused: true` freezes any phase; `spec.abort: true` rolls back
 (refused once the forward switch was issued — #migration-forward-abort).
 All gates are machine-checked (Migration/Types.lean).
+
+`target.replicas` (copies per partition) defaults to **3**, like
+`cluster.replicas`. Keep it at least `nodeReplacement.minCopies` (default 3):
+with fewer copies every [cordon move](#cordon-move) of the target cluster is
+blocked.
 
 ### The forward switch is client-visible {#migration-forward-gate}
 
@@ -1281,7 +1920,7 @@ CAUTION: cluster replication is the least-hardened path in this operator
 staging with a representative data set and confirm per-key survival on v2
 before doing it in production.
 
-## Topology observation
+## Topology observation {#topology-observation}
 
 Alerts: `FlareTopologyDeliveryLag`, `FlareTopologyGenerationMismatch`,
 `FlareTopologyFeedbackUnknown`. Gauges count mapped nodes whose last usable
@@ -1349,8 +1988,9 @@ overwrites a record it cannot trust:
 
 ### Rolling the operator back past the history record
 
-The node map now carries `transition=<id>` lines. An older operator's strict
-startup validation rejects them (it halts with "node line does not parse").
+The node map now carries `transition=<id>` lines (rc67 and rc68 read them;
+for a rollback to those see [Rolling a release back](#rollback)). An older
+operator's strict startup validation rejects them (it halts with "node line does not parse").
 Do NOT delete the node map to roll back. Roll back only when no history
 intent is pending (`intent` lines absent from `<cluster>-history`), with this
 operator stopped: remove ONLY the `transition=` lines from the `nodeMap` data of
@@ -1423,8 +2063,12 @@ only when the history is unambiguous:
   epoch: `rocksdb_master_id`, `rocksdb_source_epoch` in `stats`),
 - exactly one copy is marked as the partition's last master.
 
-It then records the history from that copy and promotes as usual. Anything else
-is HELD on purpose: choosing between histories decides which data survives, and
+It then records the history from that copy and promotes as usual.
+
+A partition of a first build that was never recorded has its own rule:
+[First-build exception](#first-build-exception).
+
+Anything else is HELD on purpose: choosing between histories decides which data survives, and
 the operator never guesses. The CRITICAL line names the reason and every copy
 with its history:
 
@@ -1467,6 +2111,25 @@ choice can never wait and apply later to a copy that has changed since:
   separate CRITICAL says so).
 - If the removal itself fails, the choice is NOT applied again and the removal
   is retried (CRITICAL `could not remove the history-adopt-holder choice`).
+
+### First-build exception {#first-build-exception}
+
+A partition of a record created by a first build (`origin first-build` in `<cluster>-history`) that
+has no record line and no intent yet — for example the first master's flared
+restarted before its history was recorded and came back as a replica — has
+nothing to choose between when every copy is empty. The operator seats its
+master as a first build's and records the history from it, only when every
+copy of the partition (the copies in the node map) reads EMPTY both in this
+pass's evidence and again at the commit, with the same pod UID, boot id and
+copy id. Log: `promotion of <key>: partition N of this first build has no
+recorded history and every copy reads empty … — seated as a first build's
+master`. If a copy is not empty at the commit, or its pod / boot / copy
+changed, the exception is refused and nothing from that pass is committed:
+`CRITICAL: PROMOTION ABORTED for <key>: the first build exception for
+partition N is REJECTED …` (the line lists each copy's pass and commit
+reading). The next pass decides again; a refusal that repeats means a copy
+holds data or keeps restarting — read the listed copies before anything else.
+A copy that is not in the node map is not part of this check.
 
 ## Writes dropped to a destination outside this cluster {#foreign-drops}
 
@@ -1514,9 +2177,20 @@ docs/review-cross-cluster-2026-10-11.md):
 
 ## Known limits (do not be surprised by)
 
-- Selective network partition (pod alive, TCP to operator blocked) is
-  mitigated (per-tick rebroadcast, lease fence) but not fully modeled —
-  a wedged-but-probe-passing flared is not failed over automatically.
+- Selective network partition (pod alive, TCP to operator blocked): since
+  spec 12 the node is marked down after 3 failed probes, a master only when
+  a reachable promotable successor exists, and nothing happens while no node
+  is reachable ([node-unreachable](#node-unreachable)). The probe needs a
+  `version` answer within 1 s, so a wedged flared that still accepts
+  connections fails it too. A demoted master that is cut off keeps its old map and can
+  take client writes until it is restarted. When the operator reaches only
+  some nodes because of its OWN partial network fault, healthy masters can be
+  failed over (the guard covers only "no node reachable").
+- A client write sent with `noreply` is forwarded to the other copies as
+  `noreply` too (fire-and-forget). If the forwarding connection is reset,
+  such writes can be lost **without** being counted in
+  `proxy_write_dropped` (FlareProxyWriteDropped stays quiet). Writes that
+  wait for their reply (`STORED` / `DELETED`) are not affected this way.
 - Multi-partition restore requires manual partition-affinity verification
   (BACKUP_RESTORE.md Case C) until partition pinning is implemented.
 - Config changes: hot-reloadable options land within ~2min (kubelet

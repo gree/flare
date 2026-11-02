@@ -130,6 +130,10 @@ def results : List (String × Bool) := Id.run do
   r := r ++ [("node guard: Kubernetes controllers are allowed",
               (del (pod "m:12121" "u1" (some 0)) [] "system:serviceaccount:kube-system:namespace-controller").allowed
                 && (del (pod "m:12121" "u1") [] "system:kube-controller-manager").allowed)]
+  r := r ++ [("node guard (stage-10 audit G3): other kube-system accounts (cluster-autoscaler, descheduler) are judged like anyone",
+              !(del (pod "m:12121" "u1" (some 0)) [] "system:serviceaccount:kube-system:cluster-autoscaler").allowed
+                && !(del (pod "m:12121" "u1" (some 0)) [] "system:serviceaccount:kube-system:descheduler").allowed
+                && (del (pod "m:12121" "u1" (some 0)) [] "system:serviceaccount:kube-system:pod-garbage-collector").allowed)]
   -- codec
   let body := "{\"request\":{\"uid\":\"r1\",\"operation\":\"DELETE\",\"resource\":{\"group\":\"\",\"version\":\"v1\",\"resource\":\"pods\"},\"name\":\"n-0\",\"namespace\":\"ns\",\"userInfo\":{\"username\":\"kubernetes-admin\"},\"oldObject\":{\"metadata\":{\"name\":\"n-0\",\"uid\":\"u9\",\"annotations\":{\"flare.gree.net/delete-override\":\"u9\"}},\"spec\":{\"hostname\":\"n-0\",\"subdomain\":\"n\",\"nodeName\":\"w7\"}},\"options\":{\"gracePeriodSeconds\":0}}}"
   r := r ++ [("admission: a pod DELETE review is read (uid, user, pod uid, hostname, override, grace 0)",

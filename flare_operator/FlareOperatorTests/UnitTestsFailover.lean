@@ -6,6 +6,10 @@
 -/
 import FlareOperator.StateMachine.FailoverOrder
 import FlareOperator.StateMachine.K8sReconciler
+import FlareOperator.StateMachine.UnreachableNode
+import FlareOperator.StateMachine.DuplicateMaster
+import FlareOperator.StateMachine.LeaseFence
+import FlareOperator.Server.TcpClient
 
 namespace FlareOperator.UnitTestsFailover
 
@@ -17,6 +21,35 @@ private def cp (k : String) (ep : Option String) (n : Option Nat) : Copy :=
 
 private def node (name : String) (role : FlareRole) (st : FlareState) (part : Int) : FlareNode :=
   { serverName := name, serverPort := 12121, role := role, state := st, partition := part }
+
+open Std.Internal.UV.TCP (Socket) in
+open Std.Net (SocketAddress SocketAddressV4) in
+/-- A local peer for the real probe path (review of a074161, P2): it accepts
+    one connection on 127.0.0.1 and either answers `version` (`answer`) or
+    holds the connection open without a byte (a wedged flared that still
+    accepts). Returns its port. -/
+private def probePeer (answer : Bool) (holdMs : Nat) : IO Nat := do
+  let srv ← Socket.new
+  srv.bind (SocketAddress.v4 (SocketAddressV4.mk ⟨#v[127, 0, 0, 1]⟩ 0))
+  srv.listen 4
+  let port := (← srv.getSockName).port.toNat
+  let _ ← IO.asTask (prio := .dedicated) do
+    match ← IO.wait (← srv.accept).result! with
+    | .error _ => pure ()
+    | .ok c =>
+      if answer then
+        let _ ← IO.wait (← c.recv? 128).result!
+        let _ ← IO.wait (← c.send "VERSION flare-test\r\n".toUTF8).result!
+      IO.sleep holdMs.toUInt32
+      let _ ← c.shutdown
+      let _ ← srv.shutdown
+  return port
+
+/-- The real probe against `ip:port`: its answer and how long it took. -/
+private def timedProbe (ip : String) (port timeoutMs : Nat) : IO (Bool × Nat) := do
+  let t0 ← IO.monoMsNow
+  let ok ← FlareOperator.Server.probeNodeReachable ip port timeoutMs
+  return (ok, (← IO.monoMsNow) - t0)
 
 /-- partition 0 has lost its master; three Active slaves a, b, c in map order. -/
 private def masterless : FlareClusterState :=
@@ -68,6 +101,180 @@ def results : List (String × Bool) := Id.run do
     refill [] [] [] (some "c") == some "c")]
   r := r ++ [("refill: the newest copy wins over the standby preference",
     refill ["b", "a"] [] ["b"] == some "b")]
+
+  -- spec 12 (2026-10-31): operator-unreachable nodes -> down, with the guard
+  let mkState : FlareClusterState :=
+    ({ nodeMap := [("m", node "m" .Master .Active 0), ("s", node "s" .Slave .Active 0),
+                   ("t", node "t" .Slave .Active 0), ("p", node "p" .Proxy .Active (-1))],
+       nodeMapVersion := 7 } : FlareClusterState).rebuildPartitionMap
+  let step := FlareOperator.UnreachableNode.step
+  let v1 := step [] [("m", false), ("s", true), ("t", true)] mkState
+  let v2 := step v1.streaks [("m", false), ("s", true), ("t", true)] mkState
+  let v3 := step v2.streaks [("m", false), ("s", true), ("t", true)] mkState
+  r := r ++ [("unreachable: flarei's defaults (3 probes, 5 s, 1000 ms) are the operator's",
+    FlareOperator.UnreachableNode.monitorThreshold == 3 && FlareOperator.UnreachableNode.monitorIntervalSec == 5
+      && FlareOperator.UnreachableNode.monitorReadTimeoutMs == 1000)]
+  r := r ++ [("unreachable: one or two failed probes do not make a node down",
+    v1.down.isEmpty && v2.down.isEmpty && v2.streaks == [("m", 2)])]
+  r := r ++ [("unreachable: the third consecutive failed probe makes it down",
+    v3.down == ["m"] && !v3.guardTripped)]
+  -- review of a74d3ec: a streak belongs to one pod incarnation
+  let keep := FlareOperator.UnreachableNode.keepStreaksForSamePod
+  let w1 := keep v2.streaks [("m", "u1")] [("m", "u1")]
+  let wGone := keep v2.streaks [("m", "u1")] []
+  let wBack := keep wGone [] [("m", "u2")]
+  let w2 := keep v2.streaks [("m", "u1")] [("m", "u2")]
+  let vNew := step w2 [("m", false), ("s", true), ("t", true)] mkState
+  r := r ++ [("unreachable: a streak is kept only for the same pod UID in both listings; missing from one, another UID or no UID starts it again",
+    w1 == [("m", 2)] && wGone.isEmpty && wBack.isEmpty && w2.isEmpty
+      && (keep v2.streaks [] [("m", "u1")]).isEmpty && (keep v2.streaks [("m", "")] [("m", "")]).isEmpty)]
+  r := r ++ [("unreachable: a pod missing from a listing and recreated under the same name (new UID) is not down at its first failed probe (the old pod's two failures are not added)",
+    vNew.down.isEmpty && vNew.streaks == [("m", 1)])]
+  r := r ++ [("unreachable: a successful probe in between restarts the count",
+    (step v2.streaks [("m", true), ("s", true), ("t", true)] mkState).streaks.isEmpty)]
+  r := r ++ [("unreachable: a Proxy (no role to fail over) never counts",
+    (step [("p", 5)] [("p", false), ("s", true)] mkState).down.isEmpty)]
+  let g := step [("m", 2)] [("m", false), ("s", false), ("t", false)] mkState
+  r := r ++ [("unreachable GUARD: every probed node unreachable -> nothing down, streaks restart, guard tripped",
+    g.down.isEmpty && g.streaks.isEmpty && g.guardTripped)]
+  r := r ++ [("unreachable GUARD: a stale streak cannot fire the moment the guard releases",
+    (step g.streaks [("m", false), ("s", true), ("t", true)] mkState).down.isEmpty)]
+  r := r ++ [("unreachable GUARD: no probe at all (empty list) is not a tripped guard",
+    !(step [] [] mkState).guardTripped)]
+  r := r ++ [("unreachable GUARD: even when only the lone Active node is probed and unreachable",
+    (step [("m", 9)] [("m", false)] mkState).guardTripped)]
+  r := r ++ [("unreachable master: down deferred while EVERY Active slave is failing probes too (41284282067), not when one answers, never for a slave",
+    UnreachableNode.deferMasterDown mkState [("m", 3), ("s", 2), ("t", 1)] "m"
+      && !UnreachableNode.deferMasterDown mkState [("m", 3), ("s", 2)] "m"
+      && !UnreachableNode.deferMasterDown mkState [("m", 3)] "m"
+      && !UnreachableNode.deferMasterDown mkState [("s", 3), ("t", 3)] "s")]
+  -- B9 / rule 12: the keep decision and the promotion run on ONE candidate
+  -- state (K8sReconciler.failoverCandidates); `unhealthy` are the nodes
+  -- flagged this pass (also dead), `g` the other gates of the pass
+  let gatesFor := fun (unhealthy : List String) (g : K8sReconciler.SuccessorGates) =>
+    ({ g with livePodKeys := if g.livePodKeys.isEmpty then ["m", "s", "t", "p"] else g.livePodKeys,
+              unhealthyKeys := unhealthy ++ g.unhealthyKeys,
+              deadKeys := unhealthy ++ g.deadKeys } : K8sReconciler.SuccessorGates)
+  let candOf := fun (unhealthy : List String) (g : K8sReconciler.SuccessorGates) =>
+    K8sReconciler.failoverCandidates (gatesFor unhealthy g) mkState
+  let keptG := fun (unhealthy : List String) (g : K8sReconciler.SuccessorGates) =>
+    K8sReconciler.unhealthyMastersKept (candOf unhealthy g) unhealthy unhealthy (gatesFor unhealthy g).lagHeld
+  let kept := fun (unhealthy : List String) => keptG unhealthy {}
+  -- the master of partition 0 after the failover itself ran on the same candidates
+  let promotedBy := fun (unhealthy : List String) (g : K8sReconciler.SuccessorGates) =>
+    ((K8sReconciler.handleFailoverWithPromotion (candOf unhealthy g) unhealthy).nodeMap.find?
+      (fun kv => kv.2.role == FlareRole.Master && kv.2.partition == 0)).map (·.1)
+  r := r ++ [("unreachable master with a reachable slave: not kept -> failed over",
+    (kept ["m"]).isEmpty && promotedBy ["m"] {} == some "s")]
+  r := r ++ [("B9 repair held: both slaves held -> master kept; only s held -> failed over to t",
+    keptG ["m"] { repairHeld := ["s", "t"] } == ["m"]
+      && (keptG ["m"] { repairHeld := ["s"] }).isEmpty && promotedBy ["m"] { repairHeld := ["s"] } == some "t")]
+  r := r ++ [("B9 follower unfit (FollowEvidence / R3 source-ineligible or unreadable / non-normal evidence / pod not Ready): both unfit -> kept; s unfit -> failed over to t",
+    keptG ["m"] { followUnfit := ["s", "t"] } == ["m"]
+      && (keptG ["m"] { followUnfit := ["s"] }).isEmpty && promotedBy ["m"] { followUnfit := ["s"] } == some "t")]
+  r := r ++ [("B9 / lag hold: an unfit follower that holds data is the lag hold's (not kept: masterless, the ex-master's wait, then NOT LOSS-FREE), the failover itself promotes nobody; repair-held, blocked or unhealthy as well -> kept",
+    (keptG ["m"] { followUnfit := ["s", "t"], dataBearing := ["s"] }).isEmpty
+      && promotedBy ["m"] { followUnfit := ["s", "t"], dataBearing := ["s"] } == none
+      && keptG ["m"] { followUnfit := ["s", "t"], dataBearing := ["s"], repairHeld := ["s"] } == ["m"]
+      && keptG ["m"] { followUnfit := ["s", "t"], dataBearing := ["s"], promotionBlocked := ["s"] } == ["m"]
+      && keptG ["m"] { followUnfit := ["s", "t"], dataBearing := ["s"], unhealthyKeys := ["s"] } == ["m"]
+      && keptG ["m"] { followUnfit := ["s", "t"], dataBearing := ["s"], livePodKeys := ["m", "t", "p"] } == ["m"])]
+  r := r ++ [("B9 promotion blocked (evidence not promotable): both blocked -> kept; s blocked -> failed over to t (the failover no longer picks the blocked head)",
+    keptG ["m"] { promotionBlocked := ["s", "t"] } == ["m"]
+      && (keptG ["m"] { promotionBlocked := ["s"] }).isEmpty && promotedBy ["m"] { promotionBlocked := ["s"] } == some "t")]
+  r := r ++ [("B9 follow unproven is NOT a refusal (availability, logged NOT LOSS-FREE): failed over, the unproven one tried last",
+    (keptG ["m"] { followUnproven := ["s", "t"] }).isEmpty && promotedBy ["m"] { followUnproven := ["s", "t"] } == some "s"
+      && promotedBy ["m"] { followUnproven := ["s"] } == some "t")]
+  r := r ++ [("B9 a proven-current ranked follower is the one promoted; standby slaves last but still successors",
+    promotedBy ["m"] { followRanked := ["t"] } == some "t"
+      && promotedBy ["m"] { standby := ["s"] } == some "t"
+      && (keptG ["m"] { standby := ["s", "t"] }).isEmpty)]
+  r := r ++ [("B9 a slave without a pod, or failed over in the same pass, is no successor -> kept; one left -> failed over to it",
+    keptG ["m"] { livePodKeys := ["m", "p"] } == ["m"]
+      && keptG ["m"] { deadKeys := ["s", "t"] } == ["m"]
+      && promotedBy ["m"] { livePodKeys := ["m", "t", "p"] } == some "t"
+      && promotedBy ["m"] { deadKeys := ["s"] } == some "t")]
+  let gateCases : List K8sReconciler.SuccessorGates :=
+    [{}, { repairHeld := ["s", "t"] }, { followUnfit := ["s"] }, { promotionBlocked := ["s", "t"] },
+     { followUnfit := ["s"], promotionBlocked := ["t"] }, { followUnproven := ["s", "t"] },
+     { followRanked := ["t"] }, { standby := ["s", "t"] }, { livePodKeys := ["m", "p"] },
+     { deadKeys := ["t"], repairHeld := ["s"] }, { unhealthyKeys := ["s"] }]
+  r := r ++ [("B9 agreement (no follower the lag hold owns): the keep decision says 'no successor' exactly when the failover promotes nobody, and failoverSuccessor names the slave the failover promotes",
+    gateCases.all fun g =>
+      (keptG ["m"] g).contains "m" == (promotedBy ["m"] g).isNone
+        && K8sReconciler.failoverSuccessor (candOf ["m"] g) "m" == promotedBy ["m"] g)]
+  r := r ++ [("unreachable master, every slave also unreachable: no successor -> kept as master",
+    kept ["m", "s", "t"] == ["m"])]
+  r := r ++ [("unreachable master, one slave unreachable and one reachable: failed over to the reachable",
+    (kept ["m", "s"]).isEmpty)]
+  r := r ++ [("unreachable slave: down (failed over to proxy), never kept",
+    (kept ["s"]).isEmpty)]
+  -- spec 13: a master claim the committed map gives to another node
+  let dm : FlareClusterState :=
+    ({ nodeMap := [("a", node "a" .Master .Active 0), ("b", node "b" .Slave .Active 0)],
+       nodeMapVersion := 7 } : FlareClusterState).rebuildPartitionMap
+  let reply := fun (role : String) (part : Int) => s!"STAT own_role {role}\r\nSTAT own_partition {part}\r\nSTAT node_map_version 6\r\nEND\r\n"
+  r := r ++ [("duplicate master: a node claiming the master the map gives to ANOTHER node conflicts; the map's own master, a slave claim or no partition does not",
+    (DuplicateMaster.ownClaim (reply "master" 0)).map (DuplicateMaster.conflicts dm "b") == some true
+      && (DuplicateMaster.ownClaim (reply "master" 0)).map (DuplicateMaster.conflicts dm "a") == some false
+      && (DuplicateMaster.ownClaim (reply "slave" 0)).map (DuplicateMaster.conflicts dm "b") == some false
+      && (DuplicateMaster.ownClaim (reply "proxy" (-1))).map (DuplicateMaster.conflicts dm "b") == some false
+      && DuplicateMaster.ownClaim "STAT own_role master\r\nEND\r\n" == none)]
+  let h := DuplicateMaster.holdMs
+  r := r ++ [("duplicate master: down only after the claim stood holdMs (15 s, flarei's 3 x 5 s); fast passes do not shorten it",
+    h == 15000
+      && (DuplicateMaster.step [] "b" (some true) 1000) == ([("b", 1000)], false)
+      && (DuplicateMaster.step [("b", 1000)] "b" (some true) 1200).2 == false
+      && (DuplicateMaster.step [("b", 1000)] "b" (some true) (1000 + h)).2 == true)]
+  r := r ++ [("duplicate master: a claim that ends clears it; an unreadable sample keeps what was known, never starts a count and never decides the down (B11); the next READ claim past holdMs does",
+    (DuplicateMaster.step [("b", 1000)] "b" (some false) 99000) == ([], false)
+      && (DuplicateMaster.step [] "b" none 99000) == ([], false)
+      -- one timeline: first sighting at 1000, unreadable at 1000 + h (no
+      -- decision, sighting kept), read claim at 1500 + h (down)
+      && (let (fs1, d1) := DuplicateMaster.step [] "b" (some true) 1000
+          let (fs2, d2) := DuplicateMaster.step fs1 "b" none (1000 + h)
+          let (_, d3) := DuplicateMaster.step fs2 "b" (some true) (1500 + h)
+          !d1 && fs2 == [("b", 1000)] && !d2 && d3))]
+  -- the mid-pass lease check (review of fac7410, P1)
+  r := r ++ [("lease check: held only from this pod's own renew with a margin left; a failed renew is never held, whatever the earlier read said",
+    LeaseFence.held true true 300 15000
+      && LeaseFence.held true true (15000 - LeaseFence.marginMs) 15000
+      && !LeaseFence.held true false 0 15000
+      && !LeaseFence.held false true 0 15000)]
+  r := r ++ [("lease check: a renew answered late (API delay) is not held — 10.001 s of a 15 s lease leaves less than the 5 s margin, and one past the lease is not held either",
+    !LeaseFence.held true true (15000 - LeaseFence.marginMs + 1) 15000
+      && !LeaseFence.held true true 16000 15000
+      && !LeaseFence.held true true 30000 15000)]
+  -- review of 2596f25: a node removed from the map leaves both lists
+  r := r ++ [("duplicate master: a key no longer in the node map is pruned from the pending claims and the down list (gauges and the unhealthy list fall back)",
+    DuplicateMaster.prune dm [("b", 1000), ("gone", 1000)] ["b", "gone"] == ([("b", 1000)], ["b"])
+      && DuplicateMaster.prune dm [] [] == ([], []))]
+  -- risk B10: the reachability probe needs flared's answer to `version`
+  r := r ++ [("reachability probe: only a VERSION line counts as an answer (a connect alone, an error or another reply does not)",
+    FlareOperator.Server.versionReplyAnswers "VERSION flare-1.3.4\r\n"
+      && !FlareOperator.Server.versionReplyAnswers "ERROR\r\n"
+      && !FlareOperator.Server.versionReplyAnswers "SERVER_ERROR busy\r\n"
+      && !FlareOperator.Server.versionReplyAnswers "")]
+  return r
+
+/-- The real reachability probe over loopback sockets (IO, so apart from
+    `results`). -/
+def probeResults : IO (List (String × Bool)) := do
+  let mut r : List (String × Bool) := []
+  -- the real probe path, bounded by the caller's timeout (review of a074161)
+  let tmo := UnreachableNode.monitorReadTimeoutMs
+  let slack := 300
+  let (stallOk, stallMs) ← timedProbe "127.0.0.1" (← probePeer false 3000) tmo
+  r := r ++ [(s!"reachability probe: a peer that accepts but never answers is unreachable within the {tmo} ms timeout (took {stallMs} ms)",
+    !stallOk && stallMs + 50 ≥ tmo && stallMs ≤ tmo + slack)]
+  let (answerOk, answerMs) ← timedProbe "127.0.0.1" (← probePeer true 1000) tmo
+  r := r ++ [(s!"reachability probe: a peer that answers VERSION is reachable (took {answerMs} ms)",
+    answerOk && answerMs ≤ tmo)]
+  -- a connect that never completes (unroutable address): the whole probe
+  -- still ends by the timeout, whether the network drops or refuses it
+  let (blackOk, blackMs) ← timedProbe "10.255.255.1" 12121 400
+  r := r ++ [(s!"reachability probe: a connect that does not complete ends within the timeout (400 ms, took {blackMs} ms)",
+    !blackOk && blackMs ≤ 400 + slack)]
   return r
 
 end FlareOperator.UnitTestsFailover

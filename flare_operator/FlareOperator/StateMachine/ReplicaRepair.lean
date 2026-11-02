@@ -36,6 +36,12 @@
   * Completion is not "the node is Active again": the re-announce path can
     make it Active without reconstructing. Completion requires the node's
     own `reconstruction_completed` counter to have moved since the reseat.
+  * A reconstruction the operator did not start can BE the repair
+    (ADOPTION, see `reconstructingKeys`): one that began after the drops
+    were counted copies every write they stand for, so a request whose
+    destination starts reconstructing after it was recorded is closed by
+    that reconstruction's success, with no demotion and no extra rebuild
+    (a recreated pod's boot reconstruction, CI 41278035134).
 
   Everything that decides is pure and in this file; Main.lean feeds it
   observations and applies its actions. The unit checks in
@@ -59,12 +65,19 @@ inductive Phase where
   /-- The node applied the demotion and was released to assignment; waiting
       for Slave/Active with a moved reconstruction counter. -/
   | reseated
+  /-- ADOPTED: the node began reconstructing (Slave/Prepare) after the
+      request was recorded, without a demotion; that reconstruction is the
+      repair. Waiting, like `reseated`, for Slave/Active with a success newer
+      than the baseline in `bootIdAtReseat`/`currentIdAtReseat`; never
+      demoted while in this phase (see `reconstructingKeys`). -/
+  | adopted
   deriving Repr, BEq, DecidableEq
 
 def Phase.toString : Phase → String
   | .requested => "requested"
   | .demoted v => s!"demoted@{v}"
   | .reseated => "reseated"
+  | .adopted => "adopted"
 
 instance : ToString Phase := ⟨Phase.toString⟩
 
@@ -107,6 +120,25 @@ structure Entry where
   mustReach : Option Nat := none
   /-- The master's source epoch when the bar was taken. -/
   barEpoch : Option String := none
+  /-- ADOPTION (see `reconstructingKeys`): the LATEST drop increment was
+      recorded while the destination was NOT Slave/Prepare in the operator's
+      map (read after the master's counter). False = recorded while it was
+      reconstructing, or unknown: no adoption, the 7be3ca6 path (deferred
+      while Prepare, demoted once Active). Absent in an older status = false. -/
+  adoptable : Bool := false
+  /-- The destination's flared boot id and latest reconstruction id, read
+      AFTER the latest drop increment was counted (none = unreadable). A
+      reconstruction with a larger id in that boot, or any in a later boot,
+      began after the read and so after every drop of this entry. -/
+  bootAtRequest : Option Nat := none
+  currentIdAtRequest : Option Nat := none
+  /-- The destination pod's UID read after the latest drop increment: `some
+      ""` = no such pod existed, `none` = could not be read. Used only when
+      the flared reading above is missing (the pod was gone or not yet
+      serving): a pod with ANOTHER UID was created after that read, so its
+      flared process — and every reconstruction it runs — is newer than the
+      drops. -/
+  podAtRequest : Option String := none
   deriving Repr, BEq
 
 structure Ledger where
@@ -183,16 +215,47 @@ def observe (l : Ledger) (masterKey : String) (observed : List (String × Nat))
   let (led, drops, first) := observed.foldl step (l0, [], [])
   ({ led with initialized := true }, drops, first)
 
+/-- What the caller saw of a drop's destination right AFTER reading the
+    master's counter: the ADOPTION evidence (see `reconstructingKeys`). The
+    default (nothing seen) is never adoptable — the 7be3ca6 behaviour. -/
+structure RequestSight where
+  /-- The destination was not Slave/Prepare in the operator's map. -/
+  outsidePrepare : Bool := false
+  /-- Its flared `reconstruction_boot_id` / `reconstruction_current_id`. -/
+  bootId : Option Nat := none
+  currentId : Option Nat := none
+  /-- Its pod UID (`some ""` = no pod), `none` = unreadable. -/
+  podUid : Option String := none
+  deriving Repr, BEq
+
 /-- Record drops for a destination: a new `requested` entry, or more drops on
     an existing one (whatever its phase — a repair in flight subsumes them,
-    because reconstruction copies the whole partition). -/
-def request (l : Ledger) (masterKey dest : String) (drops : Nat) : Ledger :=
+    because reconstruction copies the whole partition).
+
+    ADOPTION evidence is that of the LATEST increment (`sight`): every
+    earlier drop of the entry was counted before it too, so a reconstruction
+    that began after this increment covers them all; one counted while the
+    destination is reconstructing makes the entry not adoptable (rule 2: it
+    may postdate that reconstruction's final catch-up). An ADOPTED entry that
+    gains drops goes back to `requested` for the same reason: the adopted
+    reconstruction may not hold them. `demoted`/`reseated` keep the existing
+    late-drop handling (`dropsAtReseat`, `completedRequeued`). -/
+def request (l : Ledger) (masterKey dest : String) (drops : Nat) (sight : RequestSight := {}) : Ledger :=
+  let withSight := fun (e : Entry) =>
+    { e with adoptable := sight.outsidePrepare, bootAtRequest := sight.bootId,
+             currentIdAtRequest := sight.currentId, podAtRequest := sight.podUid }
   match l.entries.find? (·.dest == dest) with
   | some _ =>
     { l with entries := l.entries.map fun e =>
-        if e.dest == dest then { e with drops := e.drops + drops } else e }
+        if e.dest != dest then e
+        else match e.phase with
+          | .requested => withSight { e with drops := e.drops + drops }
+          | .adopted =>
+            withSight { e with phase := .requested, drops := e.drops + drops,
+                               bootIdAtReseat := none, currentIdAtReseat := none, dropsAtReseat := 0 }
+          | _ => { e with drops := e.drops + drops } }
   | none =>
-    { l with entries := l.entries ++ [{ dest := dest, masterKey := masterKey, drops := drops }] }
+    { l with entries := l.entries ++ [withSight { dest := dest, masterKey := masterKey, drops := drops }] }
 
 /-- SAF-10c: the follower ITSELF declared `needs_rebuild` — history purged
     past its position, the source epoch changed, an integrity failure, an
@@ -213,6 +276,22 @@ def requestRebuild (l : Ledger) (masterKey nodeKey : String) : Ledger × Bool :=
 def resolveKey (state : FlareClusterState) (dest : String) : Option (String × FlareNode) :=
   let host := (dest.splitOn ":").head?.getD dest
   state.nodeMap.find? fun (k, n) => k == dest || n.serverName == host
+
+/-- Every node a ledger entry names, resolved or not: a request opened this
+    pass has `nodeKey = none` until `resolve` runs in a later pass, and it
+    must already count (full matrix 41399431858, empty-source 2: the request
+    and the empty-master self-heal's third streak landed in one pass, and the
+    successor that missed the master's writes was not seen as under repair).
+    An unresolved destination is listed through `resolveKey`, and as its raw
+    text when the map does not name it. -/
+def pendingNodeKeys (l : Ledger) (state : FlareClusterState) : List String :=
+  l.entries.foldl (fun acc e =>
+    let ks := match e.nodeKey with
+      | some k => [k]
+      | none => match resolveKey state e.dest with
+        | some (k, _) => [k, e.dest]
+        | none => [e.dest]
+    acc ++ ks.filter (!acc.contains ·)) []
 
 /-- Resolve unresolved requests against the committed map. A destination
     that is now a MASTER cannot be repaired by demotion and its missed
@@ -241,15 +320,81 @@ def heldKeys (l : Ledger) : List String :=
     | .demoted _, some k => some k
     | _, _ => none
 
+/-- Why a request against a reconstructing destination is not acted on. -/
+def reconstructingHold : String :=
+  "the destination is reconstructing from its master (Slave/Prepare): no demotion while it does; the request is kept — closed by this reconstruction if it began after the drops (adopted), otherwise it takes the ordinary repair path once Active"
+
+/-- Node keys of the committed map that are reconstructing right now: a
+    Slave in Prepare (a reconstruction from the master in progress — the
+    boot reconstruction of a recreated pod, or a re-seated repair). A request
+    against such a node is never demoted: the demotion is what breaks the
+    rebuilding node (CI 41278035134: drops counted against a replica's OLD
+    pod, whose forwards failed while it was cut and deleted, became a request
+    that demoted the RECREATED pod ~1 s into its boot reconstruction; flared
+    kept retrying that reconstruction as a proxy and the cluster wedged for
+    24 min).
+
+    ADOPTION — a reconstruction that STARTED AFTER the drops were counted is
+    the repair. flared's reconstruction (src/lib/handler_reconstruction.cc)
+    first waits until the master's map forwards to it (:282-298), then takes
+    L0, copies (snapshot/dump) and catches up through the WAL to L1 and again
+    to now_lsn (:1410-1506): every write the master applied before the
+    reconstruction began is in the copy, and a counted drop stands for such
+    a write. Order is established from flared's own record, not from timing
+    guesses: one handler = one `reconstruction_current_id`, assigned when it
+    begins (stats::reconstruction_begin), so a success with an id LARGER than
+    the one read after the drops were counted — or any success of a later
+    process (another boot id, or a pod with another UID than the one that
+    existed then) — began after those drops. So a request whose latest drops
+    were recorded while the destination was NOT reconstructing
+    (`Entry.adoptable`) and which then sees it Slave/Prepare is ADOPTED
+    (`advanceEntry`): no demotion, and that reconstruction's success closes
+    it. Not adopted (the 7be3ca6 behaviour: held while Prepare, then the
+    ordinary demote → reseat path once Active, one extra rebuild):
+    * drops counted while it was ALREADY reconstructing — they may postdate
+      the copy's final catch-up (a write forwarded to a Prepare slave and
+      dropped is not in its copy), and the order cannot be told; this
+      includes drops that grow during an adopted reconstruction (`request`
+      returns the entry to `requested`);
+    * no baseline: neither flared's reading nor a newer pod proves the
+      reconstruction began after the drops;
+    * the node turns Active without a qualifying success (`adoptionLapsed`).
+    A reconstruction whose Prepare was shorter than one operator pass (the
+    map was never observed in Prepare) is covered too: an adoptable request
+    whose node is already Slave/Active with a success newer than the
+    baseline is closed directly (`advanceEntry`, step `adoptedCompleted`). -/
+def reconstructingKeys (state : FlareClusterState) : List String :=
+  state.nodeMap.filterMap fun (k, n) =>
+    if n.role == FlareRole.Slave && n.state == FlareState.Prepare then some k else none
+
+/-- Is `dest` (as the master reports it) a Slave in Prepare in `state`? A
+    destination that is not in the map, or not a Slave, is not
+    reconstructing by the map (see `reconstructingKeys` for why the
+    adoption does not rest on the map alone). -/
+def destReconstructing (state : FlareClusterState) (dest : String) : Bool :=
+  match resolveKey state dest with
+  | some (_, n) => n.role == FlareRole.Slave && n.state == FlareState.Prepare
+  | none => false
+
 /-- Resolved requests the caller should demote now. When `allowed` is false
-    they are marked with the gate reason instead and nothing is returned. -/
-def plan (l : Ledger) (allowed : Bool) (gateReason : String) : Ledger × List (String × Entry) :=
+    they are marked with the gate reason instead and nothing is returned.
+    A request whose node is in `reconstructing` (see `reconstructingKeys`)
+    is never returned: it is held with `reconstructingHold` and kept. -/
+def plan (l : Ledger) (allowed : Bool) (gateReason : String)
+    (reconstructing : List String := []) : Ledger × List (String × Entry) :=
   if allowed then
+    let deferred := fun (e : Entry) =>
+      match e.phase, e.nodeKey with
+      | .requested, some k => !e.owned && reconstructing.contains k
+      | _, _ => false
     let acts := l.entries.filterMap fun e =>
       match e.phase, e.nodeKey with
-      | .requested, some k => if e.owned then none else some (k, e)
+      | .requested, some k => if e.owned || deferred e then none else some (k, e)
       | _, _ => none
-    ({ l with entries := l.entries.map fun e => if e.owned then e else { e with hold := none } }, acts)
+    ({ l with entries := l.entries.map fun e =>
+        if e.owned then e
+        else if deferred e then { e with hold := some reconstructingHold }
+        else { e with hold := none } }, acts)
   else
     ({ l with entries := l.entries.map fun e =>
         match e.phase, e.nodeKey with
@@ -393,6 +538,10 @@ structure Observation where
   currentMaster : Option String := none
   /-- Role/state of the node in the committed map, if present. -/
   mapped : Option (FlareRole × FlareState) := none
+  /-- The node's pod UID, read before AND after the stats with the same
+      answer (`some ""` = no pod); `none` = not read or changed in between.
+      Read only for an adoption without a flared baseline. -/
+  podUid : Option String := none
 
 inductive Step where
   | none
@@ -400,12 +549,75 @@ inductive Step where
   | completed     -- Slave/Active with a reconstruction that began after the reseat and finished
   | completedRequeued -- as `completed`, but drops arrived after the reconstruction began: the increment is requeued
   | voided        -- node became a Master while under repair
+  | adopted       -- a reconstruction that began after the drops is in progress: it is the repair (no demotion)
+  | adoptedCompleted -- the adopted reconstruction succeeded from the current master (or, for a Prepare shorter than a pass, one seen only once Active): closed
+  | adoptionLapsed   -- Active without a qualifying success: back to the ordinary path
+  | adoptionUnproven -- reconstructing, but nothing proves it began after the drops: the 7be3ca6 path
   deriving Repr, BEq
+
+/-- The adoption baseline (boot id, reconstruction id) for an adoptable
+    request whose node `o` shows reconstructing: flared's reading taken after
+    the latest drops, or — when that was unreadable — `(boot, 0)` of a
+    process in a pod with ANOTHER UID than the one that existed then (or none
+    existed): every reconstruction of that process began after the drops.
+    `none` = no proof. -/
+def adoptionBaseline (e : Entry) (o : Observation) : Option (Nat × Nat) :=
+  match e.bootAtRequest, e.currentIdAtRequest with
+  | some b0, some c0 => some (b0, c0)
+  | _, _ =>
+    match e.podAtRequest, o.podUid, o.bootId with
+    | some p0, some p, some b => if !p.isEmpty && p != p0 then some (b, 0) else none
+    | _, _, _ => none
+
+/-- A reconstruction that SUCCEEDED (the latest handler), from the CURRENT
+    master, and began after the baseline: newer in the same process, or of a
+    different process (boot id changed). -/
+def successAfter (boot0 cid0 : Nat) (o : Observation) : Bool :=
+  match o.bootId, o.currentId, o.currentState, o.lastSuccessId, o.lastSuccessSource, o.currentMaster with
+  | some boot, some cid, some st, some lsid, some src, some master =>
+    st == "succeeded" && lsid == cid && cid ≥ 1 && src == master && ((boot != boot0) || (cid > cid0))
+  | _, _, _, _, _, _ => false
 
 /-- Advance one entry by one observation. -/
 def advanceEntry (e : Entry) (o : Observation) : Option Entry × Step :=
   match e.phase with
-  | .requested => (some e, .none)
+  | .requested =>
+    -- ADOPTION (see `reconstructingKeys`): the node began reconstructing
+    -- after the latest drops were recorded outside Prepare
+    if !e.owned && e.adoptable && o.mapped == some (FlareRole.Slave, FlareState.Prepare) then
+      match adoptionBaseline e o with
+      | some (b0, c0) =>
+        (some { e with phase := .adopted, bootIdAtReseat := some b0, currentIdAtReseat := some c0,
+                       dropsAtReseat := e.drops, hold := Option.none }, .adopted)
+      | Option.none =>
+        -- an unreadable node decides nothing yet; a readable one without a
+        -- baseline cannot be ordered after the drops
+        if o.bootId.isNone then (some e, .none)
+        else (some { e with adoptable := false }, .adoptionUnproven)
+    -- A Prepare shorter than one pass is never observed: the node is
+    -- already Active. Its success closes the request directly when it is
+    -- newer than the baseline read after the latest drops (same proof: that
+    -- reconstruction began after them).
+    else if !e.owned && e.adoptable && o.mapped == some (FlareRole.Slave, FlareState.Active) then
+      match adoptionBaseline e o with
+      | some (b0, c0) => if successAfter b0 c0 o then (Option.none, .adoptedCompleted) else (some e, .none)
+      | Option.none => (some e, .none)
+    else (some e, .none)
+  | .adopted =>
+    match o.mapped with
+    | some (FlareRole.Master, _) => (Option.none, .voided)
+    | some (FlareRole.Slave, FlareState.Active) =>
+      match e.bootIdAtReseat, e.currentIdAtReseat, o.bootId, o.currentId, o.currentState with
+      | some b0, some c0, some boot, some cid, some st =>
+        if successAfter b0 c0 o then (Option.none, .adoptedCompleted)
+        -- the adopted handler is still finishing (Active is reported from
+        -- inside it, just before its success is recorded)
+        else if st == "running" && ((boot != b0) || (cid > c0)) then (some e, .none)
+        else
+          (some { e with phase := .requested, adoptable := false, bootIdAtReseat := Option.none,
+                         currentIdAtReseat := Option.none, dropsAtReseat := 0 }, .adoptionLapsed)
+      | _, _, _, _, _ => (some e, .none)
+    | _ => (some e, .none)
   | .demoted v =>
     match o.mapped with
     | some (FlareRole.Master, _) => (Option.none, .voided)
@@ -463,6 +675,42 @@ def advance (l : Ledger) (obs : List (String × Observation)) : Ledger × List (
   let (kept, steps) := l.entries.foldl step ([], [])
   ({ l with entries := kept }, steps)
 
+/-- An adoptable request whose node is Slave/Active while a reconstruction
+    that began after the baseline is still finishing (Active is reported from
+    inside the handler, just before its success is recorded). -/
+def adoptionFinishing (e : Entry) (o : Observation) : Bool :=
+  e.phase == .requested && !e.owned && e.adoptable
+    && o.mapped == some (FlareRole.Slave, FlareState.Active)
+    && match adoptionBaseline e o, o.bootId, o.currentId, o.currentState with
+      | some (b0, c0), some boot, some cid, some st => st == "running" && ((boot != b0) || (cid > c0))
+      | _, _, _, _ => false
+
+/-- The adoption close, applied BEFORE the demotion plan (review of a549080,
+    P1): with the gate open, `plan` returns every requested Slave/Active
+    node, so a Prepare that ended between two passes was demoted before part
+    2 could close its request. This closes each adoptable request whose node
+    `obs` shows Slave/Active with a success newer than the baseline (the
+    `adoptedCompleted` of `advanceEntry`), and returns the node keys whose
+    qualifying reconstruction is still finishing: the caller holds those out
+    of the plan like a node in Prepare. Every other entry is untouched (the
+    ordinary path decides it). -/
+def adoptBeforePlan (l : Ledger) (obs : List (String × Observation)) :
+    Ledger × List Entry × List String :=
+  let step := fun (acc : List Entry × List Entry × List String) (e : Entry) =>
+    let (kept, closed, finishing) := acc
+    let candidate := e.phase == .requested && !e.owned && e.adoptable
+    match candidate, obs.lookup e.dest with
+    | true, some o =>
+      if o.mapped != some (FlareRole.Slave, FlareState.Active) then (kept ++ [e], closed, finishing)
+      else match advanceEntry e o with
+        | (Option.none, .adoptedCompleted) => (kept, closed ++ [e], finishing)
+        | _ =>
+          let fin := if adoptionFinishing e o then e.nodeKey.toList else []
+          (kept ++ [e], closed, finishing ++ fin)
+    | _, _ => (kept ++ [e], closed, finishing)
+  let (kept, closed, finishing) := l.entries.foldl step ([], [], [])
+  ({ l with entries := kept }, closed, finishing)
+
 -- ═══════════════════════════════════════════════════════════════════════
 -- Persistence (FlareCluster status.replicaRepairs)
 -- ═══════════════════════════════════════════════════════════════════════
@@ -472,12 +720,14 @@ def Phase.toJson : Phase → Json
   | .requested => Json.mkObj [("kind", Json.str "requested")]
   | .demoted v => Json.mkObj [("kind", Json.str "demoted"), ("version", Json.num v)]
   | .reseated => Json.mkObj [("kind", Json.str "reseated")]
+  | .adopted => Json.mkObj [("kind", Json.str "adopted")]
 
 open Lean in
 def Phase.fromJson? (j : Json) : Option Phase :=
   match j.getObjValAs? String "kind" with
   | .ok "requested" => some .requested
   | .ok "reseated" => some .reseated
+  | .ok "adopted" => some .adopted
   | .ok "demoted" =>
     match j.getObjValAs? Nat "version" with
     | .ok v => some (.demoted v)
@@ -499,6 +749,12 @@ def Entry.toJson (e : Entry) : Json :=
     ++ (if e.owned then [("owned", Json.bool true)] else [])
     ++ (match e.mustReach with | some b => [("mustReach", Json.num b)] | none => [])
     ++ (match e.barEpoch with | some ep => [("barEpoch", Json.str ep)] | none => [])
+    -- ADOPTION evidence: absent (an older status) reads back as not
+    -- adoptable, i.e. the 7be3ca6 behaviour
+    ++ (if e.adoptable then [("adoptable", Json.bool true)] else [])
+    ++ (match e.bootAtRequest with | some b => [("bootAtRequest", Json.num b)] | none => [])
+    ++ (match e.currentIdAtRequest with | some b => [("currentIdAtRequest", Json.num b)] | none => [])
+    ++ (match e.podAtRequest with | some p => [("podAtRequest", Json.str p)] | none => [])
 
 open Lean in
 def Entry.fromJson? (j : Json) : Option Entry := do
@@ -515,7 +771,11 @@ def Entry.fromJson? (j : Json) : Option Entry := do
     hold := (j.getObjValAs? String "hold").toOption,
     owned := (j.getObjValAs? Bool "owned").toOption.getD false,
     mustReach := (j.getObjValAs? Nat "mustReach").toOption,
-    barEpoch := (j.getObjValAs? String "barEpoch").toOption }
+    barEpoch := (j.getObjValAs? String "barEpoch").toOption,
+    adoptable := (j.getObjValAs? Bool "adoptable").toOption.getD false,
+    bootAtRequest := (j.getObjValAs? Nat "bootAtRequest").toOption,
+    currentIdAtRequest := (j.getObjValAs? Nat "currentIdAtRequest").toOption,
+    podAtRequest := (j.getObjValAs? String "podAtRequest").toOption }
 
 open Lean in
 def Ledger.toJson (l : Ledger) : Json :=

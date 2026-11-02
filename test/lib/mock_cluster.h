@@ -52,6 +52,11 @@ public:
 	 * set node to node_map
 	 */
 	cluster::node set_node(string server_name, int server_port, role r, state s, int partition = 0, int balance = 0);
+	/*
+	 * set_node under the node map's write lock (a map change while a handler
+	 * thread reads the map)
+	 */
+	cluster::node set_node_locked(string server_name, int server_port, role r, state s, int partition = 0, int balance = 0);
 	void clear_node_map();
 	void clear_node_partition_map();
 	void dump_node_map();

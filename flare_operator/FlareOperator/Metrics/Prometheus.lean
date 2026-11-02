@@ -98,6 +98,12 @@ structure OperatorMetrics where
   -- detection on purpose — the fault may be on the operator's side, and
   -- failing over a master we merely cannot see is the unsafe action.
   unreachableNodes : Gauge
+  -- spec 12 guard: 1 while the operator reaches NONE of the nodes it probes
+  -- (its own network or the k8s API is suspect: nothing is marked down)
+  noNodeReachable : Gauge
+  -- spec 13: nodes whose duplicate master claim is pending / treated as down
+  duplicateMasterClaims : Gauge
+  duplicateMasterDown : Gauge
   -- Last observed topology, with a 60s freshness bound. Diagnostics only.
   topologyBehindNodes : Gauge
   topologyAheadNodes : Gauge
@@ -145,6 +151,17 @@ structure OperatorMetrics where
   -- cannot recover it (tmpfs reseeds rewind to the last S3 backup). A human
   -- must decide (e.g. trigger a final backup) — page immediately.
   drainNoSuccessor : Gauge
+
+  -- Gauges of the cordon move (StateMachine/NodeMove.lean): pods on cordoned
+  -- nodes that could not be moved (under nodeReplacement.minCopies, no
+  -- successor) — alert FlareCordonMoveBlocked; 1 while a move holds because
+  -- the client Service still reaches the pod after its bound, or a handover
+  -- keeps aborting — alert FlareCordonMoveHeld; the number of unfinished moves;
+  -- the number of moves past their phase deadline — alert FlareCordonMoveStuck.
+  cordonMoveBlocked : Gauge
+  cordonMoveHeld : Gauge
+  cordonMovesActive : Gauge
+  cordonMovesStuck : Gauge
 
   -- Gauge: 1 while the blast-radius circuit breaker is tripped (the FSM's
   -- last pass ended in EmergencyPaused), else 0. Page on this: it means a
@@ -213,6 +230,9 @@ def initMetrics : IO OperatorMetrics := do
   let unhealthyNodes ← IO.mkRef 0.0
   let stuckDownNodes ← IO.mkRef 0.0
   let unreachableNodes ← IO.mkRef 0.0
+  let noNodeReachable ← IO.mkRef 0.0
+  let duplicateMasterClaims ← IO.mkRef 0.0
+  let duplicateMasterDown ← IO.mkRef 0.0
   let nodeRoles ← IO.mkRef ([] : List NodeRoleSample)
   let topologyBehindNodes ← IO.mkRef 0.0
   let topologyAheadNodes ← IO.mkRef 0.0
@@ -226,6 +246,10 @@ def initMetrics : IO OperatorMetrics := do
   let replicaRepairVoided ← IO.mkRef 0
   let replicaRepairsPending ← IO.mkRef 0.0
   let drainNoSuccessor ← IO.mkRef 0.0
+  let cordonMoveBlocked ← IO.mkRef 0.0
+  let cordonMoveHeld ← IO.mkRef 0.0
+  let cordonMovesActive ← IO.mkRef 0.0
+  let cordonMovesStuck ← IO.mkRef 0.0
   let circuitBreakerTripped ← IO.mkRef 0.0
   let partitionsDesired ← IO.mkRef 0.0
   let migrationPhase ← IO.mkRef 0.0
@@ -246,6 +270,9 @@ def initMetrics : IO OperatorMetrics := do
     unhealthyNodes := { value := unhealthyNodes }
     stuckDownNodes := { value := stuckDownNodes }
     unreachableNodes := { value := unreachableNodes }
+    noNodeReachable := { value := noNodeReachable }
+    duplicateMasterClaims := { value := duplicateMasterClaims }
+    duplicateMasterDown := { value := duplicateMasterDown }
     topologyBehindNodes := { value := topologyBehindNodes }
     topologyAheadNodes := { value := topologyAheadNodes }
     topologyUnknownNodes := { value := topologyUnknownNodes }
@@ -258,6 +285,10 @@ def initMetrics : IO OperatorMetrics := do
     replicaRepairVoided := { value := replicaRepairVoided }
     replicaRepairsPending := { value := replicaRepairsPending }
     drainNoSuccessor := { value := drainNoSuccessor }
+    cordonMoveBlocked := { value := cordonMoveBlocked }
+    cordonMoveHeld := { value := cordonMoveHeld }
+    cordonMovesActive := { value := cordonMovesActive }
+    cordonMovesStuck := { value := cordonMovesStuck }
     circuitBreakerTripped := { value := circuitBreakerTripped }
     partitionsDesired := { value := partitionsDesired }
     migrationPhase := { value := migrationPhase }
@@ -462,6 +493,19 @@ def exportMetrics (metrics : OperatorMetrics) (clusterName : String) : IO String
   let unreachable ← metrics.unreachableNodes.value.get
   output := output ++ formatGauge "flare_operator_nodes_unreachable" labels unreachable
 
+  -- spec 12 guard: no probed node reachable (gauge 0/1)
+  output := output ++ "# HELP flare_operator_no_node_reachable 1 while the operator reaches none of the flare nodes it probes: its own network or the k8s API is suspect, so no node is marked down and no master promoted (spec 12)\n"
+  output := output ++ "# TYPE flare_operator_no_node_reachable gauge\n"
+  output := output ++ formatGauge "flare_operator_no_node_reachable" labels (← metrics.noNodeReachable.value.get)
+
+  -- spec 13: duplicate master claims (gauges)
+  output := output ++ "# HELP flare_operator_duplicate_master_claims Nodes claiming a master the committed node map gives to another node (pending: down if the claim still stands after 15 s)\n"
+  output := output ++ "# TYPE flare_operator_duplicate_master_claims gauge\n"
+  output := output ++ formatGauge "flare_operator_duplicate_master_claims" labels (← metrics.duplicateMasterClaims.value.get)
+  output := output ++ "# HELP flare_operator_duplicate_master_down Nodes treated as down for a duplicate master claim, until restarted\n"
+  output := output ++ "# TYPE flare_operator_duplicate_master_down gauge\n"
+  output := output ++ formatGauge "flare_operator_duplicate_master_down" labels (← metrics.duplicateMasterDown.value.get)
+
   for (name, help, gauge) in [
       ("flare_operator_topology_observed_behind_nodes", "Mapped nodes last observed below committed topology version within 60s", metrics.topologyBehindNodes),
       ("flare_operator_topology_observed_ahead_nodes", "Mapped nodes last observed above committed topology version within 60s; authority mismatch", metrics.topologyAheadNodes),
@@ -514,6 +558,20 @@ def exportMetrics (metrics : OperatorMetrics) (clusterName : String) : IO String
   output := output ++ "# TYPE flare_operator_drain_no_successor gauge\n"
   let drainNoSucc ← metrics.drainNoSuccessor.value.get
   output := output ++ formatGauge "flare_operator_drain_no_successor" labels drainNoSucc
+
+  -- Cordon move (gauges)
+  output := output ++ "# HELP flare_operator_cordon_move_blocked Pods on cordoned nodes that cannot be moved now (fewer real copies than nodeReplacement.minCopies, or no successor); their eviction stays held\n"
+  output := output ++ "# TYPE flare_operator_cordon_move_blocked gauge\n"
+  output := output ++ formatGauge "flare_operator_cordon_move_blocked" labels (← metrics.cordonMoveBlocked.value.get)
+  output := output ++ "# HELP flare_operator_cordon_move_held Cordon moves held as a proxy: the client Service still reaches the pod after the bound, or the handover keeps aborting (nothing is deleted)\n"
+  output := output ++ "# TYPE flare_operator_cordon_move_held gauge\n"
+  output := output ++ formatGauge "flare_operator_cordon_move_held" labels (← metrics.cordonMoveHeld.value.get)
+  output := output ++ "# HELP flare_operator_cordon_moves_active Cordon moves not finished\n"
+  output := output ++ "# TYPE flare_operator_cordon_moves_active gauge\n"
+  output := output ++ formatGauge "flare_operator_cordon_moves_active" labels (← metrics.cordonMovesActive.value.get)
+  output := output ++ "# HELP flare_operator_cordon_moves_stuck Cordon moves past their phase deadline (unserved: nodeReplacement.unservedTimeoutSeconds; deleted/resyncing: resyncTimeoutSeconds); no longer the running move, never released\n"
+  output := output ++ "# TYPE flare_operator_cordon_moves_stuck gauge\n"
+  output := output ++ formatGauge "flare_operator_cordon_moves_stuck" labels (← metrics.cordonMovesStuck.value.get)
 
   -- Circuit breaker state (gauge)
   output := output ++ "# HELP flare_operator_circuit_breaker_tripped 1 while failover is paused by the blast-radius breaker\n"

@@ -73,6 +73,22 @@ queue_proxy_write::queue_proxy_write(cluster* cl, storage* st, vector<string> pr
 		_skipped(false),
 		_reroutes(0) {
 	pthread_mutex_init(&this->_mutex_repl_dests, NULL);
+	pthread_mutex_init(&this->_mutex_owner, NULL);
+	pthread_mutex_init(&this->_mutex_result, NULL);
+	// SAF-10b stage 3: the source's replication identity travels with the
+	// change, so the destination can order it against the same change
+	// arriving through the WAL stream. Set ONCE here, by the writer, before
+	// the item is shared by every replica's forwarding thread: setting it in
+	// run() wrote the shared entry's string from each thread at once while
+	// the others read it (risk flare-risk-repl-tag-race). The label was
+	// captured inside the key's critical section when the master wrote
+	// locally (design §3.9(B)); an empty epoch sends nothing.
+	if (cl != NULL && cl->get_repl_identity_forward() && st != NULL && this->_entry.seq_label > 0) {
+		const string epoch = st->get_source_epoch();
+		if (!epoch.empty()) {
+			this->_entry.repl_tag = epoch + "/" + boost::lexical_cast<string>(this->_entry.seq_label);
+		}
+	}
 }
 
 /**
@@ -86,6 +102,8 @@ queue_proxy_write::~queue_proxy_write() {
 		stats_object->repl_in_flight_sub(*it);
 	}
 	pthread_mutex_destroy(&this->_mutex_repl_dests);
+	pthread_mutex_destroy(&this->_mutex_owner);
+	pthread_mutex_destroy(&this->_mutex_result);
 }
 
 /**
@@ -93,8 +111,51 @@ queue_proxy_write::~queue_proxy_write() {
  *	the item is destroyed. Called before it is queued for `dest`.
  */
 void queue_proxy_write::track_repl_in_flight(const string& dest) {
+	// under the same mutex as release_repl_in_flight: the first replica's
+	// forwarding thread may already release (erase) while the writer tracks the
+	// next replica (push_back may reallocate) — unlocked, that corrupted the
+	// heap (flared SIGSEGV, 41284282067 empty-source; 41278035134 forward-window)
+	// the gauge moves under the same mutex too: added after a concurrent
+	// release had already subtracted (a no-op below 0), it stayed up for ever
+	// (the cutter test below found it)
+	pthread_mutex_lock(&this->_mutex_repl_dests);
 	this->_repl_dests.push_back(dest);
 	stats_object->repl_in_flight_add(dest);
+	pthread_mutex_unlock(&this->_mutex_repl_dests);
+}
+
+/**
+ *	One replica's thread publishes its answer: the item is shared by every
+ *	replica's forwarding thread, each of which used to assign _result and the
+ *	_result_message string at once (a data race on a std::string; risk
+ *	flare-risk-proxy-write-result-race). The last answer wins, as before.
+ */
+void queue_proxy_write::_publish_result(op::result r, const string& msg) {
+	pthread_mutex_lock(&this->_mutex_result);
+	this->_success = true;
+	this->_result = r;
+	this->_result_message = msg;
+	pthread_mutex_unlock(&this->_mutex_result);
+}
+
+op::result queue_proxy_write::get_result() {
+	pthread_mutex_lock(&this->_mutex_result);
+	const op::result r = this->_result;
+	pthread_mutex_unlock(&this->_mutex_result);
+	return r;
+}
+
+string queue_proxy_write::get_result_message() {
+	pthread_mutex_lock(&this->_mutex_result);
+	const string m = this->_result_message;
+	pthread_mutex_unlock(&this->_mutex_result);
+	return m;
+}
+
+void queue_proxy_write::set_owner(shared_thread t) {
+	pthread_mutex_lock(&this->_mutex_owner);
+	this->_owner = t;
+	pthread_mutex_unlock(&this->_mutex_owner);
 }
 
 /**
@@ -117,10 +178,10 @@ void queue_proxy_write::release_repl_in_flight(const string& dest) {
 		this->_repl_dests.erase(it);
 		found = true;
 	}
-	pthread_mutex_unlock(&this->_mutex_repl_dests);
 	if (found) {
 		stats_object->repl_in_flight_sub(dest);
 	}
+	pthread_mutex_unlock(&this->_mutex_repl_dests);
 }
 
 /**
@@ -279,20 +340,7 @@ int queue_proxy_write::run(shared_connection c) {
 		return -1;
 	}
 	p->set_proxy(this->_proxy);
-	// SAF-10b stage 3: carry the source's replication identity with the
-	// change, so the destination can order it against the same change
-	// arriving through the WAL stream instead of overwriting blindly. The
-	// label was captured inside the key's critical section when the master
-	// wrote locally (design §3.9(B)); an empty epoch means the source cannot
-	// identify its history, in which case nothing is sent and the receiver
-	// behaves exactly as before.
-	if (this->_cluster != NULL && this->_cluster->get_repl_identity_forward()
-			&& this->_storage != NULL && this->_entry.seq_label > 0) {
-		const string epoch = this->_storage->get_source_epoch();
-		if (!epoch.empty()) {
-			this->_entry.repl_tag = epoch + "/" + boost::lexical_cast<string>(this->_entry.seq_label);
-		}
-	}
+	// _entry.repl_tag was set by the ctor, before the item was shared
 
 	if (held) {
 		if (!this->_send_held(c, p)) {
@@ -347,12 +395,14 @@ int queue_proxy_write::run(shared_connection c) {
 		return -1;
 	}
 
-	this->_success = true;
-	this->_result = p->get_result();
+	// this thread's answer, in locals: the item is shared by every replica's
+	// thread, so its fields are written once below, under _mutex_result
+	const op::result r = p->get_result();
+	string msg;
 	if (stats_object->diag_enabled() && this->_post_proxy) {
 		if (const connection_tcp* ctp = dynamic_cast<const connection_tcp*>(c.get())) {
 			stats_object->diag_incr("fwd_answered:" + ctp->get_host() + ":" + boost::lexical_cast<string>(ctp->get_port())
-				+ ":" + boost::lexical_cast<string>(static_cast<int>(this->_result)));
+				+ ":" + boost::lexical_cast<string>(static_cast<int>(r)));
 		}
 	}
 	// DIAGNOSTIC (copy-identity 11, manual run 37899958227: 10 forwarded writes
@@ -365,42 +415,43 @@ int queue_proxy_write::run(shared_connection c) {
 	if (this->_post_proxy && !this->_foreign) {
 		if (const connection_tcp* ctp = dynamic_cast<const connection_tcp*>(c.get())) {
 			const string dest = ctp->get_host() + ":" + boost::lexical_cast<string>(ctp->get_port());
-			if (this->_result == op::result_not_stored) {
+			if (r == op::result_not_stored) {
 				stats_object->increment_proxy_write_skipped(dest);
-			} else if (this->_result != op::result_stored && this->_result != op::result_deleted
-					&& this->_result != op::result_touched && this->_result != op::result_ok
-					&& this->_result != op::result_not_found) {
+			} else if (r != op::result_stored && r != op::result_deleted
+					&& r != op::result_touched && r != op::result_ok
+					&& r != op::result_not_found) {
 				stats_object->increment_proxy_write_failed(dest);
 			}
 		}
 	}
-	if (this->_result != op::result_stored && this->_result != op::result_deleted
-			&& this->_result != op::result_touched && this->_result != op::result_ok
-			&& this->_result != op::result_not_found) {
+	if (r != op::result_stored && r != op::result_deleted
+			&& r != op::result_touched && r != op::result_ok
+			&& r != op::result_not_found) {
 		static AtomicCounter unexpected_logged(0);
 		if (unexpected_logged.incr() % 100 == 1) {
 			const connection_tcp* ctp = dynamic_cast<const connection_tcp*>(c.get());
 			log_warning("proxy write ANSWERED but not stored by the replica (dest=%s:%d, op=%s, key=%s, version=%u, result=%s) — the replica may now miss this write (logged 1 in 100)",
 				ctp ? ctp->get_host().c_str() : "?", ctp ? ctp->get_port() : 0,
 				this->_op_ident.c_str(), this->_entry.key.c_str(), this->_entry.version,
-				op::result_cast(this->_result).c_str());
+				op::result_cast(r).c_str());
 		}
 	}
 	// :(
-	log_debug("result: %s:%d", p->get_ident().c_str(), this->_result);
-	if ((p->get_ident() == "incr" || p->get_ident() == "decr") && this->_result == op::result_stored) {
+	log_debug("result: %s:%d", p->get_ident().c_str(), r);
+	if ((p->get_ident() == "incr" || p->get_ident() == "decr") && r == op::result_stored) {
 		log_debug("available: %d", this->_entry.is_data_available());
 		if (this->_entry.is_data_available()) {
 			char buf[BUFSIZ];
 			memcpy(buf, this->_entry.data.get(), this->_entry.size);
 			snprintf(buf+this->_entry.size, sizeof(buf)-this->_entry.size, "%s", line_delimiter);
-			this->_result_message = buf;
+			msg = buf;
 		} else {
-			this->_result_message = p->get_result_message();
+			msg = p->get_result_message();
 		}
 	} else {
-		this->_result_message = p->get_result_message();
+		msg = p->get_result_message();
 	}
+	this->_publish_result(r, msg);
 	delete p;
 
 	return 0;
@@ -419,7 +470,10 @@ uint64_t foreign_now_ms() {
 }	// anonymous namespace
 
 bool queue_proxy_write::_owner_stopping() {
-	return this->_owner && this->_owner->is_shutdown_request() != thread::shutdown_request_none;
+	pthread_mutex_lock(&this->_mutex_owner);
+	shared_thread o = this->_owner;
+	pthread_mutex_unlock(&this->_mutex_owner);
+	return o && o->is_shutdown_request() != thread::shutdown_request_none;
 }
 
 int queue_proxy_write::hold_window_ms = 0;
@@ -713,9 +767,8 @@ int queue_proxy_write::_run_foreign(shared_connection c) {
 	if (attempts > 1) {
 		stats_object->crepl_incr("forward_retried");
 	}
-	this->_success = true;
-	this->_result = p->get_result();
-	this->_result_message = p->get_result_message();
+	const op::result answered_result = p->get_result();
+	this->_publish_result(answered_result, p->get_result_message());
 
 	// The destination ANSWERED. Whether that answer put the change there
 	// depends on the op (classify_foreign_answer). A failed answer is a drop
@@ -723,9 +776,9 @@ int queue_proxy_write::_run_foreign(shared_connection c) {
 	// operator and the runbook look — and was only a rate-limited warning
 	// before (audit 2026-10-11).
 	const string sent = p->get_ident();
-	const string rname = op::result_cast(this->_result);
-	const string counter = foreign_outcome_counter(sent, this->_result);
-	switch (classify_foreign_answer(sent, this->_result)) {
+	const string rname = op::result_cast(answered_result);
+	const string counter = foreign_outcome_counter(sent, answered_result);
+	switch (classify_foreign_answer(sent, answered_result)) {
 		case foreign_applied:
 			stats_object->crepl_incr(counter);
 			break;

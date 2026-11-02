@@ -638,15 +638,23 @@ def ClusterConfig.walFollowByDefault (cfg : ClusterConfig) : Bool :=
     && !((cfg.extraFlaredConf.splitOn "repl-follow-enabled").length > 1)
 
 /-- The follow lines a RocksDB suite boots with by default (`walFollow`). -/
-def walFollowConf : String :=
-  "repl-identity-forward = true\nrepl-follow-enabled = true\nrepl-follow-poll-interval-usec = 200000"
+def walFollowLines : List (String × String) :=
+  [("repl-identity-forward", "true"), ("repl-follow-enabled", "true"), ("repl-follow-poll-interval-usec", "200000")]
+
+/-- The default follow lines the suite's own lines do not set: flared refuses
+    a key given twice ("cannot be specified more than once") and exits, so
+    a suite that sets one of them (stats-cost: identity forwarding) would
+    crashloop (41497845231). -/
+def walFollowConf (cfg : ClusterConfig) : String :=
+  "\n".intercalate ((walFollowLines.filter fun (k, _) => !((cfg.extraFlaredConf.splitOn k).length > 1)).map
+    fun (k, v) => s!"{k} = {v}")
 
 /-- The extra.conf pods boot with: the suite's lines, the default follow
     lines (`walFollow`) and the rebuild reserve. -/
 def bootFlaredConf (cfg : ClusterConfig) : String :=
   let follow := cfg.walFollowByDefault
   let lines := (if cfg.extraFlaredConf.isEmpty then [] else [cfg.extraFlaredConf])
-    ++ (if follow then [walFollowConf] else [])
+    ++ (if follow && !(walFollowConf cfg).isEmpty then [walFollowConf cfg] else [])
     ++ (match cfg.rebuildReserveBytes with
         | some n => [s!"rocksdb-rebuild-reserve-bytes = {n}"]
         | none => [])

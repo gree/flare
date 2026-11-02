@@ -425,10 +425,31 @@ def suite : TestSuite := {
         let some p0 := findMasterPod entries 0 | return .fail "precondition: no P0 master in the two-partition source"
         let some p1 := findMasterPod entries 1 | return .fail "precondition: no P1 master in the two-partition source"
         let p0Ip := (← getPodIp p0 ns2).getD ""
+        -- the operator's view runs ahead of P0's own map: written before P0
+        -- applied the two-partition map, every key stays on P0 (41497845231:
+        -- 50 on P0, 0 on P1). Write only once P0 itself routes partition 1
+        -- to an active master
+        let routes ← waitForCondition "P0's own map has an active master for partition 1" 120 do
+          match ← execInDebugPod src2Cfg.debugPod ns2 s!"printf 'stats nodes\\r\\n' | nc -w 3 {p0Ip} {src2Cfg.flarePort}" with
+          | .error _ => return false
+          | .ok o =>
+            let ls := (o.splitOn "\n").map (fun l => (l.replace "\r" "").trim)
+            -- STAT <node>:role master / :partition 1 / :state active, per node
+            let nodesOf (suffix : String) := ls.filterMap fun l =>
+              if l.startsWith "STAT " && l.endsWith suffix then some ((l.drop 5).dropRight suffix.length) else none
+            let p1Nodes := nodesOf ":partition 1"
+            return p1Nodes.any fun nd => (nodesOf ":role master").contains nd && (nodesOf ":state active").contains nd
+        if !routes then return .fail "precondition: P0's own map never had an active master for partition 1 within 120 s"
         let stored ← writeKeys src2Cfg.debugPod ns2 p0Ip src2Cfg.flarePort "part" nKeys
         if stored != nKeys then return .fail s!"precondition: stored {stored}/{nKeys} in the two-partition source"
         let p1Ip := (← getPodIp p1 ns2).getD ""
-        let p1Items ← getCurrItems src2Cfg.debugPod ns2 p1Ip src2Cfg.flarePort
+        -- the forwards to P1 land a moment after the sets are acknowledged
+        let p1ItemsRef ← IO.mkRef 0
+        discard <| waitForCondition "P1 holds a partial slice of the keys" 30 do
+          let n ← getCurrItems src2Cfg.debugPod ns2 p1Ip src2Cfg.flarePort
+          p1ItemsRef.set n
+          return n > 0 && n < nKeys
+        let p1Items ← p1ItemsRef.get
         if p1Items == 0 || p1Items == nKeys then return .fail s!"precondition: P1 holds {p1Items} of {nKeys} keys (not a partial slice)"
         match ← execInDebugPod src2Cfg.debugPod ns2 s!"printf 'backup {backupName}\\r\\n' | nc -w 10 {p1Ip} {src2Cfg.flarePort}" with
         | .ok o => IO.eprintln s!"# backup on {p1} (P1, {p1Items} keys): {o.trim}"

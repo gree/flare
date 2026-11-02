@@ -42,6 +42,8 @@ private def cfg : ClusterConfig := {
   -- identity forwarding only (as pf-dev after 2026-10-20): the replica keeps
   -- one identity record per forwarded key; no WAL follow
   extraFlaredConf := "repl-identity-forward = true"
+  -- identity forwarding only, no WAL follow: what this suite measures
+  walFollow := false
   flaredCpuLimit := "1"
 }
 

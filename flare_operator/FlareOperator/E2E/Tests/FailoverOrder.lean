@@ -200,6 +200,20 @@ private def ownRole (ip : String) : IO (Option String) := do
       | _ => none
   | .error _ => return none
 
+/-- The pod's own (`own_role`, `own_state`) from its `stats`: what the map it
+applied says about it, not the operator's map. -/
+private def ownRoleState (ip : String) : IO (Option (String × String)) := do
+  match ← execInDebugPod cfg.debugPod cfg.«namespace» s!"printf 'stats\\r\\n' | nc -w 3 {ip} {cfg.flarePort}" with
+  | .ok o =>
+    let stat (k : String) := (o.splitOn "\n").findSome? fun l =>
+      match (l.trim.replace "\r" "").splitOn " " with
+      | ["STAT", k', v] => if k' == k then some v else none
+      | _ => none
+    return match stat "own_role", stat "own_state" with
+      | some r, some st => some (r, st)
+      | _, _ => none
+  | .error _ => return none
+
 /-- One operator metric value, integer part (gauges render as floats). -/
 private def operatorMetric (name : String) : IO (Option Nat) := do
   let ips ← getPodIps s!"app={cfg.operatorName}" cfg.«namespace»
@@ -581,6 +595,19 @@ def suite : TestSuite := {
             return (← nodeView).any fun e => podOf e.fqdn == sPod && e.role == 1 && e.state == 0
           if !seated then return .fail s!"precondition: the recreated {sPod} was not seated as an Active slave within 180 s"
           let newIp := (← getPodIp sPod cfg.«namespace»).getD ""
+          -- the operator's map runs one broadcast ahead of the pod: the pod
+          -- is Ready as a Proxy, then NotReady on the map that seats it
+          -- Prepare, and Ready again only once the Active map reaches it. A
+          -- cut before that leaves it NotReady, and reachability probes Ready
+          -- pods only, so it is never marked unreachable (41418772808,
+          -- attempts 1 and 2): the pod itself must report an active slave
+          -- and be Ready before the cut
+          let applied ← waitForCondition s!"{sPod} itself reports own_role slave, own_state active and is Ready" 120 do
+            if (← ownRoleState newIp) != some ("slave", "active") then return false
+            match ← kubectl ["get", "pod", sPod, "-n", cfg.«namespace», "-o", "jsonpath={.status.containerStatuses[0].ready}"] with
+            | .ok o => return o.trim == "true"
+            | .error _ => return false
+          if !applied then return .fail s!"precondition: the recreated {sPod} did not apply its Active slave map and become Ready within 120 s"
           match ← cutLink opIp newIp with
           | .error e => return .fail s!"could not cut operator ⇄ {newIp}: {e}"
           | .ok _ => pure ()

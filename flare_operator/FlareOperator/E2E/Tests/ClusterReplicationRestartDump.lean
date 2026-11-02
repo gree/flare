@@ -167,6 +167,8 @@ structure RestartOutcome where
   details : List String
   droppedDelta : Nat
   serverErrorRetried : Nat
+  /-- seconds from the delete until the destination master answered again -/
+  backSecs : Nat := 0
   deriving Inhabited
 
 initialize outcomeRef : IO.Ref (Option RestartOutcome) ← IO.mkRef none
@@ -274,6 +276,18 @@ def suite : TestSuite := {
         match ← kubectl ["scale", "deployment", cfgDst.operatorName, "-n", cfgDst.«namespace», "--replicas=1"] with
         | .error e => return .fail s!"could not release the destination operator: {e}"
         | .ok _ => pure ()
+        -- with no operator to register with, the restarted flared exits and
+        -- kubelet's back-off grows (10, 20, 40 s ...): one missed node add
+        -- after the release waited out a further step and the destination
+        -- was back after ~144 s, past the 120 s resend window (41418772808:
+        -- 25 counted drops). A pod in CrashLoopBackOff is recreated (data
+        -- kept) so it starts at once instead of after its back-off
+        match ← kubectl ["get", "pod", dPod, "-n", cfgDst.«namespace», "-o", "jsonpath={.status.containerStatuses[0].state.waiting.reason}"] with
+        | .ok o =>
+          if o.trim == "CrashLoopBackOff" then
+            IO.eprintln s!"# {dPod} is in CrashLoopBackOff at the operator's release: recreated so its back-off does not delay the return"
+            discard <| kubectl ["delete", "pod", dPod, "-n", cfgDst.«namespace», "--wait=false"]
+        | .error _ => pure ()
         -- hold the re-seat of the restarted master past the forwards' master
         -- wait (20 s): they fail SERVER_ERROR and the source resends them
         -- (the order test 3 checks). Armed before the operator's startup
@@ -327,7 +341,8 @@ def suite : TestSuite := {
         let r1 ← statNat cfgSrc sIp "cluster_replication[forward_server_error_retried]"
         IO.eprintln s!"# restart (per-key seed): {tracked.length} tracked; differing {div.length}; proxy_write_dropped {d0} → {d1}; forward_server_error_retried {r0} → {r1}; {← creplSummary sIp}"
         outcomeRef.set (some { tracked := tracked.length, divergent := div, details,
-                               droppedDelta := d1 - d0, serverErrorRetried := r1 - r0 })
+                               droppedDelta := d1 - d0, serverErrorRetried := r1 - r0,
+                               backSecs := (t1 - t0) / 1000 })
         if div.length > d1 - d0 then
           return .fail s!"SILENT LOSS: {div.length} tracked keys differ but only {d1 - d0} drops were counted: {details.take 10}"
         let postMissing := div.filter (fun k => postKeys.contains k)
@@ -353,7 +368,11 @@ def suite : TestSuite := {
           if o.divergent.isEmpty then
             IO.eprintln s!"# FINAL MATCH: all {o.tracked} tracked keys agree; drops counted {o.droppedDelta}"
             return .pass
-          return .fail s!"FINAL MATCH: {o.divergent.length} of {o.tracked} tracked keys differ (drops counted {o.droppedDelta}); nothing repairs them: {o.details.take 10}" }
+          -- past the resend window the counted drops are the window's
+          -- expiry, not a forwarding finding: say so (the harness held the
+          -- destination too long)
+          let harness := if o.backSecs > 120 then s!" — HARNESS: the destination was back after {o.backSecs} s, past the source's 120 s resend window, so these are its counted expiries, not a forwarding finding" else ""
+          return .fail s!"FINAL MATCH: {o.divergent.length} of {o.tracked} tracked keys differ (drops counted {o.droppedDelta}); nothing repairs them: {o.details.take 10}{harness}" }
   ]
 }
 

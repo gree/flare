@@ -244,8 +244,23 @@ cluster:
   # enqueue or storage error) answers SERVER_ERROR instead of END ("key
   # absent"). Not the chart default yet (default changes are decided
   # separately); clients must treat SERVER_ERROR as an error, not a miss.
+  # Continuous WAL replication (on by default from this release, user decision
+  # 2026-10-31; RUNBOOK #enable-follow): each replica follows its master's
+  # RocksDB WAL, so a forward dropped on the proxy path is filled from the WAL
+  # instead of rebuilding the replica. replIdentityForward tags every forward
+  # with the write's identity and must be on with replFollowEnabled (a node
+  # without it would refuse the tagged forwards; flared understands the tag
+  # from rc64 on, so upgrading from rc63 or older: first with both false until
+  # every pod runs the new image, then true). The first follow after an
+  # upgrade rebuilds a replica once
+  # when the master no longer holds the WAL it needs (reads from that replica
+  # are withheld meanwhile). The WAL must cover the backlog of dropped
+  # forwards: on tmpfs keep walSizeLimitMb / walTtlSeconds as above.
+  # Set both false to keep the earlier behaviour (repairs rebuild a replica).
   rocksdb:
     maxTotalThreadQueue: 200000
+    replIdentityForward: true
+    replFollowEnabled: true
   # Declarative read-routing policy (CRD spec.readBalance). flared routes
   # reads by balance weight; the operator normalizes every node map to this
   # policy, so manual flare-admin balance edits are reverted — change this

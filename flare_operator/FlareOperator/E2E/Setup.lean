@@ -74,6 +74,12 @@ structure ClusterConfig where
       those, and restarting the whole StatefulSet mid-suite churns every
       node through re-registration. -/
   extraFlaredConf : String := ""
+  /-- Continuous WAL replication (identity forwarding + follow), the chart's
+      default from this release: a RocksDB suite's pods boot with both on
+      unless it sets this false (a suite that starts like an older release,
+      or measures the rebuild path). Ignored for tch, and when the suite's
+      own `extraFlaredConf` already sets `repl-follow-enabled`. -/
+  walFollow : Bool := true
   /-- Put `spec.rocksdb.readUnavailableError: true` in the FlareCluster (the
       production read policy, R2): the operator renders it into extra.conf
       and keeps it there; a line in `extraFlaredConf` would be overwritten
@@ -625,13 +631,26 @@ spec:
       cluster: {cfg.name}
 "
 
-/-- The extra.conf pods boot with: the suite's lines plus the rebuild reserve. -/
+/-- `walFollow` applies: a RocksDB suite on the image under test (an older
+    release's image keeps its own defaults) whose own lines do not set follow. -/
+def ClusterConfig.walFollowByDefault (cfg : ClusterConfig) : Bool :=
+  cfg.walFollow && cfg.storageBackend == "rocksdb" && cfg.flaredImageOverride.isNone
+    && !((cfg.extraFlaredConf.splitOn "repl-follow-enabled").length > 1)
+
+/-- The follow lines a RocksDB suite boots with by default (`walFollow`). -/
+def walFollowConf : String :=
+  "repl-identity-forward = true\nrepl-follow-enabled = true\nrepl-follow-poll-interval-usec = 200000"
+
+/-- The extra.conf pods boot with: the suite's lines, the default follow
+    lines (`walFollow`) and the rebuild reserve. -/
 def bootFlaredConf (cfg : ClusterConfig) : String :=
-  match cfg.rebuildReserveBytes with
-  | some n =>
-    let line := s!"rocksdb-rebuild-reserve-bytes = {n}"
-    if cfg.extraFlaredConf.isEmpty then line else cfg.extraFlaredConf ++ "\n" ++ line
-  | none => cfg.extraFlaredConf
+  let follow := cfg.walFollowByDefault
+  let lines := (if cfg.extraFlaredConf.isEmpty then [] else [cfg.extraFlaredConf])
+    ++ (if follow then [walFollowConf] else [])
+    ++ (match cfg.rebuildReserveBytes with
+        | some n => [s!"rocksdb-rebuild-reserve-bytes = {n}"]
+        | none => [])
+  "\n".intercalate lines
 
 /-- Generate FlareCluster CRD YAML. -/
 def flareClusterCrdYaml (cfg : ClusterConfig) : String :=
@@ -645,6 +664,9 @@ spec:
   replicas: {cfg.replicas}" ++
   (if cfg.readUnavailableError || cfg.reserveInCr then
     "\n  rocksdb:" ++ (if cfg.readUnavailableError then "\n    readUnavailableError: true" else "") ++
+      -- the operator owns extra.conf once the CR has a rocksdb block: the
+      -- default follow goes in the CR too, or its rewrite would drop it
+      (if cfg.walFollowByDefault then "\n    replIdentityForward: true\n    replFollowEnabled: true\n    replFollowPollIntervalUsec: 200000" else "") ++
       (match cfg.rebuildReserveBytes with
        | some n => s!"\n    rebuildReserveBytes: {n}"
        | none => "")

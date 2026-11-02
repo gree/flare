@@ -656,10 +656,18 @@ signal — see docs/STPA-node-state.md (gap G1).
    correlate with the replica's health over the same window (a
    [node-unhealthy](#node-unhealthy) event, a pod restart, or a network
    incident).
-2. The divergence does not repair itself. To force a clean copy, make the
-   replica reconstruct: delete the REPLICA's pod (never the master's), then
-   watch it go Prepare → Active. On a PVC cluster the WAL path makes this
-   incremental; on tmpfs it is a full reseed.
+2. With continuous replication on (the chart default) the replica follows
+   the master's WAL, and a dropped forward is applied from it: the replica
+   repair request is closed under the follower, nothing is rebuilt. Check
+   `repl_follow_state` is `following` and `flare_node_repl_follow_lag` falls
+   back to about 0; FlareReplicaNotFollowing / FlareReplicaFollowLag cover a
+   follower that does not. With it off, the operator's replica repair
+   rebuilds the replica. If neither happens, force a clean copy: delete the
+   REPLICA's pod (never the master's), then watch it go Prepare → Active. On
+   a PVC cluster the WAL path makes this incremental; on tmpfs it is a full
+   reseed. A drop backlog older than the master's WAL retention
+   (`walSizeLimitMb` / `walTtlSeconds`) cannot be filled from the WAL: the
+   replica declares `needs_rebuild` (`lsn_purged`) and is rebuilt once.
 3. Verify convergence: `curr_items` on master and replica should agree
    (allow a small lag for in-flight writes).
 4. If drops recur without a node incident, suspect the network path
@@ -993,10 +1001,18 @@ meanwhile.
 
 ## Enabling continuous replication on an existing cluster {#enable-follow}
 
-**Not for this release.** Continuous WAL replication stays **OFF** in this
-release (user decision 2026-10-31: it is turned on in the next release).
-Leave `replFollowEnabled` unset/false; this section is kept for that later
-release and is not an operation to run now.
+**On by default from this release** (user decision 2026-10-31): the chart's
+`cluster.rocksdb` sets `replIdentityForward: true` and `replFollowEnabled:
+true`, so a helm upgrade of a chart-managed cluster switches it on. Every flared
+from rc64 on understands the identity tag, so an upgrade from rc64 or later
+(pf-dev runs rc67) can switch it on in the same upgrade. **From rc63 or
+older, upgrade in two steps**: first with both flags false (until every pod
+runs the new image), then set them true — an older pod still in the cluster
+refuses the tagged forwards, and each refusal is a dropped write that the
+replica repair then rebuilds. A
+FlareCluster written without the chart keeps what its `spec.rocksdb` says
+(unset = off); the steps below switch such a cluster on by hand. To keep the
+earlier behaviour, set both false in the values.
 
 Rehearsed by E2E `continuous-replication-enable` (a legacy cluster switched
 on live through the CR, and back). Do one cluster at a time.

@@ -1088,6 +1088,8 @@ structure SuccessorGates where
   followUnproven : List String := []
   /-- Standby slaves (tried after every non-standby one). -/
   standby : List String := []
+  /-- Nodes read holding data this pass (the refill's last-resort tier). -/
+  dataBearing : List String := []
 
 /-- Keys the failover never promotes this pass. -/
 def SuccessorGates.excluded (g : SuccessorGates) (state : FlareClusterState) : List String :=
@@ -1113,7 +1115,22 @@ def FlareReconcileState.successorGates (s : FlareReconcileState) : SuccessorGate
   { livePodKeys := s.livePodKeys, unhealthyKeys := s.unhealthyKeys, deadKeys := s.deadNodeKeys,
     repairHeld := s.repairHeldKeys, followUnfit := s.followUnfitKeys,
     promotionBlocked := s.promotionBlockedKeys, followRanked := s.followRankedKeys,
-    followUnproven := s.followUnprovenKeys, standby := s.standbyNodeKeys }
+    followUnproven := s.followUnprovenKeys, standby := s.standbyNodeKeys,
+    dataBearing := s.dataBearingKeys }
+
+/-- Followers the masterless REFILL owns rather than the failover: excluded
+    from the failover only as unfit (FollowEvidence, R3 source eligibility,
+    a non-normal evidence class), but live, data-bearing, healthy, not dead
+    this pass, not repair-held and not promotion-blocked. The refill's
+    last-resort tier seats such a copy, at once when the lag hold is off and
+    otherwise after the ex-master's bounded wait
+    (FLARE_FOLLOW_FAILOVER_WAIT_SECONDS), logged NOT LOSS-FREE; meanwhile the
+    hold reports the partition masterless (RUNBOOK #failover-lag-hold). -/
+def SuccessorGates.lagHeld (g : SuccessorGates) : List String :=
+  g.followUnfit.filter fun k =>
+    g.livePodKeys.contains k && g.dataBearing.contains k
+      && !g.unhealthyKeys.contains k && !g.deadKeys.contains k
+      && !g.repairHeld.contains k && !g.promotionBlocked.contains k
 
 /-- The slave `handleFailoverWithPromotionSingleKey` promotes when it fails
     `key` over on `candidates` (same partition lookup, same
@@ -1156,7 +1173,8 @@ def failoverSuccessor (candidates : FlareClusterState) (key : String) : Option S
     source eligibility / unreadable, FollowEvidence, a non-normal
     PromotionEvidence class, pod not Ready), not promotion-blocked. Counting a
     slave a gate then refuses left the partition with NO master (review B9).
-    The masterless refill is deliberately NOT counted: the refill seats its
+    The masterless refill is deliberately NOT counted (except the lag hold's
+    followers, below): the refill seats its
     choice in a LATER commit than the failover's demotion (Main commits after
     AfterHandleFailover and again after AfterAssignRoles), so a refusal there
     would leave the partition masterless; the failover's own promotion is in
@@ -1170,14 +1188,24 @@ def failoverSuccessor (candidates : FlareClusterState) (key : String) : Option S
     Each of them aborts the WHOLE pass ("nothing from this pass is
     committed"), the demotion included, so the old master stays master and
     the next pass decides again; it does not leave the partition masterless.
-    RUNBOOK #node-unreachable. -/
+    RUNBOOK #node-unreachable.
+
+    A follower the lag hold owns (`SuccessorGates.lagHeld`) is NOT a reason
+    to keep: the failover lag bound deliberately leaves such a partition
+    masterless, waits a bounded time for the ex-master and then seats the
+    follower NOT LOSS-FREE. Keeping the master instead never started that
+    wait, so a master that does not come back was never replaced (full
+    matrix 41399431858: cluster-init 9, breaker-migration 9). -/
 def unhealthyMastersKept (candidates : FlareClusterState)
-    (deadKeys unhealthyKeys : List String) : List String :=
+    (deadKeys unhealthyKeys : List String) (lagHeld : List String := []) : List String :=
   deadKeys.filter fun key =>
     unhealthyKeys.contains key &&
     (match candidates.lookupNode key with
      | none => false
-     | some node => node.role == FlareRole.Master && (failoverSuccessor candidates key).isNone)
+     | some node => node.role == FlareRole.Master && (failoverSuccessor candidates key).isNone
+         && !candidates.nodeMap.any (fun (k, n) =>
+              lagHeld.contains k && n.role == FlareRole.Slave
+                && n.partition == node.partition && n.state != FlareState.Down))
 
 /-- SAF-10c: a WAL-mode follower not proven eligible to serve reads is OUT of
     the read set — balance 0 — whatever spec.readBalance.slave says. Applied
@@ -1752,7 +1780,7 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
     -- proven-current first; unproven last (availability still wins, logged
     -- below); standby after the rest.
     let candidates := failoverCandidates s.successorGates clusterState
-    let keptMasters := unhealthyMastersKept candidates s.deadNodeKeys s.unhealthyKeys
+    let keptMasters := unhealthyMastersKept candidates s.deadNodeKeys s.unhealthyKeys s.successorGates.lagHeld
     let failoverKeys := s.deadNodeKeys.filter (fun k => !keptMasters.contains k)
     let afterFailover :=
       if s.failoverTriggered && !failoverKeys.isEmpty then
@@ -1967,7 +1995,7 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
       -- the keep decision and the promotion agree here too.
       let candidates := failoverCandidates s.successorGates clusterState
       let failoverKeys := s.deadNodeKeys.filter (fun k =>
-        !(unhealthyMastersKept candidates s.deadNodeKeys s.unhealthyKeys).contains k)
+        !(unhealthyMastersKept candidates s.deadNodeKeys s.unhealthyKeys s.successorGates.lagHeld).contains k)
       let afterFailover :=
         if failoverKeys.isEmpty then clusterState
         else handleFailoverWithPromotion candidates failoverKeys

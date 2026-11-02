@@ -405,6 +405,12 @@ through the API server, so both stay green.
     successor the master is **kept**: `CRITICAL: master <key> is NOT SERVING
     or UNREACHABLE … has NO reachable promotable successor — kept as
     master`.
+    **Exception, the lag hold:** a follower excluded only as unfit (live,
+    holding data, not repair-held, not promotion-blocked) is the
+    [failover lag hold](#failover-lag-hold)'s case. The master is marked
+    down, the partition is reported `has NO master` while the ex-master's
+    wait runs, and the follower is seated `NOT LOSS-FREE` when the wait
+    expires. Keeping the master would never start that wait.
   - **What the check cannot see:** the refusals the commit makes from fresh
     reads (R3 unreadable at commit, the successor's pod / boot / copy
     changed since it was read, a different classification at commit, the

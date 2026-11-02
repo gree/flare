@@ -158,7 +158,7 @@ def results : List (String × Bool) := Id.run do
   let candOf := fun (unhealthy : List String) (g : K8sReconciler.SuccessorGates) =>
     K8sReconciler.failoverCandidates (gatesFor unhealthy g) mkState
   let keptG := fun (unhealthy : List String) (g : K8sReconciler.SuccessorGates) =>
-    K8sReconciler.unhealthyMastersKept (candOf unhealthy g) unhealthy unhealthy
+    K8sReconciler.unhealthyMastersKept (candOf unhealthy g) unhealthy unhealthy (gatesFor unhealthy g).lagHeld
   let kept := fun (unhealthy : List String) => keptG unhealthy {}
   -- the master of partition 0 after the failover itself ran on the same candidates
   let promotedBy := fun (unhealthy : List String) (g : K8sReconciler.SuccessorGates) =>
@@ -172,6 +172,13 @@ def results : List (String × Bool) := Id.run do
   r := r ++ [("B9 follower unfit (FollowEvidence / R3 source-ineligible or unreadable / non-normal evidence / pod not Ready): both unfit -> kept; s unfit -> failed over to t",
     keptG ["m"] { followUnfit := ["s", "t"] } == ["m"]
       && (keptG ["m"] { followUnfit := ["s"] }).isEmpty && promotedBy ["m"] { followUnfit := ["s"] } == some "t")]
+  r := r ++ [("B9 / lag hold: an unfit follower that holds data is the lag hold's (not kept: masterless, the ex-master's wait, then NOT LOSS-FREE), the failover itself promotes nobody; repair-held, blocked or unhealthy as well -> kept",
+    (keptG ["m"] { followUnfit := ["s", "t"], dataBearing := ["s"] }).isEmpty
+      && promotedBy ["m"] { followUnfit := ["s", "t"], dataBearing := ["s"] } == none
+      && keptG ["m"] { followUnfit := ["s", "t"], dataBearing := ["s"], repairHeld := ["s"] } == ["m"]
+      && keptG ["m"] { followUnfit := ["s", "t"], dataBearing := ["s"], promotionBlocked := ["s"] } == ["m"]
+      && keptG ["m"] { followUnfit := ["s", "t"], dataBearing := ["s"], unhealthyKeys := ["s"] } == ["m"]
+      && keptG ["m"] { followUnfit := ["s", "t"], dataBearing := ["s"], livePodKeys := ["m", "t", "p"] } == ["m"])]
   r := r ++ [("B9 promotion blocked (evidence not promotable): both blocked -> kept; s blocked -> failed over to t (the failover no longer picks the blocked head)",
     keptG ["m"] { promotionBlocked := ["s", "t"] } == ["m"]
       && (keptG ["m"] { promotionBlocked := ["s"] }).isEmpty && promotedBy ["m"] { promotionBlocked := ["s"] } == some "t")]
@@ -192,7 +199,7 @@ def results : List (String × Bool) := Id.run do
      { followUnfit := ["s"], promotionBlocked := ["t"] }, { followUnproven := ["s", "t"] },
      { followRanked := ["t"] }, { standby := ["s", "t"] }, { livePodKeys := ["m", "p"] },
      { deadKeys := ["t"], repairHeld := ["s"] }, { unhealthyKeys := ["s"] }]
-  r := r ++ [("B9 agreement: the keep decision says 'no successor' exactly when the failover promotes nobody, and failoverSuccessor names the slave the failover promotes",
+  r := r ++ [("B9 agreement (no follower the lag hold owns): the keep decision says 'no successor' exactly when the failover promotes nobody, and failoverSuccessor names the slave the failover promotes",
     gateCases.all fun g =>
       (keptG ["m"] g).contains "m" == (promotedBy ["m"] g).isNone
         && K8sReconciler.failoverSuccessor (candOf ["m"] g) "m" == promotedBy ["m"] g)]

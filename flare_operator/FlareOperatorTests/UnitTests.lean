@@ -467,6 +467,33 @@ def checkAdoptShortPrepareGuards (ctx : Ctx) : IO Unit := do
     (stepsOf adoptA (activeObs 100 2 "succeeded" 2 "nX.svc:12121") == []
       && stepsOf adoptDu (activeObs 200 1 "succeeded" 1) == [])
 
+/-- Part 1 with the gate open, as Main runs it: the adoption decided
+    before the plan, then the plan with the finishing keys held out. -/
+def beforePlan (l : Ledger) (o : Observation) : Ledger × List Entry × List String :=
+  adoptBeforePlan l [(slaveKey, o)]
+def demotedAfter (l : Ledger) (o : Observation) : List String :=
+  let (l', _, fin) := beforePlan l o
+  actKeys l' (reconstructingKeys state ++ fin)
+
+def checkAdoptBeforePlan (ctx : Ctx) : IO Unit := do
+  check ctx "gate open, Prepare ended between passes: closed before the plan, nothing demoted"
+    ((beforePlan adoptA (activeObs 100 2 "succeeded" 2)).2.1.length == 1
+      && (beforePlan adoptA (activeObs 100 2 "succeeded" 2)).1.entries.isEmpty
+      && demotedAfter adoptA (activeObs 100 2 "succeeded" 2) == [])
+  check ctx "gate open, recreated pod already Active with a later boot's success: not demoted"
+    (demotedAfter adoptD (activeObs 200 1 "succeeded" 1) == [])
+  check ctx "gate open, no flared baseline: a pod with another UID already Active closes it"
+    (demotedAfter adoptDu ({ activeObs 200 1 "succeeded" 1 with podUid := some "uid-new" }) == [])
+  check ctx "gate open, Active while the newer handler is still running: held, not demoted"
+    ((beforePlan adoptA (activeObs 100 2 "running" 1)).2.2 == [slaveKey]
+      && demotedAfter adoptA (activeObs 100 2 "running" 1) == [])
+  check ctx "gate open, Active with no newer success: demoted by the ordinary path"
+    (demotedAfter adoptA (activeObs 100 1 "succeeded" 1) == [slaveKey]
+      && demotedAfter adoptA (activeObs 100 2 "succeeded" 2 "nX.svc:12121") == [slaveKey])
+  check ctx "gate open, not adoptable (recorded or grown in Prepare): demoted, not closed"
+    (demotedAfter adoptB (activeObs 100 2 "succeeded" 2) == [slaveKey]
+      && demotedAfter adoptC (activeObs 100 2 "succeeded" 2) == [slaveKey])
+
 /-- A status entry written before adoption existed. -/
 def preAdoptionStatus : Lean.Json :=
   let entry := Lean.Json.mkObj [("dest", Lean.Json.str slaveKey), ("masterKey", Lean.Json.str masterKey),
@@ -3183,6 +3210,7 @@ def run : IO UInt32 := do
   checkAdoptRecreatedPod ctx
   checkAdoptShortPrepare ctx
   checkAdoptShortPrepareGuards ctx
+  checkAdoptBeforePlan ctx
   checkAdoptPersistence ctx
   checkFollowOwnership ctx
   checkAdvanceHold ctx

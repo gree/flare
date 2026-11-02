@@ -659,6 +659,42 @@ def advance (l : Ledger) (obs : List (String × Observation)) : Ledger × List (
   let (kept, steps) := l.entries.foldl step ([], [])
   ({ l with entries := kept }, steps)
 
+/-- An adoptable request whose node is Slave/Active while a reconstruction
+    that began after the baseline is still finishing (Active is reported from
+    inside the handler, just before its success is recorded). -/
+def adoptionFinishing (e : Entry) (o : Observation) : Bool :=
+  e.phase == .requested && !e.owned && e.adoptable
+    && o.mapped == some (FlareRole.Slave, FlareState.Active)
+    && match adoptionBaseline e o, o.bootId, o.currentId, o.currentState with
+      | some (b0, c0), some boot, some cid, some st => st == "running" && ((boot != b0) || (cid > c0))
+      | _, _, _, _ => false
+
+/-- The adoption close, applied BEFORE the demotion plan (review of a549080,
+    P1): with the gate open, `plan` returns every requested Slave/Active
+    node, so a Prepare that ended between two passes was demoted before part
+    2 could close its request. This closes each adoptable request whose node
+    `obs` shows Slave/Active with a success newer than the baseline (the
+    `adoptedCompleted` of `advanceEntry`), and returns the node keys whose
+    qualifying reconstruction is still finishing: the caller holds those out
+    of the plan like a node in Prepare. Every other entry is untouched (the
+    ordinary path decides it). -/
+def adoptBeforePlan (l : Ledger) (obs : List (String × Observation)) :
+    Ledger × List Entry × List String :=
+  let step := fun (acc : List Entry × List Entry × List String) (e : Entry) =>
+    let (kept, closed, finishing) := acc
+    let candidate := e.phase == .requested && !e.owned && e.adoptable
+    match candidate, obs.lookup e.dest with
+    | true, some o =>
+      if o.mapped != some (FlareRole.Slave, FlareState.Active) then (kept ++ [e], closed, finishing)
+      else match advanceEntry e o with
+        | (Option.none, .adoptedCompleted) => (kept, closed ++ [e], finishing)
+        | _ =>
+          let fin := if adoptionFinishing e o then e.nodeKey.toList else []
+          (kept ++ [e], closed, finishing ++ fin)
+    | _, _ => (kept ++ [e], closed, finishing)
+  let (kept, closed, finishing) := l.entries.foldl step ([], [], [])
+  ({ l with entries := kept }, closed, finishing)
+
 -- ═══════════════════════════════════════════════════════════════════════
 -- Persistence (FlareCluster status.replicaRepairs)
 -- ═══════════════════════════════════════════════════════════════════════

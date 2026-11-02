@@ -2381,6 +2381,32 @@ private def podUidOrAbsent (pod ns : String) : IO (Option String) := do
   | .ok u => pure (some u.trim)
   | .error _ => pure none
 
+/-- What `key` reports now about its reconstructions, for the adoption
+    decided before the demotion plan (ReplicaRepair.adoptBeforePlan). The
+    success must have copied from the node's CURRENT master in `state`. With
+    `withUid` (no flared baseline was read after the drops) the pod's UID is
+    read before and after the stats; a change in between proves nothing. -/
+private def adoptionObservationNow (state : FlareClusterState) (key ns : String) (withUid : Bool) :
+    IO ReplicaRepair.Observation := do
+  let mapped := (state.lookupNode key).map fun n => (n.role, n.state)
+  let currentMaster := (state.lookupNode key).bind fun n =>
+    (state.nodeMap.find? fun kv =>
+      kv.2.role == FlareRole.Master && kv.2.state == FlareState.Active && kv.2.partition == n.partition).map (·.1)
+  let pod := extractPodName key
+  let u0 ← if withUid then podUidOrAbsent pod ns else pure none
+  let o : ReplicaRepair.Observation ← match ← Bridge.queryPodStats pod ns "stats" with
+    | .ok out => pure { reportedVersion := statNat out "node_map_version",
+                        bootId := statNat out "reconstruction_boot_id",
+                        currentId := statNat out "reconstruction_current_id",
+                        currentState := statStr out "reconstruction_current_state",
+                        lastSuccessId := statNat out "reconstruction_last_success_id",
+                        lastSuccessSource := statStr out "reconstruction_last_success_source",
+                        currentMaster := currentMaster, mapped := mapped }
+    | .error _ => pure { mapped := mapped, currentMaster := currentMaster }
+  if !withUid then return o
+  let u1 ← podUidOrAbsent pod ns
+  pure { o with podUid := if u0 == u1 then u0 else none }
+
 /-- ADOPTION evidence for a drop just counted to `dest` (see
     ReplicaRepair.reconstructingKeys). MUST be called AFTER the master's
     counter was read: every reading here then postdates the drops. `state`
@@ -3892,7 +3918,28 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
       -- not consumed: closed by that reconstruction when it began after the
       -- drops (adopted in part 2), otherwise demoted once the node is Active
       -- (see ReplicaRepair.reconstructingKeys).
-      let (led2, acts) := ReplicaRepair.plan led1 gate.isNone (gate.getD "") (ReplicaRepair.reconstructingKeys preState)
+      -- A Prepare shorter than the time between two passes is seen only as
+      -- Slave/Active: its adoption is decided HERE, before the plan, or the
+      -- plan would demote it first (review of a549080, P1).
+      let mut adoptObs : List (String × ReplicaRepair.Observation) := []
+      if gate.isNone then
+        for e in led1.entries do
+          match e.nodeKey with
+          | some k =>
+            let mapped := (preState.lookupNode k).map fun n => (n.role, n.state)
+            if e.phase == .requested && e.adoptable && !e.owned
+                && mapped == some (FlareRole.Slave, FlareState.Active) then
+              adoptObs := adoptObs ++ [(e.dest, ← adoptionObservationNow preState k ns (e.bootAtRequest.isNone))]
+          | none => pure ()
+      let (ledA, adoptClosed, adoptFinishing) := ReplicaRepair.adoptBeforePlan led1 adoptObs
+      led1 := ledA
+      for e in adoptClosed do
+        metrics.replicaRepairCompleted.inc
+        IO.eprintln s!"[flare-operator] REPLICA REPAIR COMPLETE (adopted): {e.nodeKey.getD e.dest} is Slave/Active; the reconstruction that began after the drops (newer than #{e.currentIdAtRequest.getD 0}, boot {e.bootAtRequest.getD 0}) SUCCEEDED from its current master; {e.drops} dropped write(s) recovered without a demotion (decided before the demotion plan)"
+      for k in adoptFinishing do
+        IO.eprintln s!"[flare-operator] replica repair DEFERRED for {k}: Slave/Active, but the reconstruction that began after the drops is still finishing; no demotion"
+      let (led2, acts) := ReplicaRepair.plan led1 gate.isNone (gate.getD "")
+        (ReplicaRepair.reconstructingKeys preState ++ adoptFinishing)
       let mut led3 := led2
       for (rKey, e) in acts do
         let cs ← stateRef.get

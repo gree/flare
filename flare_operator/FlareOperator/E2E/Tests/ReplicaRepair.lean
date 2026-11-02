@@ -553,6 +553,71 @@ private def adoptionScenario (mIp sIp sPod : String) : IO TestResult := do
       | .pass => verifyAdoptedRecovery mIp sIp2 acked dSettled
       | r => return r
 
+/-- Test 10, after the adopted completion of a recreated pod (gate closed):
+    the held request saved before the recreation is put back in status and a
+    new operator starts with the gate OPEN. Its first pass sees the replica
+    already Slave/Active with a success newer than the baseline (a Prepare
+    shorter than a pass, as production sees it) and must close the request
+    before its demotion plan (review of a549080, P1: the plan demoted first). -/
+private def gateOpenAlreadyActive (mIp sIp : String) (saved : String) (acked : List String)
+    (dSettled : Nat) (opened : IO.Ref Bool) : IO TestResult := do
+  match ← patchLedgerRaw saved with
+  | .error e => return .fail s!"could not put the held request back in status: {e}"
+  | .ok _ => pure ()
+  if (← ledgerDests).isEmpty then
+    return .fail "the held request did not come back in status"
+  stamp s!"held request restored in status ({← ledgerDests}); opening the gate (new operator process)"
+  let s0 := (← flaredStat sIp "reconstruction_started").getD 0
+  match ← setGate false with
+  | .error e => return .fail s!"could not open the gate: {e}"
+  | .ok _ => opened.set true
+  let closed ← waitForCondition "the gate-open operator closes the request before its demotion plan" 180 do
+    return containsSubstr (← opLog 200000) "(decided before the demotion plan)"
+  if containsSubstr (← opLog 200000) "REPLICA REPAIR: demoting" then
+    return .fail "with the gate open the replica was demoted although its reconstruction after the drops had already succeeded"
+  if !closed then
+    diagnostics mIp sIp
+    return .fail "with the gate open the restored request was not closed by the reconstruction that already succeeded"
+  let emptied ← waitForCondition "ledger persisted as empty" 60 do
+    return (← ledgerDests).isEmpty
+  if !emptied then return .fail s!"the ledger still lists {← ledgerDests} after the gate-open close"
+  IO.sleep 20000
+  if containsSubstr (← opLog 200000) "REPLICA REPAIR: demoting" then
+    return .fail "after the gate-open close the operator demoted the replica"
+  let s1 := (← flaredStat sIp "reconstruction_started").getD 0
+  if s1 != s0 then
+    return .fail s!"the replica reconstructed again ({s0} → {s1}) although the request was closed"
+  stamp "gate open: the request was closed before the plan, no demotion, no extra rebuild"
+  verifyAdoptedRecovery mIp sIp acked dSettled
+
+/-- Test 10: test 9's steps with the held request saved, then
+    `gateOpenAlreadyActive`. -/
+private def gateOpenScenario (mIp sIp sPod : String) (opened : IO.Ref Bool) : IO TestResult := do
+  match ← ackedUnderCut mIp sIp "adoptopen" 30 with
+  | .error e =>
+    heal mIp sIp
+    return .fail e
+  | .ok acked =>
+    heal mIp sIp
+    let dSettled ← settledDrops mIp
+    match ← awaitHeldAdoptable with
+    | .error e =>
+      diagnostics mIp sIp
+      return .fail e
+    | .ok _ => pure ()
+    let some saved ← ledgerRawJson
+      | return .fail "could not read the held request to save it"
+    match ← recreatePod sPod with
+    | .error e => return .fail e
+    | .ok sIp2 =>
+      match ← awaitAdoptedCompletion mIp sIp2 with
+      | .pass =>
+        let emptied ← waitForCondition "ledger persisted as empty" 60 do
+          return (← ledgerDests).isEmpty
+        if !emptied then return .fail s!"the ledger still lists {← ledgerDests} after the adopted completion"
+        gateOpenAlreadyActive mIp sIp2 saved acked dSettled opened
+      | r => return r
+
 def suite : TestSuite := {
   name := "replica-repair"
   setup := do
@@ -978,6 +1043,24 @@ def suite : TestSuite := {
           finally
             heal mIp sIp
             -- a closed gate must not leak into later suites' operator
+            if !(← opened.get) then discard <| setGate false },
+
+    { name := "adoption, gate open: the recreated replica is already Active with its boot reconstruction succeeded when an operator with resync enabled first sees the request — closed before the demotion plan, no demotion, no extra rebuild, every acknowledged key on the replica"
+      run := do
+        if !(← ledgerDests).isEmpty then
+          return .fail s!"precondition: the ledger is not empty ({← ledgerDests})"
+        match ← pair with
+        | .error e => return .fail e
+        | .ok (_, mIp, sPod, sIp) =>
+          stamp s!"master {mIp}, slave {sPod} at {sIp}; closing the gate"
+          match ← setGate true with
+          | .error e => return .fail s!"could not close the gate: {e}"
+          | .ok _ => pure ()
+          let opened ← IO.mkRef false
+          try
+            gateOpenScenario mIp sIp sPod opened
+          finally
+            heal mIp sIp
             if !(← opened.get) then discard <| setGate false }
   ]
 }

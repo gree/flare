@@ -1268,13 +1268,18 @@ another node:
 
 - **tmpfs**: the pod comes back empty on another node and resyncs (E2E
   `node-ops-switch-tmpfs-cordon-*`: errors 0, missing 0).
-- **PVC on network storage** (NFS, EBS, Ceph and other volumes that attach
-  to any node): the recreated pod comes back on another node with its old
-  data and resyncs as a replica (E2E `node-ops-switch-nfs-cordon-master` /
-  `-replica` on an NFS class: errors 0, missing 0).
-- **PVC on a node-local volume** (local PV, hostPath, local-path, or any PV
-  whose `nodeAffinity` pins it to nodes): the move is **not started**. The
-  operator reads each claim's PersistentVolume before it starts a move; a
+- **PVC whose PersistentVolume has no `nodeAffinity`** (verified on NFS,
+  csi-driver-nfs): the recreated pod comes back on another node with its
+  old data and resyncs as a replica (E2E `node-ops-switch-nfs-cordon-master`
+  / `-replica`: errors 0, missing 0).
+- **PVC whose PersistentVolume is `local`, `hostPath`, or has a required
+  `nodeAffinity`**: the move is **not started**. This includes local PV and
+  local-path, and also volumes whose `nodeAffinity` only names a zone (for
+  example an EBS volume's `topology.ebs.csi.aws.com/zone`): the operator does
+  not judge whether another node satisfies the affinity, it blocks every PV
+  that has one. EBS, Ceph and other network storage are **not verified**;
+  a CSI driver that writes no `nodeAffinity` on its PVs is treated like NFS.
+  The operator reads each claim's PersistentVolume before it starts a move; a
   pinned one (or one it cannot read) reports the pod blocked
   (`FlareCordonMoveBlocked`: "… its data cannot leave the node"), the node
   guard keeps holding its eviction (429) and the pod keeps serving where it
@@ -1465,9 +1470,9 @@ the Service selector loses the serving label requirement.
 - `pending` / `handingOver` / `proxied` have no deadline: a handover that
   keeps aborting is held (alert `FlareCordonMoveHeld`) and still the running
   move.
-- A pod on a node-local PV cannot be recreated elsewhere: the move is not
-  started for it (blocked, "its data cannot leave the node"); use tmpfs or
-  network storage.
+- A pod whose PV is local, hostPath or has a required `nodeAffinity` (a
+  zone-pinned EBS volume included) is not moved (blocked, "its data cannot
+  leave the node"); use tmpfs or a PV without `nodeAffinity` (verified: NFS).
 
 ## Seeding a new cluster via cluster replication {#replication-seeding}
 

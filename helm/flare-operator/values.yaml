@@ -450,9 +450,11 @@ legacyMasterSwitch: false
 # client Service (it needs the serving label, which the operator manages), and
 # only then may it be evicted (the node guard refuses before that, 429).
 # Needs nodeGuard.enabled. Needs storage that can follow the pod: tmpfs, or a
-# PVC on network storage (verified on NFS). A pod whose claim is on a
-# node-local volume (local PV, local-path, a PV pinned by nodeAffinity) is not
-# moved: it is reported blocked and keeps serving — RUNBOOK #cordon-move.
+# PVC whose PersistentVolume has no nodeAffinity (verified on NFS). A pod
+# whose PV is local, hostPath or has a required nodeAffinity (local-path, and
+# zone-pinned volumes such as EBS too: the affinity is not evaluated) is not
+# moved: it is reported blocked and keeps serving. EBS / Ceph are not
+# verified — RUNBOOK #cordon-move.
 nodeReplacement:
   enabled: true
   # A partition needs at least this many real copies (master + replicas, counting

@@ -655,6 +655,38 @@ def listCordonedNodes : IO (Except String (List String)) := do
   | .error e => return .error s!"list cordoned nodes: {e}"
   | .ok out => return .ok ((out.splitOn "\n").map (·.trim) |>.filter (· != ""))
 
+/-- Why a pod's data cannot follow it to another node, from its claims'
+    PersistentVolumes: a `local` or `hostPath` volume, or one whose
+    `nodeAffinity` pins it to nodes (local-path and other node-local
+    provisioners). none = every claim's volume can be attached elsewhere
+    (network storage), or the pod has no claim (tmpfs). An unreadable pod,
+    claim or volume is a reason too: a move is not started on a volume
+    nobody could read (the recreated pod would stay Pending). -/
+def pinnedVolumeOf (pod ns : String) : IO (Option String) := do
+  match ← kubectl ["get", "pod", pod, "-n", ns, "-o",
+      "jsonpath={range .spec.volumes[*]}{.persistentVolumeClaim.claimName}{\"\\n\"}{end}"] with
+  | .error e => return some s!"its volumes could not be read ({e})"
+  | .ok out =>
+    let claims := (out.splitOn "\n").map (·.trim) |>.filter (· != "")
+    for c in claims do
+      let pv ← match ← kubectl ["get", "pvc", c, "-n", ns, "-o", "jsonpath={.spec.volumeName}"] with
+        | .error e => return some s!"its claim {c} could not be read ({e})"
+        | .ok v => pure v.trim
+      if pv.isEmpty then return some s!"its claim {c} is not bound to a volume"
+      match ← kubectl ["get", "pv", pv, "-o", "json"] with
+      | .error e => return some s!"the volume {pv} of its claim {c} could not be read ({e})"
+      | .ok j =>
+        match Lean.Json.parse j with
+        | .error _ => return some s!"the volume {pv} of its claim {c} did not parse"
+        | .ok v =>
+          let spec := (v.getObjVal? "spec").toOption.getD Lean.Json.null
+          let has (f : String) := (spec.getObjVal? f).isOk
+          if has "local" || has "hostPath" then
+            return some s!"its claim {c} is on node-local volume {pv}"
+          if ((spec.getObjVal? "nodeAffinity") >>= (·.getObjVal? "required")).isOk then
+            return some s!"its claim {c} is on volume {pv}, pinned to its node (nodeAffinity)"
+    return none
+
 /-- Wall clock in ms (the move's persisted times must survive a restart). -/
 def wallMs : IO Nat := do
   let out ← IO.Process.output { cmd := "date", args := #["+%s%3N"] }

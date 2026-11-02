@@ -464,9 +464,12 @@ legacyMasterSwitch: false
 # replica on another node, a replica is demoted to a proxy; the pod leaves the
 # client Service (it needs the serving label, which the operator manages), and
 # only then may it be evicted (the node guard refuses before that, 429).
-# Needs nodeGuard.enabled. Supported on tmpfs clusters only in this release (verified
-# there); on a PVC cluster set enabled: false (a local PV cannot move, network
-# storage is not verified yet) — RUNBOOK #cordon-move.
+# Needs nodeGuard.enabled. Needs storage that can follow the pod: tmpfs, or a
+# PVC whose PersistentVolume has no nodeAffinity (verified on NFS). A pod
+# whose PV is local, hostPath or has a required nodeAffinity (local-path, and
+# zone-pinned volumes such as EBS too: the affinity is not evaluated) is not
+# moved: it is reported blocked and keeps serving. EBS / Ceph are not
+# verified — RUNBOOK #cordon-move.
 nodeReplacement:
   enabled: true
   # A partition needs at least this many real copies (master + replicas, counting

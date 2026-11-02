@@ -82,7 +82,7 @@ def Ctx.event (c : Ctx) (what : String) : IO Unit := do
 def Ctx.conditions (c : Ctx) (lines : List String) : IO Unit := do
   let sha := ((← IO.getEnv "GITHUB_SHA").getD "local")
   for l in [s!"sha {sha}", s!"suite {c.suite}", s!"test {c.test}", s!"namespace {c.cfg.«namespace»}",
-            s!"partitions {c.cfg.partitions} replicas {c.cfg.replicas} backend {c.cfg.storageBackend} tmpfs {c.cfg.useTmpfs} pvc {c.cfg.usePvc}",
+            s!"partitions {c.cfg.partitions} replicas {c.cfg.replicas} backend {c.cfg.storageBackend} tmpfs {c.cfg.useTmpfs} pvc {c.cfg.usePvc} storageClass {c.cfg.storageClass.getD "(default)"}",
             s!"drainSeconds {c.cfg.drainSeconds} pdbMaxUnavailable {c.cfg.pdbMaxUnavailable}"] ++ lines do
     c.art "conditions.txt" l
 

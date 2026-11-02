@@ -67,6 +67,11 @@ structure ClusterConfig where
   /-- PVC size request (only used when usePvc). Kind's default storage
       class (local-path) ignores the size, so keep it small. -/
   pvcSize : String := "1Gi"
+  /-- StorageClass of the PVCs (only used when usePvc); none = the cluster's
+      default (local-path on kind: node-local, it cannot follow a pod to
+      another node). The PVC cordon move runs on the network storage class
+      the node-ops-cordon-pvc leg installs (`flare-nfs`). -/
+  storageClass : Option String := none
   /-- Extra flared.conf lines baked into the INITIAL {name}-config ConfigMap,
       so pods BOOT with them applied by load(). Required for DB-reopen-only
       options (e.g. rocksdb-wal-ttl-seconds) that reload() deliberately
@@ -472,7 +477,8 @@ def statefulSetYaml (cfg : ClusterConfig) : String :=
     - metadata:
         name: data
       spec:
-        accessModes: [\"ReadWriteOnce\"]
+        accessModes: [\"ReadWriteOnce\"]{(cfg.storageClass.map fun c => s!"
+        storageClassName: {c}").getD ""}
         resources:
           requests:
             storage: {cfg.pvcSize}" else ""
@@ -1097,6 +1103,7 @@ def helmSets (cfg : ClusterConfig) : List String :=
   let storage := if cfg.useTmpfs then
       ["cluster.persistence.enabled=false", "cluster.tmpfs.enabled=true", "cluster.tmpfs.sizeLimit=512Mi"]
     else ["cluster.persistence.enabled=true", "cluster.persistence.size=1Gi"]
+      ++ (cfg.storageClass.map (s!"cluster.persistence.storageClassName={·}")).toList
   ["fullnameOverride=" ++ cfg.operatorName, "namespace=" ++ cfg.«namespace», "crds.install=false",
    "replicaCount=1", "image.repository=flare-operator", "image.tag=test", "image.pullPolicy=Never",
    "podLabels.app=" ++ cfg.operatorName,

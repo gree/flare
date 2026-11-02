@@ -34,6 +34,11 @@ rules:
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list", "watch"]
+  # Claims and their volumes (the cordon move is not started for a pod whose
+  # data is on a node-local volume: it could not follow the pod)
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims", "persistentvolumes"]
+    verbs: ["get", "list"]
   # EndpointSlices (the cordon move waits until the client Service no longer lists a pod)
   - apiGroups: ["discovery.k8s.io"]
     resources: ["endpointslices"]

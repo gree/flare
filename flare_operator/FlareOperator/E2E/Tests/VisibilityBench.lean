@@ -344,6 +344,25 @@ def visibilityBenchSuite : TestSuite := {
         if !following then return .fail "the replica never reached following"
         IO.sleep 15000
         flareArm "flare-hybrid-poll" (follow := true) },
+    { name := "flare hybrid forwarding + WAL polling, follow on FROM BOOT (both pods restarted after the CR patch, the replica first): visibility as a client reading the replica sees it — tells a follow switched on live apart from follow a pod started with (41551745420 vs 41545338637)"
+      run := skipUnlessOn do
+        -- restart each pod so its flared boots with follow in its config
+        -- (the replica first; the master's restart is a planned handover)
+        let restart (which : String) : IO (Option String) := do
+          match ← flarePair with
+          | none => return some s!"no master/replica pair before restarting the {which}"
+          | some (m, _, s, _) =>
+            let pod := if which == "replica" then s else m
+            discard <| kubectl ["delete", "pod", pod, "-n", ns, "--wait=true", "--timeout=300s"]
+            let ok ← waitForCondition s!"after restarting the {which}: a pair again, the replica following" 600 do
+              match ← flarePair with
+              | some (_, _, _, sIp) => return (← flareStat sIp "repl_follow_state") == some "following"
+              | none => return false
+            return if ok then none else some s!"no following pair within 600 s after restarting the {which} ({pod})"
+        if let some e ← restart "replica" then return .fail e
+        if let some e ← restart "master" then return .fail e
+        IO.sleep 15000
+        flareArm "flare-follow-boot" (follow := true) },
     { name := "redis floor control: write and read the primary"
       run := skipUnlessOn (redisArm "redis-floor" "aof" true) },
     { name := "redis async replication, AOF appendfsync no: replica visibility"

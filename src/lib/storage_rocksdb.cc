@@ -241,6 +241,7 @@ void storage_rocksdb::_setup_rocksdb_options() {
 	this->_options.WAL_ttl_seconds = this->_wal_ttl_seconds;
 	this->_options.WAL_size_limit_MB = this->_wal_size_limit_mb;
 	this->_options.keep_log_file_num = 1000;
+	this->_options.max_total_wal_size = this->_max_total_wal_size_mb * 1024 * 1024;
 
 	// General settings
 	this->_options.create_if_missing = true;
@@ -1073,6 +1074,7 @@ storage_rocksdb* storage_rocksdb::open_staging(const string& attempt, bool exist
 		this->_wal_ttl_seconds, this->_wal_size_limit_mb, false);
 	s->_staging = true;
 	s->_data_path = path;
+	s->set_max_total_wal_size_mb(this->_max_total_wal_size_mb);
 	if (s->open() < 0) {
 		log_err("staging: the copy at [%s] does not open", path.c_str());
 		delete s;

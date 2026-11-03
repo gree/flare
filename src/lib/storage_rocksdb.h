@@ -182,6 +182,7 @@ protected:
 	int _max_write_buffer_number;
 	uint64_t _wal_ttl_seconds;
 	uint64_t _wal_size_limit_mb;
+	uint64_t _max_total_wal_size_mb = 16;
 	bool     _sync_writes;
 
 	// Master identity token (this node's DB lineage identifier, persisted
@@ -918,6 +919,18 @@ public:
 	// Phase D: WAL streaming limits. Set at startup from ini_option
 	// and read by op_repl_sync_wal configured via handler_dump_replication.
 	void set_wal_max_batch_bytes(uint64_t n) { this->_wal_max_batch_bytes = n; }
+	// Bound on the LIVE WAL (RocksDB max_total_wal_size): past it the
+	// memtables are flushed and the WAL switches files. A follower's poll
+	// is served by GetUpdatesSince, which reads the WAL file holding the
+	// requested position from its start, so an unbounded live WAL (one
+	// 64 MB memtable never flushed) made every poll re-read tens of MB.
+	// Before open(); 0 = RocksDB's own default. Archived WALs (TTL / size
+	// limit) are unaffected.
+	void set_max_total_wal_size_mb(uint64_t mb) {
+		this->_max_total_wal_size_mb = mb;
+		this->_options.max_total_wal_size = mb * 1024 * 1024;
+	}
+	uint64_t get_max_total_wal_size_mb() const { return this->_max_total_wal_size_mb; }
 	void set_wal_sync_bwlimit(int kbps)      { this->_wal_sync_bwlimit    = kbps; }
 	void set_snapshot_bwlimit(int v)          { this->_snapshot_bwlimit = v; }
 	void set_wal_sync_interval(int usec)     { this->_wal_sync_interval   = usec; }

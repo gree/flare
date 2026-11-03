@@ -15,7 +15,10 @@
     * plus a floor control per protocol (write and read the SAME node).
 
   Same kind node, same CPU/memory limits, same value size, writers,
-  observers and offered rates. A flare replica read counts as LOCAL only if
+  observers and offered rates. A follower behind the master's WAL position
+  would hand its reads to the master; the flared pods run with the test
+  seam FLARE_TEST_FOLLOW_LOCAL_READS so reads stay local and the follow arms
+  measure the replica's own copy. A flare replica read counts as LOCAL only if
   the master's cmd_get did not move across the run and the master and
   replica kept their pod UID and flared boot id; otherwise the run is
   recorded as INVALID for replica visibility (its numbers are kept, marked).
@@ -51,6 +54,11 @@ private def benchCfg : ClusterConfig := {
   -- the legacy arm measures forwarding without follow; the hybrid arm turns
   -- follow on itself (41545338637: the E2E default made both arms follow)
   walFollow := false
+  -- a follower behind the master's WAL position hands its reads to the
+  -- master (stats::follow_allows_local_read); the seam keeps them local so
+  -- every arm measures when a write lands in the replica's own copy
+  -- (41558374022: 200k replica GETs answered by the master)
+  flaredEnv := [("FLARE_TEST_FOLLOW_LOCAL_READS", "1")]
 }
 
 private def ns : String := benchCfg.«namespace»
@@ -239,14 +247,10 @@ private def runHarness (label proto write read : String) (validity : IO String) 
 /-- Run one flare arm: reads routed to the replica, evidence that every
     replica GET was served locally (master cmd_get unchanged, identities
     unchanged).
-    `follow`: the replica follows the master's WAL. A follower serves a read
-    locally only once it has applied the master's position it last saw
-    (stats::follow_allows_local_read); behind it, the read goes to the
-    master. That routing is the product's (there is no flared read mode that
-    never proxies), so a follow arm is not INVALID for it: its numbers are
-    what a client reading from that replica sees, and the share of reads the
-    master answered is reported with them. -/
-private def flareArm (label : String) (floor : Bool := false) (follow : Bool := false) : IO TestResult := do
+    A follower would hand reads to the master while it is behind the WAL;
+    the cluster runs with FLARE_TEST_FOLLOW_LOCAL_READS so it does not, and a
+    run in which the master still answered replica GETs is INVALID. -/
+private def flareArm (label : String) (floor : Bool := false) : IO TestResult := do
   let some (m, mIp, s, sIp) ← flarePair | return .fail "no master/replica pair in the operator's map"
   let readIp := if floor then mIp else sIp
   let mUid0 ← podUid m
@@ -270,15 +274,13 @@ private def flareArm (label : String) (floor : Bool := false) (follow : Bool := 
       else if !same then "INVALID: a pod or flared process changed during the run"
       else match proxied with
         | some 0 => "VALID: every replica GET served locally (master cmd_get unchanged)"
-        | some n =>
-          if follow then s!"CLIENT VIEW (follow on): {n} GET(s) sent to the replica were answered by the master while the replica was behind the WAL"
-          else s!"INVALID for replica visibility: {n} GET(s) reached the master (proxied)"
+        | some n => s!"INVALID for replica visibility: {n} GET(s) reached the master (proxied)"
         | none => "INVALID: the master's cmd_get could not be read before and after"
     return s!"{verdict}; master {m} uid {mUid0}->{mUid1} boot {mBoot0}->{mBoot1}; replica {s} uid {sUid0}->{sUid1} boot {sBoot0}->{sBoot1}; master cmd_get {gets0}->{gets1}; replica {mode0}"
   let (profs, reps) ← if floor then pure ("idle,normal,peak", "1") else pure ((← profiles), (← repeats))
   match ← runHarness label "memcache" s!"{mIp}:{benchCfg.flarePort}" s!"{readIp}:{benchCfg.flarePort}" validity profs reps with
   | .error e => return .fail e
-  | .ok v => if floor || containsSubstr v "VALID: every" || (follow && containsSubstr v "CLIENT VIEW") then return .pass else return .fail s!"{label}: {v}"
+  | .ok v => if floor || containsSubstr v "VALID: every" then return .pass else return .fail s!"{label}: {v}"
 
 private def redisArm (label profile : String) (floor : Bool := false) : IO TestResult := do
   if !(← deployRedis profile) then return .fail s!"redis ({profile}) did not come up linked"
@@ -332,7 +334,7 @@ def visibilityBenchSuite : TestSuite := {
       run := skipUnlessOn (flareArm "flare-floor" true) },
     { name := "flare legacy forwarding (follow off, rc63-style): replica-local visibility"
       run := skipUnlessOn (flareArm "flare-legacy") },
-    { name := "flare hybrid forwarding + WAL polling (follow on, the chart default): visibility as a client reading the replica sees it (reads behind the WAL answered by the master, counted)"
+    { name := "flare hybrid forwarding + WAL polling, follow switched on LIVE (CR patch, no restart): replica-local visibility"
       run := skipUnlessOn do
         match ← kubectlPatch "flarecluster" benchCfg.name ns "{\"spec\":{\"rocksdb\":{\"replIdentityForward\":true,\"replFollowEnabled\":true,\"replFollowPollIntervalUsec\":200000}}}" with
         | .error e => return .fail s!"patch failed: {e}"
@@ -343,8 +345,8 @@ def visibilityBenchSuite : TestSuite := {
           | none => return false
         if !following then return .fail "the replica never reached following"
         IO.sleep 15000
-        flareArm "flare-hybrid-poll" (follow := true) },
-    { name := "flare hybrid forwarding + WAL polling, follow on FROM BOOT (both pods restarted after the CR patch, the replica first): visibility as a client reading the replica sees it — tells a follow switched on live apart from follow a pod started with (41551745420 vs 41545338637)"
+        flareArm "flare-hybrid-poll" },
+    { name := "flare hybrid forwarding + WAL polling, follow on FROM BOOT (both pods restarted after the CR patch, the replica first; the chart default): replica-local visibility — tells a follow switched on live apart from follow a pod started with (41551745420 vs 41545338637)"
       run := skipUnlessOn do
         -- restart each pod so its flared boots with follow in its config
         -- (the replica first; the master's restart is a planned handover)
@@ -362,7 +364,7 @@ def visibilityBenchSuite : TestSuite := {
         if let some e ← restart "replica" then return .fail e
         if let some e ← restart "master" then return .fail e
         IO.sleep 15000
-        flareArm "flare-follow-boot" (follow := true) },
+        flareArm "flare-follow-boot" },
     { name := "redis floor control: write and read the primary"
       run := skipUnlessOn (redisArm "redis-floor" "aof" true) },
     { name := "redis async replication, AOF appendfsync no: replica visibility"

@@ -1852,7 +1852,12 @@ read_retry:
 				const stats::follow_record follow = stats_object->get_follow_record();
 				follow_seen = follow;
 				follow_read = true;
-				follow_proxy_to_master = follow.enabled
+				// TEST SEAM (visibility-bench only, never set in production):
+				// FLARE_TEST_FOLLOW_LOCAL_READS answers every read locally, so a
+				// benchmark measures when a write lands in this replica's own
+				// copy instead of the master answering for a follower behind it
+				static const bool follow_local_reads = getenv("FLARE_TEST_FOLLOW_LOCAL_READS") != NULL;
+				follow_proxy_to_master = !follow_local_reads && follow.enabled
 					&& (!stats::follow_allows_local_read(follow, stats_object->get_timestamp())
 						|| follow.source != p.master.node_key);
 			}

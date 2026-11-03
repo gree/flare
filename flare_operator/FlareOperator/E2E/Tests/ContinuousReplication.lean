@@ -1012,17 +1012,22 @@ def suite : TestSuite := {
             return (r.1, r.2, secs)
           let balanceOnReplica : IO (Option Nat) := do
             return ((← nodeView).find? (fun e => podOf e.fqdn == sPod)).map (·.balance)
-          let reloadSeen := fun (needle : String) => do
-            match ← hostCmd "kubectl" ["logs", "-n", cfg.«namespace», sPod, "--tail=5000"] with
-            | .ok o => return containsSubstr o needle
-            | .error _ => return false
+          -- the reload line already printed by the previous case (same pod)
+          -- must not count: wait for one more occurrence than before the
+          -- patch (41569134891: the wait passed at 0 s on the earlier line,
+          -- the reload landed 70-100 s later, and phase 2 read the legacy miss)
+          let reloadCount := fun (needle : String) => do
+            match ← hostCmd "kubectl" ["logs", "-n", cfg.«namespace», sPod] with
+            | .ok o => return (o.splitOn needle).length - 1
+            | .error _ => return 0
           try
             -- ── precondition: production read policy on, replica served (50), following, caught up
+            let reloads0 ← reloadCount "read_unavailable_error: 0 -> 1"
             match ← setOpt true 50 with
             | .error e => return .fail s!"patch failed: {e}"
             | .ok _ => pure ()
             let on ← waitForCondition "replica flared reloads read-unavailable-error = true" 240 do
-              reloadSeen "read_unavailable_error: 0 -> 1"
+              return (← reloadCount "read_unavailable_error: 0 -> 1") > reloads0
             if !on then return .fail "precondition: the replica never reported read_unavailable_error 0 -> 1"
             -- the base set: acc_0..19 = base_i
             for i in [0:20] do

@@ -144,7 +144,9 @@ def operatorModeTest : IO TestResult := do
   | .error _ => pure ()
   match ← helmCmd ["get", "manifest", helmRelease cfg, "--namespace", ns] 60 with
   | .ok m =>
-    if containsSubstr m "caBundle" then fails := fails ++ ["the release's manifest carries a caBundle in operator mode"]
+    -- the field (`caBundle:`), not the word: the webhook-cert script and its
+    -- comments in the Deployment name caBundle (bce5acf 41928037365)
+    if containsSubstr m "caBundle:" then fails := fails ++ ["the release's manifest carries a caBundle in operator mode"]
   | .error e => fails := fails ++ [s!"helm get manifest: {e.take 200}"]
   let (g1, m1) ← guardAnswers "operator mode, first certificate" 600
   IO.eprintln s!"# W1 guard (first certificate): {g1} {m1}"

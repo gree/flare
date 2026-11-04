@@ -63,4 +63,13 @@ rules:
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
+  {{- if and .Values.nodeGuard.enabled (eq (include "flare-operator.nodeGuardTlsMode" .) "operator") }}
+  # nodeGuard.tls.mode=operator: the webhook-cert container keeps this
+  # release's node-guard webhooks trusting its Secret's CA (only this one
+  # configuration; the Secret itself is in a namespaced Role)
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingwebhookconfigurations"]
+    resourceNames: ["{{ include "flare-operator.fullname" . }}-node-guard-{{ .Values.namespace }}"]
+    verbs: ["get", "patch"]
+  {{- end }}
 {{- end }}

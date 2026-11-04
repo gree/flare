@@ -287,6 +287,12 @@ jobs:
         # Keep this a separate step so a render failure cannot hide in a pipe.
         run: python3 -m unittest discover -s scripts/tests -p 'test_helm_memory.py'
 
+      - name: Test the node guard's TLS modes (chart render)
+        # nodeGuard.tls.mode: helm / operator / secret / certManager render
+        # what each needs and nothing else (certManager is checked here only,
+        # no cert-manager runs in kind)
+        run: python3 -m unittest discover -s scripts/tests -p 'test_helm_webhook_tls.py' -v
+
       - name: Test the restore hook (provenance check before replacement)
         run: python3 -m unittest discover -s scripts/tests -p 'test_restore_hook.py'
 

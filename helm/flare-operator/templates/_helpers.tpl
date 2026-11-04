@@ -164,3 +164,33 @@ WARNING: only {{ $headroom }} MiB of the flared memory limit ({{ $limit }} MiB) 
 {{- end -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+The node guard's TLS mode (nodeGuard.tls.mode), validated: every template
+that depends on it fails the same way on a typo instead of rendering a
+webhook nothing serves.
+*/}}
+{{- define "flare-operator.nodeGuardTlsMode" -}}
+{{- $mode := (.Values.nodeGuard.tls | default dict).mode | default "helm" -}}
+{{- if not (has $mode (list "helm" "operator" "secret" "certManager")) -}}
+{{- fail (printf "nodeGuard.tls.mode %q is not one of helm, operator, secret, certManager" $mode) -}}
+{{- end -}}
+{{- $mode -}}
+{{- end -}}
+
+{{/*
+The Secret the webhook-tls sidecar serves from, per nodeGuard.tls.mode. The
+operator mode's name differs from the helm mode's: switching modes under
+ArgoCD prunes the chart-owned <fullname>-webhook-tls, and the Secret the
+operator created must not be the one pruned.
+*/}}
+{{- define "flare-operator.nodeGuardTlsSecret" -}}
+{{- $mode := include "flare-operator.nodeGuardTlsMode" . -}}
+{{- if eq $mode "operator" -}}
+{{- printf "%s-webhook-tls-operator" (include "flare-operator.fullname" .) -}}
+{{- else if eq $mode "secret" -}}
+{{- required "nodeGuard.tls.mode=secret needs nodeGuard.tls.secretName (an existing kubernetes.io/tls Secret)" .Values.nodeGuard.tls.secretName -}}
+{{- else -}}
+{{- printf "%s-webhook-tls" (include "flare-operator.fullname" .) -}}
+{{- end -}}
+{{- end -}}

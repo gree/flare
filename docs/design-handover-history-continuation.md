@@ -1,4 +1,50 @@
-# 順序付き引き継ぎで履歴を継ぐ（replica を full rebuild しない）— 設計案 第 6 版（＋ 追補 1）
+# 順序付き引き継ぎで履歴を継ぐ（replica を full rebuild しない）— 設計案 第 6 版（＋ 追補 1・2）
+
+> **追補 2（2026-11-06、追補 1 8f33b11 への reviewer の指摘 P1）**
+>
+> 1. **宛先を絞って送る**
+>    - `TopologyBroadcast.broadcastTopologyToPods (keys : List String)` を新設する。
+>      - 送り方は `broadcastTopologyToAllPods` と同じ（宛先ごとの task、15 s の上限、応答の確認）。
+>      - 違いは、map の node key が `keys` に入っている Pod にだけ送ること。
+>    - 送る直前ごとに、operator の lease guard を確かめる。
+>      - 条件は、自分が leader で、`heldUntil − now ≥ 送信の上限 + 1 s`。
+>      - 足りなければ送らない。その tick では何もしない。
+>    - 送った後にもう一度 `heldUntil > now` を確かめてから、phase を進める CAS を書く。
+>    - CAS は既存の `status.handovers` と同じく、resourceVersion で行う。
+> 2. **永続化する phase**（`status.handovers[]` の Entry に足す）
+>    - phase に `preparing` と `committingReplicas` を加える。順は `draining → preparing → committingReplicas → promoting → done`。
+>    - Entry に足す項目
+>      - `hid`
+>      - `seq`（S）
+>      - `toEpoch`
+>      - `masterId`
+>      - `prepared`（prepare 済みの node key と、その時点の binding）
+>      - `committed`（commit を確かめた node key）
+>    - operator が再起動しても、leader が交代しても、この Entry から同じ phase の続きを行う。
+>
+> | phase | すること | 次へ進む条件 | 失敗・期限切れ・再起動 |
+> |---|---|---|---|
+> | `preparing` | 後継に `promote_prepare`、eligible な replica に `prepare`。L を前後で 2 回読む | 後継の prepare と、1 つ以上の replica の prepare が成功し、L の前後が一致 | prepare 済みが 0 なら、継続なしで従来の `promoting` へ。後継の prepare が失敗したら、全員に `history discard` を送り、従来の `promoting` へ。期限切れも同じ。再起動したらこの phase をやり直す（prepare は冪等） |
+> | `committingReplicas` | V2 を `prepared` にだけ送る（1） | `prepared` の全員が `node_map_version ≥ V2`、`history_pending = -`、epoch = toEpoch を報告 → `promoting` | **commit が 1 つでも確かめられたら、V1' で旧 master に戻すことはしない**（commit 済みの replica は旧 epoch の転送を拒否するため）。期限内に確かめられなかった replica は継続から外す（後で full rebuild）。下の「後継が止まったとき」を参照 |
+> | `promoting` | V2 を後継に送り、続けて旧 master と残りに送る | 既存の条件（全 Pod が V2、後継の own_role が master） | 既存どおり |
+>
+> 3. **後継が止まったとき・応答が分からないとき**（`committingReplicas` で、1 つ以上が commit 済み）
+>    - 後継の Pod が同じ process のまま `Th` 内に戻れば、V2 を送って `promoting` へ進む。
+>    - 戻らない（Pod が無い、別の process、期限切れ）ときは、旧 master に戻さない。**commit 済みの replica の 1 つ（map 順の先頭）を後継に替える。**
+>      - その replica の中身は H の時点の旧 master と同じで、S の後の書き込みは無い。H から昇格までの間、master はいなかったからである。
+>      - そのため、昇格させても書き込みを失わない。
+>      - その replica は successor の pending を持たないので、昇格のときに epoch を通常どおり進める（E' → E''）。
+>      - 他の commit 済みの replica は `epoch_mismatch` になり、full rebuild する。データは失わない。冗長度は一時的に下がる。
+>    - commit 済みが 0 なら、従来どおり V1' で旧 master に戻す。
+>    - 旧 master は、どちらの場合も E のまま残る。その後は proxy か replica として full rebuild する。
+>    - operator の交代や再起動では、`committed` を各 replica の stats（`history_pending`、epoch）で読み直してから、上の規則を当てはめる。
+> 4. **追加する試験**
+>    - E2E: 2 つの replica のうち 1 つにだけ V2 を届ける（test seam `FLARE_TEST_BROADCAST_SKIP_FILE`）→ 部分的に commit した状態で後継の flared を kill する。
+>      - 確かめること: commit 済みの replica が master になり、missing 0・エラー 0。もう 1 つの replica は full rebuild。旧 master に戻らない。
+>    - E2E: `committingReplicas` の途中で operator を再起動し、leader を交代させる → 同じ規則で続く。
+>    - E2E: lease を失わせる（`FLARE_TEST_LEASE_API_STALL_FILE`）→ 旧 leader は V2 を送らない。
+>    - unit: phase の状態機械（各遷移、再起動からの再開、commit 済みの数による分岐）。
+
 
 > **追補 1（2026-11-06、実装中に見つかった順序の問題。reviewer の確認待ち）**
 >

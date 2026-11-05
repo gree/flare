@@ -1,4 +1,48 @@
-# 順序付き引き継ぎで履歴を継ぐ（replica を full rebuild しない）— 設計案 第 6 版（＋ 追補 1・2）
+# 順序付き引き継ぎで履歴を継ぐ（replica を full rebuild しない）— 設計案 第 6 版（＋ 追補 1・2・3）
+
+> **追補 3（2026-11-06、追補 2 748f5b4 への reviewer の指摘 P1 2 点）**
+>
+> 1. **phase の書き込みを、送信より先にする**（intent first）。lease と leader epoch で守る。
+>    - **書いてから送る**
+>      - V2 を送る前に、`committingReplicas`（またはその次の段）を `status.handovers` に CAS で書く。
+>      - CAS の成功を確かめた leader だけが、その段の送信をしてよい。
+>      - 送信は冪等（同じ map の版）。新しい leader が status から再開して送り直しても、結果は同じになる。
+>    - **CAS の期限**: EvictionGuard の admitted と同じ規則にする。
+>      - CAS を始める前に、`heldUntil − now ≥ 4 s（kubectl の上限）+ 1 s` を要求する。足りなければ書かない。
+>      - CAS は `min(4 s, heldUntil − now − 1 s)` で打ち切る。
+>      - CAS の応答の後、`heldUntil > now` と leader epoch が変わっていないことを確かめてから送る。
+>    - **leader epoch**
+>      - Entry に `leaderEpoch`（書いた leader の lease の世代）を持たせる。
+>      - 新しい leader は、まず自分の epoch を CAS で書く（引き継ぎの takeover）。そのうえで続きを行う。
+>      - 古い epoch の leader の CAS は resourceVersion で負ける。lease guard で止まった leader は送らない。
+>    - **応答が分からない CAS**（timeout など）
+>      - 結果を推測しない。その tick では送らない。
+>      - 次の tick で status を読み直し、書けていればその段の送信、書けていなければもう一度 CAS、のどちらかを行う。
+>      - phase は一方向にしか進まない（`preparing → committingReplicas → promoting`）。読み直した段より前の段の動作はしない。
+>    - **期限内に終わらないとき**
+>      - `committingReplicas` の期限（`Th` の残り）を過ぎたら、追補 2 §3 の規則を当てはめる。
+>        - commit が 1 つも無い → V1'。
+>        - 1 つ以上ある → 後継が戻れば `promoting`、戻らなければ commit 済みの replica を後継に替える。
+>      - この判定も、status を CAS で書いてから送る。
+> 2. **binding を照合する**（pod UID・boot id・copy id。`prepared` に保存した値）
+>    - **V2 を送る直前**: 各 replica の binding を新しく読み直す。保存した値と違う、または読めない replica には送らない。
+>      - 同名で作り直された Pod、再起動した process、入れ替わったコピーのいずれも、ここで外れる。
+>      - その replica は `prepared` から外す（CAS）。従来どおり full rebuild。
+>      - 同じ process なら `history discard` も送る。別の process なら pending は期限で消える。
+>    - **commit の確認**: 次をすべて満たしたときだけ、`committed` に数える。
+>      - binding が保存した値と同じ。
+>      - `history_pending = -`。
+>      - epoch = toEpoch。
+>      - master_id = Entry の masterId。
+>      - `node_map_version ≥ V2`。
+>    - **再起動の後に committed を組み立て直すとき**: 同じ条件で読み直す。binding が違う Pod は数えない。
+>      - tmpfs なら、同名の新しい Pod はコピーを持たない。PVC なら copy id が変わっている。
+>    - **代わりの後継を選ぶとき**（追補 2 §3）: 上の条件で `committed` に数えられる replica だけから選ぶ。
+>    - 試験
+>      - `committingReplicas` の途中で prepare 済みの replica の Pod を削除し、作り直させる → その Pod は数えず、full rebuild する。他の replica は継続する。
+>      - 応答が分からない CAS（test seam で status の patch を遅らせる）→ 送らずに読み直す。
+>      - leader の交代の間に古い leader が送らないこと。
+
 
 > **追補 2（2026-11-06、追補 1 8f33b11 への reviewer の指摘 P1）**
 >

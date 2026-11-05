@@ -1,4 +1,50 @@
-# 順序付き引き継ぎで履歴を継ぐ（replica を full rebuild しない）— 設計案 第 2 版
+# 順序付き引き継ぎで履歴を継ぐ（replica を full rebuild しない）— 設計案 第 3 版
+
+> **第 3 版の変更（2026-11-06、第 2 版 2f2b0e3 への reviewer の変更要求を受けて）**
+>
+> 継続の可否を、ダイジェスト D ではなく **WAL follow の適用位置**で判定する。
+> 対象は WAL follow が有効なクラスタに限る（rc70 の chart の既定は有効）。以下の §3・§4-1/2・§8 は、この節が上書きする。
+>
+> 1. **根拠を cursor に戻す。ただし follow が有効なときだけ。**
+>    - 第 1 版で cursor を使えなかったのは、follow off の replica では転送で cursor が進まないからだった。
+>    - follow が有効なら、cursor は「その位置までの master の全履歴を、連続して適用した」ことを表す。
+>      - `design-continuous-wal-replication.md` §3.4: "Everything up to the cursor has already been applied"
+>      - 適用は連続性の検査付き（`storage_rocksdb.cc:5163`）。
+>    - バリアの時点 H では、次をすべて満たす replica r を eligible@H とする。
+>      - 旧 master は V1 を適用済みで、もう書き込まない。
+>      - その最新の sequence を L とする。r の `repl_last_lsn == L`。
+>      - r の follow の状態が following で、needs_rebuild ではない。
+>      - epoch、master_id、incarnation が一致する。
+>      - R3 の根拠に問題が無い。partial・quarantine・修復の未完了が無い。
+>    - follow が無効な replica（pf-dev の今の設定）は eligible にならない。従来どおり full rebuild。
+>    - ダイジェスト D（第 2 版 §3）と、初期値の走査は**やめる**。
+>      - reviewer の §8-1（走査のコストと一貫性、全 mutator の列挙）と §8-2（hash の強さ）は、この経路では不要になる。
+> 2. **遅れて届く転送**（reviewer §8-3 のコード確認を受けて）
+>    - `track_repl_in_flight` は、宛先ごとに queue の前で加算され、`handler_proxy` が処理を終えたときに減算される。queue・retry・held を含む（同じ boot の中でだけ有効）。
+>    - そこでバリアの条件は、宛先ごとの `proxy_write_in_flight[r] == 0` と、旧 master の boot id が開始時と同じこと、にする。
+>    - `proxy_write_held` は累積の counter なので使わない。
+>    - follow が有効なら、転送が落ちても WAL が埋めるので、cursor の一致で十分。転送の counter は「遅れて届くものが無い」ことの確認にだけ使う。
+>    - commit の後に届いた旧 epoch の転送は、`_decide_change` で拒否される（第 2 版 P2 と同じ）。逆順の試験は残す。
+> 3. **replica の中だけで起きる変更**（lazy expire、orphan_purge）
+>    - follow が有効でも、replica の中だけで起きる削除は、今の継続複製と同じだけずれる。
+>    - 第 2 版と同じく、引き継ぎの間は止める（`maintenance_pause <hid>`）。
+>    - ずれの許容は、今の継続複製の保証と同じ範囲にとどめる（新しい保証は足さない）。
+> 4. **re-base の後の WAL の保持**（reviewer の追加 P1）
+>    - re-base した follower は、新 master の WAL を S+1 から読む。
+>    - 新 master（後継）は commit の時点で WAL ファイルの削除を止める（RocksDB `DisableFileDeletions`）。
+>    - 削除を再開する条件は、どちらかが成り立ったとき。
+>      - prepare 済みの全 replica が cursor > S を報告した（operator が `history_release <hid>` を送る）
+>      - 期限（既定 10 分）が切れた
+>    - tmpfs では、止めている間の WAL の増え方が memory に入る。期限と `walSizeLimitMb` で上限を決めて記録する。
+>    - 期限が切れた後に `lsn_purged` になった follower は、full rebuild に戻る。tmpfs では `no_space` になり得る。これは残る制約として合格条件に書く。
+>      - E2E では、通常の負荷で 1 件も起きないことを示す。
+> 5. **prepare / commit、meta CF を捨てない、master_id の扱い**は第 2 版の §4-3〜6 のまま。
+>
+> pf-dev で効かせるには、overlay の `replFollowEnabled: false` を外す必要がある。
+> - false にした理由は、follower の poll の CPU コストだった。
+> - rc70 で直っている: replica 側の可視化 p99 が 61 → 1.8 ms（visibility-bench 41562977684 → 41563019456）。
+> - pf-dev で follow を有効にするのは、別の PR とユーザーの判断で行う。
+
 
 Issue: `flare-promotion-forces-rebuild`（ユーザー承認 2026-11-05: 案 A）。
 土台: gree/flare 77ea6e6（v0.1.0-rc70）。

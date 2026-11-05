@@ -727,7 +727,12 @@ private def continuationPrepare (ns : String) (st : FlareClusterState) (e : Hand
       inFlightFromOld := oAfter.bind (statDest · "proxy_write_in_flight" k),
       activeSlave := (st.lookupNode k).any fun n =>
         n.role == FlareRole.Slave && n.partition == Int.ofNat e.partition && n.state == FlareState.Active,
-      ready := readyKeys.contains k, r3Eligible := cls == .eligible,
+      -- at the barrier (after V1) every copy of the partition reads
+      -- `lagging` (the partition has only the Master/Down placeholder):
+      -- the same reading the handover's own promotion gate accepts
+      -- (PromotionEvidence.handoverCommitAllows), never forbidden / unknown
+      -- (42120599042: "the successor is not continued (not R3 eligible)")
+      ready := readyKeys.contains k, r3Eligible := PromotionEvidence.handoverCommitAllows cls,
       partialCopy := sts.copyPartial == some 1, quarantined := sts.quarantined == some 1,
       repairPending := repairDests.contains k }]
   let src : HistoryContinuation.SourceObs := {

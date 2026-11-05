@@ -1,4 +1,33 @@
-# 順序付き引き継ぎで履歴を継ぐ（replica を full rebuild しない）— 設計案 第 6 版（＋ 追補 1〜8）
+# 順序付き引き継ぎで履歴を継ぐ（replica を full rebuild しない）— 設計案 第 6 版（＋ 追補 1〜9）
+
+> **追補 9（2026-11-06、追補 8 7fca5e6 への reviewer の指摘 P1）**
+>
+> HMAC が証明するのは「webhook が作った」ことだけで、付けた人に権限があることではない。
+> そこで、receipt を出す前に**専用の権限**を確かめる。
+>
+> 1. **専用の権限**
+>    - 実在しない subresource `flareclusters/handover-fence` に対する動詞 `break-glass` を使う。
+>      - Kubernetes の RBAC は、存在しない subresource・動詞にも Role で権限を与えられる。
+>      - 例: `resources: ["flareclusters/handover-fence"]`、`verbs: ["break-glass"]`。
+>    - chart は、この Role を作る（`<fullname>-handover-fence`）。誰に与えるか（RoleBinding）は運用者が決め、既定では誰にも与えない。
+>    - FlareCluster の通常の update 権限だけでは発動できない。
+> 2. **mutating webhook での判定**
+>    - `handover-fenced` が増えた、または変わった UPDATE では、要求者（AdmissionReview の userInfo）について `SubjectAccessReview` を作って問い合わせる。
+>      - 問い合わせの中身: verb `break-glass`、resource `flareclusters`、subresource `handover-fence`、その namespace と name。
+>      - SubjectAccessReview は問い合わせで、何も永続化しない。`sideEffects: None` と両立する。
+>      - operator の ClusterRole に `subjectaccessreviews` の `create` を足す。
+>    - 許可されたときだけ receipt を足す。
+>    - 許可されない、または問い合わせが失敗した・時間切れになったときは、**UPDATE を拒否する**（fail closed）。
+>      - receipt は出さない。
+>      - 拒否の理由（権限が無い／確かめられない）を返す。
+>      - operator のログに `NODE GUARD: handover-fenced REFUSED for <username>` を出す。
+>    - 消費のとき（operator）は、receipt の username を記録するだけにする。権限は webhook の時点で確かめ済みで、その結果は HMAC で守られている。
+> 3. **試験**
+>    - FlareCluster の update 権限だけを持つ利用者（`kubectl --as` の impersonation）が annotation を付ける → 拒否される。receipt も `fencedBy` も残らない。
+>    - `break-glass` の権限を持つ利用者 → receipt が付き、一度だけ消費される。`fencedBy` にその username が残る。
+>    - `SubjectAccessReview` が失敗する場合（test seam で API の応答を遅らせる）→ 拒否される（fail closed）。
+>    - 権限の無い利用者が、権限のある利用者の receipt を写して付ける → HMAC は合うが、annotation の値と receipt の組（approval-id・hid）が一致しなければ無効。一致する写しは、すでに消費済みで無効。
+
 
 > **追補 8（2026-11-06、追補 7 f79fbf8 への reviewer の指摘 P1・P2）**
 >

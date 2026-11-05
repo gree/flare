@@ -543,7 +543,14 @@ private def handoverSuccessorClass (cs : FlareClusterState) (k : String) (reply 
       mapPrepare := n.state == FlareState.Prepare
       mapActive := n.state == FlareState.Active
       podReady := true
-      partitionHasMaster := cs.nodeMap.any fun kv => kv.2.role == FlareRole.Master && kv.2.partition == part
+      -- an ACTIVE master only: during the demote the partition has the old
+      -- master as a Master/Down placeholder, and a copy current to the last
+      -- write then reads `revalidating` — `lagging` by design
+      -- (handoverCommitAllows), not `forbidden` (42124876046: every copy read
+      -- "history being re-validated against the present master" at the
+      -- continuation barrier)
+      partitionHasMaster := cs.nodeMap.any fun kv =>
+        kv.2.role == FlareRole.Master && kv.2.state == FlareState.Active && kv.2.partition == part
       lastMasterHistory := ← recordedHistory part
       isLastMasterHolder := part ≥ 0 && n.lastMasterOf == part
       expectedBinding := if part ≥ 0 then some (PromotionEvidence.bindingFor part.toNat nPartsB cs.partitionSize) else none

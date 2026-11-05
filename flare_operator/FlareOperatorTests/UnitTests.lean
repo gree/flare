@@ -2497,10 +2497,11 @@ private def checkHistoryContinuation (ctx : Ctx) : IO Unit := do
   check ctx "history continuation: L moved between the readings (or unreadable) excludes every replica"
     ((excluded src (some 99) (some 100) ok).isSome && (excluded src (some 100) none ok).isSome
       && (excluded { src with latestSeq := some 101 } (some 100) (some 100) ok).isSome)
-  check ctx "history continuation: follow off / not following / needs_rebuild excludes it (it rebuilds as before)"
+  check ctx "history continuation: follow off / disconnected / needs_rebuild excludes it (it rebuilds as before); idle at the barrier with the cursor at L does not"
     ((excluded src (some 100) (some 100) { ok with followState := none }).isSome
-      && (excluded src (some 100) (some 100) { ok with followState := some "idle" }).isSome
-      && (excluded src (some 100) (some 100) { ok with needsRebuild := true }).isSome)
+      && (excluded src (some 100) (some 100) { ok with followState := some "disconnected" }).isSome
+      && (excluded src (some 100) (some 100) { ok with needsRebuild := true }).isSome
+      && (excluded src (some 100) (some 100) { ok with followState := some "idle" }).isNone)
   check ctx "history continuation: another epoch or master_id, or the old master's unreadable, excludes it"
     ((excluded src (some 100) (some 100) { ok with epoch := some "6:x" }).isSome
       && (excluded src (some 100) (some 100) { ok with masterId := some "N" }).isSome

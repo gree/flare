@@ -66,7 +66,10 @@ def excluded (src : SourceObs) (lBefore lAfter : Option Nat) (r : ReplicaObs) : 
     else if r.repairPending then some "a replica repair is pending"
     else if r.bindingAtStart.isNone || r.bindingNow.isNone || r.bindingAtStart != r.bindingNow then
       some "another pod, process or copy than at the start (or unreadable)"
-    else if r.followState != some "following" || r.needsRebuild then
+    -- at the barrier the follower idles (the partition has only the
+    -- Master/Down placeholder, nothing to poll): `idle` with its cursor at L
+    -- is the evidence; needs_rebuild or no follower is not (42124876046)
+    else if (r.followState != some "following" && r.followState != some "idle") || r.needsRebuild then
       some s!"WAL follow is not following ({r.followState.getD "unreadable"}{if r.needsRebuild then ", needs_rebuild" else ""})"
     else if src.epoch.isNone || r.epoch != src.epoch then some "another source epoch than the old master (or unreadable)"
     else if src.masterId.isNone || r.masterId != src.masterId then some "another master_id than the old master (or unreadable)"

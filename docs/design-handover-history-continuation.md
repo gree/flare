@@ -1,4 +1,33 @@
-# 順序付き引き継ぎで履歴を継ぐ（replica を full rebuild しない）— 設計案 第 6 版（＋ 追補 1〜5）
+# 順序付き引き継ぎで履歴を継ぐ（replica を full rebuild しない）— 設計案 第 6 版（＋ 追補 1〜6）
+
+> **追補 6（2026-11-06、追補 5 b393747 への reviewer の指摘 P1）**
+>
+> 1. **break-glass を、この handover・この process に一度だけ効くものにする**
+>    - annotation の値は `flare.gree.net/handover-fenced=<hid>/<pod UID>/<boot id>/<copy id>` にする。
+>      - 4 つとも、`status.handovers[]` に保存した後継の binding と hid に一致しなければならない。
+>      - 一致しなければ無視して、Event で理由を知らせる。
+>    - **消費は一度だけ**
+>      - operator は、使う前に `status.handovers[].fencedBy = {annotation の値, 誰が（managedFields の manager・user）, 時刻}` を CAS で書く。
+>      - 成功したら annotation を消す（消せなくても、`fencedBy` が既に書かれた hid には二度と使わない）。
+>      - 同じ値の 2 回目は無視する。
+>    - **失効**: 次のどれかで無効になる。
+>      - hid が変わった（次の handover）。
+>      - 後継の boot id・copy id が変わった（同じ UID の再起動、コピーの入れ替え）。
+>      - Entry が done・aborted になった。
+>      - leaderEpoch が変わった後、新しい leader がまだ `fencedBy` を書いていない。
+>    - 永続的な外部の遮断（ネットワークポリシーなど）は、この設計では求めない。break-glass は、人がそれを確かめたという、監査付きの宣言として扱う。
+> 2. **E2E は、孤立したプロセスを直接見る**
+>    - 後継の Pod IP と port を、V2 を送る前に保存する。
+>    - 故障を作る: API の object だけを消す（kubelet の確定を `FLARE_TEST_DROP_KUBELET_CONFIRM` で落とす）。
+>    - 故障の間、保存した endpoint に stats を毎秒問い合わせて、旧 flared の own_role と node_map_version を時系列で記録する。Pod の一覧には現れないので、一覧は使わない。
+>    - 確かめること: **旧 flared が master として答えている間は、他のどの Pod も master として答えない**（同じ時刻に own_role=master が 2 つ出ない）。operator は昇格させない。
+>    - 続けて break-glass の試験を行う。
+>      - (a) 別の hid の値 → 無視される。
+>      - (b) 同じ UID で boot id が違う値 → 無視される。
+>      - (c) 正しい値 → 一度だけ消費され、`fencedBy` が記録され、代わりの後継へ進む。
+>      - (d) 同じ値をもう一度付ける → 無視される。
+>    - (c) の前に旧 flared を実際に止めて（kill -9）、二重 master が起きないことも確かめる。
+
 
 > **追補 5（2026-11-06、追補 4 65b7497 への reviewer の指摘 P1）**
 >

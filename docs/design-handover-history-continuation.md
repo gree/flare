@@ -1,4 +1,43 @@
-# 順序付き引き継ぎで履歴を継ぐ（replica を full rebuild しない）— 設計案 第 6 版（＋ 追補 1〜4）
+# 順序付き引き継ぎで履歴を継ぐ（replica を full rebuild しない）— 設計案 第 6 版（＋ 追補 1〜5）
+
+> **追補 5（2026-11-06、追補 4 65b7497 への reviewer の指摘 P1）**
+>
+> 追補 4 §2 の「(b) 後継の process がもう存在しない」は、API の状態（NotFound、UID が違う）だけでは成り立たない。
+> - force delete や node の分断の後も、古い flared は動き続け、届く client からの書き込みを master として受けられる。
+> - その状態で別の replica を昇格させると、二重 master になる。
+>
+> そこで (b) を次のように**狭める**。
+>
+> 1. **(b) と認めるのは、kubelet が止めたことを確かめたときだけ**
+>    - node guard webhook には、kubelet による削除の確定が届く。これは「kubelet が、すでに Terminating の Pod の削除を確定した」もので、`system:node:<node>` が DELETE を送る（RUNBOOK `#node-guard`）。
+>    - webhook はこれを受け取ったら、その Pod の UID と時刻を `status.handovers[].successorStopped` に CAS で記録する（新設）。
+>      - これは kubelet が container を止め終えた後にだけ届く。
+>    - operator は、この記録が後継の UID と一致したときだけ (b) とする。
+>    - 次の場合は (b) としない。
+>      - Pod が NotFound・UID が違うが、上の記録が無い（force delete、node の分断、API だけの削除）。
+>      - node が NotReady のまま。
+> 2. **確かめられない間は昇格させない。止めて知らせる。**
+>    - 別の replica は昇格させない。
+>    - CRITICAL のログ、Event `FlareHandoverSuccessorUnfenced`、alert を出し、`reason` に理由を書く。
+>    - 書き込みは W で待つ。`Tw` を超えた分はエラーになるが、ACK 損失は無い。
+>    - 解き方は次のどれか。
+>      - 後継が同じ binding で応答する（適用済みなら完了へ、未適用なら再送）。
+>      - kubelet の確定が届く（node が戻った）。
+>      - **人の判断による break-glass**: `flare.gree.net/handover-fenced=<後継の Pod UID>` を FlareCluster に付ける。
+>        - 意味は「旧 flared が止まったか遮断されたことを、人が確かめた」。
+>        - 監査付きの例外で、誰が・いつ・どの UID かを記録する。既存の delete-override と同じ扱い。
+>    - data-plane の遮断（flared が自分で書き込みを止める）は、今は無い。設けるなら別の Issue で決める。
+> 3. **追加する E2E（故障窓）**
+>    - 後継に V2 を送った直後に、後継の Pod の API object だけを消し、旧 flared は動いたままにする。
+>      - Pod に kubelet が止めない設定を入れる。例: test seam で kubelet の確定を webhook に届かせない（`FLARE_TEST_DROP_KUBELET_CONFIRM`、本番では設定しない）。
+>      - または、node を kubelet ごと止める（kind の node の kubelet を `systemctl stop`）。
+>    - 確かめること
+>      - operator が別の replica を昇格させない。
+>      - CRITICAL と Event が出る。
+>      - 期間中、全 Pod の own_role を時系列で記録し、master が 1 つ以下である。
+>      - 書き込みはエラーになり得るが、missing 0。
+>    - kubelet を戻す（確定が届く）、または break-glass の annotation を付けると、追補 2 §3 の規則で進む。
+
 
 > **追補 4（2026-11-06、追補 3 070e4d6 への reviewer の指摘 P1 2 点）**
 >

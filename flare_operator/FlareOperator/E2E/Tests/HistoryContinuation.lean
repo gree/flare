@@ -97,10 +97,10 @@ private def writeMb (ip pfx : String) (mb : Nat) : IO Nat := do
 /-- The source's answer to a WAL read from `lsn` (master_id / epoch not
     checked: "-"), first line only. -/
 private def walReadFrom (ip : String) (lsn : Nat) : IO String := do
-  -- the reply carries binary WAL batches after its first line: only that
-  -- line, printable characters only (42070876131: kubectl refused the
-  -- non-UTF-8 output)
-  match ← execInDebugPod walPinCfg.debugPod walPinCfg.«namespace» s!"printf 'repl_sync_wal {lsn} - - 1 65536\r\nquit\r\n' | nc -w 10 {ip} {walPinCfg.flarePort} | head -1 | tr -cd '[:print:]'" with
+  -- the reply carries binary WAL batches after its first line: the first
+  -- 160 bytes with every other byte replaced by '?' (42070876131: kubectl
+  -- refused the non-UTF-8 output; 42074557368: busybox tr has no [:print:])
+  match ← execInDebugPod walPinCfg.debugPod walPinCfg.«namespace» s!"printf 'repl_sync_wal {lsn} - - 1 65536\r\nquit\r\n' | nc -w 10 {ip} {walPinCfg.flarePort} | head -c 160 | tr -c 'A-Za-z0-9 _:.-' '?'" with
   | .ok o => return o.trim
   | .error e => return s!"ERROR {e}"
 

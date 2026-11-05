@@ -719,6 +719,7 @@ private def continuationPrepare (ns : String) (st : FlareClusterState) (e : Hand
     let cls ← handoverSuccessorClass st k out
     let sts := (out.map PromotionEvidence.parseStats).getD {}
     let fs := out.bind (statStr · "repl_follow_state")
+    IO.eprintln s!"[flare-operator] {tag}: barrier reading of {k}: R3 {cls.label}, follow {fs.getD "unreadable"}, cursor {(out.bind (statNat · "rocksdb_repl_last_lsn")).map toString |>.getD "?"}, epoch {(out.bind (statStr · "rocksdb_source_epoch")).getD "?"}"
     obsList := obsList ++ [{
       key := k, bindingAtStart := (start.lookup k).getD none, bindingNow := contBinding pods k out,
       cursor := out.bind (statNat · "rocksdb_repl_last_lsn"), followState := fs,

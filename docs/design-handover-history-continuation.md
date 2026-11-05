@@ -1,4 +1,39 @@
-# 順序付き引き継ぎで履歴を継ぐ（replica を full rebuild しない）— 設計案 第 6 版（＋ 追補 1〜7）
+# 順序付き引き継ぎで履歴を継ぐ（replica を full rebuild しない）— 設計案 第 6 版（＋ 追補 1〜8）
+
+> **追補 8（2026-11-06、追補 7 f79fbf8 への reviewer の指摘 P1・P2）**
+>
+> 1. **誰が付けたかを、同じ UPDATE の中に原子的に残す**（P1）
+>    - 追補 7 では、validating webhook が判定中に status へ別の書き込みをしていた。これをやめる（`sideEffects: None` を守る）。
+>    - 代わりに **mutating webhook**（`flareclusters` の UPDATE、この annotation が増えたか変わったときだけ）を使い、同じ object に receipt の annotation を足す。
+>      - `flare.gree.net/handover-fenced-receipt=<approval-id>/<hid>/<AdmissionReview uid>/<username>/<user uid>/<HMAC>`
+>      - HMAC は operator だけが持つ鍵で、前の 5 項目と annotation の値全体にかける。
+>      - 鍵は operator が 1 回だけ作る Secret（`<fullname>-receipt-key`）。webhook の証明書の operator モードと同じく、作成は 1 回だけで上書きしない。
+>    - 利用者が receipt を自分で書いた場合
+>      - mutating webhook は、要求に含まれる receipt を必ず自分の計算値で置き換える。
+>      - 鍵を持たない者は正しい HMAC を作れない。webhook を通らずに直接 patch された receipt は、検証に失敗する。
+>    - 原子性
+>      - receipt は元の UPDATE と同じ書き込みで保存される。UPDATE が拒否されたり競合したりすれば、receipt も残らない（phantom にならない）。
+>      - 再試行では、新しい AdmissionReview uid で計算し直す。
+>    - 消費: operator は receipt の HMAC と、値の binding（hid・UID・boot・copy）を確かめてから、`status.handovers[].fencedBy` に CAS で写す。
+>      - 写すのは、receipt の内容（username、user uid、AdmissionReview uid）と、消費した時刻。
+>      - その後に 2 つの annotation を消す。消せなくても、`fencedBy` がある hid では二度と使わない。
+>    - 鍵が無い、または入れ替わった場合は、未消費の receipt は使えない（fail closed）。人がもう一度付け直す。
+>    - 試験
+>      - 正しい流れで、userInfo と AdmissionReview uid が `fencedBy` に残る。
+>      - 利用者が書いた偽の receipt は無効になる。
+>      - resourceVersion の競合で UPDATE を拒否させる → receipt は残らない。再試行すると、新しい uid の receipt が 1 つだけ残る。
+>      - 同じ annotation を 2 回適用する → 消費は 1 回だけ。
+>      - mutating webhook を外した状態で付けた annotation は使われない。
+> 2. **approval-id の一意性の保証範囲**（P2）
+>    - 安全性は、approval-id の一意性に頼らない。
+>      - 承認は、値に含まれる hid と後継の binding に束縛される。
+>      - hid は handover ごとに一意（partition・attempt・demote 時刻）である。
+>      - そのため、古い承認が別の handover に使われることは無い。
+>    - approval-id は監査で突き合わせるための ID とする。
+>      - 重複の検出は、status に保持する直近 64 件の範囲でだけ行う（重複なら拒否し、Event を出す）。
+>      - それより古い ID の重複は検出しない、と明記する。
+>      - 追補 7 §1 の「二度と受け付けない」は、この範囲に改める。
+
 
 > **追補 7（2026-11-06、追補 6 bdade09 への reviewer の指摘 P2 2 点）**
 >

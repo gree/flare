@@ -3221,7 +3221,11 @@ int storage_rocksdb::wal_pin_set(const string& hid, uint64_t seq, uint64_t deadl
 		wal_pin::pin p;
 		p.hid = hid;
 		p.seq = seq;
-		p.deadline_ms = deadline_ms;
+		// never further ahead than the pin limit: a marker beyond twice the
+		// limit is not believed at the next open (wal_pin::decide), so a
+		// longer request is capped here, not stored as an invalid marker
+		const uint64_t now = wal_pin::now_ms();
+		p.deadline_ms = (now > 0 && deadline_ms > now + this->_wal_pin_max_ms) ? now + this->_wal_pin_max_ms : deadline_ms;
 		string why;
 		if (!wal_pin::parse(wal_pin::serialize(p), p, why)) {
 			result = "refused:" + why;

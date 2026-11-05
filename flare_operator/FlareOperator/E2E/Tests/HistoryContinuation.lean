@@ -5,9 +5,9 @@
 
   * `history-continuation-wal-pin-restart` (A1, design 6th revision): the
     WAL retention marker WAL_PIN outside the DB is read before DB::Open.
-    The master's WAL TTL and size cap are made small (60 s, 16 MB) and more
+    The master's WAL TTL and size cap are made small (30 s, 16 MB) and more
     WAL than that is written, then flared is killed and restarted after the
-    TTL: with the marker the WAL from S+1 is still served
+    TTL (30 s; the pin is 115 s, inside the default 120 s limit): with the marker the WAL from S+1 is still served
     (`repl_sync_wal S+1` answers no `lsn_purged`); without it (the control)
     the same restart purges it and the answer is `lsn_purged` — the control
     shows the test really produces the deletion.
@@ -46,7 +46,7 @@ private def walPinCfg : ClusterConfig := {
   flaredMemoryRequest := "256Mi"
   -- small retention so a normal reopen purges the archived WAL; a small
   -- write buffer so the writes below switch WAL files and archive the old
-  extraFlaredConf := "rocksdb-write-buffer-size-mb = 1\nrocksdb-wal-ttl-seconds = 60\nrocksdb-wal-size-limit-mb = 16\nrocksdb-max-total-wal-size-mb = 1"
+  extraFlaredConf := "rocksdb-write-buffer-size-mb = 1\nrocksdb-wal-ttl-seconds = 30\nrocksdb-wal-size-limit-mb = 16\nrocksdb-max-total-wal-size-mb = 1"
 }
 
 private def nodeCmd (ip : String) (cmd : String) : IO String := do
@@ -97,8 +97,12 @@ private def writeMb (ip pfx : String) (mb : Nat) : IO Nat := do
 /-- The source's answer to a WAL read from `lsn` (master_id / epoch not
     checked: "-"), first line only. -/
 private def walReadFrom (ip : String) (lsn : Nat) : IO String := do
-  let out ← nodeCmd ip s!"repl_sync_wal {lsn} - - 1 65536"
-  return ((out.splitOn "\n").head?.getD "").replace "\r" "" |>.trim
+  -- the reply carries binary WAL batches after its first line: only that
+  -- line, printable characters only (42070876131: kubectl refused the
+  -- non-UTF-8 output)
+  match ← execInDebugPod walPinCfg.debugPod walPinCfg.«namespace» s!"printf 'repl_sync_wal {lsn} - - 1 65536\r\nquit\r\n' | nc -w 10 {ip} {walPinCfg.flarePort} | head -1 | tr -cd '[:print:]'" with
+  | .ok o => return o.trim
+  | .error e => return s!"ERROR {e}"
 
 private def nowMs : IO Nat := do
   let out ← IO.Process.output { cmd := "date", args := #["+%s%3N"] }
@@ -111,11 +115,12 @@ private def nowMs : IO Nat := do
 private def cycle (pod ip mIp : String) (pin : Option String) : IO (Except String (String × String)) := do
   let some s := (← stat ip "rocksdb_latest_sequence_number").bind String.toNat? | return .error "no rocksdb_latest_sequence_number"
   if let some hid := pin then
-    let r ← nodeCmd ip s!"wal_pin set {hid} {s} {(← nowMs) + 600000}"
+    -- within the default pin limit (120 s): writes + 40 s + the restart
+    let r ← nodeCmd ip s!"wal_pin set {hid} {s} {(← nowMs) + 115000}"
     if !(containsSubstr r "STAT wal_pin_result pinned") then return .error s!"wal_pin set: {r.trim}"
   let stored ← writeMb mIp (pin.getD "ctl") 40
   if stored < 700 then return .error s!"stored {stored}/800 values"
-  IO.sleep 90000
+  IO.sleep 40000
   let rc0 ← restartCount pod
   if let .error e ← killFlaredIn pod then return .error s!"kill: {e}"
   let back ← waitForCondition s!"{pod}'s flared answers after the restart" 300 do

@@ -1,4 +1,30 @@
-# 順序付き引き継ぎで履歴を継ぐ（replica を full rebuild しない）— 設計案 第 6 版（＋ 追補 1〜10）
+# 順序付き引き継ぎで履歴を継ぐ（replica を full rebuild しない）— 設計案 第 6 版（＋ 追補 1〜11）
+
+> **追補 11（2026-11-06、A2 のコードレビュー 0753e72 の P1 を受けて。実装は A2 に入れた）**
+>
+> **arm の段を足す**
+> - map の形式は変えない。そのため、「どの map が V2 か」を flared に先に伝える。
+> - operator は、V2 の版 V が決まった後、その map を送る前に、`history arm <hid> <V>` を送る。送り先は prepare 済みの各 replica と、後継。
+>   - flared は pending の記録に V を書き込む（同じ V なら冪等、別の V なら拒否）。
+> - commit の条件は、次の 2 つに限る。
+>   - replica: 適用中の map の版が、記録した V と**一致する**こと。加えて、map の partition の Active な Master が記録の後継であり、自分が後継ではないこと。
+>   - 後継: 昇格の処理の中で、自分の node key が記録の後継であり、partition と適用中の map の版 V が一致すること。
+> - arm されていない記録は commit しない。版の違う map、別の node、普通の昇格では、何も commit しない。
+>
+> **排他**
+> - commit・discard・期限による破棄は、同じ排他ロック（whole-lock の write）の中で行う。
+> - commit は、そのロックの中で記録を読み直してから判断する。判断の材料は、hid・全項目・期限・incarnation。
+> - そのため、先に読んだ古い内容で、すでに捨てられた記録を有効にすることは無い。
+> - 後継が commit のために WAL_PIN を取った後に commit しなかった場合は、その pin を release する。
+>
+> **operator（A3a）の手順の変更**
+> - `committingReplicas` で V2 を送る前に、prepared の各 replica へ `history arm <hid> <V>` を送る。
+> - `promoting` で後継に V2 を送る前に、後継へも `history arm <hid> <V>` を送る。
+> - arm に失敗した replica は継続から外す（従来どおり full rebuild）。
+> - 後継の arm に失敗した場合は、後継は普通の昇格になる。commit 済みの replica は epoch_mismatch から full rebuild する。データは失わない。
+>
+> **prepare の冪等**: 同じ hid でも、全項目（partition・successor・epoch の組・S・master_id・期限・incarnation）が一致するときだけ `already` とする。違えば `refused:different_tuple`。
+
 
 > **追補 10（2026-11-06、追補 9 98978e3 への reviewer の指摘 P1）**
 >

@@ -12,8 +12,11 @@
     the same restart purges it and the answer is `lsn_purged` — the control
     shows the test really produces the deletion.
 
-  The operator is scaled to 0 for the restarts, so a kill does not start a
-  failover: the test reads the source flared directly.
+  The pin is storage-level, so it is exercised on a REPLICA (its own WAL
+  holds the changes it applied): restarting a replica starts no failover,
+  and flared cannot start without the operator (the index server), so the
+  operator stays up (42065347622: with the operator at 0 the restarted
+  flared never came back).
 -/
 import FlareOperator.E2E.Framework
 import FlareOperator.E2E.Helpers
@@ -101,24 +104,27 @@ private def nowMs : IO Nat := do
   let out ← IO.Process.output { cmd := "date", args := #["+%s%3N"] }
   return out.stdout.trim.toNat?.getD 0
 
-/-- One cycle: S = the master's latest sequence; optionally pin from S;
-    write past the caps; wait out the TTL; kill -9 and wait until flared
-    answers again; read the WAL from S+1. -/
-private def cycle (pod ip : String) (pin : Option String) : IO (Except String (String × String)) := do
+/-- One cycle on the replica `pod`: S = its latest sequence; optionally pin
+    from S; write past the caps on the master (the replica applies them into
+    its own WAL); wait out the TTL; kill -9 the replica and wait until it
+    answers again; read its WAL from S+1. -/
+private def cycle (pod ip mIp : String) (pin : Option String) : IO (Except String (String × String)) := do
   let some s := (← stat ip "rocksdb_latest_sequence_number").bind String.toNat? | return .error "no rocksdb_latest_sequence_number"
   if let some hid := pin then
     let r ← nodeCmd ip s!"wal_pin set {hid} {s} {(← nowMs) + 600000}"
     if !(containsSubstr r "STAT wal_pin_result pinned") then return .error s!"wal_pin set: {r.trim}"
-  let stored ← writeMb ip (pin.getD "ctl") 40
+  let stored ← writeMb mIp (pin.getD "ctl") 40
   if stored < 700 then return .error s!"stored {stored}/800 values"
   IO.sleep 90000
   let rc0 ← restartCount pod
   if let .error e ← killFlaredIn pod then return .error s!"kill: {e}"
-  let back ← waitForCondition s!"{pod}'s flared answers after the restart" 180 do
-    return (← restartCount pod) > rc0 && (← stat ip "wal_pin_state").isSome
+  let back ← waitForCondition s!"{pod}'s flared answers after the restart" 300 do
+    let some ipNow ← podIp pod | return false
+    return (← restartCount pod) > rc0 && (← stat ipNow "wal_pin_state").isSome
   if !back then return .error "flared did not come back"
-  let state := (← stat ip "wal_pin_state").getD "?"
-  return .ok (← walReadFrom ip (s + 1), state)
+  let some ipNow ← podIp pod | return .error "no IP after the restart"
+  let state := (← stat ipNow "wal_pin_state").getD "?"
+  return .ok (← walReadFrom ipNow (s + 1), state)
 
 def walPinRestartSuite : TestSuite := {
   name := "history-continuation-wal-pin-restart"
@@ -132,24 +138,22 @@ def walPinRestartSuite : TestSuite := {
       run := do
         let ns := walPinCfg.«namespace»
         let sync ← operatorTcpCmd walPinCfg.debugPod ns walPinCfg.operatorName walPinCfg.operatorPort "node sync"
-        let some mFqdn := findMasterFqdn (parseNodeSync sync) 0 | return .fail "no Active P0 master in the operator's map"
-        let pod := podOf mFqdn
-        let some ip ← podIp pod | return .fail "no master IP"
-        -- no failover while the master restarts: the test reads it directly
-        match ← kubectl ["scale", "deployment", walPinCfg.operatorName, "-n", ns, "--replicas=0"] with
-        | .error e => return .fail s!"could not stop the operator: {e}"
-        | .ok _ => pure ()
-        IO.sleep 15000
-        let pinned ← cycle pod ip (some "hc-e2e-1")
+        let entries := parseNodeSync sync
+        let some mFqdn := findMasterFqdn entries 0 | return .fail "no Active P0 master in the operator's map"
+        let some sEntry := entries.find? (fun e => e.fqdn != mFqdn && e.role == 1 && e.state == 0) | return .fail "no Active slave"
+        let some mIp ← podIp (podOf mFqdn) | return .fail "no master IP"
+        let pod := podOf sEntry.fqdn
+        let some ip ← podIp pod | return .fail "no replica IP"
+        let pinned ← cycle pod ip mIp (some "hc-e2e-1")
         let (pinnedRead, pinnedState) ← match pinned with
           | .error e => return .fail s!"pinned cycle: {e}"
           | .ok r => pure r
-        let rel ← nodeCmd ip "wal_pin release hc-e2e-1"
-        let control ← cycle pod ip none
+        let some ip2 ← podIp pod | return .fail "no replica IP after the first cycle"
+        let rel ← nodeCmd ip2 "wal_pin release hc-e2e-1"
+        let control ← cycle pod ip2 mIp none
         let (ctlRead, ctlState) ← match control with
           | .error e => return .fail s!"control cycle: {e}"
           | .ok r => pure r
-        discard <| kubectl ["scale", "deployment", walPinCfg.operatorName, "-n", ns, "--replicas=1"]
         IO.eprintln s!"# pinned: state after restart {pinnedState}; repl_sync_wal S+1 -> {pinnedRead.take 160}\n# release: {(statOf rel "wal_pin_result").getD rel.trim}\n# control: state after restart {ctlState}; repl_sync_wal S+1 -> {ctlRead.take 160}"
         if pinnedState != "active" then return .fail s!"after the pinned restart wal_pin_state is {pinnedState}, not active"
         if containsSubstr pinnedRead "lsn_purged" || containsSubstr pinnedRead "SERVER_ERROR" || containsSubstr pinnedRead "ERROR" then

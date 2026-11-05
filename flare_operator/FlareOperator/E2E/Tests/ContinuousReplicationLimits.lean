@@ -1421,13 +1421,25 @@ def parkedSlotSuite : TestSuite := {
         -- delete (bf 42055533108: "Active" after 0 s with 0 items): wait for
         -- the NEW pod (another UID), Ready, Active in the map AND holding
         -- the master's items
+        -- observed TOGETHER (review of 085a362, P2): while the emptied s2
+        -- rebuilds (Prepare) and when it is Active, s1 is still parked
+        let parkedDuringPrepare ← IO.mkRef false
+        let parkedAtActive ← IO.mkRef false
+        let s1Parked : IO Bool := do
+          let some ip ← getPodIp s1 ns | return false
+          return (← c.statStr ip "rebuild_blocked") == some "no_space" && (← c.statNat ip "rebuild_parked") == some 1
         let active ← waitForCondition s!"the emptied {s2} (a new pod) rebuilds: Ready, Slave/Active, the master's items" 600 do
           let uid ← c.podUid s2
           if uid.isNone || uid == uid0 then return false
+          let view ← c.nodeView
+          if view.any (fun e => podOf e.fqdn == s2 && e.role == 1 && e.state == 1) && (← s1Parked) then
+            parkedDuringPrepare.set true
           if !(← c.ready s2) then return false
-          if !((← c.nodeView).any fun e => podOf e.fqdn == s2 && e.role == 1 && e.state == 0) then return false
+          if !(view.any fun e => podOf e.fqdn == s2 && e.role == 1 && e.state == 0) then return false
           let some ip ← getPodIp s2 ns | return false
-          return (← c.currItems ip) ≥ big
+          if (← c.currItems ip) < big then return false
+          parkedAtActive.set (← s1Parked)
+          return true
         let log ← c.opLogSince t0
         let heldByPart := (log.splitOn "\n").filter fun l =>
           containsSubstr l "REBUILD HELD" && containsSubstr l s2 && containsSubstr l "partition 0 already has"
@@ -1436,10 +1448,12 @@ def parkedSlotSuite : TestSuite := {
         let s2Items ← match ← getPodIp s2 ns with
           | some ip => c.currItems ip
           | none => pure 0
-        IO.eprintln s!"# parked {s1} items {items1}→{items1Now}; emptied {s2} active={active} items {s2Items} (master {← c.currItems mIp}); REBUILD HELD by the partition for {s2}: {heldByPart.length}"
+        IO.eprintln s!"# parked {s1} items {items1}→{items1Now}; emptied {s2} active={active} items {s2Items} (master {← c.currItems mIp}); REBUILD HELD by the partition for {s2}: {heldByPart.length}; {s1} parked while {s2} was Prepare: {← parkedDuringPrepare.get}, when {s2} became Active: {← parkedAtActive.get}"
         if !active then
           return .fail s!"the emptied {s2} did not become Slave/Active while {s1} was parked (held by the partition {heldByPart.length} time(s); first: {(heldByPart.head?.getD "(none)").trim.take 220})"
         if s2Items < big then return .fail s!"{s2} is Active with {s2Items} items, fewer than the {big} written"
+        if !(← parkedAtActive.get) then
+          return .fail s!"{s1} was not parked (no_space) at the moment {s2} became Active: the two were not observed together"
         if items1Now < items1 then return .fail s!"the parked replica's copy shrank ({items1}→{items1Now}): something was discarded"
         if (← masterPodOf c) != some mPod then return .fail "the master moved"
         return .pass }

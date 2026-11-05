@@ -5468,6 +5468,11 @@ uint64_t storage_rocksdb::_collect_tombstones_locked(uint64_t budget) {
 		return 0;
 	}
 	const uint64_t cursor = this->_get_repl_last_lsn_locked();
+	// labels are positions in ONE source's sequence space: the cursor
+	// compares only with rows of the current epoch. A row of another epoch
+	// (kept across a history continuation, design 6th rev. §8-3) is absent
+	// for every decision and is dropped whatever its label.
+	const string epoch = this->get_source_epoch();
 	rocksdb::ReadOptions ro = this->_read_options;
 	ro.fill_cache = false;
 	rocksdb::Iterator* it = this->_db->NewIterator(ro, this->_cf_meta);
@@ -5506,7 +5511,8 @@ uint64_t storage_rocksdb::_collect_tombstones_locked(uint64_t budget) {
 		} catch (boost::bad_lexical_cast&) {
 			continue;
 		}
-		if (label <= cursor) {
+		const bool other_epoch = !epoch.empty() && v.substr(0, p1) != epoch;
+		if (other_epoch || label <= cursor) {
 			batch.Delete(this->_cf_meta, last);
 			dropped++;
 		}

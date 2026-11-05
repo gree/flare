@@ -629,6 +629,62 @@ void test_history_successor_prepare_commit_at_promotion_pins_wal() {
 	cut_remove_path(dir, NULL);
 }
 
+// History continuation (design 6th rev. §8-3): the meta family is kept
+// across a commit; its rows of the previous epoch are absent for every
+// decision and the tombstone GC drops them whatever their label (a label
+// of another sequence space is not compared with the new cursor).
+void test_history_commit_keeps_meta_and_gc_drops_old_epoch_rows() {
+	const char dir[] = "tmp_rocksdb_history_meta";
+	storage_rocksdb* s = make_small_wal(dir);
+	cut_assert_equal_int(0, s->open());
+	const string e0 = s->get_source_epoch();
+	const string inc = s->get_incarnation();
+	storage::entry d1; d1.key = "gone";
+	s->apply_forwarded_change(e0, inc, 900000, d1, true);   // a tombstone far above any cursor
+	uint64_t n = 0;
+	string why;
+	cut_assert_equal_int(0, s->count_repl_tombstones(n, why));
+	cut_assert_equal_int(1, (int)n);
+	// with the old epoch its label is above the cursor: kept by the GC
+	s->collect_tombstones(256);
+	cut_assert_equal_int(0, s->count_repl_tombstones(n, why));
+	cut_assert_equal_int(1, (int)n);
+	storage_rocksdb::pending_history in;
+	in.hid = "p0-a1-meta";
+	in.successor = "succ:12121";
+	in.from_epoch = e0;
+	in.to_epoch = "99:meta";
+	in.seq = 5;
+	in.master_id = "m";
+	in.deadline_ms = wal_pin::now_ms() + 60000;
+	string res;
+	cut_assert_equal_int(0, s->history_replica_prepare(in, inc, res));
+	cut_assert_equal_int(1, s->history_on_map(0, "succ:12121"));
+	// committed: the row is still there (the family was not dropped) ...
+	cut_assert_equal_int(0, s->count_repl_tombstones(n, why));
+	cut_assert_equal_int(1, (int)n);
+	// ... a change of the new epoch is decided without it ...
+	storage::entry p1;
+	p1.key = "gone";
+	p1.flag = 0;
+	p1.expire = 0;
+	p1.version = 1;
+	p1.size = 4;
+	shared_byte pd(new uint8_t[4]);
+	memcpy(pd.get(), "back", 4);
+	p1.data = pd;
+	cut_assert_equal_int(storage_rocksdb::apply_applied, s->apply_forwarded_change("99:meta", s->get_incarnation(), 6, p1, false));
+	// ... and the old-epoch rows go at the next collection
+	storage::entry d2; d2.key = "other";
+	s->apply_forwarded_change(e0, inc, 900001, d2, true);    // refused: another epoch, writes nothing
+	s->collect_tombstones(256);
+	cut_assert_equal_int(0, s->count_repl_tombstones(n, why));
+	cut_assert_equal_int(0, (int)n);
+	s->close();
+	delete s;
+	cut_remove_path(dir, NULL);
+}
+
 void test_wal_incremental_replication_basic() {
 	storage_rocksdb* master = make_rocksdb(wal_master_dir);
 	storage_rocksdb* slave  = make_rocksdb(wal_slave_dir);

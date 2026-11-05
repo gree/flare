@@ -3076,6 +3076,16 @@ int storage_rocksdb::history_commit(const string& hid, string& result) {
 			return -1;
 		}
 		pinned_here = (pr == "pinned");
+		// the range retained must be exactly this history's S
+		const wal_pin_status w = this->get_wal_pin_status();
+		if (w.state != "active" || w.hid != p.hid || w.seq != p.seq) {
+			if (pinned_here) {
+				string rr;
+				this->wal_pin_release(p.hid, rr);
+			}
+			result = "refused:pin_mismatch";
+			return -1;
+		}
 	}
 	this->_wholelock_wrlock_copy_change();
 	int r = -1;
@@ -3286,6 +3296,7 @@ void storage_rocksdb::_wal_pin_before_open(rocksdb::DBOptions& opts) {
 	}
 	this->_wal_pin_state = st;
 	this->_wal_pin = p;
+	this->_wal_pin_requested_deadline = 0;
 	this->_wal_pin_reason = why;
 	this->_wal_pin_deletions_disabled = false;
 	this->_wal_pin_protected_open = (st == wal_pin::state_valid || st == wal_pin::state_invalid);
@@ -3359,8 +3370,17 @@ int storage_rocksdb::wal_pin_set(const string& hid, uint64_t seq, uint64_t deadl
 	pthread_mutex_lock(&this->_mutex_wal_pin);
 	int r = -1;
 	if (this->_wal_pin_state == wal_pin::state_valid && this->_wal_pin.hid == hid) {
-		result = "already";
-		r = 0;
+		// idempotent only for the SAME pin (review of f0171df, P2): the
+		// sequence and the requested deadline must match, else the caller
+		// would be told S is retained while another range is
+		const bool same_deadline = deadline_ms == this->_wal_pin.deadline_ms
+			|| (this->_wal_pin_requested_deadline != 0 && deadline_ms == this->_wal_pin_requested_deadline);
+		if (seq == this->_wal_pin.seq && same_deadline) {
+			result = "already";
+			r = 0;
+		} else {
+			result = "refused:different_pin";
+		}
 	} else if (this->_wal_pin_state == wal_pin::state_valid || this->_wal_pin_state == wal_pin::state_invalid) {
 		result = "refused:another_pin";
 	} else {
@@ -3388,6 +3408,7 @@ int storage_rocksdb::wal_pin_set(const string& hid, uint64_t seq, uint64_t deadl
 			this->_wal_pin_deletions_disabled = true;
 			this->_wal_pin_state = wal_pin::state_valid;
 			this->_wal_pin = p;
+			this->_wal_pin_requested_deadline = deadline_ms;
 			this->_wal_pin_reason = "";
 			log_notice("WAL_PIN: handover %s pins the WAL from seq %llu until %llu", hid.c_str(), (unsigned long long)seq, (unsigned long long)deadline_ms);
 			result = "pinned";

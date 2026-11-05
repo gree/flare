@@ -236,6 +236,9 @@ protected:
 	// this handle holds one DisableFileDeletions for the pin
 	bool _wal_pin_deletions_disabled = false;
 	uint64_t _wal_pin_max_ms = 120000;
+	// the deadline the current pin was REQUESTED with (before the cap); 0
+	// after an open from the marker (only the stored deadline is known)
+	uint64_t _wal_pin_requested_deadline = 0;
 	int64_t _wal_pin_floor_bytes = -1;	// -1 = half the rebuild reserve
 	uint64_t _wal_pin_released = 0;
 	uint64_t _wal_pin_floor_releases = 0;

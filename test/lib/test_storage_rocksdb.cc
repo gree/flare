@@ -414,10 +414,18 @@ void test_wal_pin_open_keeps_archived_wal_and_release_purges() {
 	cut_assert_equal_int(0, s->open());
 	const uint64_t first = fill_and_archive(s, "pin");
 	string res;
-	cut_assert_equal_int(0, s->wal_pin_set("h1", first, wal_pin::now_ms() + 60000, res));
+	const uint64_t dl1 = wal_pin::now_ms() + 60000;
+	cut_assert_equal_int(0, s->wal_pin_set("h1", first, dl1, res));
 	cut_assert_equal_string("pinned", res.c_str());
-	cut_assert_equal_int(0, s->wal_pin_set("h1", first, wal_pin::now_ms() + 60000, res));
+	cut_assert_equal_int(0, s->wal_pin_set("h1", first, dl1, res));
 	cut_assert_equal_string("already", res.c_str());
+	// the same hid with another sequence or another deadline is another pin
+	// (review of f0171df, P2)
+	cut_assert_equal_int(-1, s->wal_pin_set("h1", first + 1, dl1, res));
+	cut_assert_equal_string("refused:different_pin", res.c_str());
+	cut_assert_equal_int(-1, s->wal_pin_set("h1", first, dl1 + 1000, res));
+	cut_assert_equal_string("refused:different_pin", res.c_str());
+	cut_assert_equal_int((int)first, (int)s->get_wal_pin_status().seq);
 	cut_assert_equal_int(-1, s->wal_pin_set("h2", first, wal_pin::now_ms() + 60000, res));
 	// a crash: the process goes away with the marker on disk
 	s->close();
@@ -724,6 +732,31 @@ void test_history_promote_prepare_other_request_refused_and_unreadable_fails_clo
 	cut_assert_equal_string("discarded", res.c_str());
 	cut_assert_equal_int(0, s->history_discard("p0-x", "test", res));
 	cut_assert_equal_string("already", res.c_str());
+	s->close();
+	delete s;
+	cut_remove_path(dir, NULL);
+}
+
+// review of f0171df (A1 / A2), P2: a successor commit against a WAL pin of
+// the same hid but another sequence refuses and commits nothing
+void test_history_commit_refuses_a_pin_of_another_sequence() {
+	const char dir[] = "tmp_rocksdb_history_pin_seq";
+	storage_rocksdb* s = make_small_wal(dir);
+	cut_assert_equal_int(0, s->open());
+	cut_assert_equal_int(0, storage_set_string(s, "a", "1"));
+	const string e0 = s->get_source_epoch();
+	storage_rocksdb::pending_history out;
+	string res;
+	const uint64_t dl = wal_pin::now_ms() + 60000;
+	cut_assert_equal_int(0, s->history_promote_prepare("p0-pin", 0, "me:12121", dl, out, res));
+	// a pin of the same hid already holds ANOTHER position
+	cut_assert_equal_int(0, s->wal_pin_set("p0-pin", out.seq + 5, wal_pin::now_ms() + 60000, res));
+	cut_assert_equal_int(-1, s->history_commit("p0-pin", res));
+	cut_assert_equal_string(e0.c_str(), s->get_source_epoch().c_str());
+	storage_rocksdb::pending_history p;
+	cut_assert_true(s->get_pending_history(p));
+	cut_assert_equal_int((int)out.seq + 5, (int)s->get_wal_pin_status().seq);
+	s->wal_pin_release("p0-pin", res);
 	s->close();
 	delete s;
 	cut_remove_path(dir, NULL);

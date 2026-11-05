@@ -47,7 +47,7 @@ structure ReplicaObs where
   activeSlave : Bool := false
   ready : Bool := false
   r3Eligible : Bool := false
-  partial : Bool := false
+  partialCopy : Bool := false
   quarantined : Bool := false
   repairPending : Bool := false
   deriving Repr, BEq
@@ -61,7 +61,7 @@ def excluded (src : SourceObs) (lBefore lAfter : Option Nat) (r : ReplicaObs) : 
     else if !r.activeSlave then some "not an Active slave"
     else if !r.ready then some "the pod is not Ready"
     else if !r.r3Eligible then some "not R3 eligible"
-    else if r.partial then some "the copy is partial"
+    else if r.partialCopy then some "the copy is partial"
     else if r.quarantined then some "a quarantined copy is kept"
     else if r.repairPending then some "a replica repair is pending"
     else if r.bindingAtStart.isNone || r.bindingNow.isNone || r.bindingAtStart != r.bindingNow then

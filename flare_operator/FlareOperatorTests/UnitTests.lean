@@ -2514,7 +2514,7 @@ private def checkHistoryContinuation (ctx : Ctx) : IO Unit := do
       && (excluded src (some 100) (some 100) { ok with ready := false }).isSome
       && (excluded src (some 100) (some 100) { ok with activeSlave := false }).isSome
       && (excluded src (some 100) (some 100) { ok with r3Eligible := false }).isSome
-      && (excluded src (some 100) (some 100) { ok with partial := true }).isSome
+      && (excluded src (some 100) (some 100) { ok with partialCopy := true }).isSome
       && (excluded src (some 100) (some 100) { ok with quarantined := true }).isSome
       && (excluded src (some 100) (some 100) { ok with repairPending := true }).isSome)
   let (prep, out) := partition src (some 100) (some 100) [ok, { ok with key := "r2", cursor := some 98 }, { ok with key := "r3" }]

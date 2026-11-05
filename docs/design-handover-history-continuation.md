@@ -1,4 +1,17 @@
-# 順序付き引き継ぎで履歴を継ぐ（replica を full rebuild しない）— 設計案 第 6 版（＋ 追補 1〜9）
+# 順序付き引き継ぎで履歴を継ぐ（replica を full rebuild しない）— 設計案 第 6 版（＋ 追補 1〜10）
+
+> **追補 10（2026-11-06、追補 9 98978e3 への reviewer の指摘 P1）**
+>
+> FlareCluster の API group は `flare.gree.net` である。
+> - Role の `apiGroups` と SubjectAccessReview の `resourceAttributes.group` の両方に、`flare.gree.net` を明記した（追補 9 §1・§2 を書き換え）。
+> - 空にすると core group になり、権限のある承認者まで拒否される。
+>
+> 試験（追補 9 §3 に加える。どれも `kubectl --as` で impersonation する）
+> - この Role に結び付けた利用者 → SubjectAccessReview が allow になり、receipt が付く。
+> - FlareCluster の `update` だけを持つ利用者 → deny になり、UPDATE が拒否される。
+> - `apiGroups: [""]`（core）で同じ resource・動詞を与えた利用者 → deny。group が一致しない権限では発動できないことの対照。
+> - 加えて unit で、webhook が作る SubjectAccessReview の JSON に `group: flare.gree.net` が入ることを固定する。
+
 
 > **追補 9（2026-11-06、追補 8 7fca5e6 への reviewer の指摘 P1）**
 >
@@ -8,12 +21,12 @@
 > 1. **専用の権限**
 >    - 実在しない subresource `flareclusters/handover-fence` に対する動詞 `break-glass` を使う。
 >      - Kubernetes の RBAC は、存在しない subresource・動詞にも Role で権限を与えられる。
->      - 例: `resources: ["flareclusters/handover-fence"]`、`verbs: ["break-glass"]`。
+>      - Role の rule: `apiGroups: ["flare.gree.net"]`、`resources: ["flareclusters/handover-fence"]`、`verbs: ["break-glass"]`（追補 10: apiGroups を明記。空は core group で、CR の group と一致しない）。
 >    - chart は、この Role を作る（`<fullname>-handover-fence`）。誰に与えるか（RoleBinding）は運用者が決め、既定では誰にも与えない。
 >    - FlareCluster の通常の update 権限だけでは発動できない。
 > 2. **mutating webhook での判定**
 >    - `handover-fenced` が増えた、または変わった UPDATE では、要求者（AdmissionReview の userInfo）について `SubjectAccessReview` を作って問い合わせる。
->      - 問い合わせの中身: verb `break-glass`、resource `flareclusters`、subresource `handover-fence`、その namespace と name。
+>      - 問い合わせの中身（`resourceAttributes`）: group `flare.gree.net`、verb `break-glass`、resource `flareclusters`、subresource `handover-fence`、その namespace と name（追補 10: group を明記）。
 >      - SubjectAccessReview は問い合わせで、何も永続化しない。`sideEffects: None` と両立する。
 >      - operator の ClusterRole に `subjectaccessreviews` の `create` を足す。
 >    - 許可されたときだけ receipt を足す。

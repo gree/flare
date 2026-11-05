@@ -1,4 +1,62 @@
-# 順序付き引き継ぎで履歴を継ぐ（replica を full rebuild しない）— 設計案 第 5 版
+# 順序付き引き継ぎで履歴を継ぐ（replica を full rebuild しない）— 設計案 第 6 版
+
+> **第 6 版の変更（2026-11-06、第 5 版 855dbc6 への reviewer の指摘 P1 2 点）**
+>
+> 1. **「全部残す」の具体値と、その根拠**
+>    - RocksDB の版
+>      - 本番の image は Ubuntu noble の `librocksdb8.9`（`Dockerfile.flare-node-rocksdb`）。
+>      - nix の試験は nixpkgs の 8.3.2。
+>      - 試験は両方の版で行う。nix-linux の cutter と、image の E2E。
+>    - 前提にする仕様（公式の Options の説明）
+>      - `WAL_ttl_seconds` と `WAL_size_limit_MB` が両方 0 なら、不要になった WAL はすぐ削除される。
+>      - どちらかが 0 でなければ、archive に移される。
+>      - archive の削除は、TTL か size を超えたときだけ。
+>      - `WAL_ttl_seconds` が 0 でなく `WAL_size_limit_MB` が 0 なら、TTL だけで消す。
+>      - flared は今、両方を設定している（`storage_rocksdb.cc:241-242`）。
+>    - marker が有効な open での値
+>      - `WAL_ttl_seconds = 315360000`（10 年）、`WAL_size_limit_MB = 0`。
+>        - 不要になった WAL は archive に移り、10 年は消えない。
+>      - `recycle_log_file_num = 0` を明示する。
+>        - recycle は WAL の内容を上書きして `GetUpdatesSince` を壊すため。今も使っていないが、明示して検査する。
+>      - RocksDB に open 時の後片付けを止める option があれば使う（実装時に 8.3.2 と 8.9 で確かめる）。
+>        - 根拠にはしない。上の値だけで守れることを、次の試験で示す。
+>    - **示す試験**（設計の合格条件に入れる）
+>      - E2E `history-continuation-wal-pin-restart`
+>        1. 新 master の WAL の設定を小さくする（`walTtlSeconds 60`、`walSizeLimitMb 16`）。
+>        2. 保持の間に、上限を超える量の WAL を作る（数十 MB の書き込み）。
+>        3. 新 master の flared を kill -9 し、TTL より長く（90 s）止めてから起動する。
+>        4. 起動の後、follower の `repl_sync_wal S+1` が成功し、`lsn_purged` にならないことを確かめる。
+>        5. 同じ手順を marker 無しでも行い、そちらは `lsn_purged` になることを確かめる。
+>           - これで、この試験が実際に削除の条件を作っていることを示す（対照）。
+>      - cutter `test_wal_pin_open`
+>        - 8.3.2 で、TTL と size を小さくした DB を作り、archive に WAL を置く。
+>        - marker の値で open した後、S+1 からの `GetUpdatesSince` が読めることを示す。
+>        - 対照として、通常の値で open すると読めないことも示す。
+> 2. **marker が読めないときは fail closed**
+>    - `WAL_PIN` が存在する限り、「marker 無し」としては扱わない。次のどれでも、保護の値（上の値と、open 直後の `DisableFileDeletions`）で open する。
+>      - 読めない（権限、I/O エラー）
+>      - 形式が違う（項目の数、数値でない、hid が空）
+>      - 期限を安全に判定できない
+>        - 時計が期限より大きく遅れている。目安は、期限が今より保持の上限（設定の 2 倍）より先にある。
+>        - 時計が読めない。
+>    - そのとき
+>      - CRITICAL のログを出す。
+>      - stats `wal_pin_state=invalid` と、その理由を出す。
+>      - marker は自動では消さない。
+>    - 解き方は 2 つ。
+>      - operator が、stats で読んだ内容に合う `history_release <hid>` を送る。
+>      - 内容を読めない marker は、人が承認して `history_release_invalid <起動の boot id>` を送る。
+>        - 記録を残す。
+>        - 他の起動の指示とは取り違えない。
+>    - 空きの下限に当たったときは、invalid のままでも保持を解く（第 4 版 §3 と同じ）。
+>      - master のデータは失わない。
+>      - follower は full rebuild に戻る。
+>      - これは、記録された例外として扱う。
+>    - 期限が正しく読めて、その期限が過ぎている marker だけを、起動時に消してよい。
+>    - 試験
+>      - 壊れた marker、読めない marker（権限 000）、期限が遠い未来の marker のそれぞれで、保護の値で open し、`wal_pin_state=invalid` になる。
+>      - 解除の指示で通常に戻る。
+
 
 > **第 5 版の変更（2026-11-06、第 4 版 8e4020c への reviewer の指摘 P1）**
 >

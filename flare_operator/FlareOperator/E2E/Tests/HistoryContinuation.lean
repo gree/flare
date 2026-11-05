@@ -170,4 +170,107 @@ def walPinRestartSuite : TestSuite := {
   ]
 }
 
+-- ─── a planned master switch keeps the remaining replica's copy (A4) ─────
+
+private def hcCfg : ClusterConfig := {
+  name := "hist-cont-handover"
+  «namespace» := "flare-hist-cont-handover"
+  partitions := 1
+  replicas := 3
+  operatorName := "flare-operator"
+  debugPod := "debug-hist-cont-handover"
+  storageBackend := "rocksdb"
+  useTmpfs := true
+  tmpfsSize := "512Mi"
+  flaredMemoryLimit := "512Mi"
+  flaredMemoryRequest := "256Mi"
+  operatorEnv := [("FLARE_OPERATOR_HISTORY_CONTINUATION", "on")]
+}
+
+private def hcCmd (ip cmd : String) : IO String := do
+  match ← execInDebugPod hcCfg.debugPod hcCfg.«namespace» s!"printf '{cmd}\\r\\nquit\\r\\n' | nc -w 10 {ip} {hcCfg.flarePort}" with
+  | .ok o => return o
+  | .error e => return s!"ERROR {e}"
+
+private def hcStat (ip key : String) : IO (Option String) := do
+  return statOf (← hcCmd ip "stats") key
+
+private def hcWrite (ip pfx : String) (n : Nat) : IO Nat := do
+  let cmd := s!"(awk 'BEGIN\{for(i=0;i<{n};i++) printf \"set {pfx}_%d 0 0 5\\r\\nvalue\\r\\n\", i}'; sleep 2) | nc -w 60 {ip} {hcCfg.flarePort} | grep -c STORED"
+  match ← execInDebugPod hcCfg.debugPod hcCfg.«namespace» cmd with
+  | .ok o => return o.trim.toNat?.getD 0
+  | .error _ => return 0
+
+def handoverSuite : TestSuite := {
+  name := "history-continuation-handover"
+  setup := do
+    deployCluster hcCfg
+    IO.sleep 50000
+  teardown := cleanupCluster hcCfg
+  onFailure := dumpClusterDiagnostics hcCfg.«namespace» s!"app={hcCfg.operatorName}"
+  tests := [
+    { name := "history continuation (A4): a graceful delete of the master hands over and the remaining replica COMMITS the continued history — no staged rebuild, no snapshot bootstrap, same epoch as the new master, it follows the new master's writes"
+      run := do
+        let ns := hcCfg.«namespace»
+        let view := fun (_ : Unit) => do
+          return parseNodeSync (← operatorTcpCmd hcCfg.debugPod ns hcCfg.operatorName hcCfg.operatorPort "node sync")
+        let entries ← view ()
+        let some mFqdn := findMasterFqdn entries 0 | return .fail "no Active P0 master"
+        let slaves := (entries.filter fun e => e.role == 1 && e.state == 0 && e.partition == 0).map (podOf ·.fqdn)
+        let [s1, s2] := slaves | return .fail s!"precondition: want 2 Active slaves, have {slaves}"
+        let mPod := podOf mFqdn
+        let some mIp ← getPodIp mPod ns | return .fail "no master IP"
+        if (← hcWrite mIp "pre" 300) < 300 then return .fail "precondition writes not all STORED"
+        -- both replicas follow the master's WAL up to its last sequence
+        let caught ← waitForCondition "both replicas' follow cursor reaches the master's last sequence" 180 do
+          let some l := (← hcStat mIp "rocksdb_latest_sequence_number").bind String.toNat? | return false
+          let mut ok := true
+          for r in [s1, s2] do
+            let some ip ← getPodIp r ns | return false
+            let c := (← hcStat ip "rocksdb_repl_last_lsn").bind String.toNat?
+            let st := (← hcStat ip "repl_follow_state")
+            ok := ok && c == some l && st == some "following"
+          return ok
+        if !caught then return .fail "precondition: the replicas did not catch up by WAL follow (is follow on?)"
+        let mut before : List (String × (Option String × Option String)) := []
+        for r in [s1, s2] do
+          let some ip ← getPodIp r ns | return .fail s!"no IP for {r}"
+          before := before ++ [(r, ((← hcStat ip "rocksdb_staged_switched"), (← hcStat ip "rocksdb_snapshot_bootstrap")))]
+        let t0 := (← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%SZ"] }).stdout.trim
+        discard <| kubectl ["delete", "pod", mPod, "-n", ns, "--wait=false"]
+        -- the new master is one of the replicas; the other stays Slave/Active
+        let switched ← waitForCondition "a replica is the Active master and the other an Active slave" 240 do
+          let es ← view ()
+          let m := (findMasterFqdn es 0).map podOf
+          return m.any (fun x => x == s1 || x == s2)
+            && (es.filter fun e => e.role == 1 && e.state == 0 && e.partition == 0 && (podOf e.fqdn == s1 || podOf e.fqdn == s2)).length == 1
+        if !switched then return .fail "no handover to a replica within 240 s"
+        let es ← view ()
+        let some newM := (findMasterFqdn es 0).map podOf | return .fail "no master after the switch"
+        let other := if newM == s1 then s2 else s1
+        let some oIp ← getPodIp other ns | return .fail "no IP for the remaining replica"
+        let some nIp ← getPodIp newM ns | return .fail "no IP for the new master"
+        let opLog ← match ← kubectl ["logs", "-n", ns, "-l", s!"app={hcCfg.operatorName}", "--since-time", t0, "--tail=-1"] with
+          | .ok o => pure o | .error _ => pure ""
+        let flLog ← match ← kubectl ["logs", "-n", ns, other, "-c", "flared", "--since-time", t0] with
+          | .ok o => pure o | .error _ => pure ""
+        let committed := containsSubstr flLog "COMMITTED as replica"
+        let after := ((← hcStat oIp "rocksdb_staged_switched"), (← hcStat oIp "rocksdb_snapshot_bootstrap"))
+        let eO := (← hcStat oIp "rocksdb_source_epoch")
+        let eN := (← hcStat nIp "rocksdb_source_epoch")
+        let wrote ← hcWrite nIp "post" 200
+        let follows ← waitForCondition "the remaining replica follows the new master" 120 do
+          let some l := (← hcStat nIp "rocksdb_latest_sequence_number").bind String.toNat? | return false
+          return ((← hcStat oIp "rocksdb_repl_last_lsn").bind String.toNat?) == some l
+        let phases := (opLog.splitOn "\n").filter (fun l => containsSubstr l "HANDOVER p0" && containsSubstr l " -> ")
+        IO.eprintln s!"# new master {newM}, remaining {other}: committed={committed}; staged/snapshot before {before.lookup other} after {after}; epoch remaining {eO} new master {eN}; post writes {wrote}/200; follows={follows}\n# phases: {phases.map (·.trim.take 160)}"
+        if !committed then return .fail s!"the remaining replica {other} did not commit the continued history (no 'COMMITTED as replica' in its log)"
+        if before.lookup other != some after then return .fail s!"the remaining replica rebuilt (staged/snapshot {before.lookup other} -> {after})"
+        if eO.isNone || eO != eN then return .fail s!"epochs differ: remaining {eO}, new master {eN}"
+        if wrote < 200 then return .fail s!"post-switch writes {wrote}/200"
+        if !follows then return .fail "the remaining replica does not follow the new master's WAL"
+        return .pass }
+  ]
+}
+
 end FlareOperator.E2E.Tests.HistoryContinuation

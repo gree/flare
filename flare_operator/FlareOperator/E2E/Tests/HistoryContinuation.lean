@@ -185,6 +185,10 @@ private def hcCfg : ClusterConfig := {
   flaredMemoryLimit := "512Mi"
   flaredMemoryRequest := "256Mi"
   operatorEnv := [("FLARE_OPERATOR_HISTORY_CONTINUATION", "on")]
+  -- the node guard refuses the master's first graceful delete and starts
+  -- the ordered handover; without it the delete goes through and the
+  -- failover rules promote (42117591864: no HANDOVER, a lagging promotion)
+  nodeGuard := true
 }
 
 private def hcCmd (ip cmd : String) : IO String := do
@@ -237,7 +241,16 @@ def handoverSuite : TestSuite := {
           let some ip ← getPodIp r ns | return .fail s!"no IP for {r}"
           before := before ++ [(r, ((← hcStat ip "rocksdb_staged_switched"), (← hcStat ip "rocksdb_snapshot_bootstrap")))]
         let t0 := (← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%SZ"] }).stdout.trim
-        discard <| kubectl ["delete", "pod", mPod, "-n", ns, "--wait=false"]
+        -- refused first (the handover starts), allowed once the master is a
+        -- proxy: repeat the graceful delete until the pod is gone
+        let mUid ← match ← kubectlGetJsonpath "pod" mPod ns "{.metadata.uid}" with
+          | .ok o => pure o.trim | .error _ => pure ""
+        let gone ← waitForCondition s!"the master {mPod} is deleted after its handover (graceful deletes repeated)" 240 do
+          discard <| kubectl ["delete", "pod", mPod, "-n", ns, "--wait=false"]
+          match ← kubectlGetJsonpath "pod" mPod ns "{.metadata.uid}" with
+          | .ok o => return o.trim != mUid
+          | .error _ => return true
+        if !gone then return .fail "the master was not deleted within 240 s (the node guard kept refusing)"
         -- the new master is one of the replicas; the other stays Slave/Active
         let switched ← waitForCondition "a replica is the Active master and the other an Active slave" 240 do
           let es ← view ()

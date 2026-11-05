@@ -1,4 +1,54 @@
-# 順序付き引き継ぎで履歴を継ぐ（replica を full rebuild しない）— 設計案 第 3 版
+# 順序付き引き継ぎで履歴を継ぐ（replica を full rebuild しない）— 設計案 第 4 版
+
+> **第 4 版の変更（2026-11-06、第 3 版 338c2fe への reviewer の変更要求を受けて）**
+>
+> 第 3 版の節（cursor の一致を根拠にする）は維持する。次の 4 点を加える・改める。
+>
+> 1. **完了条件と pf-dev（follow off）の扱い**
+>    - この Issue の完了条件は次の 2 つ。
+>      - follow が有効なクラスタで、計画的な master の切替で残りの replica が full rebuild しないこと（実装、unit、E2E）。
+>      - follow が無効なクラスタでは、従来どおり full rebuild になること（変わらないことの確認）。
+>    - pf-dev で follow を有効にするのは、別の Issue（`flare-pfdev-follow-on`）で行う。
+>      - 負荷と CPU を検証し、ユーザーが判断する。
+>    - **残るリスク**: pf-dev で follow を有効にするまでは、master の切替で残りの replica が full rebuild になる。
+>      - tmpfs では `no_space` で止まる。
+>      - それまでの運用: master の切替（master の node の cordon・drain、rc の入れ替え）を避ける。
+>      - 避けられないときは、止まった replica のコピーを `FlareCopyDiscardApproval` で捨てるか、容量を増やす。どちらもユーザーの判断で行う。
+> 2. **H で L が動かないこと**
+>    - V1 の後も、source（旧 master）の sequence は書き込み以外で進み得る。
+>      - reaper の削除、orphan_purge、lazy expire の物理削除、metadata・cursor の Put。
+>    - そこで `maintenance_pause <hid>` を、旧 master・後継・各 replica の全員に送る（期限付き）。
+>      - 止めている間は、これらの変更を起こさない。
+>      - L1 の書き込み区間で、止まったことを確認する。
+>    - L は、比較の前後で 2 回読む。
+>      - 1 回目は全 replica の cursor を読む前、2 回目は prepare の直前。
+>      - `L_before == L_after` のときだけ継続を許す。動いていたら、継続をあきらめて full rebuild に回す（安全側）。
+>    - stats の読み取りは、毎回 END まで揃ったものだけを使う。
+>      - 読み取りは pod UID・boot id・copy id・epoch に束縛する。読んだ値と prepare の要求で、これらが同じであることを確かめる。
+>      - follow の状態（following）と identity の確認は残す。
+> 3. **WAL の保持の上限と、上限に達したとき**
+>    - `DisableFileDeletions` の間は、WAL の TTL もサイズの上限も効かない（既存の snapshot のコメントと同じ）。
+>      - そのため `walSizeLimitMb` を上限には使えない。
+>    - 保持の上限は、空き容量で決める。
+>      - 新 master は、保持の間、データディレクトリの空き（tmpfs では `rebuild_space_available` と同じ計算）を 1 秒ごとに見る。
+>      - 空きが下限を下回ったら、すぐに保持をやめる。下限の既定は `rebuildReserveBytes` の 1/2、設定で変えられる。
+>    - 保持の期限は既定 120 s。follow の poll は 200 ms なので、通常は数秒で全員が S を越える見込み（E2E で測る）。
+>    - 保持をやめた後に `lsn_purged` になった follower は、full rebuild に戻る。master のデータは失わない。
+>    - E2E では、保持の間の WAL の増分（MB）、空きの最小値、保持の時間を記録する。
+> 4. **保持を再起動に耐えるようにする、release を冪等にする**
+>    - 保持の意図（hid、S、期限）は、default CF に 1 バッチで永続化する。
+>      - flared は起動時、WAL の削除を始める前に意図を読む。
+>      - 期限が残っていれば、もう一度 `DisableFileDeletions` する。
+>    - `history_release <hid>` は冪等にする。
+>      - 意図を消し、保持を解く。同じ hid の 2 回目の release は何もしない。
+>      - 期限切れでも同じ扱いにする。
+>    - 追加する試験
+>      - 保持の間に operator を止める → 期限で解ける。
+>      - 保持の間に新 master の flared を再起動する → 意図から保持が戻る。期限で解ける。
+>      - 1 つの follower を長く止める → 期限か空きの下限で解ける。その follower は full rebuild、他は継続。
+>      - release の再送。
+>      - 空きの下限に当たる負荷 → すぐに保持をやめ、エラー 0。
+
 
 > **第 3 版の変更（2026-11-06、第 2 版 2f2b0e3 への reviewer の変更要求を受けて）**
 >

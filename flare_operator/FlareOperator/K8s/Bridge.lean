@@ -18,6 +18,7 @@ import FlareOperator.Kubectl
 import Lean.Data.Json
 import FlareOperator.StateMachine.ReplicaRepair
 import FlareOperator.StateMachine.Handover
+import FlareOperator.StateMachine.HandoverDrive
 import FlareOperator.StateMachine.NodeMove
 import FlareOperator.StateMachine.LeaseFence
 
@@ -507,6 +508,47 @@ def writeHandovers (crName ns : String) (l : Handover.Ledger) : IO (Except Strin
       "--subresource=status", "--type=merge", "-p", patch] with
   | .error e => return .error e
   | .ok _ => return .ok ()
+
+/-- Compare-and-swap of `status.handovers` before a history-continuation send
+    (design addendum 3 §1): reads the stored record, refuses when it was
+    written by a newer leader or is a phase ahead of `x`
+    (HandoverDrive.casAllowed), then a JSON patch whose `test` holds exactly
+    what was read and whose `add` writes `new`. Both calls are bounded by
+    `boundSec` together; a timeout is "outcome unknown" (the caller sends
+    nothing this tick and reads again next tick). -/
+def casHandovers (crName ns : String) (x : Handover.Entry) (new : Handover.Ledger) (epoch : Nat)
+    (boundSec : Nat) : IO (Except String Unit) := do
+  let t0 ← IO.monoMsNow
+  let rd := max 1 (boundSec / 2)
+  let got ← IO.Process.output { cmd := "timeout", args := #["-k", "1", toString rd, "kubectl", "get", "flarecluster", crName, "-n", ns, "-o", "json"] }
+  if got.exitCode != 0 then
+    return .error s!"handover CAS: the record could not be read (exit {got.exitCode}); nothing was written"
+  let some j := (Lean.Json.parse got.stdout).toOption
+    | return .error "handover CAS: the record did not parse; nothing was written"
+  let raw := (j.getObjVal? "status" >>= (·.getObjVal? "handovers")).toOption
+  let stored ← match raw with
+    | none => pure (some ({} : Handover.Ledger))
+    | some r => pure (Handover.Ledger.fromJson? r)
+  let some stored := stored
+    | return .error "handover CAS: status.handovers is present but does not parse; nothing was written"
+  match HandoverDrive.casAllowed stored x epoch with
+  | .error e => return .error s!"handover CAS refused: {e}"
+  | .ok _ =>
+    let spent := (← IO.monoMsNow) - t0
+    if spent + 1000 > boundSec * 1000 then
+      return .error "handover CAS: no time left after the read; nothing was written"
+    let left := (boundSec * 1000 - spent) / 1000
+    let ops : List Lean.Json :=
+      (match raw with
+       | some o => [Lean.Json.mkObj [("op", "test"), ("path", "/status/handovers"), ("value", o)]]
+       | none => []) ++
+      [Lean.Json.mkObj [("op", "add"), ("path", "/status/handovers"), ("value", new.toJson)]]
+    let patch := (Lean.Json.arr ops.toArray).compress
+    let args := ["patch", "flarecluster", crName, "-n", ns, "--subresource=status", "--type=json", "-p", patch]
+    let out ← IO.Process.output { cmd := "timeout", args := #["-k", "1", toString (max 1 left), "kubectl"] ++ args.toArray }
+    if out.exitCode == 0 then return .ok ()
+    else if out.exitCode == 124 then return .error s!"handover CAS timed out after {boundSec}s (outcome unknown; re-read)"
+    else return .error s!"handover CAS refused: {out.stderr.trim}"
 
 /-- How many stats connections the operator opened to each pod (every
     `queryPodStats` is one connection to flared, and flared counts it in

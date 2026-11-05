@@ -5,6 +5,7 @@
 -/
 import Lean.Data.Json
 import FlareOperator.StateMachine.Handover
+import FlareOperator.StateMachine.HandoverDrive
 import FlareOperator.StateMachine.K8sReconciler
 import FlareOperator.StateMachine.PromotionEvidence
 
@@ -285,6 +286,71 @@ def results : List (String × Bool) := Id.run do
   r := r ++ [("continuation: the entry's continuation fields survive the status JSON",
               rt.map (fun l => l.entries.map fun x => (x.hid, x.contSeq, x.toEpoch, x.contMasterId, x.prepared, x.committed, x.leaderEpoch, x.phase))
                 == some [(c2.hid, some 500, "9:e", "M", c2.prepared, ["r1:12121"], 4, Phase.committingReplicas)])]
+  -- the drive's pure helpers (flare-hc-op-phases: CAS before send, bindings)
+  let ent : Entry := { prep with hid := "p0-a1-1100", toEpoch := "9:e", contMasterId := "M", v2 := some 9,
+                                 prepared := [("r1:12121", "u2|b2|c2"), ("r2:12121", "u3|b3|c3")] }
+  let rd := fun (b : String) (pend : String) (ep : String) (v : Nat) =>
+    ({ binding := some b, pending := some pend, epoch := some ep, masterId := some "M", version := some v } : HandoverDrive.Reading)
+  r := r ++ [("drive: the CAS needs heldUntil − now ≥ 4 s + 1 s and is cut at min(4 s, left − 1 s)",
+              HandoverDrive.casBound 4 == none && HandoverDrive.casBound 5 == some 4 && HandoverDrive.casBound 60 == some 4
+                && HandoverDrive.casBound (-3) == none)]
+  r := r ++ [("drive: after the answer only the same holder, epoch and time left allow the send",
+              HandoverDrive.leaseKept "a" "a" false 3 3 2 && !HandoverDrive.leaseKept "a" "b" false 3 3 2
+                && !HandoverDrive.leaseKept "a" "a" true 3 3 2 && !HandoverDrive.leaseKept "a" "a" false 3 4 2
+                && !HandoverDrive.leaseKept "a" "a" false 3 3 0)]
+  r := r ++ [("drive: nothing is guarded with the continuation off; on, the continuation phases and entries with a hid are",
+              !HandoverDrive.guarded false ent && !HandoverDrive.guarded false { ent with phase := .rollingBack }
+                && HandoverDrive.guarded true { ent with phase := .committingReplicas } && HandoverDrive.guarded true { fresh with phase := .rollingBack }
+                && HandoverDrive.guarded true { fresh with phase := .promoting, hid := "h" }
+                && !HandoverDrive.guarded true { fresh with phase := .promoting } && !HandoverDrive.guarded true { fresh with phase := .draining }
+                && HandoverDrive.guarded true { fresh with phase := .promoting, contSeq := some 5 })]
+  let st : Ledger := { entries := [{ ent with phase := .committingReplicas, leaderEpoch := 4 }] }
+  let ok? := fun (x : Entry) (ep : Nat) => match HandoverDrive.casAllowed st x ep with | .ok _ => true | .error _ => false
+  r := r ++ [("drive: an older leader's write and a phase written back are refused; the same or a newer epoch, the next phase and another attempt are allowed",
+              !ok? { ent with phase := .committingReplicas } 3 && ok? { ent with phase := .committingReplicas } 4
+                && ok? { ent with phase := .promoting } 5 && !ok? { ent with phase := .preparing } 5
+                && !ok? { ent with phase := .rollingBack, hid := "x" } 3 && ok? { ent with phase := .rollingBack } 4
+                && ok? { ent with phase := .preparing, attempt := 2 } 4
+                && (match HandoverDrive.casAllowed {} ent 1 with | .ok _ => true | .error _ => false))]
+  let good := [("r1:12121", rd "u2|b2|c2" "-" "9:e" 9), ("r2:12121", rd "u3|b3|c3" "-" "9:e" 8)]
+  r := r ++ [("drive: committed needs the same binding, no pending, epoch = toEpoch, master_id and version ≥ V2",
+              HandoverDrive.committedKeys ent good == ["r1:12121"]
+                && HandoverDrive.committedKeys ent [("r1:12121", { rd "u2|b2|c2" "-" "9:e" 9 with binding := some "u9|b2|c2" })] == []
+                && HandoverDrive.committedKeys ent [("r1:12121", { rd "u2|b2|c2" "-" "8:e" 9 with pending := some "-" })] == []
+                && HandoverDrive.committedKeys ent [("r1:12121", rd "u2|b2|c2" "v1 replica h 0 s a 9:e 5 M 1 i" "9:e" 9)] == []
+                && HandoverDrive.committedKeys ent [("r1:12121", { rd "u2|b2|c2" "-" "9:e" 9 with masterId := some "X" })] == []
+                && HandoverDrive.committedKeys { ent with v2 := none } good == [])]
+  let pend := "v1 replica p0-a1-1100 0 s:12121 8:e 9:e 500 M 99999 inc"
+  let p1 := ("r1:12121", rd "u2|b2|c2" pend "8:e" 8)
+  let pending := [p1, ("r2:12121", rd "u3|b3|c3" pend "8:e" 8)]
+  r := r ++ [("drive: zero commit is proven only when EVERY prepared replica was read fresh, bound the same and still pending with its from epoch",
+              HandoverDrive.zeroProven ent pending
+                && !HandoverDrive.zeroProven ent [p1]
+                && !HandoverDrive.zeroProven ent [p1, ("r2:12121", { rd "u3|b3|c3" pend "8:e" 8 with binding := none })]
+                && !HandoverDrive.zeroProven ent [p1, ("r2:12121", rd "u3|b3|c3" "-" "9:e" 9)]
+                && !HandoverDrive.zeroProven ent [p1, ("r2:12121", rd "u3|b3|c3" pend "9:e" 8)]
+                && !HandoverDrive.zeroProven ent [p1, ("r2:12121", rd "u3|b3|c3" "v1 replica OTHER 0 s a 8:e 5 M 1 i" "8:e" 8)]
+                && HandoverDrive.pendingFrom pend "p0-a1-1100" == some "8:e" && (HandoverDrive.pendingFrom "-" "p0-a1-1100").isNone)]
+  let (dEnt, dropped) := HandoverDrive.dropChanged ent [("r1:12121", some "u2|b2|c2"), ("r2:12121", some "u3x|b3|c3")]
+  let (dSame, droppedSame) := HandoverDrive.dropChanged ent [("r1:12121", some "u2|b2|c2"), ("r2:12121", some "u3|b3|cNEW")]
+  let (dAll, _) := HandoverDrive.dropChanged ent [("r1:12121", none), ("r2:12121", some "zz")]
+  let (dAllV1, _) := HandoverDrive.dropChanged { ent with v2 := none } [("r1:12121", none), ("r2:12121", none)]
+  r := r ++ [("drive: a prepared replica whose pod, process or copy changed (or unreadable) is dropped; same process = discard it; none left = promote as before",
+              dEnt.prepared == [("r1:12121", "u2|b2|c2")] && dropped == [("r2:12121", false)]
+                && dSame.prepared.length == 1 && droppedSame == [("r2:12121", true)]
+                && dAll.phase == .promoting && dAll.prepared.isEmpty && dAll.hid == "p0-a1-1100" && !dAll.fullSent
+                && dAllV1.phase == .promoting && dAllV1.hid.isEmpty
+                && (HandoverDrive.dropChanged ent [("r1:12121", some "u2|b2|c2"), ("r2:12121", some "u3|b3|c3")]).2.isEmpty)]
+  r := r ++ [("drive: flared command lines, the promote_prepare reply, safe arguments and the pending's wall deadline",
+              HandoverDrive.promotePrepareCmd "h" 0 "s:12121" 77 == "history promote_prepare h 0 s:12121 77"
+                && HandoverDrive.prepareCmd "h" 0 "s:12121" "8:e" "9:e" 5 "M" 77 "inc" == "history prepare h 0 s:12121 8:e 9:e 5 M 77 inc"
+                && HandoverDrive.discardCmd "h" == "history discard h" && HandoverDrive.releaseCmd "h" == "wal_pin release h"
+                && HandoverDrive.parsePromote "STAT history_result prepared\r\nSTAT history_from_epoch 8:e\r\nSTAT history_to_epoch 9:e\r\nSTAT history_seq 500\r\nSTAT history_master_id M\r\nEND\r\n" == some ("9:e", 500, "M")
+                && (HandoverDrive.parsePromote "STAT history_result already\r\nSTAT history_to_epoch 9:e\r\nSTAT history_seq 500\r\nSTAT history_master_id M\r\nEND").isSome
+                && (HandoverDrive.parsePromote "STAT history_result refused:busy\r\nEND").isNone
+                && (HandoverDrive.parsePromote "STAT history_result prepared\r\nSTAT history_to_epoch 9:e\r\nEND").isNone
+                && HandoverDrive.safeArg "p0-a1-1100" && HandoverDrive.safeArg "pod-0.svc.ns:12121" && !HandoverDrive.safeArg "a b" && !HandoverDrive.safeArg "x'y" && !HandoverDrive.safeArg ""
+                && HandoverDrive.wallDeadline 1000000 5000 12000 == 1007000 && HandoverDrive.wallDeadline 1000000 13000 12000 == 1000000)]
   return r
 
 end FlareOperator.UnitTestsHandover

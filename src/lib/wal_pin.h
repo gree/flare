@@ -66,6 +66,9 @@ state read(const string& data_dir, uint64_t now_ms, uint64_t max_pin_ms, pin& ou
 int write(const string& data_dir, const pin& p);
 // unlink + fsync(dir); 0 when it is gone (also when it was absent)
 int remove(const string& data_dir);
+// TEST SEAM (unit tests only): remove() fails with `err` at the unlink
+// (`after_unlink` false) or at the directory fsync after it (true); 0 clears
+void set_remove_fault_for_test(int err, bool after_unlink = false);
 
 uint64_t now_ms();
 

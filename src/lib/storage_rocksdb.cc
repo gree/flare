@@ -3256,28 +3256,35 @@ void storage_rocksdb::_wal_pin_after_open() {
 
 // caller holds _mutex_wholelock (read) and then _mutex_wal_pin — the order
 // every path takes them in (an open runs under the whole lock and takes
-// _mutex_wal_pin inside). EnableFileDeletions first, then the marker
-// is removed (unlink + fsync of the directory): a crash in between leaves a
-// marker, so the next open still protects.
+// _mutex_wal_pin inside).
+//
+// The marker goes FIRST, deletions are re-enabled only after it is durably
+// gone (review of 2f6294a, P1-1): a release that fails at any step leaves
+// this handle exactly as protected as before (DisableFileDeletions still
+// held, state still valid). An unlink that succeeded with a failed fsync is
+// uncertain (the marker may come back at a crash): it is reported as a
+// failure and the handle stays protected; the next release retries.
 int storage_rocksdb::_wal_pin_release_locked(const string& why) {
-	if (this->_wal_pin_deletions_disabled && this->_db != NULL) {
-		// non-forced: releases only this pin's DisableFileDeletions
-		rocksdb::Status s = this->_db->EnableFileDeletions(false);
-		if (!s.ok()) {
-			log_err("WAL_PIN: EnableFileDeletions failed: %s — the pin of %s stays", s.ToString().c_str(), this->_wal_pin.hid.c_str());
-			return -1;
-		}
-		this->_wal_pin_deletions_disabled = false;
-	}
 	if (wal_pin::remove(this->_data_dir) < 0) {
-		log_err("WAL_PIN: the marker could not be removed: the next open still keeps every WAL file", 0);
+		log_err("WAL_PIN: the marker of %s could not be removed durably: the pin stays (deletions still disabled)", this->_wal_pin.hid.c_str());
 		return -1;
 	}
-	log_notice("WAL_PIN: released the pin of handover %s (seq %llu): %s%s", this->_wal_pin.hid.c_str(), (unsigned long long)this->_wal_pin.seq, why.c_str(),
-		this->_wal_pin_protected_open ? " — this handle was opened with every WAL file kept: archived WAL is now purged by flared with the configured TTL / size" : "");
 	this->_wal_pin_state = wal_pin::state_absent;
 	this->_wal_pin_reason = why;
 	this->_wal_pin_released++;
+	if (this->_wal_pin_deletions_disabled && this->_db != NULL) {
+		// non-forced: releases only this pin's DisableFileDeletions
+		rocksdb::Status s = this->_db->EnableFileDeletions(false);
+		if (s.ok()) {
+			this->_wal_pin_deletions_disabled = false;
+		} else {
+			// over-protecting, never under: deletions stay disabled and the
+			// tick retries the enable
+			log_err("WAL_PIN: EnableFileDeletions after the release of %s failed: %s — deletions stay disabled until it succeeds", this->_wal_pin.hid.c_str(), s.ToString().c_str());
+		}
+	}
+	log_notice("WAL_PIN: released the pin of handover %s (seq %llu): %s%s", this->_wal_pin.hid.c_str(), (unsigned long long)this->_wal_pin.seq, why.c_str(),
+		this->_wal_pin_protected_open ? " — this handle was opened with every WAL file kept: archived WAL is now purged by flared with the configured TTL / size" : "");
 	return 0;
 }
 
@@ -3400,7 +3407,23 @@ int storage_rocksdb::wal_pin_tick(uint64_t now_ms) {
 			}
 		}
 	}
+	if (this->_wal_pin_state == wal_pin::state_absent && this->_wal_pin_deletions_disabled && this->_db != NULL) {
+		// a release whose enable failed: retry it
+		if (this->_db->EnableFileDeletions(false).ok()) {
+			this->_wal_pin_deletions_disabled = false;
+		}
+	}
 	purge = this->_wal_pin_protected_open && this->_wal_pin_state == wal_pin::state_absent;
+	int removed = 0;
+	if (purge) {
+		// the whole destructive section runs under the SAME locks a new pin
+		// takes (review of 2f6294a, P1-2): a pin set concurrently waits
+		// until the purge is over, and a pin set before it is seen here
+		if (_test_hook_wal_purge_decided != NULL) {
+			_test_hook_wal_purge_decided(this);
+		}
+		removed = this->_wal_archive_purge_locked(now_ms);
+	}
 	pthread_mutex_unlock(&this->_mutex_wal_pin);
 	pthread_rwlock_unlock(&this->_mutex_wholelock);
 	{
@@ -3412,9 +3435,15 @@ int storage_rocksdb::wal_pin_tick(uint64_t now_ms) {
 			this->history_discard(ph.hid, "its deadline passed", dr);
 		}
 	}
-	if (!purge) {
+	return removed;
+}
+
+// caller holds _mutex_wholelock (read) and _mutex_wal_pin
+int storage_rocksdb::_wal_archive_purge_locked(uint64_t now_ms) {
+	if (this->_wal_pin_state != wal_pin::state_absent) {
 		return 0;
 	}
+
 	// This handle keeps every archived WAL file (opened under a pin): purge
 	// the archive by the configured policy, as RocksDB would have.
 	const string dir = this->_data_path + "/archive";
@@ -6029,6 +6058,7 @@ uint64_t storage_rocksdb::get_repl_last_lsn() {
 }
 
 void (*storage_rocksdb::_test_hook_reader_checked)() = NULL;
+void (*storage_rocksdb::_test_hook_wal_purge_decided)(storage_rocksdb*) = NULL;
 void (*storage_rocksdb::_test_hook_reap_scanned)() = NULL;
 
 uint64_t storage_rocksdb::_get_repl_last_lsn_locked() {

@@ -156,10 +156,28 @@ int write(const string& data_dir, const pin& p) {
 	return copy_fs::write_file_durable(data_dir, kFile, serialize(p));
 }
 
+namespace {
+int g_remove_fault = 0;
+bool g_remove_fault_after_unlink = false;
+}	// anonymous namespace
+
+void set_remove_fault_for_test(int err, bool after_unlink) {
+	g_remove_fault = err;
+	g_remove_fault_after_unlink = after_unlink;
+}
+
 int remove(const string& data_dir) {
 	const string path = data_dir + "/" + kFile;
+	if (g_remove_fault != 0 && !g_remove_fault_after_unlink) {
+		log_err("WAL_PIN: unlink [%s] failed: %s (injected)", path.c_str(), strerror(g_remove_fault));
+		return -1;
+	}
 	if (::unlink(path.c_str()) != 0 && errno != ENOENT) {
 		log_err("WAL_PIN: unlink [%s] failed: %s", path.c_str(), strerror(errno));
+		return -1;
+	}
+	if (g_remove_fault != 0) {
+		log_err("WAL_PIN: fsync of [%s] after the unlink failed: %s (injected)", data_dir.c_str(), strerror(g_remove_fault));
 		return -1;
 	}
 	return copy_fs::fsync_dir(data_dir);

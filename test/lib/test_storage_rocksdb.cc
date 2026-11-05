@@ -492,6 +492,106 @@ void test_wal_pin_expired_marker_opens_normally() {
 	cut_remove_path(dir, NULL);
 }
 
+// review of 2f6294a, P1-1: a release that fails at the unlink or at the
+// directory fsync leaves the pin in force (state active, deletions still
+// disabled) and S+1 still served; a later release completes it.
+void test_wal_pin_release_failure_keeps_the_pin() {
+	const char dir[] = "tmp_rocksdb_wal_pin_relfail";
+	storage_rocksdb* s = make_small_wal(dir);
+	cut_assert_equal_int(0, s->open());
+	const uint64_t first = fill_and_archive(s, "rf");
+	string res;
+	cut_assert_equal_int(0, s->wal_pin_set("hr", first, wal_pin::now_ms() + 60000, res));
+	sleep(2);
+	wal_pin::set_remove_fault_for_test(EIO, false);
+	cut_assert_equal_int(-1, s->wal_pin_release("hr", res));
+	storage_rocksdb::wal_pin_status w = s->get_wal_pin_status();
+	cut_assert_equal_string("active", w.state.c_str());
+	cut_assert_true(w.deletions_disabled);
+	s->wal_pin_tick(wal_pin::now_ms());
+	cut_assert_true(serves_from(s, first));
+	// the unlink succeeded, the fsync after it failed: uncertain -> still pinned
+	wal_pin::set_remove_fault_for_test(EIO, true);
+	cut_assert_equal_int(-1, s->wal_pin_release("hr", res));
+	w = s->get_wal_pin_status();
+	cut_assert_equal_string("active", w.state.c_str());
+	cut_assert_true(w.deletions_disabled);
+	s->wal_pin_tick(wal_pin::now_ms());
+	cut_assert_true(serves_from(s, first));
+	wal_pin::set_remove_fault_for_test(0, false);
+	cut_assert_equal_int(0, s->wal_pin_release("hr", res));
+	cut_assert_equal_string("released", res.c_str());
+	cut_assert_false(s->get_wal_pin_status().deletions_disabled);
+	s->close();
+	delete s;
+	cut_remove_path(dir, NULL);
+}
+
+// review of 2f6294a, P1-2: a pin set while the archive purge of a released
+// pin is running waits until the purge is over (same locks through the
+// unlinks), and the new pin's S+1 is served afterwards.
+namespace {
+	struct purge_race {
+		storage_rocksdb* s;
+		uint64_t seq;
+		volatile bool done;
+		string res;
+	};
+	purge_race* g_race = NULL;
+	bool g_set_returned_during_purge = false;
+
+	void* race_set_pin(void* arg) {
+		purge_race* r = static_cast<purge_race*>(arg);
+		r->s->wal_pin_set("h-new", r->seq, wal_pin::now_ms() + 60000, r->res);
+		r->done = true;
+		return NULL;
+	}
+
+	pthread_t g_race_thread;
+	void race_hook(storage_rocksdb*) {
+		pthread_create(&g_race_thread, NULL, race_set_pin, g_race);
+		usleep(300 * 1000);
+		g_set_returned_during_purge = g_race->done;
+	}
+}
+
+void test_wal_pin_purge_does_not_race_a_new_pin() {
+	const char dir[] = "tmp_rocksdb_wal_pin_race";
+	storage_rocksdb* s = make_small_wal(dir);
+	cut_assert_equal_int(0, s->open());
+	const uint64_t first = fill_and_archive(s, "ra");
+	string res;
+	cut_assert_equal_int(0, s->wal_pin_set("h-old", first, wal_pin::now_ms() + 60000, res));
+	s->close();
+	sleep(2);
+	cut_assert_equal_int(0, s->open());		// a protected open (marker present)
+	cut_assert_true(s->get_wal_pin_status().protected_open);
+	cut_assert_equal_int(0, s->wal_pin_release("h-old", res));
+	purge_race r;
+	r.s = s;
+	r.seq = s->get_latest_sequence_number();
+	r.done = false;
+	g_race = &r;
+	g_set_returned_during_purge = false;
+	storage_rocksdb::_test_hook_wal_purge_decided = race_hook;
+	s->wal_pin_tick(wal_pin::now_ms());
+	storage_rocksdb::_test_hook_wal_purge_decided = NULL;
+	pthread_join(g_race_thread, NULL);
+	g_race = NULL;
+	// the set did not slip in between the purge decision and its unlinks
+	cut_assert_false(g_set_returned_during_purge);
+	cut_assert_equal_string("pinned", r.res.c_str());
+	cut_assert_equal_string("active", s->get_wal_pin_status().state.c_str());
+	// the new pin's range is served after more writes and a tick
+	fill_and_archive(s, "rb");
+	s->wal_pin_tick(wal_pin::now_ms());
+	cut_assert_true(serves_from(s, r.seq));
+	s->wal_pin_release("h-new", res);
+	s->close();
+	delete s;
+	cut_remove_path(dir, NULL);
+}
+
 // History continuation (design 6th rev. §4-3..6): pending -> commit.
 void test_history_replica_prepare_commit_is_atomic_and_survives_restart() {
 	const char dir[] = "tmp_rocksdb_history_replica";

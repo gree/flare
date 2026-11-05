@@ -242,6 +242,7 @@ protected:
 	void _wal_pin_before_open(rocksdb::DBOptions& opts);
 	void _wal_pin_after_open();
 	int _wal_pin_release_locked(const string& why);
+	int _wal_archive_purge_locked(uint64_t now_ms);
 	pthread_mutex_t _mutex_rebuild_status;
 	string _rebuild_blocked;
 	uint64_t _staged_switched = 0;
@@ -561,6 +562,9 @@ public:
 		uint64_t floor_releases = 0;
 	};
 	wal_pin_status get_wal_pin_status();
+	// TEST SEAM (unit tests only): called inside wal_pin_tick after the
+	// archive purge was decided, with the purge's locks held
+	static void (*_test_hook_wal_purge_decided)(storage_rocksdb*);
 	// Slave side: replace the live DB with the received checkpoint (staging
 	// dir is renamed into place under the whole-storage write lock — readers
 	// and writers are excluded for the swap) and seed the replication cursor

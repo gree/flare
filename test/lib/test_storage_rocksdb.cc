@@ -45,6 +45,7 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <dirent.h>
+#include <dirent.h>
 #include <cerrno>
 #include <copy_switch_fs.h>
 #include <rocksdb/db.h>
@@ -263,6 +264,64 @@ void test_wal_get_updates_since_empty() {
 	cut_assert_equal_int(0, static_cast<int>(new_count));
 
 	drop_rocksdb(m, wal_master_dir);
+}
+
+// The live WAL is bounded (set_max_total_wal_size_mb): a follower poll reads
+// the WAL file holding its position from the start, so with one large
+// memtable never flushed every poll re-read tens of MB (41558374022). Past
+// the bound the memtables flush and the WAL switches files; the older
+// positions stay served from the archive.
+namespace {
+	uint64_t live_wal_bytes(const string& db) {
+		uint64_t total = 0;
+		DIR* d = opendir(db.c_str());
+		if (d == NULL) return 0;
+		struct dirent* de;
+		while ((de = readdir(d)) != NULL) {
+			const string name = de->d_name;
+			if (name.size() > 4 && name.compare(name.size() - 4, 4, ".log") == 0) {
+				struct stat st;
+				if (stat((db + "/" + name).c_str(), &st) == 0) total += st.st_size;
+			}
+		}
+		closedir(d);
+		return total;
+	}
+}
+
+void test_wal_live_size_is_bounded() {
+	const char dir[] = "tmp_rocksdb_wal_bound";
+	mkdir(dir, 0700);
+	storage_rocksdb* s = new storage_rocksdb(dir, 32, 4, 16,
+		64,     // write_buffer_size_mb: one memtable never fills in this test
+		2, 86400, 1024);
+	s->set_max_total_wal_size_mb(1);
+	cut_assert_equal_int(1, static_cast<int>(s->get_max_total_wal_size_mb()));
+	cut_assert_equal_int(0, s->open());
+	const uint64_t first = s->get_latest_sequence_number();
+	const string value(1000, 'v');
+	for (int i = 0; i < 4000; i++) {
+		char key[32];
+		snprintf(key, sizeof(key), "bound_%d", i);
+		cut_assert_equal_int(0, storage_set_string(s, key, value));
+	}
+	// the flush the bound requests runs in the background
+	const string db = string(dir) + "/flare.rocksdb";
+	uint64_t live = live_wal_bytes(db);
+	for (int i = 0; i < 100 && live >= 2 * 1024 * 1024; i++) {
+		usleep(50 * 1000);
+		live = live_wal_bytes(db);
+	}
+	// ~4 MB written: the live WAL holds about the bound, not all of it
+	cut_assert_operator(live, <, static_cast<uint64_t>(2 * 1024 * 1024));
+	// a position from before the switch is still served (archived WAL)
+	vector<pair<uint64_t, rocksdb::WriteBatch> > updates;
+	cut_assert_equal_int(0, s->get_updates_since(first, updates, 16, 1024 * 1024));
+	cut_assert_operator(updates.size(), >, static_cast<size_t>(0));
+	cut_assert_operator(updates.front().first, <=, first + 1);
+	s->close();
+	delete s;
+	cut_remove_path(dir, NULL);
 }
 
 void test_wal_incremental_replication_basic() {

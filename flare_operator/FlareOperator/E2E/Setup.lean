@@ -67,6 +67,11 @@ structure ClusterConfig where
   /-- PVC size request (only used when usePvc). Kind's default storage
       class (local-path) ignores the size, so keep it small. -/
   pvcSize : String := "1Gi"
+  /-- StorageClass of the PVCs (only used when usePvc); none = the cluster's
+      default (local-path on kind: node-local, it cannot follow a pod to
+      another node). The PVC cordon move runs on the network storage class
+      the node-ops-cordon-pvc leg installs (`flare-nfs`). -/
+  storageClass : Option String := none
   /-- Extra flared.conf lines baked into the INITIAL {name}-config ConfigMap,
       so pods BOOT with them applied by load(). Required for DB-reopen-only
       options (e.g. rocksdb-wal-ttl-seconds) that reload() deliberately
@@ -74,6 +79,12 @@ structure ClusterConfig where
       those, and restarting the whole StatefulSet mid-suite churns every
       node through re-registration. -/
   extraFlaredConf : String := ""
+  /-- Continuous WAL replication (identity forwarding + follow), the chart's
+      default from this release: a RocksDB suite's pods boot with both on
+      unless it sets this false (a suite that starts like an older release,
+      or measures the rebuild path). Ignored for tch, and when the suite's
+      own `extraFlaredConf` already sets `repl-follow-enabled`. -/
+  walFollow : Bool := true
   /-- Put `spec.rocksdb.readUnavailableError: true` in the FlareCluster (the
       production read policy, R2): the operator renders it into extra.conf
       and keeps it there; a line in `extraFlaredConf` would be overwritten
@@ -466,7 +477,8 @@ def statefulSetYaml (cfg : ClusterConfig) : String :=
     - metadata:
         name: data
       spec:
-        accessModes: [\"ReadWriteOnce\"]
+        accessModes: [\"ReadWriteOnce\"]{(cfg.storageClass.map fun c => s!"
+        storageClassName: {c}").getD ""}
         resources:
           requests:
             storage: {cfg.pvcSize}" else ""
@@ -625,13 +637,34 @@ spec:
       cluster: {cfg.name}
 "
 
-/-- The extra.conf pods boot with: the suite's lines plus the rebuild reserve. -/
+/-- `walFollow` applies: a RocksDB suite on the image under test (an older
+    release's image keeps its own defaults) whose own lines do not set follow. -/
+def ClusterConfig.walFollowByDefault (cfg : ClusterConfig) : Bool :=
+  cfg.walFollow && cfg.storageBackend == "rocksdb" && cfg.flaredImageOverride.isNone
+    && !((cfg.extraFlaredConf.splitOn "repl-follow-enabled").length > 1)
+
+/-- The follow lines a RocksDB suite boots with by default (`walFollow`). -/
+def walFollowLines : List (String × String) :=
+  [("repl-identity-forward", "true"), ("repl-follow-enabled", "true"), ("repl-follow-poll-interval-usec", "200000")]
+
+/-- The default follow lines the suite's own lines do not set: flared refuses
+    a key given twice ("cannot be specified more than once") and exits, so
+    a suite that sets one of them (stats-cost: identity forwarding) would
+    crashloop (41497845231). -/
+def walFollowConf (cfg : ClusterConfig) : String :=
+  "\n".intercalate ((walFollowLines.filter fun (k, _) => !((cfg.extraFlaredConf.splitOn k).length > 1)).map
+    fun (k, v) => s!"{k} = {v}")
+
+/-- The extra.conf pods boot with: the suite's lines, the default follow
+    lines (`walFollow`) and the rebuild reserve. -/
 def bootFlaredConf (cfg : ClusterConfig) : String :=
-  match cfg.rebuildReserveBytes with
-  | some n =>
-    let line := s!"rocksdb-rebuild-reserve-bytes = {n}"
-    if cfg.extraFlaredConf.isEmpty then line else cfg.extraFlaredConf ++ "\n" ++ line
-  | none => cfg.extraFlaredConf
+  let follow := cfg.walFollowByDefault
+  let lines := (if cfg.extraFlaredConf.isEmpty then [] else [cfg.extraFlaredConf])
+    ++ (if follow && !(walFollowConf cfg).isEmpty then [walFollowConf cfg] else [])
+    ++ (match cfg.rebuildReserveBytes with
+        | some n => [s!"rocksdb-rebuild-reserve-bytes = {n}"]
+        | none => [])
+  "\n".intercalate lines
 
 /-- Generate FlareCluster CRD YAML. -/
 def flareClusterCrdYaml (cfg : ClusterConfig) : String :=
@@ -645,6 +678,9 @@ spec:
   replicas: {cfg.replicas}" ++
   (if cfg.readUnavailableError || cfg.reserveInCr then
     "\n  rocksdb:" ++ (if cfg.readUnavailableError then "\n    readUnavailableError: true" else "") ++
+      -- the operator owns extra.conf once the CR has a rocksdb block: the
+      -- default follow goes in the CR too, or its rewrite would drop it
+      (if cfg.walFollowByDefault then "\n    replIdentityForward: true\n    replFollowEnabled: true\n    replFollowPollIntervalUsec: 200000" else "") ++
       (match cfg.rebuildReserveBytes with
        | some n => s!"\n    rebuildReserveBytes: {n}"
        | none => "")
@@ -1067,6 +1103,7 @@ def helmSets (cfg : ClusterConfig) : List String :=
   let storage := if cfg.useTmpfs then
       ["cluster.persistence.enabled=false", "cluster.tmpfs.enabled=true", "cluster.tmpfs.sizeLimit=512Mi"]
     else ["cluster.persistence.enabled=true", "cluster.persistence.size=1Gi"]
+      ++ (cfg.storageClass.map (s!"cluster.persistence.storageClassName={·}")).toList
   ["fullnameOverride=" ++ cfg.operatorName, "namespace=" ++ cfg.«namespace», "crds.install=false",
    "replicaCount=1", "image.repository=flare-operator", "image.tag=test", "image.pullPolicy=Never",
    "podLabels.app=" ++ cfg.operatorName,

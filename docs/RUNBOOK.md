@@ -656,10 +656,18 @@ signal — see docs/STPA-node-state.md (gap G1).
    correlate with the replica's health over the same window (a
    [node-unhealthy](#node-unhealthy) event, a pod restart, or a network
    incident).
-2. The divergence does not repair itself. To force a clean copy, make the
-   replica reconstruct: delete the REPLICA's pod (never the master's), then
-   watch it go Prepare → Active. On a PVC cluster the WAL path makes this
-   incremental; on tmpfs it is a full reseed.
+2. With continuous replication on (the chart default) the replica follows
+   the master's WAL, and a dropped forward is applied from it: the replica
+   repair request is closed under the follower, nothing is rebuilt. Check
+   `repl_follow_state` is `following` and `flare_node_repl_follow_lag` falls
+   back to about 0; FlareReplicaNotFollowing / FlareReplicaFollowLag cover a
+   follower that does not. With it off, the operator's replica repair
+   rebuilds the replica. If neither happens, force a clean copy: delete the
+   REPLICA's pod (never the master's), then watch it go Prepare → Active. On
+   a PVC cluster the WAL path makes this incremental; on tmpfs it is a full
+   reseed. A drop backlog older than the master's WAL retention
+   (`walSizeLimitMb` / `walTtlSeconds`) cannot be filled from the WAL: the
+   replica declares `needs_rebuild` (`lsn_purged`) and is rebuilt once.
 3. Verify convergence: `curr_items` on master and replica should agree
    (allow a small lag for in-flight writes).
 4. If drops recur without a node incident, suspect the network path
@@ -993,10 +1001,18 @@ meanwhile.
 
 ## Enabling continuous replication on an existing cluster {#enable-follow}
 
-**Not for this release.** Continuous WAL replication stays **OFF** in this
-release (user decision 2026-10-31: it is turned on in the next release).
-Leave `replFollowEnabled` unset/false; this section is kept for that later
-release and is not an operation to run now.
+**On by default from this release** (user decision 2026-10-31): the chart's
+`cluster.rocksdb` sets `replIdentityForward: true` and `replFollowEnabled:
+true`, so a helm upgrade of a chart-managed cluster switches it on. Every flared
+from rc64 on understands the identity tag, so an upgrade from rc64 or later
+(pf-dev runs rc67) can switch it on in the same upgrade. **From rc63 or
+older, upgrade in two steps**: first with both flags false (until every pod
+runs the new image), then set them true — an older pod still in the cluster
+refuses the tagged forwards, and each refusal is a dropped write that the
+replica repair then rebuilds. A
+FlareCluster written without the chart keeps what its `spec.rocksdb` says
+(unset = off); the steps below switch such a cluster on by hand. To keep the
+earlier behaviour, set both false in the values.
 
 Rehearsed by E2E `continuous-replication-enable` (a legacy cluster switched
 on live through the CR, and back). Do one cluster at a time.
@@ -1263,17 +1279,30 @@ Chart values: `nodeReplacement.*` (needs `nodeGuard.enabled`; the chart refuses
 `nodeReplacement.enabled` without it). `FLARE_NODE_REPLACEMENT=off` on the
 operator turns the whole feature off.
 
-**This release supports the cordon move on tmpfs clusters only** (user
-decision 2026-11-01). It is verified there (E2E cordon-master / cordon-replica:
-errors 0, missing 0). On a PVC cluster it is NOT verified: with node-local
-volumes (local PV, local-path) the recreated pod cannot leave the cordoned
-node, stays Pending and the move stays `resyncing` (no data lost; one copy
-fewer; after `resyncTimeoutSeconds` the move is marked
-[stuck](#cordon-move-stuck) and the next moves run, those of the same
-partition blocked by the copy count); with network storage the
-recreated pod comes back with its old data, a path not tested yet. On a PVC
-cluster set `nodeReplacement.enabled: false`: drains then go through the node
-guard's handover only, as before.
+**Storage.** The cordon move needs storage the recreated pod can take to
+another node:
+
+- **tmpfs**: the pod comes back empty on another node and resyncs (E2E
+  `node-ops-switch-tmpfs-cordon-*`: errors 0, missing 0).
+- **PVC whose PersistentVolume has no `nodeAffinity`** (verified on NFS,
+  csi-driver-nfs): the recreated pod comes back on another node with its
+  old data and resyncs as a replica (E2E `node-ops-switch-nfs-cordon-master`
+  / `-replica`: errors 0, missing 0).
+- **PVC whose PersistentVolume is `local`, `hostPath`, or has a required
+  `nodeAffinity`**: the move is **not started**. This includes local PV and
+  local-path, and also volumes whose `nodeAffinity` only names a zone (for
+  example an EBS volume's `topology.ebs.csi.aws.com/zone`): the operator does
+  not judge whether another node satisfies the affinity, it blocks every PV
+  that has one. EBS, Ceph and other network storage are **not verified**;
+  a CSI driver that writes no `nodeAffinity` on its PVs is treated like NFS.
+  The operator reads each claim's PersistentVolume before it starts a move; a
+  pinned one (or one it cannot read) reports the pod blocked
+  (`FlareCordonMoveBlocked`: "… its data cannot leave the node"), the node
+  guard keeps holding its eviction (429) and the pod keeps serving where it
+  is (E2E `node-ops-switch-cordon-pinned`). Uncordon to end it; to move such
+  a pod anyway, the data has to be given up (delete the claim with the pod,
+  the copy reseeds from its partition) — the
+  [break-glass](#cordon-move-break-glass) path, not the cordon move.
 
 **Check the copy count first.** The chart defaults are `cluster.replicas: 3`
 (a master and two replicas per partition) and `nodeReplacement.minCopies: 3`
@@ -1457,8 +1486,9 @@ the Service selector loses the serving label requirement.
 - `pending` / `handingOver` / `proxied` have no deadline: a handover that
   keeps aborting is held (alert `FlareCordonMoveHeld`) and still the running
   move.
-- A pod on a node-local PV cannot be recreated elsewhere: use tmpfs or
-  network storage.
+- A pod whose PV is local, hostPath or has a required `nodeAffinity` (a
+  zone-pinned EBS volume included) is not moved (blocked, "its data cannot
+  leave the node"); use tmpfs or a PV without `nodeAffinity` (verified: NFS).
 
 ## Seeding a new cluster via cluster replication {#replication-seeding}
 

@@ -2121,6 +2121,14 @@ private def checkAuthoritativeHistory (ctx : Ctx) : IO Unit := do
     ((match establish fresh 0 (some "m") cs false "t" with | (_, .recorded 0 r _) => r.reason == "first-build" | _ => false)
       && (establish absent 0 (some "m") cs false "t").2 == .none
       && (match establish absent 0 (some "m") cs true "t" with | (_, .recorded 0 r _) => r.reason == "adopted" | _ => false))
+  -- 41579664848: a first build's master read before its flared applied the
+  -- role (epoch reason "new") is not recorded; its promotion epoch is
+  let csNew := [("m", Seen.modern bM ⟨"M", "1:e"⟩ true true [] "new"), ("s", modern bS ⟨"S", "1:f"⟩ true)]
+  let csPromoted := [("m", Seen.modern bM h2 true true [] "promotion"), ("s", modern bS ⟨"S", "1:f"⟩ true)]
+  check ctx "history (1): a first build's master still on its copy's initial epoch (reason new) is held, not recorded; after its promotion advanced the epoch the record takes that history; an adoption (a record absent with a node map) is not affected"
+    ((match establish fresh 0 (some "m") csNew false "t" with | (s', .held 0 _) => s'.part 0 == none | _ => false)
+      && (match establish fresh 0 (some "m") csPromoted false "t" with | (_, .recorded 0 r _) => r.hist == h2 && r.reason == "first-build" | _ => false)
+      && (match establish absent 0 (some "m") csNew true "t" with | (_, .recorded 0 r _) => r.reason == "adopted" | _ => false))
   -- 41211110343: the first master restarted before its record and came back a replica
   let pb := fun (u : String) => ({ podUid := some u, bootId := some s!"boot-{u}", copyId := some s!"copy-{u}" } : PromotionEvidence.Binding)
   let empties : List (String × PromotionEvidence.Class × PromotionEvidence.Binding) :=

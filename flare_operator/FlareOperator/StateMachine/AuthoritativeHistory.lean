@@ -233,9 +233,17 @@ def establish (s : Store) (p : Nat) (masterKey : Option String) (copies : List (
       | _, _, _ => (s, .held p "no master to take the history from (an approved adoption without a master needs one history on every copy and exactly one last master)")
     | some m =>
       match copies.lookup m with
-      | some (.modern b h healthy empty _ _) =>
+      | some (.modern b h healthy empty _ epochReason) =>
         if !healthy then (s, .held p s!"the master {m} reports an unhealthy copy")
         else if empty && othersHaveData copies m then (s, .held p s!"the master {m} is EMPTY while another copy holds data")
+        -- a first build's master seated in the map but whose flared has not
+        -- applied the role yet still reports its copy's initial epoch (reason
+        -- "new"); its promotion advances the epoch right after, and a record
+        -- taken from the earlier one refuses every later rebuild from it
+        -- ("holds another history than the record": 41579664848,
+        -- node-ops-switch-tmpfs-helm-upgrade, the replaced replica never rebuilt)
+        else if state == none && epochReason == "new" then
+          (s, .held p s!"the master {m} has not applied its role yet (its copy's epoch is still the initial one): the record waits for its promotion epoch")
         else
           let reason := if state == none then "first-build" else "adopted"
           let r : Record := { gen := 1, hist := h, holder := m, binding := b, since := now, reason := reason }

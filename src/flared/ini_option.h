@@ -110,6 +110,7 @@ private:
 	int				_rocksdb_max_write_buffer_number;
 	uint64_t		_rocksdb_wal_ttl_seconds;
 	uint64_t		_rocksdb_wal_size_limit_mb;
+	uint64_t		_rocksdb_max_total_wal_size_mb;
 	bool			_rocksdb_sync_writes;
 	int				_rocksdb_resync_failure_threshold;
 	// Hard cap on a single replicated WriteBatch in bytes. Batches
@@ -193,6 +194,9 @@ public:
 	static const int      default_rocksdb_max_write_buffer_number  = 3;
 	static const uint64_t default_rocksdb_wal_ttl_seconds          = 86400;
 	static const uint64_t default_rocksdb_wal_size_limit_mb        = 10240;
+	// live WAL bound: a follower poll re-reads the live WAL file from its
+	// start (GetUpdatesSince), so it is kept small; see storage_rocksdb
+	static const uint64_t default_rocksdb_max_total_wal_size_mb    = 16;
 	static const int      default_rocksdb_resync_failure_threshold = 3;
 	static const uint64_t default_rocksdb_wal_max_batch_bytes      = 16 * 1024 * 1024;  // 16 MB
 	static const int      default_rocksdb_wal_sync_bwlimit         = 0;  // inherit
@@ -299,6 +303,7 @@ public:
 	int get_rocksdb_max_write_buffer_number() { return this->_rocksdb_max_write_buffer_number; }
 	uint64_t get_rocksdb_wal_ttl_seconds() { return this->_rocksdb_wal_ttl_seconds; }
 	uint64_t get_rocksdb_wal_size_limit_mb() { return this->_rocksdb_wal_size_limit_mb; }
+	uint64_t get_rocksdb_max_total_wal_size_mb() { return this->_rocksdb_max_total_wal_size_mb; }
 	bool is_rocksdb_sync_writes() { return this->_rocksdb_sync_writes; }
 	int get_rocksdb_resync_failure_threshold() { return this->_rocksdb_resync_failure_threshold; }
 	uint64_t get_rocksdb_wal_max_batch_bytes() { return this->_rocksdb_wal_max_batch_bytes; }

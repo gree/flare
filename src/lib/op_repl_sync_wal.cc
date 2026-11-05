@@ -239,9 +239,15 @@ int op_repl_sync_wal::_run_server() {
 	bool more = false;
 	// The requested LSN is the client's APPLIED position (follower and
 	// catch-up both send get_repl_last_lsn()), so the batch holding it is
-	// not sent again.
-	int result = rocksdb->get_updates_since(this->_lsn, updates,
-		this->_max_batches, this->_max_response_bytes, &more, this->_lsn);
+	// not sent again. A client already at our latest position has nothing to
+	// fetch: answer it without opening a WAL iterator, which reads the live
+	// WAL file from its start on every call (an idle follower polls every
+	// 200 ms; 41558374022: master write ACK p99 20-30 ms while it did).
+	int result = 0;
+	if (this->_lsn < server_latest) {
+		result = rocksdb->get_updates_since(this->_lsn, updates,
+			this->_max_batches, this->_max_response_bytes, &more, this->_lsn);
+	}
 
 	if (result == storage_rocksdb::ERR_LSN_PURGED) {
 		log_notice("LSN %llu purged from WAL, slave needs full sync", this->_lsn);

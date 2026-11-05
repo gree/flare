@@ -1331,8 +1331,12 @@ private def runNodeMoves (crName ns : String) (stateRef : IO.Ref FlareClusterSta
           if role == "master" && succ.isNone && cn.role == FlareRole.Slave && active && sameHistory
               && !cordoned.contains nodeName && !repairOpen && !dropIncreased then
             if (cStats.bind (fun o => statNat o "repl_read_source_eligible")) == some 1 then succ := some ck
+      -- a node-local volume cannot follow the pod: the move is not started
+      -- (read only for a pod that could start, a tmpfs pod has no claim)
+      let pinned ← if movable && (role == "master" || role == "slave") then Bridge.pinnedVolumeOf p.name ns
+        else pure none
       cands := cands ++ [{ pod := p.name, key := k, uid := p.uid, node := p.nodeName, role,
-                           partition := part, others, successor := succ, movable }]
+                           partition := part, others, successor := succ, movable, pinned }]
   let (start, blocked) := NodeMove.next cfg led cordoned cands wallNow
   if let .start m := start then
     led := { led with seq := led.seq + 1, blocked := blocked }

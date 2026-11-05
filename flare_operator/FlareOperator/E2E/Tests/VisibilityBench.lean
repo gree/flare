@@ -6,7 +6,8 @@
   (bench/visibility/visibility_bench.py, one monotonic clock, open-loop load)
   measures write SEND → first observation in the replica's data, for:
 
-    * flare legacy forwarding (today's production default),
+    * flare legacy forwarding (follow off: rc63-style, the default before
+      continuous WAL replication was turned on),
     * flare hybrid forwarding + WAL polling (follow on),
     * Redis asynchronous primary/replica, AOF appendfsync no (the profile
       closest to flare's RocksDB WAL without per-write sync), and
@@ -14,7 +15,10 @@
     * plus a floor control per protocol (write and read the SAME node).
 
   Same kind node, same CPU/memory limits, same value size, writers,
-  observers and offered rates. A flare replica read counts as LOCAL only if
+  observers and offered rates. A follower behind the master's WAL position
+  would hand its reads to the master; the flared pods run with the test
+  seam FLARE_TEST_FOLLOW_LOCAL_READS so reads stay local and the follow arms
+  measure the replica's own copy. A flare replica read counts as LOCAL only if
   the master's cmd_get did not move across the run and the master and
   replica kept their pod UID and flared boot id; otherwise the run is
   recorded as INVALID for replica visibility (its numbers are kept, marked).
@@ -47,6 +51,14 @@ private def benchCfg : ClusterConfig := {
   debugPod := "debug-vis-bench"
   storageBackend := "rocksdb"
   usePvc := true
+  -- the legacy arm measures forwarding without follow; the hybrid arm turns
+  -- follow on itself (41545338637: the E2E default made both arms follow)
+  walFollow := false
+  -- a follower behind the master's WAL position hands its reads to the
+  -- master (stats::follow_allows_local_read); the seam keeps them local so
+  -- every arm measures when a write lands in the replica's own copy
+  -- (41558374022: 200k replica GETs answered by the master)
+  flaredEnv := [("FLARE_TEST_FOLLOW_LOCAL_READS", "1")]
 }
 
 private def ns : String := benchCfg.«namespace»
@@ -234,7 +246,10 @@ private def runHarness (label proto write read : String) (validity : IO String) 
 
 /-- Run one flare arm: reads routed to the replica, evidence that every
     replica GET was served locally (master cmd_get unchanged, identities
-    unchanged). -/
+    unchanged).
+    A follower would hand reads to the master while it is behind the WAL;
+    the cluster runs with FLARE_TEST_FOLLOW_LOCAL_READS so it does not, and a
+    run in which the master still answered replica GETs is INVALID. -/
 private def flareArm (label : String) (floor : Bool := false) : IO TestResult := do
   let some (m, mIp, s, sIp) ← flarePair | return .fail "no master/replica pair in the operator's map"
   let readIp := if floor then mIp else sIp
@@ -243,7 +258,7 @@ private def flareArm (label : String) (floor : Bool := false) : IO TestResult :=
   let mBoot0 ← flareStat mIp "reconstruction_boot_id"
   let sBoot0 ← flareStat sIp "reconstruction_boot_id"
   let gets0 ← flareStat mIp "cmd_get"
-  let mode0 := s!"follow={← flareStat sIp "repl_follow_enabled"} state={← flareStat sIp "repl_follow_state"}"
+  let mode0 := s!"follow={← flareStat sIp "repl_follow_enabled"} state={← flareStat sIp "repl_follow_state"} read_source_eligible={← flareStat sIp "repl_read_source_eligible"}"
   let validity : IO String := do
     let gets1 ← flareStat mIp "cmd_get"
     let mUid1 ← podUid m
@@ -317,9 +332,9 @@ def visibilityBenchSuite : TestSuite := {
         | .error e => return .fail e },
     { name := "flare floor control: write and read the master (harness + network floor)"
       run := skipUnlessOn (flareArm "flare-floor" true) },
-    { name := "flare legacy forwarding (production default): replica-local visibility"
+    { name := "flare legacy forwarding (follow off, rc63-style): replica-local visibility"
       run := skipUnlessOn (flareArm "flare-legacy") },
-    { name := "flare hybrid forwarding + WAL polling (follow on): replica-local visibility"
+    { name := "flare hybrid forwarding + WAL polling, follow switched on LIVE (CR patch, no restart): replica-local visibility"
       run := skipUnlessOn do
         match ← kubectlPatch "flarecluster" benchCfg.name ns "{\"spec\":{\"rocksdb\":{\"replIdentityForward\":true,\"replFollowEnabled\":true,\"replFollowPollIntervalUsec\":200000}}}" with
         | .error e => return .fail s!"patch failed: {e}"
@@ -331,6 +346,25 @@ def visibilityBenchSuite : TestSuite := {
         if !following then return .fail "the replica never reached following"
         IO.sleep 15000
         flareArm "flare-hybrid-poll" },
+    { name := "flare hybrid forwarding + WAL polling, follow on FROM BOOT (both pods restarted after the CR patch, the replica first; the chart default): replica-local visibility — tells a follow switched on live apart from follow a pod started with (41551745420 vs 41545338637)"
+      run := skipUnlessOn do
+        -- restart each pod so its flared boots with follow in its config
+        -- (the replica first; the master's restart is a planned handover)
+        let restart (which : String) : IO (Option String) := do
+          match ← flarePair with
+          | none => return some s!"no master/replica pair before restarting the {which}"
+          | some (m, _, s, _) =>
+            let pod := if which == "replica" then s else m
+            discard <| kubectl ["delete", "pod", pod, "-n", ns, "--wait=true", "--timeout=300s"]
+            let ok ← waitForCondition s!"after restarting the {which}: a pair again, the replica following" 600 do
+              match ← flarePair with
+              | some (_, _, _, sIp) => return (← flareStat sIp "repl_follow_state") == some "following"
+              | none => return false
+            return if ok then none else some s!"no following pair within 600 s after restarting the {which} ({pod})"
+        if let some e ← restart "replica" then return .fail e
+        if let some e ← restart "master" then return .fail e
+        IO.sleep 15000
+        flareArm "flare-follow-boot" },
     { name := "redis floor control: write and read the primary"
       run := skipUnlessOn (redisArm "redis-floor" "aof" true) },
     { name := "redis async replication, AOF appendfsync no: replica visibility"

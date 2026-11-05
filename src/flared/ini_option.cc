@@ -98,6 +98,7 @@ ini_option::ini_option():
 		_rocksdb_max_write_buffer_number(default_rocksdb_max_write_buffer_number),
 		_rocksdb_wal_ttl_seconds(default_rocksdb_wal_ttl_seconds),
 		_rocksdb_wal_size_limit_mb(default_rocksdb_wal_size_limit_mb),
+		_rocksdb_max_total_wal_size_mb(default_rocksdb_max_total_wal_size_mb),
 		_rocksdb_sync_writes(false),
 		_rocksdb_resync_failure_threshold(default_rocksdb_resync_failure_threshold),
 		_rocksdb_wal_max_batch_bytes(default_rocksdb_wal_max_batch_bytes),
@@ -458,6 +459,9 @@ int ini_option::load() {
 		if (opt_var_map.count("rocksdb-wal-ttl-seconds")) {
 			this->_rocksdb_wal_ttl_seconds = opt_var_map["rocksdb-wal-ttl-seconds"].as<uint64_t>();
 		}
+		if (opt_var_map.count("rocksdb-max-total-wal-size-mb")) {
+			this->_rocksdb_max_total_wal_size_mb = opt_var_map["rocksdb-max-total-wal-size-mb"].as<uint64_t>();
+		}
 		if (opt_var_map.count("rocksdb-wal-size-limit-mb")) {
 			this->_rocksdb_wal_size_limit_mb = opt_var_map["rocksdb-wal-size-limit-mb"].as<uint64_t>();
 		}
@@ -722,6 +726,12 @@ int ini_option::reload() {
 					(unsigned long long)this->_rocksdb_wal_ttl_seconds,
 					(unsigned long long)opt_var_map["rocksdb-wal-ttl-seconds"].as<uint64_t>());
 		}
+		if (opt_var_map.count("rocksdb-max-total-wal-size-mb")
+				&& opt_var_map["rocksdb-max-total-wal-size-mb"].as<uint64_t>() != this->_rocksdb_max_total_wal_size_mb) {
+			log_warning("rocksdb-max-total-wal-size-mb changed in config (%llu -> %llu) but requires reopening the DB; restart flared to apply",
+					(unsigned long long)this->_rocksdb_max_total_wal_size_mb,
+					(unsigned long long)opt_var_map["rocksdb-max-total-wal-size-mb"].as<uint64_t>());
+		}
 		if (opt_var_map.count("rocksdb-wal-size-limit-mb")
 				&& opt_var_map["rocksdb-wal-size-limit-mb"].as<uint64_t>() != this->_rocksdb_wal_size_limit_mb) {
 			log_warning("rocksdb-wal-size-limit-mb changed in config (%llu -> %llu) but requires reopening the DB; restart flared to apply",
@@ -959,6 +969,7 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("rocksdb-max-write-buffer-number",	program_options::value<int>(),		"RocksDB max number of memtables (default 3, rocksdb only)")
 		("rocksdb-wal-ttl-seconds",				program_options::value<uint64_t>(),	"RocksDB WAL retention window in seconds; controls how far a slave may fall behind before full-dump is forced (default 86400, rocksdb only)")
 		("rocksdb-wal-size-limit-mb",			program_options::value<uint64_t>(),	"RocksDB WAL retention size cap in MB (default 10240, rocksdb only)")
+		("rocksdb-max-total-wal-size-mb",		program_options::value<uint64_t>(),	"RocksDB live WAL bound in MB: past it memtables flush and the WAL switches files, so a follower poll re-reads at most this much (default 16, 0 = RocksDB default, rocksdb only)")
 		("rocksdb-sync-writes",						program_options::value<bool>(),		"force fsync on every RocksDB write for strict durability (default false, rocksdb only)")
 		("rocksdb-resync-failure-threshold",program_options::value<int>(),		"consecutive WAL/dump resync failures before the slave self-demotes to down state; data is preserved (default 3, rocksdb only)")
 		("rocksdb-wal-max-batch-bytes",		program_options::value<uint64_t>(),	"max size of a single replicated RocksDB WriteBatch; batches beyond this abort WAL sync and fall back to full dump (default 16MB, 0 disables, rocksdb only)")

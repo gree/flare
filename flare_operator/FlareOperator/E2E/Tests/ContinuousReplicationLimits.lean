@@ -701,6 +701,8 @@ private def enableCfg : ClusterConfig := {
   debugPod := "debug-cont-repl-enable"
   storageBackend := "rocksdb"
   usePvc := true
+  -- starts like an older release: no follow until the CR enables it
+  walFollow := false
 }
 
 private def enablePatch (identity follow : Bool) : String :=
@@ -1099,6 +1101,8 @@ private def enablePurgedCfg : ClusterConfig := {
   debugPod := "debug-cont-repl-enable-p"
   storageBackend := "rocksdb"
   usePvc := true
+  -- starts like an older release: no follow until the CR enables it
+  walFollow := false
   extraFlaredConf := "rocksdb-write-buffer-size-mb = 4\nrocksdb-wal-ttl-seconds = 60\nrocksdb-wal-size-limit-mb = 16"
   -- Slow ConfigMap propagation, made deterministic: the operator holds every
   -- rocksdb config write back 45 s, so the replica is read in the OLD mode
@@ -3912,6 +3916,8 @@ private def multiEnableCfg : ClusterConfig := {
   debugPod := "debug-cont-repl-mp-enable"
   storageBackend := "rocksdb"
   usePvc := true
+  -- starts like an older release: no follow until the CR enables it
+  walFollow := false
 }
 
 def multiEnableSuite : TestSuite := {

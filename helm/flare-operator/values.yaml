@@ -244,8 +244,23 @@ cluster:
   # enqueue or storage error) answers SERVER_ERROR instead of END ("key
   # absent"). Not the chart default yet (default changes are decided
   # separately); clients must treat SERVER_ERROR as an error, not a miss.
+  # Continuous WAL replication (on by default from this release, user decision
+  # 2026-10-31; RUNBOOK #enable-follow): each replica follows its master's
+  # RocksDB WAL, so a forward dropped on the proxy path is filled from the WAL
+  # instead of rebuilding the replica. replIdentityForward tags every forward
+  # with the write's identity and must be on with replFollowEnabled (a node
+  # without it would refuse the tagged forwards; flared understands the tag
+  # from rc64 on, so upgrading from rc63 or older: first with both false until
+  # every pod runs the new image, then true). The first follow after an
+  # upgrade rebuilds a replica once
+  # when the master no longer holds the WAL it needs (reads from that replica
+  # are withheld meanwhile). The WAL must cover the backlog of dropped
+  # forwards: on tmpfs keep walSizeLimitMb / walTtlSeconds as above.
+  # Set both false to keep the earlier behaviour (repairs rebuild a replica).
   rocksdb:
     maxTotalThreadQueue: 200000
+    replIdentityForward: true
+    replFollowEnabled: true
   # Declarative read-routing policy (CRD spec.readBalance). flared routes
   # reads by balance weight; the operator normalizes every node map to this
   # policy, so manual flare-admin balance edits are reverted — change this
@@ -449,9 +464,12 @@ legacyMasterSwitch: false
 # replica on another node, a replica is demoted to a proxy; the pod leaves the
 # client Service (it needs the serving label, which the operator manages), and
 # only then may it be evicted (the node guard refuses before that, 429).
-# Needs nodeGuard.enabled. Supported on tmpfs clusters only in this release (verified
-# there); on a PVC cluster set enabled: false (a local PV cannot move, network
-# storage is not verified yet) — RUNBOOK #cordon-move.
+# Needs nodeGuard.enabled. Needs storage that can follow the pod: tmpfs, or a
+# PVC whose PersistentVolume has no nodeAffinity (verified on NFS). A pod
+# whose PV is local, hostPath or has a required nodeAffinity (local-path, and
+# zone-pinned volumes such as EBS too: the affinity is not evaluated) is not
+# moved: it is reported blocked and keeps serving. EBS / Ceph are not
+# verified — RUNBOOK #cordon-move.
 nodeReplacement:
   enabled: true
   # A partition needs at least this many real copies (master + replicas, counting

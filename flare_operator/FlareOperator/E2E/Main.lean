@@ -50,6 +50,7 @@ import FlareOperator.E2E.Tests.RestoreIsolated
 import FlareOperator.E2E.Tests.NodeOpsSwitch
 import FlareOperator.E2E.Tests.FailoverOrder
 import FlareOperator.E2E.Tests.FirstBuildBusyPool
+import FlareOperator.E2E.Tests.WebhookTls
 
 open FlareOperator.E2E
 
@@ -139,5 +140,6 @@ def main (args : List String) : IO UInt32 :=
     Tests.PrepareEvidence.suite,
     Tests.NativeMetrics.suite,
     Tests.BlueGreenMigration.suite,
-    Tests.SnapshotPushSeed.suite
+    Tests.SnapshotPushSeed.suite,
+    Tests.WebhookTls.suite
   ] ++ Tests.NodeOpsSwitch.switchSuites) args

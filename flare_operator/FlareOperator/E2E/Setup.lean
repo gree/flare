@@ -1127,8 +1127,9 @@ def helmCmd (args : List String) (timeoutSec : Nat := 300) : IO (Except String S
 
 /-- A cluster installed by a REAL `helm install` of `chart` (not the
     harness's own manifests): namespace, the debug pod, the release, the
-    first-build approval, the operator rolled out. -/
-def deployHelmCluster (cfg : ClusterConfig) (chart : String) : IO Unit := do
+    first-build approval, the operator rolled out. `extraSets` are more
+    `--set` values after the harness's own (they win). -/
+def deployHelmCluster (cfg : ClusterConfig) (chart : String) (extraSets : List String := []) : IO Unit := do
   IO.eprintln s!"# Deploying cluster '{cfg.name}' in namespace '{cfg.«namespace»}' by helm install of {chart}"
   let _ ← waitForCondition s!"namespace {cfg.«namespace»} not Terminating" 30 do
     match ← kubectl ["get", "namespace", cfg.«namespace», "-o", "jsonpath={.status.phase}"] with
@@ -1147,7 +1148,7 @@ def deployHelmCluster (cfg : ClusterConfig) (chart : String) : IO Unit := do
   | .ok _ => pure ()
   | .error e => if !containsSubstr e "AlreadyExists" then IO.eprintln s!"# WARNING: could not create debug pod {cfg.debugPod}: {e}"
   let _ ← kubectlWaitReady s!"pod/{cfg.debugPod}" cfg.«namespace» 60
-  let sets := (helmSets cfg).foldl (fun acc v => acc ++ ["--set", v]) []
+  let sets := (helmSets cfg ++ extraSets).foldl (fun acc v => acc ++ ["--set", v]) []
   match ← helmCmd (["install", helmRelease cfg, chart, "--namespace", cfg.«namespace»] ++ sets) with
   | .ok _ => pure ()
   | .error e => throw (IO.userError e)

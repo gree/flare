@@ -14,13 +14,27 @@
   (sideEffects: None). failurePolicy Fail: with no operator answering, these
   operations are refused — the escape hatches are the delete-override
   annotation or nodeGuard.enabled=false.
-  The certificate is generated per render (as the SAF-10 eviction webhook):
-  the Secret and the caBundle always change together.
+  The certificate comes from nodeGuard.tls.mode (docs/RUNBOOK.md#node-guard-tls):
+  helm generates it per render (as the SAF-10 eviction webhook), so the Secret
+  and the caBundle always change together; that suits one render per helm
+  upgrade, not ArgoCD, which re-renders on every refresh (never in sync) and
+  rotates the CA on every sync while the sidecar still serves the old
+  certificate for up to a minute (every guarded operation refused). operator
+  and certManager render NO caBundle: the operator's container or
+  cert-manager's cainjector owns the field, and a server-side apply that
+  never sets it leaves their value in place.
 */}}
-{{- $svc := printf "%s-webhook" (include "flare-operator.fullname" .) }}
+{{- $mode := include "flare-operator.nodeGuardTlsMode" . }}
+{{- $fullname := include "flare-operator.fullname" . }}
+{{- $svc := printf "%s-webhook" $fullname }}
 {{- $ns := .Values.namespace }}
+{{- $tls := .Values.nodeGuard.tls | default dict }}
+{{- $caBundle := "" }}
+{{- $certName := printf "%s-node-guard" $fullname }}
+{{- if eq $mode "helm" }}
 {{- $ca := genCA "flare-node-guard-ca" 3650 }}
 {{- $cert := genSignedCert (printf "%s.%s.svc" $svc $ns) nil (list (printf "%s.%s.svc" $svc $ns) (printf "%s.%s.svc.cluster.local" $svc $ns)) 3650 $ca }}
+{{- $caBundle = $ca.Cert | b64enc }}
 apiVersion: v1
 kind: Secret
 type: kubernetes.io/tls
@@ -32,6 +46,87 @@ metadata:
 data:
   tls.crt: {{ $cert.Cert | b64enc }}
   tls.key: {{ $cert.Key | b64enc }}
+{{- else if eq $mode "secret" }}
+{{- $_ := include "flare-operator.nodeGuardTlsSecret" . }}
+{{- $caBundle = required "nodeGuard.tls.mode=secret needs nodeGuard.tls.caBundle (base64 of the PEM CA that signed nodeGuard.tls.secretName)" $tls.caBundle }}
+{{- else if eq $mode "operator" }}
+{{- if .Values.rbac.create }}
+{{- /* The operator pod's webhook-cert container reads and creates its
+       Secret. Namespaced, not in the ClusterRole: the operator needs no
+       Secret anywhere else. create cannot be limited by name (the object
+       does not exist yet when it is authorized); get can. */}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $fullname }}-webhook-cert
+  namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ include "flare-operator.nodeGuardTlsSecret" . | quote }}]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $fullname }}-webhook-cert
+  namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "flare-operator.serviceAccountName" . }}
+    namespace: {{ $ns }}
+roleRef:
+  kind: Role
+  name: {{ $fullname }}-webhook-cert
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}
+{{- else if eq $mode "certManager" }}
+{{- $issuerRef := $tls.certManager | default dict }}
+{{- $issuerRef = $issuerRef.issuerRef | default dict }}
+{{- if not $issuerRef }}
+{{- /* a self-signed serving certificate: it is its own CA (ca.crt), which
+       the cainjector puts into every webhook's caBundle */}}
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ $fullname }}-webhook-selfsigned
+  namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+---
+{{- end }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $certName }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.labels" . | nindent 4 }}
+spec:
+  secretName: {{ include "flare-operator.nodeGuardTlsSecret" . }}
+  # openssl and some issuers refuse a CN over 64 characters; the names are
+  # in dnsNames
+  commonName: flare-node-guard
+  dnsNames:
+    - {{ printf "%s.%s.svc" $svc $ns }}
+    - {{ printf "%s.%s.svc.cluster.local" $svc $ns }}
+  issuerRef:
+    {{- if $issuerRef }}
+    {{- toYaml $issuerRef | nindent 4 }}
+    {{- else }}
+    name: {{ $fullname }}-webhook-selfsigned
+    kind: Issuer
+    {{- end }}
+{{- end }}
 ---
 apiVersion: v1
 kind: Service
@@ -56,6 +151,12 @@ metadata:
   name: {{ include "flare-operator.fullname" . }}-node-guard-{{ $ns }}
   labels:
     {{- include "flare-operator.labels" . | nindent 4 }}
+  {{- if eq $mode "certManager" }}
+  annotations:
+    # cert-manager's cainjector writes the Certificate's CA into every
+    # webhook's caBundle (the chart renders none)
+    cert-manager.io/inject-ca-from: {{ $ns }}/{{ $certName }}
+  {{- end }}
 webhooks:
   - name: pods.node-guard.flare.gree.net
     admissionReviewVersions: ["v1"]
@@ -85,7 +186,9 @@ webhooks:
         resources: ["pods"]
         scope: Namespaced
     clientConfig:
-      caBundle: {{ $ca.Cert | b64enc }}
+      {{- with $caBundle }}
+      caBundle: {{ . }}
+      {{- end }}
       service:
         name: {{ $svc }}
         namespace: {{ $ns }}
@@ -110,7 +213,9 @@ webhooks:
         resources: ["pods/eviction"]
         scope: Namespaced
     clientConfig:
-      caBundle: {{ $ca.Cert | b64enc }}
+      {{- with $caBundle }}
+      caBundle: {{ . }}
+      {{- end }}
       service:
         name: {{ $svc }}
         namespace: {{ $ns }}
@@ -132,7 +237,9 @@ webhooks:
         resources: ["statefulsets", "statefulsets/scale"]
         scope: Namespaced
     clientConfig:
-      caBundle: {{ $ca.Cert | b64enc }}
+      {{- with $caBundle }}
+      caBundle: {{ . }}
+      {{- end }}
       service:
         name: {{ $svc }}
         namespace: {{ $ns }}

@@ -1271,6 +1271,62 @@ helm upgrade <release> ... --set nodeGuard.enabled=true --set nodeReplacement.en
 Without the guard nothing stops a force delete of a master: do one pod at a
 time and only graceful deletes.
 
+### The webhook's certificate (`nodeGuard.tls.mode`) {#node-guard-tls}
+
+The API server calls the webhook over TLS and trusts the CA in each
+webhook's `caBundle`; a sidecar (`webhook-tls`, socat) in the operator pod
+serves the certificate from a Secret and restarts when the mounted Secret
+changes (the kubelet refreshes it within about a minute). While the two
+disagree every call fails, and with `failurePolicy: Fail` that is the same as
+[the operator being down](#node-guard-operator-down) for that time.
+
+| Deployed with | Mode | What happens |
+|---|---|---|
+| plain `helm install` / `helm upgrade` | `helm` (default) | a new CA and certificate on every render, Secret `<fullname>-webhook-tls` and the `caBundle` inline. One render per upgrade; guarded operations may be refused for up to a minute after each upgrade, until the sidecar reloads |
+| ArgoCD, Flux or any tool that re-renders the chart | `operator` | the chart renders neither the Secret nor the `caBundle`. The operator pod's `webhook-cert` container creates `<fullname>-webhook-tls-operator` once (CA + certificate, 10 years) and every 10 s sets each webhook's `caBundle` to its `ca.crt` (field manager `flare-webhook-cert`). A re-render changes nothing, so the app stays in sync |
+| a cluster with cert-manager | `certManager` | a `Certificate` (and a self-signed `Issuer` unless `nodeGuard.tls.certManager.issuerRef` names yours); cert-manager's cainjector fills the `caBundle` (annotation `cert-manager.io/inject-ca-from`). Checked by the chart render test only, not against a running cert-manager |
+| your own certificate | `secret` | `nodeGuard.tls.secretName` (an existing `kubernetes.io/tls` Secret for `<fullname>-webhook.<ns>.svc` and `.svc.cluster.local`) and `nodeGuard.tls.caBundle` (base64 of its CA's PEM); the render fails without either |
+
+Do not use `helm` mode under ArgoCD: every refresh renders a new CA (the app
+is never in sync) and every sync rotates it, refusing guarded operations for
+up to a minute each time.
+
+**operator mode.**
+
+- Check: `kubectl get secret <fullname>-webhook-tls-operator -n <ns>` exists,
+  and `kubectl get validatingwebhookconfiguration <fullname>-node-guard-<ns>
+  -o jsonpath='{.webhooks[*].clientConfig.caBundle}'` shows its `ca.crt`
+  three times. The container's log (`kubectl logs <operator pod> -c
+  webhook-cert`) says `created …` / `caBundle of … set from …`, and every
+  error it hits.
+- Rotate: `kubectl delete secret <fullname>-webhook-tls-operator -n <ns>`.
+  The container makes a new one and repatches the `caBundle` within about
+  10 s; the sidecar reloads when the kubelet refreshes the Secret, so guarded
+  operations may be refused for up to about a minute in between. The Secret
+  is never overwritten: both operator replicas run the container, and
+  `create` either succeeds or finds the other's Secret.
+- It relies on the chart never rendering `caBundle`: helm's three-way merge
+  and a server-side apply (ArgoCD `ServerSideApply=true`) leave a field they
+  do not own. Switching a live release **from `helm` to `operator`** removes
+  the field once (the previous render owned it), so every webhook call fails
+  until the container repatches it, about 10 s after its pod started —
+  guarded operations are refused meanwhile. Switch at a quiet time. The old
+  Secret `<fullname>-webhook-tls` goes with the switch; the operator mode's
+  Secret has another name, so switching back and forth never deletes the one
+  in use (it stays after leaving operator mode; delete it by hand).
+- RBAC (rendered only in this mode): a namespaced Role with `secrets`
+  `create` and `get` on that one name, and in the ClusterRole `get`/`patch`
+  on that one ValidatingWebhookConfiguration. Leaving operator mode removes
+  the permission, so a terminating old pod cannot put its CA back.
+- The Secret is labelled `flare.gree.net/webhook-tls=operator`, not with the
+  chart's labels: `app.kubernetes.io/instance` is ArgoCD's tracking label,
+  and a tracked object the chart does not render would be pruned.
+
+**certManager mode.** The Secret is `<fullname>-webhook-tls`, the same name
+as `helm` mode's: switching from `helm` under ArgoCD with prune may delete
+the Secret cert-manager just wrote; cert-manager issues it again and the
+cainjector follows, with refusals until the sidecar reloads.
+
 ## Cordon (`kubectl cordon` / `drain`) moves the pods off a node {#cordon-move}
 
 Design: `flare-ci-inputs/decisions/NODE-OPS-NOSTOP-IMPLEMENTATION-PLAN-2026-10-26.md`

@@ -506,6 +506,51 @@ nodeGuard:
       memory: 16Mi
     limits:
       memory: 64Mi
+  # Where the webhook's serving certificate and the caBundle the API server
+  # trusts come from (docs/RUNBOOK.md#node-guard-tls). failurePolicy is Fail:
+  # while the API server's caBundle and the certificate socat serves differ,
+  # every guarded delete, eviction and StatefulSet update is refused.
+  tls:
+    # helm        - the chart generates a CA and a certificate on EVERY render
+    #               (genCA) and puts the CA inline. Right for plain helm (one
+    #               render per upgrade). NOT for ArgoCD or any tool that
+    #               re-renders: each render is a new CA, the app never syncs,
+    #               and each sync refuses guarded operations for up to about a
+    #               minute (the API server trusts the new CA at once; the
+    #               sidecar reloads the certificate only when the kubelet
+    #               refreshes the mounted Secret).
+    # operator    - a container in the operator pod creates the Secret
+    #               <fullname>-webhook-tls-operator once (CA + certificate,
+    #               10 years) and keeps every webhook's caBundle equal to its
+    #               ca.crt. The chart renders neither, so a re-render changes
+    #               nothing. For ArgoCD / GitOps without cert-manager.
+    #               Rotation: delete that Secret.
+    # secret      - you supply an existing kubernetes.io/tls Secret
+    #               (secretName) and its CA (caBundle, base64 PEM).
+    # certManager - the chart renders a cert-manager Certificate (and a
+    #               self-signed Issuer unless certManager.issuerRef is set);
+    #               cert-manager's cainjector fills the caBundle.
+    mode: helm
+    # mode=secret: an existing kubernetes.io/tls Secret in the release's
+    # namespace, for <fullname>-webhook.<ns>.svc (and .svc.cluster.local)
+    secretName: ""
+    # mode=secret: the CA that signed it, base64 of the PEM
+    caBundle: ""
+    certManager:
+      # e.g. {name: my-ca, kind: ClusterIssuer}; empty = a self-signed Issuer
+      # rendered by the chart
+      issuerRef: {}
+    operator:
+      # how often the container compares every webhook's caBundle with the
+      # Secret's ca.crt (and recreates the Secret if it was deleted)
+      intervalSeconds: 10
+      # kubectl and openssl, run every intervalSeconds
+      resources:
+        requests:
+          cpu: 10m
+          memory: 32Mi
+        limits:
+          memory: 128Mi
 
 monitoring:
   serviceMonitor:

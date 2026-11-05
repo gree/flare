@@ -324,6 +324,174 @@ void test_wal_live_size_is_bounded() {
 	cut_remove_path(dir, NULL);
 }
 
+// WAL retention across an ordered handover (wal_pin.h, design 6th rev.):
+// a marker outside the DB is read before DB::Open. With small WAL TTL /
+// size caps and the WAL older than the TTL, a normal reopen purges the
+// archived WAL (the control) and a pinned reopen keeps it.
+namespace {
+	storage_rocksdb* make_small_wal(const char* dir) {
+		mkdir(dir, 0700);
+		storage_rocksdb* s = new storage_rocksdb(dir, 32, 4, 16,
+			64, 2,
+			1,      // wal_ttl_seconds
+			1);     // wal_size_limit_mb
+		s->set_max_total_wal_size_mb(1);
+		return s;
+	}
+
+	// write ~4 MB so the live WAL switches files and the old ones are archived
+	uint64_t fill_and_archive(storage_rocksdb* s, const char* pfx) {
+		const uint64_t first = s->get_latest_sequence_number();
+		const string value(1000, 'v');
+		for (int i = 0; i < 4000; i++) {
+			char key[48];
+			snprintf(key, sizeof(key), "%s_%d", pfx, i);
+			cut_assert_equal_int(0, storage_set_string(s, key, value));
+		}
+		usleep(500 * 1000);
+		return first;
+	}
+
+	bool serves_from(storage_rocksdb* s, uint64_t first) {
+		vector<pair<uint64_t, rocksdb::WriteBatch> > updates;
+		if (s->get_updates_since(first, updates, 16, 1024 * 1024) != 0 || updates.empty()) {
+			return false;
+		}
+		return updates.front().first <= first + 1;
+	}
+}
+
+void test_wal_pin_decide() {
+	wal_pin::pin p;
+	string why;
+	const uint64_t now = 1000000;
+	cut_assert_equal_int(wal_pin::state_absent, wal_pin::decide(copy_fs::file_absent, "", now, 120000, p, why));
+	cut_assert_equal_int(wal_pin::state_invalid, wal_pin::decide(copy_fs::file_error, "", now, 120000, p, why));
+	cut_assert_equal_int(wal_pin::state_invalid, wal_pin::decide(copy_fs::file_present, "garbage\n", now, 120000, p, why));
+	// as read back by read_small_file_status (line end stripped): valid
+	cut_assert_equal_int(wal_pin::state_valid, wal_pin::decide(copy_fs::file_present, "v1 h1 10 1060000", now, 120000, p, why));
+	cut_assert_equal_int(wal_pin::state_invalid, wal_pin::decide(copy_fs::file_present, "v1 h1\n10 1060000", now, 120000, p, why));
+	cut_assert_equal_int(wal_pin::state_invalid, wal_pin::decide(copy_fs::file_present, "v1 h1 10 2000000 x\n", now, 120000, p, why));
+	cut_assert_equal_int(wal_pin::state_invalid, wal_pin::decide(copy_fs::file_present, "v1 h/1 10 1060000\n", now, 120000, p, why));
+	cut_assert_equal_int(wal_pin::state_valid, wal_pin::decide(copy_fs::file_present, "v1 h1 10 1060000\n", now, 120000, p, why));
+	cut_assert_equal_string("h1", p.hid.c_str());
+	cut_assert_equal_int(10, (int)p.seq);
+	cut_assert_equal_int(wal_pin::state_expired, wal_pin::decide(copy_fs::file_present, "v1 h1 10 999999\n", now, 120000, p, why));
+	// further ahead than twice the limit: not believed
+	cut_assert_equal_int(wal_pin::state_invalid, wal_pin::decide(copy_fs::file_present, "v1 h1 10 1300000\n", now, 120000, p, why));
+	// the clock could not be read
+	cut_assert_equal_int(wal_pin::state_invalid, wal_pin::decide(copy_fs::file_present, "v1 h1 10 1060000\n", 0, 120000, p, why));
+	wal_pin::pin q;
+	q.hid = "hx:1";
+	q.seq = 42;
+	q.deadline_ms = 77;
+	wal_pin::pin r;
+	cut_assert_true(wal_pin::parse(wal_pin::serialize(q), r, why));
+	cut_assert_equal_string("hx:1", r.hid.c_str());
+}
+
+void test_wal_pin_open_control_purges_archived_wal() {
+	const char dir[] = "tmp_rocksdb_wal_pin_control";
+	storage_rocksdb* s = make_small_wal(dir);
+	cut_assert_equal_int(0, s->open());
+	const uint64_t first = fill_and_archive(s, "ctl");
+	cut_assert_true(serves_from(s, first));
+	s->close();
+	sleep(3);
+	cut_assert_equal_int(0, s->open());
+	// no marker: the open's own cleanup purged the archive past the 1 s TTL
+	cut_assert_false(serves_from(s, first));
+	cut_assert_equal_string("none", s->get_wal_pin_status().state.c_str());
+	s->close();
+	delete s;
+	cut_remove_path(dir, NULL);
+}
+
+void test_wal_pin_open_keeps_archived_wal_and_release_purges() {
+	const char dir[] = "tmp_rocksdb_wal_pin_kept";
+	storage_rocksdb* s = make_small_wal(dir);
+	cut_assert_equal_int(0, s->open());
+	const uint64_t first = fill_and_archive(s, "pin");
+	string res;
+	cut_assert_equal_int(0, s->wal_pin_set("h1", first, wal_pin::now_ms() + 60000, res));
+	cut_assert_equal_string("pinned", res.c_str());
+	cut_assert_equal_int(0, s->wal_pin_set("h1", first, wal_pin::now_ms() + 60000, res));
+	cut_assert_equal_string("already", res.c_str());
+	cut_assert_equal_int(-1, s->wal_pin_set("h2", first, wal_pin::now_ms() + 60000, res));
+	// a crash: the process goes away with the marker on disk
+	s->close();
+	sleep(3);
+	cut_assert_equal_int(0, s->open());
+	storage_rocksdb::wal_pin_status w = s->get_wal_pin_status();
+	cut_assert_equal_string("active", w.state.c_str());
+	cut_assert_true(w.protected_open);
+	cut_assert_true(w.deletions_disabled);
+	cut_assert_true(serves_from(s, first));
+	// release: other handover refused, the right one released, then idempotent
+	cut_assert_equal_int(-1, s->wal_pin_release("h2", res));
+	cut_assert_equal_int(0, s->wal_pin_release("h1", res));
+	cut_assert_equal_string("released", res.c_str());
+	cut_assert_equal_int(0, s->wal_pin_release("h1", res));
+	cut_assert_equal_string("already", res.c_str());
+	struct stat sb;
+	cut_assert_true(stat((string(dir) + "/WAL_PIN").c_str(), &sb) != 0);
+	// this handle keeps every WAL file: flared purges by the configured TTL
+	cut_assert_operator(s->wal_pin_tick(wal_pin::now_ms()), >, 0);
+	cut_assert_false(serves_from(s, first));
+	s->close();
+	delete s;
+	cut_remove_path(dir, NULL);
+}
+
+void test_wal_pin_invalid_marker_fails_closed() {
+	const char dir[] = "tmp_rocksdb_wal_pin_invalid";
+	storage_rocksdb* s = make_small_wal(dir);
+	cut_assert_equal_int(0, s->open());
+	const uint64_t first = fill_and_archive(s, "inv");
+	s->close();
+	cut_assert_equal_int(0, copy_fs::write_file_durable(dir, "WAL_PIN", "not a marker\n"));
+	sleep(3);
+	cut_assert_equal_int(0, s->open());
+	storage_rocksdb::wal_pin_status w = s->get_wal_pin_status();
+	cut_assert_equal_string("invalid", w.state.c_str());
+	cut_assert_true(w.protected_open);
+	cut_assert_true(serves_from(s, first));
+	string res;
+	cut_assert_equal_int(-1, s->wal_pin_release("h1", res));
+	cut_assert_equal_string("refused:invalid_marker", res.c_str());
+	cut_assert_equal_int(-1, s->wal_pin_release_invalid("111", "222", res));
+	cut_assert_equal_string("refused:boot_id", res.c_str());
+	// the deadline tick never releases an invalid marker
+	s->wal_pin_tick(wal_pin::now_ms() + 3600 * 1000);
+	cut_assert_equal_string("invalid", s->get_wal_pin_status().state.c_str());
+	cut_assert_equal_int(0, s->wal_pin_release_invalid("222", "222", res));
+	cut_assert_equal_string("released", res.c_str());
+	s->close();
+	delete s;
+	cut_remove_path(dir, NULL);
+}
+
+void test_wal_pin_expired_marker_opens_normally() {
+	const char dir[] = "tmp_rocksdb_wal_pin_expired";
+	storage_rocksdb* s = make_small_wal(dir);
+	cut_assert_equal_int(0, s->open());
+	s->close();
+	wal_pin::pin p;
+	p.hid = "old";
+	p.seq = 1;
+	p.deadline_ms = wal_pin::now_ms() - 1000;
+	cut_assert_equal_int(0, wal_pin::write(dir, p));
+	cut_assert_equal_int(0, s->open());
+	storage_rocksdb::wal_pin_status w = s->get_wal_pin_status();
+	cut_assert_equal_string("none", w.state.c_str());
+	cut_assert_false(w.protected_open);
+	struct stat sb;
+	cut_assert_true(stat((string(dir) + "/WAL_PIN").c_str(), &sb) != 0);
+	s->close();
+	delete s;
+	cut_remove_path(dir, NULL);
+}
+
 void test_wal_incremental_replication_basic() {
 	storage_rocksdb* master = make_rocksdb(wal_master_dir);
 	storage_rocksdb* slave  = make_rocksdb(wal_slave_dir);

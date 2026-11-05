@@ -436,6 +436,19 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 			_send_stat("rocksdb_rebuilt_from_epoch"         , rdb->get_rebuilt_from_epoch());
 			_send_stat("rocksdb_incarnation"                , rdb->get_incarnation());
 			_send_stat("rocksdb_generations_broken"         , rdb->generations_broken() ? 1 : 0);
+			{
+				// WAL retention across an ordered handover (wal_pin.h)
+				const storage_rocksdb::wal_pin_status w = rdb->get_wal_pin_status();
+				_send_stat("wal_pin_state"                  , w.state);
+				_send_stat("wal_pin_hid"                    , w.hid.empty() ? string("-") : w.hid);
+				_send_stat("wal_pin_seq"                    , w.seq);
+				_send_stat("wal_pin_deadline_ms"            , w.deadline_ms);
+				_send_stat("wal_pin_reason"                 , w.reason.empty() ? string("-") : w.reason);
+				_send_stat("wal_pin_protected_open"         , w.protected_open ? 1 : 0);
+				_send_stat("wal_pin_deletions_disabled"     , w.deletions_disabled ? 1 : 0);
+				_send_stat("wal_pin_released"               , w.released);
+				_send_stat("wal_pin_floor_releases"         , w.floor_releases);
+			}
 			// Common apply rule (SAF-10b): what each delivery path did.
 			// repl_wal_skipped moving while repl_forward_applied moves is the
 			// healthy signal of coexistence — the WAL re-delivering changes

@@ -35,6 +35,7 @@ libflare_la_SOURCES = \
 	source_eligibility.h \
 	copy_protection.h \
 	copy_switch.h copy_switch_fs.h copy_switch.cc copy_capacity.h \
+	wal_pin.h wal_pin.cc \
 	signal_interrupt.h signal_interrupt.cc \
 	htonll.h \
 	key_resolver.h key_resolver.cc \
@@ -67,6 +68,7 @@ libflare_la_SOURCES = \
 	op_orphan_scan.h op_orphan_scan.cc \
 	op_orphan_purge.h op_orphan_purge.cc \
 	op_backup.h op_copy_discard.h op_rebuild_resume.h op_backup.cc op_copy_discard.cc op_rebuild_resume.cc \
+	op_wal_pin.h op_wal_pin.cc \
 	op_node_add.h op_node_add.cc \
 	op_node_remove.h op_node_remove.cc \
 	op_node_role.h op_node_role.cc \

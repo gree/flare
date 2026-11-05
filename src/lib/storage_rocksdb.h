@@ -49,6 +49,7 @@
 
 #include "storage.h"
 #include "util.h"
+#include "wal_pin.h"
 
 using namespace std;
 
@@ -216,6 +217,26 @@ protected:
 	// (staged rebuilds stop). Why the last staged rebuild stopped ("" = not
 	// blocked), for stats.
 	int64_t _rebuild_reserve_bytes = -1;
+	// WAL retention across an ordered handover (wal_pin.h). The marker on
+	// disk is the truth; these describe this DB handle. Guarded by
+	// _mutex_wal_pin.
+	pthread_mutex_t _mutex_wal_pin;
+	wal_pin::state _wal_pin_state = wal_pin::state_absent;
+	wal_pin::pin _wal_pin;
+	string _wal_pin_reason;
+	// this handle was opened with the keep-all WAL options (a marker was
+	// present at open): archived WAL is then purged by flared itself with
+	// the configured TTL / size once the pin is released
+	bool _wal_pin_protected_open = false;
+	// this handle holds one DisableFileDeletions for the pin
+	bool _wal_pin_deletions_disabled = false;
+	uint64_t _wal_pin_max_ms = 120000;
+	int64_t _wal_pin_floor_bytes = -1;	// -1 = half the rebuild reserve
+	uint64_t _wal_pin_released = 0;
+	uint64_t _wal_pin_floor_releases = 0;
+	void _wal_pin_before_open(rocksdb::DBOptions& opts);
+	void _wal_pin_after_open();
+	int _wal_pin_release_locked(const string& why);
 	pthread_mutex_t _mutex_rebuild_status;
 	string _rebuild_blocked;
 	uint64_t _staged_switched = 0;
@@ -473,6 +494,30 @@ public:
 	// disk growth bounded by the transfer duration.
 	int disable_file_deletions();
 	int enable_file_deletions();
+	// WAL retention across an ordered handover (wal_pin.h). set: the marker
+	// is written durably FIRST, then file deletions are disabled on this
+	// handle; the same hid again is a no-op. release: only the pin of that
+	// hid (idempotent: no marker = "already"); an invalid marker is released
+	// only by release_invalid naming this process's boot id. tick: releases
+	// at the deadline or when free space falls below the floor.
+	int wal_pin_set(const string& hid, uint64_t seq, uint64_t deadline_ms, string& result);
+	int wal_pin_release(const string& hid, string& result);
+	int wal_pin_release_invalid(const string& boot_id, const string& own_boot_id, string& result);
+	int wal_pin_tick(uint64_t now_ms);
+	void set_wal_pin_max_ms(uint64_t ms) { this->_wal_pin_max_ms = ms; }
+	void set_wal_pin_floor_bytes(int64_t b) { this->_wal_pin_floor_bytes = b; }
+	struct wal_pin_status {
+		string state;
+		string hid;
+		uint64_t seq = 0;
+		uint64_t deadline_ms = 0;
+		string reason;
+		bool protected_open = false;
+		bool deletions_disabled = false;
+		uint64_t released = 0;
+		uint64_t floor_releases = 0;
+	};
+	wal_pin_status get_wal_pin_status();
 	// Slave side: replace the live DB with the received checkpoint (staging
 	// dir is renamed into place under the whole-storage write lock — readers
 	// and writers are excluded for the swap) and seed the replication cursor

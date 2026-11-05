@@ -1119,7 +1119,7 @@ private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterSta
           e1 := e
           act := .none
         else
-          match ← continuationPrepare ns st e1 pods repairDests now (e.demotedMs + cfg.handoverMs) renew with
+          match ← continuationPrepare ns st e1 pods repairDests now (e.demotedMs + cfg.handoverMs + HandoverDrive.pendingGraceMs) renew with
           | some e' =>
             e1 := e'
             act := .none

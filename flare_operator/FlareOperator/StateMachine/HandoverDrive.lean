@@ -259,4 +259,14 @@ structure ReleaseDue where
   untilMs : Nat
   deriving Repr, BEq
 
+/-- How long a prepared (pending) history outlives the handover's own
+    deadline before flared drops it by itself. The pending deadline is only
+    the safety net for a handover that was abandoned; it must not expire
+    while the V2 the record is armed for is still on its way (42128038045:
+    the replica's record was dropped 0.8 s before V2 arrived, the
+    successor's before its arm, both by the handover's 10 s budget). A
+    commit after the operator gave up is still safe: it happens only on the
+    exact armed map. -/
+def pendingGraceMs : Nat := 30000
+
 end FlareOperator.HandoverDrive

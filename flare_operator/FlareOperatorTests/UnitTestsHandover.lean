@@ -237,6 +237,54 @@ def results : List (String × Bool) := Id.run do
               PromotionEvidence.handoverCommitAllows .lagging && !PromotionEvidence.commitTimeAllows .lagging
                 && PromotionEvidence.handoverCommitAllows .eligible
                 && !PromotionEvidence.handoverCommitAllows (.forbidden "x") && !PromotionEvidence.handoverCommitAllows (.unknown "x"))]
+  -- history continuation (design addendum 2-4): the phases, off by default
+  let ccfg : Config := { continuation := true }
+  let draining0 : Entry := { fresh with phase := .draining, demotedMs := 1100, phaseMs := 1100 }
+  let draining : Entry := { draining0 with v1 := (some 5), oldBoot := (some 7), dropped0 := (some 3), failed0 := (some 0), successorBinding := "u1|b1|c1" }
+  let (dOff, aOff) := step cfg draining (okObs 1200)
+  let (dOn, aOn) := step ccfg draining (okObs 1200)
+  r := r ++ [("continuation: a clean drain prepares (continuation on) and promotes as before (off, the default)",
+              dOff.phase == .promoting && aOff == .send && dOn.phase == .preparing && aOn == .prepare && dOn.drainProven)]
+  let prep := afterPrepare dOn 1300 "p0-a1-1100" 500 "9:e" "M" [("r1:12121", "u2|b2|c2"), ("r2:12121", "u3|b3|c3")]
+  let none0 := afterPrepare dOn 1300 "p0-a1-1100" 500 "9:e" "M" []
+  r := r ++ [("continuation: after the prepare, committingReplicas with the prepared list; none prepared = promote as before (no hid)",
+              prep.phase == .committingReplicas && prep.prepared.length == 2 && prep.contSeq == some 500
+                && none0.phase == .promoting && none0.hid.isEmpty)]
+  let (c1, ca1) := step ccfg prep (okObs 1400)
+  r := r ++ [("continuation: committingReplicas sends V2 to the prepared replicas only first (sendTargeted)",
+              c1.phase == .committingReplicas && ca1 == .sendTargeted)]
+  let sent := recordSent prep 9
+  let (c2, ca2) := step ccfg sent { okObs 1500 with committedKeys := ["r1:12121"] }
+  let (c3, ca3) := step ccfg c2 { okObs 1600 with committedKeys := ["r2:12121", "x:12121"] }
+  r := r ++ [("continuation: commits are accumulated (only prepared keys); all committed -> promoting",
+              c2.phase == .committingReplicas && c2.committed == ["r1:12121"] && ca2 == .sendTargeted
+                && c3.phase == .promoting && ca3 == .send && c3.committed == ["r1:12121", "r2:12121"])]
+  let (p1, pa1) := step ccfg c3 (okObs 1700)
+  let p1s := recordSent p1 9
+  r := r ++ [("continuation: promoting after the targeted V2 sends V2 to every pod once (fullSent), then waits as before",
+              pa1 == .send && p1s.fullSent && p1s.v2 == some 9 && (step ccfg p1s (okObs 1800)).2 == .none)]
+  -- the deadline in committingReplicas (handoverMs 10000 from demotedMs 1100)
+  let late := 1100 + 10000
+  let (x1, _) := step ccfg sent { okObs late with committedKeys := ["r1:12121"] }
+  let (x2, _) := step ccfg sent { okObs late with zeroCommitProven := true }
+  let (x3, _) := step ccfg sent (okObs late)
+  r := r ++ [("continuation: at the deadline one commit -> promoting (never back), proven none -> rollingBack, unknown -> promoting the prepared successor (no rollback)",
+              x1.phase == .promoting && x2.phase == .rollingBack && x3.phase == .promoting)]
+  let rb := recordSent x2 11
+  let rbApplied : Obs := { okObs (late + 100) with entryVersions := [("m:12121", some 11), ("s:12121", some 11)] }
+  r := r ++ [("continuation: rollingBack sends V1' (vBack) and ends aborted once every pod has it; its map makes the old master master again",
+              (step ccfg x2 (okObs late)).2 == .send && rb.vBack == some 11
+                && (step ccfg rb rbApplied).1.phase == .aborted
+                && roleOf (apply pair x2) "m:12121" == some (.Master, .Active))]
+  r := r ++ [("continuation: preparing past the deadline or with the successor gone rolls back (nothing active yet)",
+              (step ccfg dOn (okObs late)).1.phase == .rollingBack
+                && (step ccfg dOn { okObs 1300 with successorEligible := false }).1.phase == .rollingBack)]
+  r := r ++ [("continuation: the old master stays master/down while preparing / committingReplicas (no refill promotes the successor)",
+              roleOf (apply pair dOn) "m:12121" == some (.Master, .Down) && blockedKeys { entries := [dOn, prep] } == ["s:12121", "s:12121"])]
+  let rt := Ledger.fromJson? ({ entries := [{ c2 with leaderEpoch := 4 }] } : Ledger).toJson
+  r := r ++ [("continuation: the entry's continuation fields survive the status JSON",
+              rt.map (fun l => l.entries.map fun x => (x.hid, x.contSeq, x.toEpoch, x.contMasterId, x.prepared, x.committed, x.leaderEpoch, x.phase))
+                == some [(c2.hid, some 500, "9:e", "M", c2.prepared, ["r1:12121"], 4, Phase.committingReplicas)])]
   return r
 
 end FlareOperator.UnitTestsHandover

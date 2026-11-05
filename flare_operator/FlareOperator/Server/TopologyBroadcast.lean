@@ -188,4 +188,45 @@ def broadcastTopologyToAllPods (crName ns : String) (version : Nat) (nodes : Lis
   IO.eprintln s!"[TopologyBroadcast] Broadcast attempt complete (v{version}); all targets reply-confirmed={confirmed}"
   return confirmed
 
+/-- Send the map ONLY to the pods whose node key is in `keys` (history
+    continuation, docs/design-handover-history-continuation.md addendum 2:
+    the prepared replicas get V2 before the successor). Same bounds as the
+    full broadcast. `true` only when every listed key was found among the
+    pods and every send was reply-confirmed; a key with no pod is
+    unconfirmed (the caller re-reads before it advances). -/
+def broadcastTopologyToPods (crName ns : String) (version : Nat) (nodes : List FlareNode)
+    (keys : List String) : IO Bool := do
+  if keys.isEmpty then return true
+  let pods ← match ← listFlaredPodsE crName ns with
+    | .ok ps => pure ps
+    | .error e =>
+      IO.eprintln s!"[TopologyBroadcast] Pod list unavailable; targeted delivery unconfirmed: {e}"
+      return false
+  let targets := pods.filter fun p => keys.contains p.toNodeKey
+  let missing := keys.filter fun k => !targets.any (·.toNodeKey == k)
+  IO.eprintln s!"[TopologyBroadcast] Targeted node sync v{version} to {targets.map (·.name)}{if missing.isEmpty then "" else s!" (no pod for {missing})"}"
+  let tasks ← targets.mapM fun pod =>
+    IO.asTask (prio := .dedicated) (sendNodeSyncToNode pod.ip 12121 version nodes)
+  let deadline := (← IO.monoMsNow) + 15000
+  let mut confirmed := missing.isEmpty
+  for t in tasks do
+    let mut finished := false
+    for _ in [0:300] do
+      if (← IO.hasFinished t) then
+        finished := true
+        break
+      if (← IO.monoMsNow) >= deadline then break
+      IO.sleep 50
+    if finished then
+      match t.get with
+      | .ok ok => confirmed := confirmed && ok
+      | .error e =>
+        confirmed := false
+        IO.eprintln s!"[TopologyBroadcast] targeted send task failed: {e}"
+    else
+      confirmed := false
+      IO.eprintln "[TopologyBroadcast] WARNING: targeted send task exceeded 15s — abandoning it"
+  IO.eprintln s!"[TopologyBroadcast] Targeted attempt complete (v{version}); reply-confirmed={confirmed}"
+  return confirmed
+
 end FlareOperator.Server

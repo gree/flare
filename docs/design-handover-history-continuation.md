@@ -1,4 +1,20 @@
-# 順序付き引き継ぎで履歴を継ぐ（replica を full rebuild しない）— 設計案 第 6 版（＋ 追補 1〜11）
+# 順序付き引き継ぎで履歴を継ぐ（replica を full rebuild しない）— 設計案 第 6 版（＋ 追補 1〜12）
+
+> **追補 12（2026-11-06、E2E で見つかったバリア時の読み取り。実装は 422505b・8216b2e）**
+>
+> V1 の後（バリア）では、partition の master は Master/Down の placeholder だけになる。そのため、各コピーの読み取りは次のようになる。
+>
+> 1. **follow の状態は `idle`**。poll する相手の master がいないため。
+>    - 第 3 版 §1 の条件「following」を、「`following` または `idle`」に改める。
+>    - 根拠は、cursor が L と一致すること（L まで連続して適用済み）。
+>    - `needs_rebuild` や follower が無い場合は、これまでどおり除外する。
+> 2. **R3 は `lagging`**（handoverCommitAllows が許すもの）。
+>    - 実装では、R3 の分類が Down の placeholder も「partition の master」と数えていた。そのため、L まで追いついたコピーが forbidden（re-validated against the present master）に分類されていた。
+>    - Active な master だけを数えるように直した。
+>    - 継続の判定は、昇格の関門と同じく eligible または lagging を許す。forbidden（別の履歴、隔離、再構築中など）と unknown は除外する。
+>
+> 根拠: E2E 42124876046 の operator ログ。バリアでの各コピーは「R3 FORBIDDEN (history being re-validated against the present master), follow idle, cursor 310」だった。
+
 
 > **追補 11（2026-11-06、A2 のコードレビュー 0753e72 の P1 を受けて。実装は A2 に入れた）**
 >

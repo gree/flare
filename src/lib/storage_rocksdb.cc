@@ -79,6 +79,7 @@ const char* const storage_rocksdb::kReplRebuiltFromKey = "__flare_repl_rebuilt_f
 // Same format, the evidence of the stored copy while a rebuild is in progress.
 const char* const storage_rocksdb::kReplRebuiltFromSuspendedKey = "__flare_repl_rebuilt_from_suspended";
 const char* const storage_rocksdb::kCopyIdKey = "__flare_copy_id";
+const char* const storage_rocksdb::kReplPendingHistoryKey = "__flare_repl_pending_history";
 // Receipts of COMPLETED bulks (truncate / flush_all): "<pred copy> <succ copy>
 // <new epoch>" per line, the last kBulkChainKeep, written only AFTER the new
 // epoch was recorded (docs/design-authoritative-history.md: the operator
@@ -102,7 +103,7 @@ bool storage_rocksdb::is_reserved_key(const string& key) {
 		|| key == kReplSourceEpochKey || key == kReplSourceEpochReasonKey || key == kReplIncarnationKey
 		|| key == kReplRestoreDoneKey || key == kReplRebuiltFromKey || key == kReplRebuiltFromSuspendedKey || key == kCopyIdKey
 		|| key == kBulkChainKey || key == kBulkPendingKey
-		|| key == kPartitionBindingKey || key == kRestoredUnverifiedKey;
+		|| key == kPartitionBindingKey || key == kRestoredUnverifiedKey || key == kReplPendingHistoryKey;
 }
 // }}}
 
@@ -2841,6 +2842,284 @@ int storage_rocksdb::enable_file_deletions() {
 	return r;
 }
 
+// {{{ history continuation across an ordered handover (pending -> commit)
+string storage_rocksdb::serialize_pending(const pending_history& p) {
+	ostringstream o;
+	o << "v1 " << p.role << " " << p.hid << " " << p.partition << " " << p.successor << " "
+		<< p.from_epoch << " " << p.to_epoch << " " << p.seq << " " << p.master_id << " "
+		<< p.deadline_ms << " " << (p.incarnation.empty() ? string("-") : p.incarnation);
+	return o.str();
+}
+
+bool storage_rocksdb::parse_pending(const string& text, pending_history& p) {
+	istringstream in(text);
+	string ver, extra;
+	pending_history r;
+	in >> ver >> r.role >> r.hid >> r.partition >> r.successor >> r.from_epoch >> r.to_epoch
+		>> r.seq >> r.master_id >> r.deadline_ms >> r.incarnation;
+	if (in.fail() || (in >> extra) || ver != "v1" || (r.role != "successor" && r.role != "replica")
+			|| r.hid.empty() || r.successor.empty() || r.from_epoch.empty() || r.to_epoch.empty()
+			|| r.master_id.empty() || r.deadline_ms == 0) {
+		return false;
+	}
+	if (r.incarnation == "-") {
+		r.incarnation.clear();
+	}
+	p = r;
+	return true;
+}
+
+bool storage_rocksdb::get_pending_history(pending_history& out) {
+	pthread_rwlock_rdlock(&this->_mutex_wholelock);
+	bool found = false;
+	if (this->_db != NULL) {
+		string v;
+		rocksdb::Status st = this->_db->Get(this->_read_options, kReplPendingHistoryKey, &v);
+		if (st.ok()) {
+			found = parse_pending(v, out);
+			if (!found) {
+				log_err("pending history is unreadable [%s]: treated as none (nothing is activated from it)", v.c_str());
+			}
+		}
+	}
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	return found;
+}
+
+int storage_rocksdb::history_promote_prepare(const string& hid, uint64_t partition, const string& successor,
+		uint64_t deadline_ms, pending_history& out, string& result) {
+	pending_history cur;
+	if (this->get_pending_history(cur)) {
+		if (cur.hid == hid && cur.role == "successor") {
+			out = cur;
+			result = "already";
+			return 0;
+		}
+		result = "refused:another_pending";
+		return -1;
+	}
+	if (this->_staging || this->_db == NULL) {
+		result = "refused:not_live";
+		return -1;
+	}
+	const string epoch = this->get_source_epoch();
+	if (epoch.empty() || this->generations_broken()) {
+		result = "refused:generations_unavailable";
+		return -1;
+	}
+	pending_history p;
+	p.role = "successor";
+	p.hid = hid;
+	p.partition = partition;
+	p.successor = successor;
+	p.from_epoch = epoch;
+	p.to_epoch = _mint_generation(epoch);
+	p.seq = this->get_latest_sequence_number();
+	// the cursor > own sequence branch of a promotion (cluster.cc): decided
+	// and minted here, published only at the commit
+	if (this->get_repl_last_lsn() > p.seq) {
+		uuid_t uuid;
+		char buf[37];
+		uuid_generate(uuid);
+		uuid_unparse_lower(uuid, buf);
+		p.master_id = buf;
+	} else {
+		p.master_id = this->get_master_id();
+	}
+	p.deadline_ms = deadline_ms;
+	p.incarnation = this->get_incarnation();
+	if (this->_persist_generation(kReplPendingHistoryKey, serialize_pending(p)) < 0) {
+		result = "failed:persist";
+		return -1;
+	}
+	log_notice("history continuation: handover %s prepared on the successor: %s -> %s at seq %llu (master_id %s)",
+		hid.c_str(), p.from_epoch.c_str(), p.to_epoch.c_str(), (unsigned long long)p.seq, p.master_id.c_str());
+	out = p;
+	result = "prepared";
+	return 0;
+}
+
+int storage_rocksdb::history_replica_prepare(const pending_history& in, const string& expected_incarnation, string& result) {
+	pending_history cur;
+	if (this->get_pending_history(cur)) {
+		if (cur.hid == in.hid && cur.role == "replica") {
+			result = "already";
+			return 0;
+		}
+		result = "refused:another_pending";
+		return -1;
+	}
+	if (this->_staging || this->_db == NULL) {
+		result = "refused:not_live";
+		return -1;
+	}
+	if (this->get_source_epoch() != in.from_epoch) {
+		result = "refused:epoch";
+		return -1;
+	}
+	if (expected_incarnation.empty() || this->get_incarnation() != expected_incarnation) {
+		result = "refused:incarnation";
+		return -1;
+	}
+	pending_history p = in;
+	p.role = "replica";
+	p.incarnation = expected_incarnation;
+	if (this->_persist_generation(kReplPendingHistoryKey, serialize_pending(p)) < 0) {
+		result = "failed:persist";
+		return -1;
+	}
+	log_notice("history continuation: handover %s prepared on this replica: %s -> %s, continue from seq %llu of %s",
+		p.hid.c_str(), p.from_epoch.c_str(), p.to_epoch.c_str(), (unsigned long long)p.seq, p.successor.c_str());
+	result = "prepared";
+	return 0;
+}
+
+int storage_rocksdb::history_commit(const string& hid, string& result) {
+	pending_history p;
+	if (!this->get_pending_history(p)) {
+		result = "refused:no_pending";
+		return -1;
+	}
+	if (p.hid != hid) {
+		result = "refused:other_handover";
+		return -1;
+	}
+	if (p.role == "successor") {
+		// the new master keeps every WAL file from S until the prepared
+		// replicas are past it (WAL_PIN), written BEFORE the history is
+		// committed so a crash in between still protects S+1 on
+		string pr;
+		if (this->wal_pin_set(p.hid, p.seq, p.deadline_ms + this->_wal_pin_max_ms, pr) < 0) {
+			result = "failed:wal_pin:" + pr;
+			return -1;
+		}
+	}
+	this->_wholelock_wrlock_copy_change();
+	int r = -1;
+	do {
+		if (this->_db == NULL) {
+			result = "refused:closed";
+			break;
+		}
+		if (this->get_incarnation() != p.incarnation) {
+			result = "refused:incarnation";
+			break;
+		}
+		rocksdb::WriteBatch b;
+		b.Put(kReplSourceEpochKey, p.to_epoch);
+		b.Put(kReplSourceEpochReasonKey, "continued");
+		b.Put(kReplMasterIdKey, p.master_id);
+		if (p.role == "replica") {
+			// continues the new master's WAL from S; rebuilt from its history
+			b.Put(kReplLastLsnKey, boost::lexical_cast<string>(p.seq));
+			b.Put(kReplRebuiltFromKey, p.master_id + " " + p.to_epoch + " " + p.to_epoch);
+		} else {
+			// the successor: its own history now; the cursor > own sequence
+			// branch of a promotion moves the cursor with the new master_id
+			if (this->_get_repl_last_lsn_locked() > p.seq) {
+				b.Put(kReplLastLsnKey, boost::lexical_cast<string>(p.seq));
+			}
+			b.Delete(kReplRebuiltFromKey);
+			b.Delete(kReplRebuiltFromSuspendedKey);
+		}
+		b.Delete(kReplPendingHistoryKey);
+		rocksdb::WriteOptions wo;
+		wo.sync = true;
+		rocksdb::Status st = this->_db->Write(wo, &b);
+		if (!st.ok()) {
+			log_err("history continuation: commit of %s failed: %s (nothing changed)", hid.c_str(), st.ToString().c_str());
+			result = "failed:write";
+			break;
+		}
+		pthread_rwlock_wrlock(&this->_mutex_generations);
+		this->_source_epoch = p.to_epoch;
+		this->_source_epoch_reason = "continued";
+		if (p.role == "replica") {
+			this->_rebuilt_from_master_id = p.master_id;
+			this->_rebuilt_from_epoch = p.to_epoch;
+		} else {
+			this->_rebuilt_from_master_id.clear();
+			this->_rebuilt_from_epoch.clear();
+			this->_suspended_from_master_id.clear();
+			this->_suspended_from_epoch.clear();
+		}
+		pthread_rwlock_unlock(&this->_mutex_generations);
+		pthread_rwlock_wrlock(&this->_mutex_master_id);
+		this->_master_id = p.master_id;
+		pthread_rwlock_unlock(&this->_mutex_master_id);
+		log_notice("history continuation: handover %s COMMITTED as %s: epoch %s -> %s, master_id %s%s",
+			hid.c_str(), p.role.c_str(), p.from_epoch.c_str(), p.to_epoch.c_str(), p.master_id.c_str(),
+			p.role == "replica" ? (", cursor " + boost::lexical_cast<string>(p.seq)).c_str() : "");
+		result = "committed";
+		r = 0;
+	} while (0);
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	return r;
+}
+
+int storage_rocksdb::history_on_map(int partition, const string& master_key) {
+	pending_history p;
+	if (partition < 0 || !this->get_pending_history(p) || (int64_t)p.partition != (int64_t)partition) {
+		return 0;
+	}
+	string r;
+	if (master_key.empty()) {
+		return 0;		// no master yet (the demote map): keep waiting
+	}
+	if (master_key == p.successor) {
+		if (p.role == "replica") {
+			return this->history_commit(p.hid, r) == 0 ? 1 : -1;
+		}
+		return 0;		// the successor commits at its promotion
+	}
+	// another master: the handover was rolled back (V1') or replaced
+	this->history_discard(p.hid, "the map names another master (" + master_key + ")", r);
+	return 0;
+}
+
+int storage_rocksdb::history_on_promotion(int partition) {
+	pending_history p;
+	if (!this->get_pending_history(p) || p.role != "successor" || (int64_t)p.partition != (int64_t)partition) {
+		return 0;
+	}
+	string r;
+	if (this->history_commit(p.hid, r) == 0) {
+		return 1;
+	}
+	log_err("history continuation: the prepared history %s could not be committed at the promotion (%s): the epoch is advanced as usual (the prepared replicas rebuild)", p.hid.c_str(), r.c_str());
+	this->history_discard(p.hid, "commit failed at the promotion", r);
+	return -1;
+}
+
+int storage_rocksdb::history_discard(const string& hid, const string& why, string& result) {
+	pending_history p;
+	if (!this->get_pending_history(p)) {
+		result = "already";
+		return 0;
+	}
+	if (!hid.empty() && p.hid != hid) {
+		result = "refused:other_handover";
+		return -1;
+	}
+	pthread_rwlock_rdlock(&this->_mutex_wholelock);
+	int r = -1;
+	if (this->_db != NULL) {
+		rocksdb::WriteOptions wo;
+		wo.sync = true;
+		rocksdb::Status st = this->_db->Delete(wo, kReplPendingHistoryKey);
+		if (st.ok()) {
+			log_notice("history continuation: pending handover %s discarded (%s)", p.hid.c_str(), why.c_str());
+			result = "discarded";
+			r = 0;
+		} else {
+			result = "failed:write";
+		}
+	}
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	return r;
+}
+// }}}
+
 // {{{ WAL retention across an ordered handover (wal_pin.h)
 /**
  *	Before DB::Open of the LIVE copy: read WAL_PIN. A marker that is valid,
@@ -3047,6 +3326,15 @@ int storage_rocksdb::wal_pin_tick(uint64_t now_ms) {
 	purge = this->_wal_pin_protected_open && this->_wal_pin_state == wal_pin::state_absent;
 	pthread_mutex_unlock(&this->_mutex_wal_pin);
 	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	{
+		// a prepared history whose handover neither committed nor aborted
+		// by its deadline is dropped (nothing active was changed)
+		pending_history ph;
+		if (now_ms > 0 && this->get_pending_history(ph) && ph.deadline_ms <= now_ms) {
+			string dr;
+			this->history_discard(ph.hid, "its deadline passed", dr);
+		}
+	}
 	if (!purge) {
 		return 0;
 	}

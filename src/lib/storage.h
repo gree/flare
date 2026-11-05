@@ -331,6 +331,14 @@ public:
 	// (truncate / flush_all). It lets a repair tell a legitimately emptied
 	// source from an empty copy that was promoted (SAF-08).
 	virtual int advance_source_epoch(const char* reason = "unspecified") { (void)reason; return 0; }
+	// History continuation across an ordered handover (storage_rocksdb):
+	// a map was accepted whose master of `partition` is `master_key` ("" =
+	// none) — a prepared replica commits when it is the prepared successor
+	// and discards when it is another node. A promotion to master of
+	// `partition`: 1 = a prepared history was committed (the caller does not
+	// advance the epoch again), 0 = none, -1 = it could not be committed.
+	virtual int history_on_map(int partition, const string& master_key) { (void)partition; (void)master_key; return 0; }
+	virtual int history_on_promotion(int partition) { (void)partition; return 0; }
 	virtual int advance_incarnation() { return 0; }
 	virtual int regenerate_master_id() { return 0; }
 	// decision 2026-10-08 (flared's own refusal): true when this copy must not

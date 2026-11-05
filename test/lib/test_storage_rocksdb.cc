@@ -492,6 +492,143 @@ void test_wal_pin_expired_marker_opens_normally() {
 	cut_remove_path(dir, NULL);
 }
 
+// History continuation (design 6th rev. §4-3..6): pending -> commit.
+void test_history_replica_prepare_commit_is_atomic_and_survives_restart() {
+	const char dir[] = "tmp_rocksdb_history_replica";
+	storage_rocksdb* s = make_small_wal(dir);
+	cut_assert_equal_int(0, s->open());
+	cut_assert_equal_int(0, storage_set_string(s, "k", "v"));
+	const string e0 = s->get_source_epoch();
+	const string inc = s->get_incarnation();
+	const string mid0 = s->get_master_id();
+	const uint64_t cursor0 = s->get_repl_last_lsn();
+	storage_rocksdb::pending_history in;
+	in.hid = "p0-a1-1";
+	in.partition = 0;
+	in.successor = "succ:12121";
+	in.from_epoch = e0;
+	in.to_epoch = "99:newepoch";
+	in.seq = 4242;
+	in.master_id = "new-master-id";
+	in.deadline_ms = wal_pin::now_ms() + 60000;
+	string res;
+	// another epoch / another copy is refused; nothing is written
+	storage_rocksdb::pending_history bad = in;
+	bad.from_epoch = "1:other";
+	cut_assert_equal_int(-1, s->history_replica_prepare(bad, inc, res));
+	cut_assert_equal_string("refused:epoch", res.c_str());
+	cut_assert_equal_int(-1, s->history_replica_prepare(in, "other-incarnation", res));
+	cut_assert_equal_string("refused:incarnation", res.c_str());
+	cut_assert_equal_int(0, s->history_replica_prepare(in, inc, res));
+	cut_assert_equal_string("prepared", res.c_str());
+	cut_assert_equal_int(0, s->history_replica_prepare(in, inc, res));
+	cut_assert_equal_string("already", res.c_str());
+	// prepared only: nothing active changed
+	cut_assert_equal_string(e0.c_str(), s->get_source_epoch().c_str());
+	cut_assert_equal_string(mid0.c_str(), s->get_master_id().c_str());
+	cut_assert_equal_int((int)cursor0, (int)s->get_repl_last_lsn());
+	// a restart keeps the pending record
+	s->close();
+	cut_assert_equal_int(0, s->open());
+	storage_rocksdb::pending_history p;
+	cut_assert_true(s->get_pending_history(p));
+	cut_assert_equal_string("replica", p.role.c_str());
+	// a map naming the prepared successor commits it in one batch
+	cut_assert_equal_int(1, s->history_on_map(0, "succ:12121"));
+	cut_assert_equal_string("99:newepoch", s->get_source_epoch().c_str());
+	cut_assert_equal_string("new-master-id", s->get_master_id().c_str());
+	cut_assert_equal_int(4242, (int)s->get_repl_last_lsn());
+	cut_assert_equal_string("new-master-id", s->get_rebuilt_from_master_id().c_str());
+	cut_assert_false(s->get_pending_history(p));
+	// and it is durable
+	s->close();
+	cut_assert_equal_int(0, s->open());
+	cut_assert_equal_string("99:newepoch", s->get_source_epoch().c_str());
+	cut_assert_equal_int(4242, (int)s->get_repl_last_lsn());
+	// the user data is untouched
+	string out;
+	cut_assert_equal_int(0, storage_get_string(s, "k", out));
+	cut_assert_equal_string("v", out.c_str());
+	s->close();
+	delete s;
+	cut_remove_path(dir, NULL);
+}
+
+void test_history_replica_discards_on_another_master_and_waits_without_one() {
+	const char dir[] = "tmp_rocksdb_history_discard";
+	storage_rocksdb* s = make_small_wal(dir);
+	cut_assert_equal_int(0, s->open());
+	const string e0 = s->get_source_epoch();
+	storage_rocksdb::pending_history in;
+	in.hid = "p0-a1-2";
+	in.successor = "succ:12121";
+	in.from_epoch = e0;
+	in.to_epoch = "99:x";
+	in.seq = 7;
+	in.master_id = "m";
+	in.deadline_ms = wal_pin::now_ms() + 60000;
+	string res;
+	cut_assert_equal_int(0, s->history_replica_prepare(in, s->get_incarnation(), res));
+	storage_rocksdb::pending_history p;
+	// no master (the demote map) or another partition: kept
+	cut_assert_equal_int(0, s->history_on_map(0, ""));
+	cut_assert_equal_int(0, s->history_on_map(1, "succ:12121"));
+	cut_assert_true(s->get_pending_history(p));
+	// the old master again (the rollback map): dropped, nothing changed
+	cut_assert_equal_int(0, s->history_on_map(0, "old:12121"));
+	cut_assert_false(s->get_pending_history(p));
+	cut_assert_equal_string(e0.c_str(), s->get_source_epoch().c_str());
+	// a deadline that passed: dropped by the tick
+	in.hid = "p0-a1-3";
+	in.deadline_ms = wal_pin::now_ms() + 1;
+	cut_assert_equal_int(0, s->history_replica_prepare(in, s->get_incarnation(), res));
+	s->wal_pin_tick(wal_pin::now_ms() + 1000);
+	cut_assert_false(s->get_pending_history(p));
+	s->close();
+	delete s;
+	cut_remove_path(dir, NULL);
+}
+
+void test_history_successor_prepare_commit_at_promotion_pins_wal() {
+	const char dir[] = "tmp_rocksdb_history_successor";
+	storage_rocksdb* s = make_small_wal(dir);
+	cut_assert_equal_int(0, s->open());
+	cut_assert_equal_int(0, storage_set_string(s, "a", "1"));
+	const string e0 = s->get_source_epoch();
+	const string mid0 = s->get_master_id();
+	storage_rocksdb::pending_history out, again;
+	string res;
+	cut_assert_equal_int(0, s->history_promote_prepare("p0-a1-9", 0, "me:12121", wal_pin::now_ms() + 60000, out, res));
+	cut_assert_equal_string("prepared", res.c_str());
+	cut_assert_equal_string(e0.c_str(), out.from_epoch.c_str());
+	cut_assert_true(out.to_epoch != e0);
+	// the cursor is not ahead of the own sequence: the master_id is kept
+	cut_assert_equal_string(mid0.c_str(), out.master_id.c_str());
+	// idempotent: the same values again
+	cut_assert_equal_int(0, s->history_promote_prepare("p0-a1-9", 0, "me:12121", wal_pin::now_ms() + 60000, again, res));
+	cut_assert_equal_string("already", res.c_str());
+	cut_assert_equal_string(out.to_epoch.c_str(), again.to_epoch.c_str());
+	cut_assert_equal_int((int)out.seq, (int)again.seq);
+	// another handover is refused while one is pending
+	cut_assert_equal_int(-1, s->history_promote_prepare("p0-a2-9", 0, "me:12121", wal_pin::now_ms() + 60000, again, res));
+	// nothing active changed before the promotion
+	cut_assert_equal_string(e0.c_str(), s->get_source_epoch().c_str());
+	cut_assert_equal_int(1, s->history_on_promotion(0));
+	cut_assert_equal_string(out.to_epoch.c_str(), s->get_source_epoch().c_str());
+	storage_rocksdb::wal_pin_status w = s->get_wal_pin_status();
+	cut_assert_equal_string("active", w.state.c_str());
+	cut_assert_equal_string("p0-a1-9", w.hid.c_str());
+	cut_assert_equal_int((int)out.seq, (int)w.seq);
+	storage_rocksdb::pending_history p;
+	cut_assert_false(s->get_pending_history(p));
+	// a second promotion call finds nothing to commit
+	cut_assert_equal_int(0, s->history_on_promotion(0));
+	s->wal_pin_release("p0-a1-9", res);
+	s->close();
+	delete s;
+	cut_remove_path(dir, NULL);
+}
+
 void test_wal_incremental_replication_basic() {
 	storage_rocksdb* master = make_rocksdb(wal_master_dir);
 	storage_rocksdb* slave  = make_rocksdb(wal_slave_dir);

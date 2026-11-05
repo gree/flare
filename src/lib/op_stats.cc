@@ -449,6 +449,10 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 				_send_stat("wal_pin_released"               , w.released);
 				_send_stat("wal_pin_floor_releases"         , w.floor_releases);
 			}
+			{
+				storage_rocksdb::pending_history ph;
+				_send_stat("history_pending"                , rdb->get_pending_history(ph) ? storage_rocksdb::serialize_pending(ph) : string("-"));
+			}
 			// Common apply rule (SAF-10b): what each delivery path did.
 			// repl_wal_skipped moving while repl_forward_applied moves is the
 			// healthy signal of coexistence — the WAL re-delivering changes

@@ -107,6 +107,11 @@ public:
 	// R3-D: the evidence of the STORED copy while a rebuild is in progress
 	// (moved here, durably, when an attempt starts; never advertised)
 	static const char* const kReplRebuiltFromSuspendedKey;
+	// History continuation across an ordered handover (design
+	// docs/design-handover-history-continuation.md): a PENDING history,
+	// prepared but not active. "v1 <role> <hid> <partition> <successor>
+	// <from_epoch> <to_epoch> <seq> <master_id> <deadline_ms> <incarnation>"
+	static const char* const kReplPendingHistoryKey;
 	// Copy retention (docs/design-copy-retention.md §2): the persistent
 	// identity of THIS stored copy, "<uuid>:<generation>". A different copy
 	// (swap, reset, quarantine, a staging copy) gets a new uuid; replacing the
@@ -500,6 +505,37 @@ public:
 	// hid (idempotent: no marker = "already"); an invalid marker is released
 	// only by release_invalid naming this process's boot id. tick: releases
 	// at the deadline or when free space falls below the floor.
+	// History continuation (design 6th rev. §4-3..6). prepare persists a
+	// pending record only (nothing active changes). commit makes it active
+	// in ONE batch of reserved default-CF keys (epoch, reason, master_id,
+	// cursor, rebuilt_from; the meta family is kept, epoch-scoped). discard
+	// drops it. All are idempotent per hid.
+	struct pending_history {
+		string role;		// "successor" | "replica"
+		string hid;
+		uint64_t partition = 0;
+		string successor;
+		string from_epoch;
+		string to_epoch;
+		uint64_t seq = 0;
+		string master_id;
+		uint64_t deadline_ms = 0;
+		string incarnation;
+	};
+	static string serialize_pending(const pending_history& p);
+	static bool parse_pending(const string& text, pending_history& p);
+	bool get_pending_history(pending_history& out);
+	// successor: mint E' (from the current epoch), S (own latest sequence)
+	// and, when the cursor is ahead of S, a new master_id; persist as pending
+	int history_promote_prepare(const string& hid, uint64_t partition, const string& successor,
+		uint64_t deadline_ms, pending_history& out, string& result);
+	// replica: requires source epoch == from_epoch and incarnation ==
+	// expected (the copy read at the barrier)
+	int history_replica_prepare(const pending_history& in, const string& expected_incarnation, string& result);
+	int history_commit(const string& hid, string& result);
+	int history_discard(const string& hid, const string& why, string& result);
+	virtual int history_on_map(int partition, const string& master_key);
+	virtual int history_on_promotion(int partition);
 	int wal_pin_set(const string& hid, uint64_t seq, uint64_t deadline_ms, string& result);
 	int wal_pin_release(const string& hid, string& result);
 	int wal_pin_release_invalid(const string& boot_id, const string& own_boot_id, string& result);

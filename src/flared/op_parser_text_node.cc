@@ -40,6 +40,7 @@
 #include "op_copy_discard.h"
 #include "op_rebuild_resume.h"
 #include "op_wal_pin.h"
+#include "op_history.h"
 
 namespace gree {
 namespace flare {
@@ -152,6 +153,9 @@ op* op_parser_text_node::_determine_op(const char* first, const char* buf, int& 
 			singleton<flared>::instance().get_storage());
 	} else if (strcmp(first, "rebuild_resume") == 0) {
 		r = new op_rebuild_resume(this->_connection,
+			singleton<flared>::instance().get_storage());
+	} else if (strcmp(first, "history") == 0) {
+		r = new op_history(this->_connection,
 			singleton<flared>::instance().get_storage());
 	} else if (strcmp(first, "wal_pin") == 0) {
 		r = new op_wal_pin(this->_connection,

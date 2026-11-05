@@ -1460,6 +1460,25 @@ int cluster::_reconstruct_node(vector<node> v, uint64_t node_map_version) {
 		}
 	}
 
+	// History continuation: a prepared replica commits once the map names
+	// the prepared successor as its partition's master (the operator sends
+	// this map to the prepared replicas BEFORE the successor), and drops the
+	// pending history when the map names another master (rollback).
+	{
+		node_map::iterator me = this->_node_map.find(this->_node_key);
+		if (me != this->_node_map.end() && me->second.node_partition >= 0 && me->second.node_role != role_master
+				&& this->_storage != NULL) {
+			string master_key;
+			for (node_map::iterator it = this->_node_map.begin(); it != this->_node_map.end(); it++) {
+				if (it->second.node_role == role_master && it->second.node_partition == me->second.node_partition
+						&& it->second.node_state == state_active) {
+					master_key = it->first;
+				}
+			}
+			this->_storage->history_on_map(me->second.node_partition, master_key);
+		}
+	}
+
 	// One line per accepted map: when this process took which master, so a
 	// decision (activation, read) can be placed before or after a switch.
 	{
@@ -2662,8 +2681,14 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 		// source exists, each advanced it (rc68: epoch 7, 8 in one map
 		// application). One tenure is one history; a second token only
 		// forces the followers of the first to rebuild again.
+		const int continued = this->_master_epoch_advanced ? 0 : this->_storage->history_on_promotion(new_partition);
 		if (this->_master_epoch_advanced) {
 			log_notice("promotion: the source epoch was already advanced for this master tenure — not advanced again", 0);
+		} else if (continued == 1) {
+			// ordered handover with history continuation: the epoch, master_id
+			// and cursor prepared before this map were committed together
+			log_notice("promotion: the prepared history of the ordered handover was committed (the remaining replicas continue it)", 0);
+			this->_master_epoch_advanced = true;
 		} else if (this->_storage->advance_source_epoch("promotion") < 0) {
 			// Fail closed: the storage marks its generations unavailable and
 			// every replication path refuses on that, rather than this node

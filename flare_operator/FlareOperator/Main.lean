@@ -1698,7 +1698,7 @@ private def refreshParkedRebuilds (stateRef : IO.Ref FlareClusterState) (ns : St
       | .error _ => pure ()
   let prev ← parkedIdleRef.get
   if parked != prev then
-    IO.eprintln s!"[flare-operator] parked rebuilds (blocked, nothing in flight; their cluster slot is free): {parked}"
+    IO.eprintln s!"[flare-operator] parked rebuilds (blocked, nothing in flight; their cluster and partition slots are free): {parked}"
   parkedIdleRef.set parked
   let nowMs ← IO.monoMsNow
   let recent := (← resumedAtRef.get).filter fun (_, t) => nowMs < t + 300000

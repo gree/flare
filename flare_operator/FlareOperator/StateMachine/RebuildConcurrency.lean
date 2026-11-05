@@ -127,8 +127,14 @@ def gate (before after : FlareClusterState) (perPartition clusterWide : Nat)
   let counted := existing ++ (running.filter fun k => !existing.contains k)
   let partOf := fun (k : String) => ((before.lookupNode k).map (·.partition)).getD (-1)
   -- a PARKED rebuild with nothing left in flight (no transfer, serve or
-  -- switch: read from its stats) gives back its CLUSTER slot; it still holds
-  -- its partition's slot (the same replica is never rebuilt twice)
+  -- switch: read from its stats) gives back its cluster slot AND its
+  -- partition's slot. It takes no source bandwidth while parked, and a
+  -- parked no_space rebuild (a replica keeping an old copy) held its
+  -- partition's slot against an EMPTY replica that would fit (pf-dev
+  -- 2026-11-05: nodes-2 parked, nodes-1 REBUILD HELD until nodes-2 was
+  -- deleted). A parked one is resumed only while nothing else in its
+  -- partition rebuilds (`resumeCandidate`): one running rebuild per
+  -- partition still holds.
   let mut admitted : List (String × Int) := counted.map fun k => (k, partOf k)
   let mut clusterCount : Nat := (counted.filter fun k => !parkedIdle.contains k).length
   let mut nodeMap := after.nodeMap
@@ -139,7 +145,7 @@ def gate (before after : FlareClusterState) (perPartition clusterWide : Nat)
       -- recreated pod demoted to proxy while its boot reconstruction still
       -- retried held its own re-seat for ever (41278035134: 24 min)
       let self := if counted.contains k && !parkedIdle.contains k then 1 else 0
-      let inPart := (admitted.filter fun (k', p) => k' != k && p == a.partition).length
+      let inPart := (admitted.filter fun (k', p) => k' != k && p == a.partition && !parkedIdle.contains k').length
       if clusterCount - self ≥ clusterWide || inPart ≥ perPartition then
         let why := if inPart ≥ perPartition
           then s!"partition {a.partition} already has {inPart} rebuild(s) (limit {perPartition})"
@@ -156,7 +162,9 @@ def gate (before after : FlareClusterState) (perPartition clusterWide : Nat)
 
 /-- Which parked rebuild may be RESUMED now (it takes its slot again): the
     first parked-idle rebuilding node (map order) when no other rebuild runs
-    in the cluster beyond the limit and none other in its partition. -/
+    in the cluster beyond the limit and none other RUNS in its partition (an
+    other parked one does not count: it holds no slot, and counting it would
+    keep two parked rebuilds of one partition parked for ever). -/
 def resumeCandidate (state : FlareClusterState) (perPartition clusterWide : Nat)
     (parkedIdle' : List String) (running : List String := []) : Option String :=
   let parkedIdle := parkedIdle'.filter (!running.contains ·)
@@ -168,6 +176,6 @@ def resumeCandidate (state : FlareClusterState) (perPartition clusterWide : Nat)
     let partOf := fun (k : String) => ((state.lookupNode k).map (·.partition)).getD (-1)
     parkedIdle.find? fun k =>
       rebuildingKeys.contains k &&
-        (counted.filter fun o => o != k && partOf o == partOf k).length < perPartition
+        (active.filter fun o => o != k && partOf o == partOf k).length < perPartition
 
 end FlareOperator.RebuildConcurrency

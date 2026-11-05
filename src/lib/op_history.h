@@ -9,6 +9,7 @@
  *
  *	syntax: history promote_prepare <hid> <partition> <successor> <deadline_ms>
  *	        history prepare <hid> <partition> <successor> <from_epoch> <to_epoch> <seq> <master_id> <deadline_ms> <incarnation>
+ *	        history arm <hid> <map_version>     (bind to the exact V2 map)
  *	        history discard <hid>
  *	reply:  STAT history_result <prepared|already|discarded|refused:...|failed:...>
  *	        [STAT history_to_epoch / history_seq / history_master_id] (promote_prepare)

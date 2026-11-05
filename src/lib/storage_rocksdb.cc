@@ -2847,7 +2847,8 @@ string storage_rocksdb::serialize_pending(const pending_history& p) {
 	ostringstream o;
 	o << "v1 " << p.role << " " << p.hid << " " << p.partition << " " << p.successor << " "
 		<< p.from_epoch << " " << p.to_epoch << " " << p.seq << " " << p.master_id << " "
-		<< p.deadline_ms << " " << (p.incarnation.empty() ? string("-") : p.incarnation);
+		<< p.deadline_ms << " " << (p.incarnation.empty() ? string("-") : p.incarnation)
+		<< " " << p.armed_version;
 	return o.str();
 }
 
@@ -2856,7 +2857,7 @@ bool storage_rocksdb::parse_pending(const string& text, pending_history& p) {
 	string ver, extra;
 	pending_history r;
 	in >> ver >> r.role >> r.hid >> r.partition >> r.successor >> r.from_epoch >> r.to_epoch
-		>> r.seq >> r.master_id >> r.deadline_ms >> r.incarnation;
+		>> r.seq >> r.master_id >> r.deadline_ms >> r.incarnation >> r.armed_version;
 	if (in.fail() || (in >> extra) || ver != "v1" || (r.role != "successor" && r.role != "replica")
 			|| r.hid.empty() || r.successor.empty() || r.from_epoch.empty() || r.to_epoch.empty()
 			|| r.master_id.empty() || r.deadline_ms == 0) {
@@ -2867,6 +2868,16 @@ bool storage_rocksdb::parse_pending(const string& text, pending_history& p) {
 	}
 	p = r;
 	return true;
+}
+
+// caller holds _mutex_wholelock (read or write)
+bool storage_rocksdb::_read_pending_locked(pending_history& out) {
+	if (this->_db == NULL) {
+		return false;
+	}
+	string v;
+	rocksdb::Status st = this->_db->Get(this->_read_options, kReplPendingHistoryKey, &v);
+	return st.ok() && parse_pending(v, out);
 }
 
 bool storage_rocksdb::get_pending_history(pending_history& out) {
@@ -2942,11 +2953,13 @@ int storage_rocksdb::history_promote_prepare(const string& hid, uint64_t partiti
 int storage_rocksdb::history_replica_prepare(const pending_history& in, const string& expected_incarnation, string& result) {
 	pending_history cur;
 	if (this->get_pending_history(cur)) {
-		if (cur.hid == in.hid && cur.role == "replica") {
+		if (cur.hid == in.hid && cur.role == "replica" && cur.partition == in.partition && cur.successor == in.successor
+				&& cur.from_epoch == in.from_epoch && cur.to_epoch == in.to_epoch && cur.seq == in.seq
+				&& cur.master_id == in.master_id && cur.deadline_ms == in.deadline_ms && cur.incarnation == expected_incarnation) {
 			result = "already";
 			return 0;
 		}
-		result = "refused:another_pending";
+		result = cur.hid == in.hid ? "refused:different_tuple" : "refused:another_pending";
 		return -1;
 	}
 	if (this->_staging || this->_db == NULL) {
@@ -2984,6 +2997,7 @@ int storage_rocksdb::history_commit(const string& hid, string& result) {
 		result = "refused:other_handover";
 		return -1;
 	}
+	bool pinned_here = false;
 	if (p.role == "successor") {
 		// the new master keeps every WAL file from S until the prepared
 		// replicas are past it (WAL_PIN), written BEFORE the history is
@@ -2993,12 +3007,25 @@ int storage_rocksdb::history_commit(const string& hid, string& result) {
 			result = "failed:wal_pin:" + pr;
 			return -1;
 		}
+		pinned_here = (pr == "pinned");
 	}
 	this->_wholelock_wrlock_copy_change();
 	int r = -1;
 	do {
 		if (this->_db == NULL) {
 			result = "refused:closed";
+			break;
+		}
+		// the decision is taken HERE, under the same exclusive lock as a
+		// discard and the deadline: what was read before may be gone
+		pending_history now_p;
+		if (!this->_read_pending_locked(now_p) || now_p.hid != hid || serialize_pending(now_p) != serialize_pending(p)) {
+			result = "refused:pending_changed";
+			break;
+		}
+		const uint64_t now_ms = wal_pin::now_ms();
+		if (now_ms == 0 || now_ms >= p.deadline_ms) {
+			result = "refused:deadline";
 			break;
 		}
 		if (this->get_incarnation() != p.incarnation) {
@@ -3054,10 +3081,47 @@ int storage_rocksdb::history_commit(const string& hid, string& result) {
 		r = 0;
 	} while (0);
 	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	if (r != 0 && pinned_here) {
+		// not committed: the pin taken for it goes too
+		string pr;
+		this->wal_pin_release(hid, pr);
+	}
 	return r;
 }
 
-int storage_rocksdb::history_on_map(int partition, const string& master_key) {
+int storage_rocksdb::history_arm(const string& hid, uint64_t map_version, string& result) {
+	if (map_version == 0) {
+		result = "refused:version";
+		return -1;
+	}
+	this->_wholelock_wrlock_copy_change();
+	int r = -1;
+	pending_history p;
+	if (!this->_read_pending_locked(p) || p.hid != hid) {
+		result = "refused:no_pending";
+	} else if (p.armed_version == map_version) {
+		result = "already";
+		r = 0;
+	} else if (p.armed_version != 0) {
+		result = "refused:armed_for_another_version";
+	} else {
+		p.armed_version = map_version;
+		rocksdb::WriteOptions wo;
+		wo.sync = true;
+		rocksdb::Status st = this->_db->Put(wo, kReplPendingHistoryKey, serialize_pending(p));
+		if (st.ok()) {
+			log_notice("history continuation: pending handover %s armed for map v%llu", hid.c_str(), (unsigned long long)map_version);
+			result = "armed";
+			r = 0;
+		} else {
+			result = "failed:write";
+		}
+	}
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	return r;
+}
+
+int storage_rocksdb::history_on_map(int partition, const string& master_key, const string& own_key, uint64_t map_version) {
 	pending_history p;
 	if (partition < 0 || !this->get_pending_history(p) || (int64_t)p.partition != (int64_t)partition) {
 		return 0;
@@ -3067,19 +3131,22 @@ int storage_rocksdb::history_on_map(int partition, const string& master_key) {
 		return 0;		// no master yet (the demote map): keep waiting
 	}
 	if (master_key == p.successor) {
-		if (p.role == "replica") {
+		// commit only on the exact map it was armed for, as a replica that
+		// is not the successor itself
+		if (p.role == "replica" && own_key != p.successor && p.armed_version != 0 && map_version == p.armed_version) {
 			return this->history_commit(p.hid, r) == 0 ? 1 : -1;
 		}
-		return 0;		// the successor commits at its promotion
+		return 0;
 	}
 	// another master: the handover was rolled back (V1') or replaced
 	this->history_discard(p.hid, "the map names another master (" + master_key + ")", r);
 	return 0;
 }
 
-int storage_rocksdb::history_on_promotion(int partition) {
+int storage_rocksdb::history_on_promotion(int partition, const string& own_key, uint64_t map_version) {
 	pending_history p;
-	if (!this->get_pending_history(p) || p.role != "successor" || (int64_t)p.partition != (int64_t)partition) {
+	if (!this->get_pending_history(p) || p.role != "successor" || (int64_t)p.partition != (int64_t)partition
+			|| own_key != p.successor || p.armed_version == 0 || map_version != p.armed_version) {
 		return 0;
 	}
 	string r;
@@ -3101,9 +3168,15 @@ int storage_rocksdb::history_discard(const string& hid, const string& why, strin
 		result = "refused:other_handover";
 		return -1;
 	}
-	pthread_rwlock_rdlock(&this->_mutex_wholelock);
+	this->_wholelock_wrlock_copy_change();
 	int r = -1;
-	if (this->_db != NULL) {
+	pending_history now_p;
+	if (!this->_read_pending_locked(now_p)) {
+		result = "already";
+		r = 0;
+	} else if (!hid.empty() && now_p.hid != hid) {
+		result = "refused:other_handover";
+	} else if (this->_db != NULL) {
 		rocksdb::WriteOptions wo;
 		wo.sync = true;
 		rocksdb::Status st = this->_db->Delete(wo, kReplPendingHistoryKey);

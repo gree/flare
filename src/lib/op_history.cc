@@ -51,6 +51,7 @@ int op_history::_parse_text_server_parameters() {
 	if (op == "promote_prepare" && n == 5) return 0;
 	if (op == "prepare" && n == 10) return 0;
 	if (op == "discard" && n == 2) return 0;
+	if (op == "arm" && n == 3) return 0;
 	return -1;
 }
 
@@ -86,6 +87,12 @@ int op_history::_run_server() {
 			return this->_send_result(result_client_error, "bad number");
 		}
 		rdb->history_replica_prepare(in, a[9], result);
+	} else if (a[0] == "arm") {
+		uint64_t v = 0;
+		if (!u64(a[2], v)) {
+			return this->_send_result(result_client_error, "bad number");
+		}
+		rdb->history_arm(a[1], v, result);
 	} else {
 		rdb->history_discard(a[1], "discarded by the operator", result);
 	}

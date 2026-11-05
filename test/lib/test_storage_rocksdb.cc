@@ -533,8 +533,20 @@ void test_history_replica_prepare_commit_is_atomic_and_survives_restart() {
 	storage_rocksdb::pending_history p;
 	cut_assert_true(s->get_pending_history(p));
 	cut_assert_equal_string("replica", p.role.c_str());
-	// a map naming the prepared successor commits it in one batch
-	cut_assert_equal_int(1, s->history_on_map(0, "succ:12121"));
+	// not armed: a map naming the successor does not commit
+	cut_assert_equal_int(0, s->history_on_map(0, "succ:12121", "me:12121", 77));
+	cut_assert_true(s->get_pending_history(p));
+	cut_assert_equal_int(0, s->history_arm("p0-a1-1", 77, res));
+	cut_assert_equal_string("armed", res.c_str());
+	cut_assert_equal_int(0, s->history_arm("p0-a1-1", 77, res));
+	cut_assert_equal_string("already", res.c_str());
+	cut_assert_equal_int(-1, s->history_arm("p0-a1-1", 78, res));
+	// another map version, or this node being the successor: no commit
+	cut_assert_equal_int(0, s->history_on_map(0, "succ:12121", "me:12121", 76));
+	cut_assert_equal_int(0, s->history_on_map(0, "succ:12121", "succ:12121", 77));
+	cut_assert_true(s->get_pending_history(p));
+	// the armed map naming the prepared successor commits it in one batch
+	cut_assert_equal_int(1, s->history_on_map(0, "succ:12121", "me:12121", 77));
 	cut_assert_equal_string("99:newepoch", s->get_source_epoch().c_str());
 	cut_assert_equal_string("new-master-id", s->get_master_id().c_str());
 	cut_assert_equal_int(4242, (int)s->get_repl_last_lsn());
@@ -571,11 +583,16 @@ void test_history_replica_discards_on_another_master_and_waits_without_one() {
 	cut_assert_equal_int(0, s->history_replica_prepare(in, s->get_incarnation(), res));
 	storage_rocksdb::pending_history p;
 	// no master (the demote map) or another partition: kept
-	cut_assert_equal_int(0, s->history_on_map(0, ""));
-	cut_assert_equal_int(0, s->history_on_map(1, "succ:12121"));
+	cut_assert_equal_int(0, s->history_on_map(0, "", "me:12121", 5));
+	cut_assert_equal_int(0, s->history_on_map(1, "succ:12121", "me:12121", 5));
 	cut_assert_true(s->get_pending_history(p));
+	// a different tuple under the same hid is not "already"
+	storage_rocksdb::pending_history other = in;
+	other.seq = 8;
+	cut_assert_equal_int(-1, s->history_replica_prepare(other, s->get_incarnation(), res));
+	cut_assert_equal_string("refused:different_tuple", res.c_str());
 	// the old master again (the rollback map): dropped, nothing changed
-	cut_assert_equal_int(0, s->history_on_map(0, "old:12121"));
+	cut_assert_equal_int(0, s->history_on_map(0, "old:12121", "me:12121", 6));
 	cut_assert_false(s->get_pending_history(p));
 	cut_assert_equal_string(e0.c_str(), s->get_source_epoch().c_str());
 	// a deadline that passed: dropped by the tick
@@ -584,6 +601,18 @@ void test_history_replica_discards_on_another_master_and_waits_without_one() {
 	cut_assert_equal_int(0, s->history_replica_prepare(in, s->get_incarnation(), res));
 	s->wal_pin_tick(wal_pin::now_ms() + 1000);
 	cut_assert_false(s->get_pending_history(p));
+	// a commit after the discard (a stale caller) finds nothing to activate
+	cut_assert_equal_int(-1, s->history_commit("p0-a1-3", res));
+	cut_assert_equal_string(e0.c_str(), s->get_source_epoch().c_str());
+	// a record whose deadline passed is never committed, even before the tick drops it
+	in.hid = "p0-a1-4";
+	in.deadline_ms = wal_pin::now_ms() + 300;
+	cut_assert_equal_int(0, s->history_replica_prepare(in, s->get_incarnation(), res));
+	cut_assert_equal_int(0, s->history_arm("p0-a1-4", 9, res));
+	usleep(400 * 1000);
+	cut_assert_equal_int(-1, s->history_commit("p0-a1-4", res));
+	cut_assert_equal_string("refused:deadline", res.c_str());
+	cut_assert_equal_string(e0.c_str(), s->get_source_epoch().c_str());
 	s->close();
 	delete s;
 	cut_remove_path(dir, NULL);
@@ -613,7 +642,14 @@ void test_history_successor_prepare_commit_at_promotion_pins_wal() {
 	cut_assert_equal_int(-1, s->history_promote_prepare("p0-a2-9", 0, "me:12121", wal_pin::now_ms() + 60000, again, res));
 	// nothing active changed before the promotion
 	cut_assert_equal_string(e0.c_str(), s->get_source_epoch().c_str());
-	cut_assert_equal_int(1, s->history_on_promotion(0));
+	// not armed / another node / another map version: an ordinary promotion
+	cut_assert_equal_int(0, s->history_on_promotion(0, "me:12121", 41));
+	cut_assert_equal_int(0, s->history_arm("p0-a1-9", 41, res));
+	cut_assert_equal_int(0, s->history_on_promotion(0, "other:12121", 41));
+	cut_assert_equal_int(0, s->history_on_promotion(0, "me:12121", 40));
+	cut_assert_equal_int(0, s->history_on_promotion(1, "me:12121", 41));
+	cut_assert_equal_string(e0.c_str(), s->get_source_epoch().c_str());
+	cut_assert_equal_int(1, s->history_on_promotion(0, "me:12121", 41));
 	cut_assert_equal_string(out.to_epoch.c_str(), s->get_source_epoch().c_str());
 	storage_rocksdb::wal_pin_status w = s->get_wal_pin_status();
 	cut_assert_equal_string("active", w.state.c_str());
@@ -622,7 +658,7 @@ void test_history_successor_prepare_commit_at_promotion_pins_wal() {
 	storage_rocksdb::pending_history p;
 	cut_assert_false(s->get_pending_history(p));
 	// a second promotion call finds nothing to commit
-	cut_assert_equal_int(0, s->history_on_promotion(0));
+	cut_assert_equal_int(0, s->history_on_promotion(0, "me:12121", 41));
 	s->wal_pin_release("p0-a1-9", res);
 	s->close();
 	delete s;
@@ -659,7 +695,8 @@ void test_history_commit_keeps_meta_and_gc_drops_old_epoch_rows() {
 	in.deadline_ms = wal_pin::now_ms() + 60000;
 	string res;
 	cut_assert_equal_int(0, s->history_replica_prepare(in, inc, res));
-	cut_assert_equal_int(1, s->history_on_map(0, "succ:12121"));
+	cut_assert_equal_int(0, s->history_arm("p0-a1-meta", 3, res));
+	cut_assert_equal_int(1, s->history_on_map(0, "succ:12121", "me:12121", 3));
 	// committed: the row is still there (the family was not dropped) ...
 	cut_assert_equal_int(0, s->count_repl_tombstones(n, why));
 	cut_assert_equal_int(1, (int)n);

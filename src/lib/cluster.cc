@@ -74,6 +74,7 @@ cluster::cluster(thread_pool* req_tp, thread_pool* other_tp, string server_name,
 		_master_reconstruction(0),
 		_boot_shift_pending(false),
 		_master_epoch_advanced(false),
+		_applying_map_version(0),
 		_reannounce_active(false),
 		_activation_pending(false),
 		_node_map_version(0),
@@ -1285,6 +1286,7 @@ void cluster::write_section_leave() {
 int cluster::_reconstruct_node(vector<node> v, uint64_t node_map_version) {
 	stack<node_shift_state> shift_state_stack;
 	stack<node_shift_role> shift_role_stack;
+	this->_applying_map_version = node_map_version;
 
 	pthread_rwlock_wrlock(&this->_mutex_node_map);
 	pthread_rwlock_wrlock(&this->_mutex_node_partition_map);
@@ -1475,7 +1477,7 @@ int cluster::_reconstruct_node(vector<node> v, uint64_t node_map_version) {
 					master_key = it->first;
 				}
 			}
-			this->_storage->history_on_map(me->second.node_partition, master_key);
+			this->_storage->history_on_map(me->second.node_partition, master_key, this->_node_key, node_map_version);
 		}
 	}
 
@@ -2681,7 +2683,8 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 		// source exists, each advanced it (rc68: epoch 7, 8 in one map
 		// application). One tenure is one history; a second token only
 		// forces the followers of the first to rebuild again.
-		const int continued = this->_master_epoch_advanced ? 0 : this->_storage->history_on_promotion(new_partition);
+		const int continued = this->_master_epoch_advanced ? 0
+			: this->_storage->history_on_promotion(new_partition, this->_node_key, this->_applying_map_version);
 		if (this->_master_epoch_advanced) {
 			log_notice("promotion: the source epoch was already advanced for this master tenure — not advanced again", 0);
 		} else if (continued == 1) {

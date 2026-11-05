@@ -521,6 +521,9 @@ public:
 		string master_id;
 		uint64_t deadline_ms = 0;
 		string incarnation;
+		// the V2 map version the operator armed this record with (0 = not
+		// armed): the commit happens only on that exact map
+		uint64_t armed_version = 0;
 	};
 	static string serialize_pending(const pending_history& p);
 	static bool parse_pending(const string& text, pending_history& p);
@@ -534,9 +537,13 @@ public:
 	int history_replica_prepare(const pending_history& in, const string& expected_incarnation, string& result);
 	int history_commit(const string& hid, string& result);
 	int history_discard(const string& hid, const string& why, string& result);
-	virtual int history_on_map(int partition, const string& master_key);
-	virtual int history_on_promotion(int partition);
+	// arm: bind the pending record of `hid` to the V2 map version (sent by
+	// the operator BEFORE that map; idempotent for the same version)
+	int history_arm(const string& hid, uint64_t map_version, string& result);
+	virtual int history_on_map(int partition, const string& master_key, const string& own_key, uint64_t map_version);
+	virtual int history_on_promotion(int partition, const string& own_key, uint64_t map_version);
 	int wal_pin_set(const string& hid, uint64_t seq, uint64_t deadline_ms, string& result);
+	bool _read_pending_locked(pending_history& out);
 	int wal_pin_release(const string& hid, string& result);
 	int wal_pin_release_invalid(const string& boot_id, const string& own_boot_id, string& result);
 	int wal_pin_tick(uint64_t now_ms);

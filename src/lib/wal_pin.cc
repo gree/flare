@@ -30,7 +30,11 @@ const char* state_name(state s) {
 
 string serialize(const pin& p) {
 	ostringstream o;
-	o << "v1 " << p.hid << " " << p.seq << " " << p.deadline_ms << "\n";
+	o << "v1 " << p.hid << " " << p.seq << " " << p.deadline_ms;
+	if (p.requested_deadline_ms != 0) {
+		o << " " << p.requested_deadline_ms;
+	}
+	o << "\n";
 	return o.str();
 }
 
@@ -81,8 +85,10 @@ bool parse(const string& text, pin& p, string& why) {
 		return false;
 	}
 	istringstream in(line);
-	string ver, hid, seq, deadline, extra;
+	string ver, hid, seq, deadline, requested, extra;
 	in >> ver >> hid >> seq >> deadline;
+	// the requested deadline is optional (markers written before it)
+	in >> requested;
 	if (in >> extra) {
 		why = "extra fields";
 		return false;
@@ -103,6 +109,10 @@ bool parse(const string& text, pin& p, string& why) {
 	}
 	if (!u64_of(deadline, r.deadline_ms) || r.deadline_ms == 0) {
 		why = "invalid deadline";
+		return false;
+	}
+	if (!requested.empty() && (!u64_of(requested, r.requested_deadline_ms) || r.requested_deadline_ms == 0)) {
+		why = "invalid requested deadline";
 		return false;
 	}
 	p = r;

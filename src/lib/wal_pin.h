@@ -35,8 +35,12 @@ static const uint64_t kKeepAllSizeLimitMb = 0;
 struct pin {
 	string hid;
 	uint64_t seq;
-	uint64_t deadline_ms;	// wall clock (epoch ms)
-	pin(): seq(0), deadline_ms(0) {}
+	uint64_t deadline_ms;	// wall clock (epoch ms), the effective (capped) one
+	// the deadline the pin was requested with, before the cap (0 = unknown,
+	// a marker written before this field): a retry of the same request
+	// after a restart is recognised as the same pin
+	uint64_t requested_deadline_ms;
+	pin(): seq(0), deadline_ms(0), requested_deadline_ms(0) {}
 };
 
 enum state {

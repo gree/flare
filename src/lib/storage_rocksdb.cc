@@ -3296,7 +3296,9 @@ void storage_rocksdb::_wal_pin_before_open(rocksdb::DBOptions& opts) {
 	}
 	this->_wal_pin_state = st;
 	this->_wal_pin = p;
-	this->_wal_pin_requested_deadline = 0;
+	// durable since the marker carries it (review of 2de21f2, P1): a retry
+	// of the same request after a restart is the same pin
+	this->_wal_pin_requested_deadline = p.requested_deadline_ms;
 	this->_wal_pin_reason = why;
 	this->_wal_pin_deletions_disabled = false;
 	this->_wal_pin_protected_open = (st == wal_pin::state_valid || st == wal_pin::state_invalid);
@@ -3392,6 +3394,7 @@ int storage_rocksdb::wal_pin_set(const string& hid, uint64_t seq, uint64_t deadl
 		// longer request is capped here, not stored as an invalid marker
 		const uint64_t now = wal_pin::now_ms();
 		p.deadline_ms = (now > 0 && deadline_ms > now + this->_wal_pin_max_ms) ? now + this->_wal_pin_max_ms : deadline_ms;
+		p.requested_deadline_ms = deadline_ms;
 		string why;
 		if (!wal_pin::parse(wal_pin::serialize(p), p, why)) {
 			result = "refused:" + why;

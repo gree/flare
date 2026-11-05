@@ -762,6 +762,44 @@ void test_history_commit_refuses_a_pin_of_another_sequence() {
 	cut_remove_path(dir, NULL);
 }
 
+// review of 2de21f2 (A1 / A2), P1: the successor's commit pins the WAL
+// (marker durable) and crashes before the history commit; after a reopen
+// the same commit retry finds the same pin (the requested deadline is in
+// the marker), commits, and S+1 is still served
+void test_history_commit_retry_after_crash_between_pin_and_commit() {
+	const char dir[] = "tmp_rocksdb_history_pin_crash";
+	storage_rocksdb* s = make_small_wal(dir);
+	cut_assert_equal_int(0, s->open());
+	const uint64_t first = fill_and_archive(s, "pc");
+	storage_rocksdb::pending_history out;
+	string res;
+	const uint64_t dl = wal_pin::now_ms() + 60000;
+	cut_assert_equal_int(0, s->history_promote_prepare("p0-crash", 0, "me:12121", dl, out, res));
+	cut_assert_equal_int(0, s->history_arm("p0-crash", 7, res));
+	// what history_commit does first: pin S with the requested deadline
+	// (the cap makes the stored deadline differ from it)
+	cut_assert_equal_int(0, s->wal_pin_set("p0-crash", out.seq, out.deadline_ms + 120000, res));
+	cut_assert_equal_string("pinned", res.c_str());
+	// the crash: the process goes away before the history commit
+	s->close();
+	sleep(2);
+	cut_assert_equal_int(0, s->open());
+	storage_rocksdb::wal_pin_status w = s->get_wal_pin_status();
+	cut_assert_equal_string("active", w.state.c_str());
+	cut_assert_equal_int((int)out.seq, (int)w.seq);
+	// the same retry: recognised as the same pin, the commit completes
+	cut_assert_equal_int(1, s->history_on_promotion(0, "me:12121", 7));
+	cut_assert_equal_string(out.to_epoch.c_str(), s->get_source_epoch().c_str());
+	storage_rocksdb::pending_history p;
+	cut_assert_false(s->get_pending_history(p));
+	cut_assert_equal_string("active", s->get_wal_pin_status().state.c_str());
+	cut_assert_true(serves_from(s, first));
+	s->wal_pin_release("p0-crash", res);
+	s->close();
+	delete s;
+	cut_remove_path(dir, NULL);
+}
+
 // History continuation (design 6th rev. §4-3..6): pending -> commit.
 void test_history_replica_prepare_commit_is_atomic_and_survives_restart() {
 	const char dir[] = "tmp_rocksdb_history_replica";

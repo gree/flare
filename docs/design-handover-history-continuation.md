@@ -1,4 +1,28 @@
-# 順序付き引き継ぎで履歴を継ぐ（replica を full rebuild しない）— 設計案 第 6 版
+# 順序付き引き継ぎで履歴を継ぐ（replica を full rebuild しない）— 設計案 第 6 版（＋ 追補 1）
+
+> **追補 1（2026-11-06、実装中に見つかった順序の問題。reviewer の確認待ち）**
+>
+> 第 2 版 §4-4 では、prepare 済みの replica は V2 を受け取ったときに commit する。しかし V2 の配布順が既存どおり「後継 → 旧 master → 残り」だと、次のことが起きる。
+> 1. 後継が先に master になり、新 epoch E' の転送を始める。
+> 2. まだ V2 を適用していない replica には epoch E が残っているので、E' の転送を `_decide_change` で拒否する。
+> 3. これが drop・failed として数えられ、replica repair、つまり full rebuild になる。
+>
+> **改める点（A3 の operator で実装する）**
+> - 継続する引き継ぎ（prepare 済みの replica がいるもの）では、V2 を次の順で配る。
+>   1. prepare 済みの replica に V2 を送る。
+>   2. その全員が `node_map_version ≥ V2` と `history_pending = -`（commit 済み）を報告したことを確かめる。
+>   3. その後で、後継に V2 を送る。
+>   4. 最後に、旧 master と残りに送る。
+> - 1 と 2 の間、master はいない。V1 の後と同じ状態で、書き込みは W で待つ。この時間も `Th` に含めて測る。
+> - 2 で期限内に確かめられなかった replica は継続から外す。
+>   - その replica の pending は、後継が commit した後に E' の転送が拒否されて repair、つまり従来どおりの full rebuild になる。
+>   - 引き継ぎ自体は進める。
+> - 先に commit した replica は、後継の昇格を待つ間、旧 epoch E の転送を拒否する。しかしバリアの条件（旧 master から in_flight 0）で、旧 epoch の転送はもう無い。
+> - 後継の commit（昇格時）が失敗した場合は、通常どおり epoch を進める（`history_on_promotion` が -1）。
+>   - commit 済みの replica は E'、新 master は E'' になり、`epoch_mismatch` から full rebuild になる。データは失わない（安全側）。
+> - flared 側（A2、`cluster.cc`）: replica は、map が prepare 済みの後継を partition の Active な Master と示したときに commit する。別の master を示したら pending を捨てる。
+>   - 後継は昇格の処理（`_shift_node_role`）の中で commit し、epoch をもう一度進めない。
+
 
 > **第 6 版の変更（2026-11-06、第 5 版 855dbc6 への reviewer の指摘 P1 2 点）**
 >

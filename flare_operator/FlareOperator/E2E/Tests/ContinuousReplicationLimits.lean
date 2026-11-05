@@ -1411,13 +1411,23 @@ def parkedSlotSuite : TestSuite := {
           return (← c.statStr ip "rebuild_blocked") == some "no_space" && (← c.statNat ip "rebuild_parked") == some 1
         if !parked then return .fail s!"precondition: {s1}'s rebuild did not park on no_space"
         let t0 := (← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%SZ"] }).stdout.trim
+        let uid0 ← c.podUid s2
         -- s2 is emptied (a graceful delete clears its tmpfs): its pod comes
         -- back with nothing, needs a new assignment, and fits
         match ← kubectl ["delete", "pod", s2, "-n", ns, "--wait=true", "--timeout=180s"] with
         | .error e => return .fail s!"could not delete {s2}: {e}"
         | .ok _ => pure ()
-        let active ← waitForCondition s!"the emptied {s2} rebuilds and is Slave/Active" 600 do
-          return (← c.nodeView).any fun e => podOf e.fqdn == s2 && e.role == 1 && e.state == 0
+        -- the map still has the OLD pod as Slave/Active right after the
+        -- delete (bf 42055533108: "Active" after 0 s with 0 items): wait for
+        -- the NEW pod (another UID), Ready, Active in the map AND holding
+        -- the master's items
+        let active ← waitForCondition s!"the emptied {s2} (a new pod) rebuilds: Ready, Slave/Active, the master's items" 600 do
+          let uid ← c.podUid s2
+          if uid.isNone || uid == uid0 then return false
+          if !(← c.ready s2) then return false
+          if !((← c.nodeView).any fun e => podOf e.fqdn == s2 && e.role == 1 && e.state == 0) then return false
+          let some ip ← getPodIp s2 ns | return false
+          return (← c.currItems ip) ≥ big
         let log ← c.opLogSince t0
         let heldByPart := (log.splitOn "\n").filter fun l =>
           containsSubstr l "REBUILD HELD" && containsSubstr l s2 && containsSubstr l "partition 0 already has"

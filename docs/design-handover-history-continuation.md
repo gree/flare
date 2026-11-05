@@ -1,4 +1,31 @@
-# 順序付き引き継ぎで履歴を継ぐ（replica を full rebuild しない）— 設計案 第 6 版（＋ 追補 1〜6）
+# 順序付き引き継ぎで履歴を継ぐ（replica を full rebuild しない）— 設計案 第 6 版（＋ 追補 1〜7）
+
+> **追補 7（2026-11-06、追補 6 bdade09 への reviewer の指摘 P2 2 点）**
+>
+> 1. **leader が替わったときの break-glass**
+>    - `fencedBy` は、一度書かれたら、その hid のあいだ有効なまま残る。leader が替わっても、新しい leader は status の `fencedBy` を読んで続きを行う。人の再承認は要らない。
+>      - 「人が確かめた」という事実は、leader が替わっても変わらないため。
+>      - 追補 6 §1 の失効条件のうち「leaderEpoch が変わった後、新しい leader がまだ書いていない」は削る。
+>    - まだ `fencedBy` が書かれていない段階で leader が替わった場合は、annotation を新しい leader が読んで、通常どおり消費する。値は同じでよい。
+>    - 「同じ値の 2 回目は無視」は、`fencedBy` が書かれた後に同じ値が再び付いた場合のこと。消費は 1 回だけで、その後は記録として残る。
+>    - 値に一意の承認 ID を含める: `<approval-id>/<hid>/<pod UID>/<boot id>/<copy id>`。
+>      - approval-id は人が付ける任意の一意な文字列（例: 作業チケット番号）。
+>      - `fencedBy` に残し、同じ approval-id は別の hid でも二度と受け付けない。
+>      - 受け付けた ID を status に保持する。直近 64 件。
+> 2. **誰が付けたかの根拠**
+>    - managedFields の manager は使わない。
+>    - annotation を付ける要求は、node guard webhook の FlareCluster の UPDATE で受ける（webhook の対象に `flareclusters` の UPDATE を加える。この annotation の追加・変更だけを判定し、他は許可）。
+>      - AdmissionReview の、認証済みの `userInfo`（username・groups・uid）を、AdmissionReview の uid とともに記録する。
+>      - 記録先は `status.handovers[].fencedBy` と、operator のログ（`NODE GUARD: handover-fenced …`）。
+>    - API server の audit log は、AdmissionReview の uid（audit event の `auditID` ではない）と時刻で突き合わせられるようにする。`fencedBy` に両方を残す。
+>    - webhook を通らずに付いた annotation は、operator が使わない。例: webhook が無効、または operator が不在のとき直接 patch された。
+>      - 理由: `fencedBy` の userInfo が無い。
+>      - CRITICAL のログを出す。
+>    - 試験
+>      - 認証済みの userInfo が `fencedBy` に残る。
+>      - webhook を通らない annotation（test seam で webhook を外す）は使われない。
+>      - 同じ approval-id を別の hid で使うと、拒否される。
+
 
 > **追補 6（2026-11-06、追補 5 b393747 への reviewer の指摘 P1）**
 >

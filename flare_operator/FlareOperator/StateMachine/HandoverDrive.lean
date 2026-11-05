@@ -144,6 +144,53 @@ def dropChanged (e : Entry) (now : List (String × Option String)) : Entry × Li
                  reason := "no prepared replica kept its pod, process and copy: they rebuild" }, dropped)
     else (e', dropped)
 
+/-- Drop `bad` replicas whose arm failed from `prepared` / `committed`
+    (nothing else is recorded). No prepared replica left = no continuation:
+    promoting with the handover id kept (V2 is already out) and `fullSent`
+    false, so the promoting step arms and sends to the successor. -/
+def dropPrepared (e : Entry) (bad : List String) : Entry :=
+  let good := e.prepared.filter fun (k, _) => !bad.contains k
+  let e' := { e with prepared := good, committed := e.committed.filter fun k => good.any (·.1 == k) }
+  if good.isEmpty then
+    { e' with phase := .promoting, fullSent := false,
+              reason := "no prepared replica could be armed for V2: they rebuild" }
+  else e'
+
+-- ═══════════════════════════════════════════════════════════════════════
+-- the V2 publication gate (addendum 11, ordering hole)
+-- ═══════════════════════════════════════════════════════════════════════
+
+/-- While an entry is in `committingReplicas` (V2 recorded or about to be,
+    `fullSent` false) the live map holds V2 and only the prepared replicas,
+    armed for it, may be sent it. -/
+def holdsV2 (e : Entry) : Bool := e.phase == .committingReplicas
+
+/-- What a publish of the live map may do: everything (`all`), only the
+    listed node keys (`only`), or nothing (`skip`, kept pending). -/
+inductive Gate
+  | all
+  | only (keys : List String)
+  | skip
+  deriving Repr, BEq
+
+/-- The gate decision for a publish. `keys` = the targets it asks for
+    (`none` = the whole fleet). Without a held entry a publish is as before.
+    With one: a fleet-wide publish is skipped; a targeted one keeps only the
+    prepared replicas of the held entries (never the successor or any other
+    pod). `known` false (the ledger was never read) fails closed. -/
+def publishGate (known : Bool) (ents : List Entry) (keys : Option (List String)) : Gate :=
+  let held := ents.filter holdsV2
+  if known && held.isEmpty then
+    match keys with
+    | none => .all
+    | some ks => .only ks
+  else
+    match keys with
+    | none => .skip
+    | some ks =>
+      if !known then .skip
+      else .only (ks.filter fun k => held.any fun e => e.prepared.any (·.1 == k))
+
 -- ═══════════════════════════════════════════════════════════════════════
 -- flared commands and replies
 -- ═══════════════════════════════════════════════════════════════════════
@@ -160,6 +207,14 @@ def prepareCmd (hid : String) (partition : Nat) (successor fromEpoch toEpoch : S
   s!"history prepare {hid} {partition} {successor} {fromEpoch} {toEpoch} {seq} {masterId} {deadlineMs} {incarnation}"
 
 def discardCmd (hid : String) : String := s!"history discard {hid}"
+
+/-- Addendum 11: binds the pending record to the exact V2 map before it is
+    sent (replicas commit only on that version). -/
+def armCmd (hid : String) (version : Nat) : String := s!"history arm {hid} {version}"
+
+/-- An arm that took (`armed`) or had already (`already`); anything else
+    (refused / failed / no reply) did not. -/
+def armOk (r : Option String) : Bool := r == some "armed" || r == some "already"
 
 def releaseCmd (hid : String) : String := s!"wal_pin release {hid}"
 

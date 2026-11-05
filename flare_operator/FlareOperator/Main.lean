@@ -610,6 +610,15 @@ private def statDest (out name dest : String) : Option Nat :=
 private def historyContinuationOn : IO Bool := do
   return (← IO.getEnv "FLARE_OPERATOR_HISTORY_CONTINUATION") == some "on"
 
+/-- Addendum 11 (ordering hole): the gate every publish of the live map goes
+    through. Off = no gate (the map goes out as before). On: while a handover
+    entry is in committingReplicas the live map holds V2 and only the armed
+    prepared replicas may get it (HandoverDrive.publishGate). -/
+private def v2Gate (keys : Option (List String)) : IO HandoverDrive.Gate := do
+  if !(← historyContinuationOn) then
+    return match keys with | none => .all | some ks => .only ks
+  return HandoverDrive.publishGate (← handoverLoadedRef.get) (← handoverRef.get).entries keys
+
 /-- A complete reply of a flared command line (`stats` is one of them), or
     none (unreadable is never a value). -/
 private def podCmdOf (key ns cmd : String) : IO (Option String) := do
@@ -1159,8 +1168,41 @@ private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterSta
                                   reason := "the promotion gates refused the successor and the old master is gone: the failover rules apply" }
                   act := .finish
                 proceed := false
+          let mut targets := (e1.prepared.map (·.1)).filter fun k => !e1.committed.contains k
           if proceed then
-            let targets := (e1.prepared.map (·.1)).filter fun k => !e1.committed.contains k
+            -- addendum 11: each prepared replica not yet committed is armed
+            -- for this exact V2 (idempotent) BEFORE the map goes to it; one
+            -- whose arm fails is dropped by CAS (it rebuilds) — unless a
+            -- fresh read shows it committed
+            if !targets.isEmpty && e1.v2.isSome && contOn && (justCommitted || now >= lastTargeted + 1000) then
+              if let some v2 := e1.v2 then
+                let mut failed : List String := []
+                for k in targets do
+                  let r ← podCmdOf k ns (HandoverDrive.armCmd hid v2)
+                  let res := r.bind HandoverDrive.historyResult
+                  if !HandoverDrive.armOk res then
+                    let rd ← contReading pods k ns
+                    match e1.prepared.lookup k with
+                    | some b =>
+                      if rd.committed e1 b v2 then
+                        e1 := { e1 with committed := (e1.committed ++ [k]).eraseDups }
+                      else
+                        IO.eprintln s!"[flare-operator] HANDOVER p{e.partition}: arm of {hid} for v{v2} on {k} answered {res.getD "nothing"}: dropped from the continuation (it rebuilds)"
+                        failed := failed ++ [k]
+                    | none => pure ()
+                if !failed.isEmpty then
+                  let eArm := HandoverDrive.dropPrepared e1 failed
+                  if (← durable eArm) then
+                    e1 := eArm
+                    discardHistory ns hid failed
+                    if e1.phase != .committingReplicas then
+                      act := .send
+                      proceed := false
+                  else
+                    proceed := false
+                    act := .none
+                targets := (e1.prepared.map (·.1)).filter fun k => !e1.committed.contains k
+          if proceed then
             if !targets.isEmpty && e1.v2.isSome && (justCommitted || now >= lastTargeted + 1000) then
               if (← durable e1) then
                 lastTargeted := now
@@ -1204,9 +1246,33 @@ private def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterSta
           | none => []
         discardHistory ns (HistoryContinuation.handoverId e1.partition e1.attempt e1.demotedMs)
           (e1.successor :: slaves ++ e1.prepared.map (·.1))
+      -- addendum 11: before the promoting full send that follows a
+      -- continuation, the successor is armed for V2 (a refusal is logged and
+      -- the ordinary promotion goes on: it advances its epoch, the committed
+      -- replicas rebuild, no data is lost). That send carries V2 itself (no
+      -- new version) while the live map is still V2: the successor commits
+      -- only on the exact version it was armed for.
+      let contFull := act == .send && contOn && e1.phase == .promoting && !e1.hid.isEmpty && !e1.fullSent
+      let liveV := (← stateRef.get).nodeMapVersion
+      let fixedV : Option Nat := if contFull then
+          (match e1.v2 with
+            | some v2 => if liveV == v2 then some v2 else none
+            | none => none)
+        else none
+      if contFull then
+        if let some v2 := e1.v2 then
+          let sendV := match fixedV with | some v => v | none => liveV + 1
+          let r ← podCmdOf e1.successor ns (HandoverDrive.armCmd e1.hid sendV)
+          let res := r.bind HandoverDrive.historyResult
+          if HandoverDrive.armOk res then
+            IO.eprintln s!"[flare-operator] HANDOVER p{e.partition}: successor {e1.successor} armed for v{sendV} (V2 = v{v2}; {res.getD ""})"
+          else
+            IO.eprintln s!"[flare-operator] HANDOVER p{e.partition}: arm of {e1.hid} for v{sendV} on the successor {e1.successor} answered {res.getD "nothing"}: the ordinary promotion goes on (it advances its epoch; committed replicas rebuild)"
       let e2 ← if act == .send then do
           let v ← stateRef.modifyGet fun cur =>
-            let v := cur.nodeMapVersion + 1
+            let v := match fixedV with
+              | some fv => if cur.nodeMapVersion == fv then fv else cur.nodeMapVersion + 1
+              | none => cur.nodeMapVersion + 1
             (v, { Handover.apply cur e1 with nodeMapVersion := v })
           IO.eprintln s!"[flare-operator] HANDOVER p{e.partition}: {e1.phase} map committed as v{v}"
           sent := true
@@ -3440,6 +3506,11 @@ private def publishLiveMapTo (stateRef : IO.Ref FlareClusterState)
   let hold : IO Bool := do
     pendingBroadcastRef.modify fun p => some (p.getD v)
     pure false
+  let gate ← v2Gate keys
+  if gate == .skip then
+    IO.eprintln s!"[flare-operator] topology send of v{v} ({why}) HELD: a history continuation is committing its replicas; only the prepared replicas get V2 until the successor is armed"
+    return (← hold)
+  let keys := match gate with | .only ks => some ks | _ => keys
   let stillLeader ← match ← holdLeaseNow leaseName ns identity with
     | .ok held => pure held
     | .error e =>
@@ -4617,7 +4688,15 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
     pending := pendingBefore
     repairHeld := heldKeys.length
     activeNotReady := unconfirmedActive.length }
-  if triggers.any then
+  -- addendum 11: while a history continuation commits its replicas the
+  -- live map holds V2 and no fleet-wide send may carry it (the audit's
+  -- "behind" resends, the retry flag and every other trigger end up here);
+  -- the flag stays, the send follows once the successor is armed
+  let v2Held := (← v2Gate none) == .skip
+  if triggers.any && v2Held then
+    IO.eprintln s!"[flare-operator] topology broadcast of v{finalVersion} HELD ({triggers.label}): a history continuation is committing its replicas; only the prepared replicas get V2 until the successor is armed"
+    pendingBroadcastRef.modify fun p => match p with | some v => some v | none => some finalVersion
+  else if triggers.any then
     -- TEST SEAM (SAF-01 / CHECK-01). Unset in production, this is one
     -- getEnv and nothing else.
     --

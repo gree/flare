@@ -351,6 +351,30 @@ def results : List (String × Bool) := Id.run do
                 && (HandoverDrive.parsePromote "STAT history_result prepared\r\nSTAT history_to_epoch 9:e\r\nEND").isNone
                 && HandoverDrive.safeArg "p0-a1-1100" && HandoverDrive.safeArg "pod-0.svc.ns:12121" && !HandoverDrive.safeArg "a b" && !HandoverDrive.safeArg "x'y" && !HandoverDrive.safeArg ""
                 && HandoverDrive.wallDeadline 1000000 5000 12000 == 1007000 && HandoverDrive.wallDeadline 1000000 13000 12000 == 1000000)]
+  -- addendum 11: arm before V2, and the publish gate while committingReplicas
+  let held := { ent with phase := .committingReplicas }
+  let prom := { ent with phase := .promoting }
+  let ks := ["r1:12121", "s:12121", "other:12121"]
+  let (dArm, _) := (HandoverDrive.dropPrepared held ["r2:12121"], 0)
+  let dArmAll := HandoverDrive.dropPrepared { held with committed := ["r1:12121"] } ["r1:12121", "r2:12121"]
+  r := r ++ [("drive: history arm command line and result; a replica whose arm failed is dropped (none left = promoting with the hid kept, fullSent false)",
+              HandoverDrive.armCmd "p0-a1-1100" 9 == "history arm p0-a1-1100 9"
+                && HandoverDrive.armOk (some "armed") && HandoverDrive.armOk (some "already")
+                && !HandoverDrive.armOk (some "refused:armed_for_another_version") && !HandoverDrive.armOk (some "failed:write") && !HandoverDrive.armOk none
+                && dArm.prepared == [("r1:12121", "u2|b2|c2")] && dArm.phase == .committingReplicas
+                && dArmAll.phase == .promoting && dArmAll.prepared.isEmpty && dArmAll.committed.isEmpty
+                && dArmAll.hid == "p0-a1-1100" && dArmAll.v2 == some 9 && !dArmAll.fullSent)]
+  r := r ++ [("drive: publish gate — while an entry is committingReplicas a fleet-wide publish is skipped and a targeted one keeps only its prepared replicas (never the successor or other pods); an unread ledger fails closed; otherwise as before",
+              HandoverDrive.publishGate true [held] none == .skip
+                && HandoverDrive.publishGate true [held] (some ks) == .only ["r1:12121"]
+                && HandoverDrive.publishGate true [held] (some ["s:12121"]) == .only []
+                && HandoverDrive.publishGate true [prep, { held with partition := 3 }] none == .skip
+                && HandoverDrive.publishGate true [prom] none == .all
+                && HandoverDrive.publishGate true [] none == .all
+                && HandoverDrive.publishGate true [prom] (some ks) == .only ks
+                && HandoverDrive.publishGate false [] none == .skip
+                && HandoverDrive.publishGate false [] (some ks) == .skip
+                && HandoverDrive.holdsV2 held && !HandoverDrive.holdsV2 prom && !HandoverDrive.holdsV2 { held with phase := .done })]
   return r
 
 end FlareOperator.UnitTestsHandover

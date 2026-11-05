@@ -1,4 +1,50 @@
-# 順序付き引き継ぎで履歴を継ぐ（replica を full rebuild しない）— 設計案 第 6 版（＋ 追補 1・2・3）
+# 順序付き引き継ぎで履歴を継ぐ（replica を full rebuild しない）— 設計案 第 6 版（＋ 追補 1〜4）
+
+> **追補 4（2026-11-06、追補 3 070e4d6 への reviewer の指摘 P1 2 点）**
+>
+> 1. **V1' で旧 master に戻すのは、commit が無いことを証明できたときだけ**
+>    - 「commit 0」と判定する条件は、`prepared` の**全員**について、新しい完全な stats（END まで揃ったもの）で次がすべて成り立つこと。
+>      - binding が保存した値と同じ。
+>      - `history_pending` が、この hid の pending を示す（commit も discard もされていない）。
+>      - epoch = fromEpoch。
+>    - 1 人でも読めない、応答が分からない、binding が違う場合は、「0」とは扱わない（unknown）。
+>      - binding の違う Pod は、元のコピーを持たない。ただし commit したかどうかは分からないので、unknown に数える。
+>    - **rollback の意図を先に永続化する**
+>      - 証明できたら、まず phase `rollingBack`（leaderEpoch 付き）を CAS で書く。その後に、V1' の送信と各 replica への `history discard` を行う。
+>      - 再起動・leader の交代の後に `rollingBack` を読んだら、rollback の続きだけを行う。前へは進まない。
+>      - 各 replica は V1' を受け取ると、pending を自分で捨てる（A2: map が別の master を示す）。
+>    - **unknown が残る場合**
+>      - 後継が同じ binding で応答するなら、`promoting` へ進む。後継は H で清浄なので、どの場合でも安全に進める。
+>      - 後継も応答しないなら、何も昇格させずに止める。
+>        - CRITICAL のログと Event を出し、`status.handovers[].reason` に理由を書く。
+>        - 読めるようになったら、上の規則でやり直す。
+>        - この間、書き込みは W で待つ。`Tw` を超えた分はエラーになるが、ACK 損失は無い。これは既決の区分 (a)・(b) と同じ扱い。
+> 2. **`promoting` で後継に V2 を送った後**
+>    - 後継に V2 を送った時点からは、「後継がすでに master かもしれない」として扱う。
+>    - そのため、次のどちらかを確かめるまでは、**別の replica を昇格させない。**
+>      - (a) 後継が master として適用を終えた。
+>      - (b) 後継の process がもう存在しない。
+>    - **適用済みの判定**: 後継の binding が保存した値と同じで、`node_map_version ≥ V2`、`own_role = master`、epoch = toEpoch。これで (a) とし、既存の完了条件へ進む（残りに V2 を送る）。
+>    - **応答が分からない（timeout、stats が読めない）**
+>      - 同じ binding に V2 を再送する（冪等）。適用済みかどうかを読み直す。
+>      - Pod の UID が同じ間は、別の replica を昇格させない。
+>      - `Th` を超えたら止めて知らせる。止め方と知らせ方は §1 と同じ。
+>    - **Pod が消えた、または binding が違う**
+>      - 次のどちらかを API で確かめたときだけ、(b) とする。
+>        - Pod が NotFound である。
+>        - Pod の UID が違う。
+>      - 同じ UID のまま boot id が違う場合（container の再起動）は、新しい process が古い map で master にならないとは限らない。
+>        - 新しい process は起動時に operator から map を受け取るまで proxy だが、確かめていない。
+>        - そのため、この場合は (b) とせず、上の「応答が分からない」と同じに扱う。
+>      - (b) の後に限り、追補 2 §3 の「commit 済みの replica を後継に替える」を行う。
+>        - その map（V3）は、元の後継の node key を Master にしない（proxy か down）。
+>        - 元の後継が新しい Pod で戻ってきても、V3 で proxy になる。
+>    - **E2E を足す**
+>      - 後継に V2 を送った直後に、後継の Pod を消す。後継が適用する前と後の 2 通り（test seam で適用を遅らせる）。
+>        - 確かめること: master は 1 つ以下（`atMostOneMasterPerPartition` と、各 Pod の own_role を時系列で記録）。missing 0。
+>      - 後継の stats を読めなくする（ネットワークを切る）→ 別の replica を昇格させず、止まって知らせる。
+>      - prepared の 1 人を読めなくした状態で後継を止める → rollback もせず、止まって知らせる。読めるようになったら規則どおりに進む。
+
 
 > **追補 3（2026-11-06、追補 2 748f5b4 への reviewer の指摘 P1 2 点）**
 >

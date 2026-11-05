@@ -1,4 +1,47 @@
-# 順序付き引き継ぎで履歴を継ぐ（replica を full rebuild しない）— 設計案 第 4 版
+# 順序付き引き継ぎで履歴を継ぐ（replica を full rebuild しない）— 設計案 第 5 版
+
+> **第 5 版の変更（2026-11-06、第 4 版 8e4020c への reviewer の指摘 P1）**
+>
+> 第 4 版 §4 の保持の意図は、RocksDB の default CF に置いていた。
+> - これでは、起動時の `DB::Open`（`storage_rocksdb.cc:1503`）が WAL・obsolete file の後片付けをするのが、意図を読むより先になる。
+> - `DisableFileDeletions` も DB handle を得た後でしか呼べない。
+> - そこで、意図を **DB の外に**置き、open の前から効かせる。
+>
+> 1. **marker を DB の外に置く**
+>    - `data_dir/WAL_PIN` に `hid S deadline_epoch_ms` を書く。
+>    - 書き方は一時ファイルに書いて fsync し、rename してから、ディレクトリを fsync する。
+>    - 書くのは commit（V2 の適用）の前。消すのは release か期限切れの後。
+>    - 同じ hid なら上書きしても同じ内容（冪等）。
+> 2. **open の前に読む**
+>    - flared は `_open_db` の前に `WAL_PIN` を読む。
+>    - 期限が残っていれば、その open では次の設定で `DB::Open` する。
+>      - `WAL_ttl_seconds` と `WAL_size_limit_MB` を「全部残す」値にする。
+>        - flush 済みの WAL は削除されず archive に移るので、open の後片付けで消えなくなる。
+>      - RocksDB に `disable_delete_obsolete_files_on_open` があれば、それも使う。
+>        - nixpkgs の RocksDB の版で確かめる。無い・効かない場合は、上の WAL の設定だけで守れることを試験で示す。
+>    - open の直後、まだどの follower にも答えないうちに `DisableFileDeletions` する。
+>    - そのうえで、WAL の TTL と上限を通常の値に戻す。
+>      - `SetDBOptions` で戻せるかを実装時に確かめる。
+>      - 戻せなければ、保持を解くときに戻すまでその値のままにする。保持には期限と空きの下限があるので、増え方には上限がある。
+>    - 期限切れの marker は、open の前に消す。その open は通常の設定で行う。
+> 3. **release と期限**
+>    - `history_release <hid>` と期限切れのどちらでも、次の順で行う。
+>      1. `EnableFileDeletions`
+>      2. WAL の設定を通常に戻す
+>      3. `WAL_PIN` を消す
+>      4. ディレクトリを fsync する
+>    - この順なら、どこで落ちても次の起動は「保持あり」か「通常」のどちらかになる。
+>    - 期限が過ぎた marker が残っていたら、起動時に消す。
+> 4. **順序を試験できるようにする**
+>    - test seam を置く。どれも本番では設定しない。
+>      - `FLARE_TEST_WAL_PIN_CRASH_AT`: marker を書いた後、DisableFileDeletions の後、release の各段で flared を落とす。
+>      - `FLARE_TEST_OPEN_HOLD_FILE`: open の直前で止める。
+>    - E2E で確かめること
+>      - 保持の間に新 master を kill -9 し、再起動の後も follower が `repl_sync_wal S+1` で続けられる（`lsn_purged` にならない）。
+>      - release の途中で落としても、次の起動は保持ありか通常のどちらかになり、WAL が残り続けない。
+>      - 期限切れの marker があっても、通常どおり open する。
+>    - cutter: marker の読み書きと、期限・hid の判定。
+
 
 > **第 4 版の変更（2026-11-06、第 3 版 338c2fe への reviewer の変更要求を受けて）**
 >

@@ -43,6 +43,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <pthread.h>
+#include <atomic>
 #include <unistd.h>
 #include <dirent.h>
 #include <dirent.h>
@@ -527,6 +528,45 @@ void test_wal_pin_release_failure_keeps_the_pin() {
 	cut_remove_path(dir, NULL);
 }
 
+// review of 4eb6974, P2: a release whose EnableFileDeletions fails keeps
+// its disable; a pin set right after REUSES it (never stacks a second
+// one), and the next release balances it — deletions end up enabled.
+void test_wal_pin_failed_enable_then_new_pin_stays_balanced() {
+	const char dir[] = "tmp_rocksdb_wal_pin_enfail";
+	storage_rocksdb* s = make_small_wal(dir);
+	cut_assert_equal_int(0, s->open());
+	uint64_t base = 0, n = 0;
+	cut_assert_true(s->file_deletion_disables(base));
+	string res;
+	cut_assert_equal_int(0, s->wal_pin_set("h1", 1, wal_pin::now_ms() + 60000, res));
+	cut_assert_true(s->file_deletion_disables(n));
+	cut_assert_true(n != base);
+	storage_rocksdb::_test_enable_fault = true;
+	cut_assert_equal_int(0, s->wal_pin_release("h1", res));
+	storage_rocksdb::wal_pin_status w = s->get_wal_pin_status();
+	cut_assert_equal_string("none", w.state.c_str());
+	cut_assert_true(w.deletions_disabled);
+	cut_assert_true(s->file_deletion_disables(n));
+	cut_assert_true(n != base);
+	// an immediate new pin, before any tick retried the enable: reused,
+	// not stacked
+	cut_assert_equal_int(0, s->wal_pin_set("h2", 2, wal_pin::now_ms() + 60000, res));
+	cut_assert_equal_string("pinned", res.c_str());
+	cut_assert_true(s->file_deletion_disables(n));
+	cut_assert_true(n != base);
+	storage_rocksdb::_test_enable_fault = false;
+	cut_assert_equal_int(0, s->wal_pin_release("h2", res));
+	w = s->get_wal_pin_status();
+	cut_assert_false(w.deletions_disabled);
+	// RocksDB itself: back to where it was before the pins (a second,
+	// stacked disable would leave it disabled after the one enable)
+	cut_assert_true(s->file_deletion_disables(n));
+	cut_assert_equal_int((int)base, (int)n);
+	s->close();
+	delete s;
+	cut_remove_path(dir, NULL);
+}
+
 // review of 2f6294a, P1-2: a pin set while the archive purge of a released
 // pin is running waits until the purge is over (same locks through the
 // unlinks), and the new pin's S+1 is served afterwards.
@@ -534,7 +574,7 @@ namespace {
 	struct purge_race {
 		storage_rocksdb* s;
 		uint64_t seq;
-		volatile bool done;
+		std::atomic<bool> done;
 		string res;
 	};
 	purge_race* g_race = NULL;
@@ -551,7 +591,7 @@ namespace {
 	void race_hook(storage_rocksdb*) {
 		pthread_create(&g_race_thread, NULL, race_set_pin, g_race);
 		usleep(300 * 1000);
-		g_set_returned_during_purge = g_race->done;
+		g_set_returned_during_purge = g_race->done.load();
 	}
 }
 
@@ -570,7 +610,7 @@ void test_wal_pin_purge_does_not_race_a_new_pin() {
 	purge_race r;
 	r.s = s;
 	r.seq = s->get_latest_sequence_number();
-	r.done = false;
+	r.done.store(false);
 	g_race = &r;
 	g_set_returned_during_purge = false;
 	storage_rocksdb::_test_hook_wal_purge_decided = race_hook;
@@ -587,6 +627,103 @@ void test_wal_pin_purge_does_not_race_a_new_pin() {
 	s->wal_pin_tick(wal_pin::now_ms());
 	cut_assert_true(serves_from(s, r.seq));
 	s->wal_pin_release("h-new", res);
+	s->close();
+	delete s;
+	cut_remove_path(dir, NULL);
+}
+
+// review of ef2f35a, P1: concurrent first prepares of one hid mint ONE
+// tuple (read, compare and persist under one exclusive section)
+namespace {
+	struct prep_race {
+		storage_rocksdb* s;
+		pthread_barrier_t* bar;
+		storage_rocksdb::pending_history out;
+		string res;
+		int rc;
+	};
+	void* prep_race_run(void* arg) {
+		prep_race* r = static_cast<prep_race*>(arg);
+		pthread_barrier_wait(r->bar);
+		r->rc = r->s->history_promote_prepare("p0-race", 0, "me:12121", 999999999999ULL, r->out, r->res);
+		return NULL;
+	}
+}
+
+void test_history_promote_prepare_concurrent_first_requests_mint_one_tuple() {
+	const char dir[] = "tmp_rocksdb_history_prep_race";
+	storage_rocksdb* s = make_small_wal(dir);
+	cut_assert_equal_int(0, s->open());
+	const int n = 6;
+	pthread_barrier_t bar;
+	pthread_barrier_init(&bar, NULL, n);
+	prep_race rs[n];
+	pthread_t th[n];
+	for (int i = 0; i < n; i++) {
+		rs[i].s = s;
+		rs[i].bar = &bar;
+		rs[i].rc = -2;
+		pthread_create(&th[i], NULL, prep_race_run, &rs[i]);
+	}
+	for (int i = 0; i < n; i++) {
+		pthread_join(th[i], NULL);
+	}
+	pthread_barrier_destroy(&bar);
+	int prepared = 0;
+	for (int i = 0; i < n; i++) {
+		cut_assert_equal_int(0, rs[i].rc);
+		if (rs[i].res == "prepared") prepared++;
+		cut_assert_equal_string(rs[0].out.to_epoch.c_str(), rs[i].out.to_epoch.c_str());
+		cut_assert_equal_string(rs[0].out.master_id.c_str(), rs[i].out.master_id.c_str());
+		cut_assert_equal_int((int)rs[0].out.seq, (int)rs[i].out.seq);
+	}
+	cut_assert_equal_int(1, prepared);
+	storage_rocksdb::pending_history p;
+	cut_assert_true(s->get_pending_history(p));
+	cut_assert_equal_string(rs[0].out.to_epoch.c_str(), p.to_epoch.c_str());
+	s->close();
+	delete s;
+	cut_remove_path(dir, NULL);
+}
+
+// review of ef2f35a, P2: the successor's idempotence covers the request;
+// an unreadable pending record is never "already" (fail closed)
+void test_history_promote_prepare_other_request_refused_and_unreadable_fails_closed() {
+	const char dir[] = "tmp_rocksdb_history_prep_neg";
+	storage_rocksdb* s = make_small_wal(dir);
+	cut_assert_equal_int(0, s->open());
+	storage_rocksdb::pending_history out;
+	string res;
+	const uint64_t dl = wal_pin::now_ms() + 60000;
+	cut_assert_equal_int(0, s->history_promote_prepare("p0-x", 0, "me:12121", dl, out, res));
+	cut_assert_equal_int(-1, s->history_promote_prepare("p0-x", 1, "me:12121", dl, out, res));
+	cut_assert_equal_string("refused:different_tuple", res.c_str());
+	cut_assert_equal_int(-1, s->history_promote_prepare("p0-x", 0, "other:12121", dl, out, res));
+	cut_assert_equal_string("refused:different_tuple", res.c_str());
+	cut_assert_equal_int(-1, s->history_promote_prepare("p0-x", 0, "me:12121", dl + 1, out, res));
+	cut_assert_equal_string("refused:different_tuple", res.c_str());
+	cut_assert_equal_int(-1, s->history_promote_prepare("p0-y", 0, "me:12121", dl, out, res));
+	cut_assert_equal_string("refused:another_pending", res.c_str());
+	cut_assert_equal_int(0, s->history_promote_prepare("p0-x", 0, "me:12121", dl, out, res));
+	cut_assert_equal_string("already", res.c_str());
+	// a read error: no "already", no new tuple, no discard reported
+	storage_rocksdb::_test_pending_read_fault = true;
+	cut_assert_equal_int(-1, s->history_discard("p0-x", "test", res));
+	cut_assert_equal_string("failed:pending_unreadable", res.c_str());
+	cut_assert_equal_int(-1, s->history_promote_prepare("p0-x", 0, "me:12121", dl, out, res));
+	cut_assert_equal_string("refused:pending_unreadable", res.c_str());
+	storage_rocksdb::pending_history in = out;
+	in.hid = "p0-z";
+	cut_assert_equal_int(-1, s->history_replica_prepare(in, s->get_incarnation(), res));
+	cut_assert_equal_string("refused:pending_unreadable", res.c_str());
+	storage_rocksdb::_test_pending_read_fault = false;
+	// the record is still there and is discarded once readable
+	storage_rocksdb::pending_history p;
+	cut_assert_true(s->get_pending_history(p));
+	cut_assert_equal_int(0, s->history_discard("p0-x", "test", res));
+	cut_assert_equal_string("discarded", res.c_str());
+	cut_assert_equal_int(0, s->history_discard("p0-x", "test", res));
+	cut_assert_equal_string("already", res.c_str());
 	s->close();
 	delete s;
 	cut_remove_path(dir, NULL);
@@ -727,14 +864,16 @@ void test_history_successor_prepare_commit_at_promotion_pins_wal() {
 	const string mid0 = s->get_master_id();
 	storage_rocksdb::pending_history out, again;
 	string res;
-	cut_assert_equal_int(0, s->history_promote_prepare("p0-a1-9", 0, "me:12121", wal_pin::now_ms() + 60000, out, res));
+	const uint64_t dl9 = wal_pin::now_ms() + 60000;
+	cut_assert_equal_int(0, s->history_promote_prepare("p0-a1-9", 0, "me:12121", dl9, out, res));
 	cut_assert_equal_string("prepared", res.c_str());
 	cut_assert_equal_string(e0.c_str(), out.from_epoch.c_str());
 	cut_assert_true(out.to_epoch != e0);
 	// the cursor is not ahead of the own sequence: the master_id is kept
 	cut_assert_equal_string(mid0.c_str(), out.master_id.c_str());
 	// idempotent: the same values again
-	cut_assert_equal_int(0, s->history_promote_prepare("p0-a1-9", 0, "me:12121", wal_pin::now_ms() + 60000, again, res));
+	// the SAME request again (every field equal, deadline included)
+	cut_assert_equal_int(0, s->history_promote_prepare("p0-a1-9", 0, "me:12121", dl9, again, res));
 	cut_assert_equal_string("already", res.c_str());
 	cut_assert_equal_string(out.to_epoch.c_str(), again.to_epoch.c_str());
 	cut_assert_equal_int((int)out.seq, (int)again.seq);

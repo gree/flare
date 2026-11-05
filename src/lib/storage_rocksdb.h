@@ -544,7 +544,10 @@ public:
 	virtual int history_on_map(int partition, const string& master_key, const string& own_key, uint64_t map_version);
 	virtual int history_on_promotion(int partition, const string& own_key, uint64_t map_version);
 	int wal_pin_set(const string& hid, uint64_t seq, uint64_t deadline_ms, string& result);
-	bool _read_pending_locked(pending_history& out);
+	enum pending_read { pending_absent = 0, pending_present, pending_error };
+	pending_read _read_pending_locked(pending_history& out);
+	// TEST SEAM (unit tests only): the pending record reads as an error
+	static bool _test_pending_read_fault;
 	int wal_pin_release(const string& hid, string& result);
 	int wal_pin_release_invalid(const string& boot_id, const string& own_boot_id, string& result);
 	int wal_pin_tick(uint64_t now_ms);
@@ -565,6 +568,10 @@ public:
 	// TEST SEAM (unit tests only): called inside wal_pin_tick after the
 	// archive purge was decided, with the purge's locks held
 	static void (*_test_hook_wal_purge_decided)(storage_rocksdb*);
+	// TEST SEAM (unit tests only): EnableFileDeletions of a WAL_PIN release
+	// fails as if RocksDB refused it
+	static bool _test_enable_fault;
+	bool file_deletion_disables(uint64_t& n);
 	// Slave side: replace the live DB with the received checkpoint (staging
 	// dir is renamed into place under the whole-storage write lock — readers
 	// and writers are excluded for the swap) and seed the replication cursor

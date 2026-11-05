@@ -2870,14 +2870,44 @@ bool storage_rocksdb::parse_pending(const string& text, pending_history& p) {
 	return true;
 }
 
-// caller holds _mutex_wholelock (read or write)
-bool storage_rocksdb::_read_pending_locked(pending_history& out) {
+// caller holds _mutex_wholelock (read or write). ABSENT only on NotFound;
+// a read error or a record that does not parse is an ERROR (review of
+// ef2f35a, P2: an unreadable pending record is never "already gone")
+storage_rocksdb::pending_read storage_rocksdb::_read_pending_locked(pending_history& out) {
 	if (this->_db == NULL) {
-		return false;
+		return pending_error;
+	}
+	if (_test_pending_read_fault) {
+		return pending_error;
 	}
 	string v;
 	rocksdb::Status st = this->_db->Get(this->_read_options, kReplPendingHistoryKey, &v);
-	return st.ok() && parse_pending(v, out);
+	if (st.IsNotFound()) {
+		return pending_absent;
+	}
+	if (!st.ok()) {
+		log_err("pending history could not be read: %s", st.ToString().c_str());
+		return pending_error;
+	}
+	if (!parse_pending(v, out)) {
+		log_err("pending history is unreadable [%s]", v.c_str());
+		return pending_error;
+	}
+	return pending_present;
+}
+
+bool storage_rocksdb::_test_pending_read_fault = false;
+bool storage_rocksdb::_test_enable_fault = false;
+
+// RocksDB's own reading of "rocksdb.is-file-deletions-enabled" (8.3.2
+// answers 1 while deletions are enabled and 0 while any disable is held,
+// whatever rocksdb/db.h says): compared with the value right after open by
+// the tests. false when it cannot be read.
+bool storage_rocksdb::file_deletion_disables(uint64_t& n) {
+	pthread_rwlock_rdlock(&this->_mutex_wholelock);
+	const bool ok = this->_db != NULL && this->_db->GetIntProperty("rocksdb.is-file-deletions-enabled", &n);
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	return ok;
 }
 
 bool storage_rocksdb::get_pending_history(pending_history& out) {
@@ -2899,92 +2929,130 @@ bool storage_rocksdb::get_pending_history(pending_history& out) {
 
 int storage_rocksdb::history_promote_prepare(const string& hid, uint64_t partition, const string& successor,
 		uint64_t deadline_ms, pending_history& out, string& result) {
-	pending_history cur;
-	if (this->get_pending_history(cur)) {
-		if (cur.hid == hid && cur.role == "successor") {
-			out = cur;
-			result = "already";
-			return 0;
-		}
-		result = "refused:another_pending";
-		return -1;
-	}
-	if (this->_staging || this->_db == NULL) {
+	if (this->_staging) {
 		result = "refused:not_live";
 		return -1;
 	}
-	const string epoch = this->get_source_epoch();
-	if (epoch.empty() || this->generations_broken()) {
-		result = "refused:generations_unavailable";
-		return -1;
-	}
-	pending_history p;
-	p.role = "successor";
-	p.hid = hid;
-	p.partition = partition;
-	p.successor = successor;
-	p.from_epoch = epoch;
-	p.to_epoch = _mint_generation(epoch);
-	p.seq = this->get_latest_sequence_number();
-	// the cursor > own sequence branch of a promotion (cluster.cc): decided
-	// and minted here, published only at the commit
-	if (this->get_repl_last_lsn() > p.seq) {
-		uuid_t uuid;
-		char buf[37];
-		uuid_generate(uuid);
-		uuid_unparse_lower(uuid, buf);
-		p.master_id = buf;
-	} else {
-		p.master_id = this->get_master_id();
-	}
-	p.deadline_ms = deadline_ms;
-	p.incarnation = this->get_incarnation();
-	if (this->_persist_generation(kReplPendingHistoryKey, serialize_pending(p)) < 0) {
-		result = "failed:persist";
-		return -1;
-	}
-	log_notice("history continuation: handover %s prepared on the successor: %s -> %s at seq %llu (master_id %s)",
-		hid.c_str(), p.from_epoch.c_str(), p.to_epoch.c_str(), (unsigned long long)p.seq, p.master_id.c_str());
-	out = p;
-	result = "prepared";
-	return 0;
+	// read, compare and persist in ONE exclusive section (review of
+	// ef2f35a, P1): two first requests of one hid never mint two tuples
+	this->_wholelock_wrlock_copy_change();
+	int r = -1;
+	do {
+		if (this->_db == NULL) {
+			result = "refused:not_live";
+			break;
+		}
+		pending_history cur;
+		const pending_read pr = this->_read_pending_locked(cur);
+		if (pr == pending_error) {
+			result = "refused:pending_unreadable";
+			break;
+		}
+		if (pr == pending_present) {
+			// idempotent only for the same request (review of ef2f35a, P2)
+			if (cur.hid == hid && cur.role == "successor" && cur.partition == partition
+					&& cur.successor == successor && cur.deadline_ms == deadline_ms) {
+				out = cur;
+				result = "already";
+				r = 0;
+			} else {
+				result = cur.hid == hid ? "refused:different_tuple" : "refused:another_pending";
+			}
+			break;
+		}
+		const string epoch = this->get_source_epoch();
+		if (epoch.empty() || this->generations_broken()) {
+			result = "refused:generations_unavailable";
+			break;
+		}
+		pending_history p;
+		p.role = "successor";
+		p.hid = hid;
+		p.partition = partition;
+		p.successor = successor;
+		p.from_epoch = epoch;
+		p.to_epoch = _mint_generation(epoch);
+		// under the whole-lock: read the handle directly
+		p.seq = this->_db->GetLatestSequenceNumber();
+		// the cursor > own sequence branch of a promotion (cluster.cc):
+		// decided and minted here, published only at the commit
+		if (this->_get_repl_last_lsn_locked() > p.seq) {
+			uuid_t uuid;
+			char buf[37];
+			uuid_generate(uuid);
+			uuid_unparse_lower(uuid, buf);
+			p.master_id = buf;
+		} else {
+			p.master_id = this->get_master_id();
+		}
+		p.deadline_ms = deadline_ms;
+		p.incarnation = this->get_incarnation();
+		if (this->_persist_generation(kReplPendingHistoryKey, serialize_pending(p)) < 0) {
+			result = "failed:persist";
+			break;
+		}
+		log_notice("history continuation: handover %s prepared on the successor: %s -> %s at seq %llu (master_id %s)",
+			hid.c_str(), p.from_epoch.c_str(), p.to_epoch.c_str(), (unsigned long long)p.seq, p.master_id.c_str());
+		out = p;
+		result = "prepared";
+		r = 0;
+	} while (0);
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	return r;
 }
 
 int storage_rocksdb::history_replica_prepare(const pending_history& in, const string& expected_incarnation, string& result) {
-	pending_history cur;
-	if (this->get_pending_history(cur)) {
-		if (cur.hid == in.hid && cur.role == "replica" && cur.partition == in.partition && cur.successor == in.successor
-				&& cur.from_epoch == in.from_epoch && cur.to_epoch == in.to_epoch && cur.seq == in.seq
-				&& cur.master_id == in.master_id && cur.deadline_ms == in.deadline_ms && cur.incarnation == expected_incarnation) {
-			result = "already";
-			return 0;
-		}
-		result = cur.hid == in.hid ? "refused:different_tuple" : "refused:another_pending";
-		return -1;
-	}
-	if (this->_staging || this->_db == NULL) {
+	if (this->_staging) {
 		result = "refused:not_live";
 		return -1;
 	}
-	if (this->get_source_epoch() != in.from_epoch) {
-		result = "refused:epoch";
-		return -1;
-	}
-	if (expected_incarnation.empty() || this->get_incarnation() != expected_incarnation) {
-		result = "refused:incarnation";
-		return -1;
-	}
-	pending_history p = in;
-	p.role = "replica";
-	p.incarnation = expected_incarnation;
-	if (this->_persist_generation(kReplPendingHistoryKey, serialize_pending(p)) < 0) {
-		result = "failed:persist";
-		return -1;
-	}
-	log_notice("history continuation: handover %s prepared on this replica: %s -> %s, continue from seq %llu of %s",
-		p.hid.c_str(), p.from_epoch.c_str(), p.to_epoch.c_str(), (unsigned long long)p.seq, p.successor.c_str());
-	result = "prepared";
-	return 0;
+	this->_wholelock_wrlock_copy_change();
+	int r = -1;
+	do {
+		if (this->_db == NULL) {
+			result = "refused:not_live";
+			break;
+		}
+		pending_history cur;
+		const pending_read pr = this->_read_pending_locked(cur);
+		if (pr == pending_error) {
+			result = "refused:pending_unreadable";
+			break;
+		}
+		if (pr == pending_present) {
+			if (cur.hid == in.hid && cur.role == "replica" && cur.partition == in.partition && cur.successor == in.successor
+					&& cur.from_epoch == in.from_epoch && cur.to_epoch == in.to_epoch && cur.seq == in.seq
+					&& cur.master_id == in.master_id && cur.deadline_ms == in.deadline_ms && cur.incarnation == expected_incarnation) {
+				result = "already";
+				r = 0;
+			} else {
+				result = cur.hid == in.hid ? "refused:different_tuple" : "refused:another_pending";
+			}
+			break;
+		}
+		if (this->get_source_epoch() != in.from_epoch) {
+			result = "refused:epoch";
+			break;
+		}
+		if (expected_incarnation.empty() || this->get_incarnation() != expected_incarnation) {
+			result = "refused:incarnation";
+			break;
+		}
+		pending_history p = in;
+		p.role = "replica";
+		p.incarnation = expected_incarnation;
+		p.armed_version = 0;
+		if (this->_persist_generation(kReplPendingHistoryKey, serialize_pending(p)) < 0) {
+			result = "failed:persist";
+			break;
+		}
+		log_notice("history continuation: handover %s prepared on this replica: %s -> %s, continue from seq %llu of %s",
+			p.hid.c_str(), p.from_epoch.c_str(), p.to_epoch.c_str(), (unsigned long long)p.seq, p.successor.c_str());
+		result = "prepared";
+		r = 0;
+	} while (0);
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	return r;
 }
 
 int storage_rocksdb::history_commit(const string& hid, string& result) {
@@ -3019,7 +3087,7 @@ int storage_rocksdb::history_commit(const string& hid, string& result) {
 		// the decision is taken HERE, under the same exclusive lock as a
 		// discard and the deadline: what was read before may be gone
 		pending_history now_p;
-		if (!this->_read_pending_locked(now_p) || now_p.hid != hid || serialize_pending(now_p) != serialize_pending(p)) {
+		if (this->_read_pending_locked(now_p) != pending_present || now_p.hid != hid || serialize_pending(now_p) != serialize_pending(p)) {
 			result = "refused:pending_changed";
 			break;
 		}
@@ -3097,7 +3165,7 @@ int storage_rocksdb::history_arm(const string& hid, uint64_t map_version, string
 	this->_wholelock_wrlock_copy_change();
 	int r = -1;
 	pending_history p;
-	if (!this->_read_pending_locked(p) || p.hid != hid) {
+	if (this->_read_pending_locked(p) != pending_present || p.hid != hid) {
 		result = "refused:no_pending";
 	} else if (p.armed_version == map_version) {
 		result = "already";
@@ -3159,21 +3227,18 @@ int storage_rocksdb::history_on_promotion(int partition, const string& own_key, 
 }
 
 int storage_rocksdb::history_discard(const string& hid, const string& why, string& result) {
-	pending_history p;
-	if (!this->get_pending_history(p)) {
-		result = "already";
-		return 0;
-	}
-	if (!hid.empty() && p.hid != hid) {
-		result = "refused:other_handover";
-		return -1;
-	}
+	// decided only under the lock, from a read that tells absence from an
+	// error (review of ef2f35a, P2)
 	this->_wholelock_wrlock_copy_change();
 	int r = -1;
 	pending_history now_p;
-	if (!this->_read_pending_locked(now_p)) {
+	const pending_read pr = this->_read_pending_locked(now_p);
+	if (pr == pending_absent) {
 		result = "already";
 		r = 0;
+	} else if (pr == pending_error) {
+		// fail closed: never report a discard that did not happen
+		result = "failed:pending_unreadable";
 	} else if (!hid.empty() && now_p.hid != hid) {
 		result = "refused:other_handover";
 	} else if (this->_db != NULL) {
@@ -3181,7 +3246,7 @@ int storage_rocksdb::history_discard(const string& hid, const string& why, strin
 		wo.sync = true;
 		rocksdb::Status st = this->_db->Delete(wo, kReplPendingHistoryKey);
 		if (st.ok()) {
-			log_notice("history continuation: pending handover %s discarded (%s)", p.hid.c_str(), why.c_str());
+			log_notice("history continuation: pending handover %s discarded (%s)", now_p.hid.c_str(), why.c_str());
 			result = "discarded";
 			r = 0;
 		} else {
@@ -3274,7 +3339,8 @@ int storage_rocksdb::_wal_pin_release_locked(const string& why) {
 	this->_wal_pin_released++;
 	if (this->_wal_pin_deletions_disabled && this->_db != NULL) {
 		// non-forced: releases only this pin's DisableFileDeletions
-		rocksdb::Status s = this->_db->EnableFileDeletions(false);
+		rocksdb::Status s = _test_enable_fault ? rocksdb::Status::IOError("injected enable failure")
+			: this->_db->EnableFileDeletions(false);
 		if (s.ok()) {
 			this->_wal_pin_deletions_disabled = false;
 		} else {
@@ -3311,7 +3377,11 @@ int storage_rocksdb::wal_pin_set(const string& hid, uint64_t seq, uint64_t deadl
 			result = "refused:" + why;
 		} else if (wal_pin::write(this->_data_dir, p) < 0) {
 			result = "failed:write";
-		} else if (this->_db == NULL || !this->_db->DisableFileDeletions().ok()) {
+		} else if (this->_db == NULL
+				|| (!this->_wal_pin_deletions_disabled && !this->_db->DisableFileDeletions().ok())) {
+			// a disable still held from a release whose enable failed is
+			// REUSED, never stacked (review of 4eb6974, P2): one disable per
+			// handle, balanced by the one enable of the next release
 			wal_pin::remove(this->_data_dir);
 			result = "failed:disable_file_deletions";
 		} else {
@@ -3409,7 +3479,7 @@ int storage_rocksdb::wal_pin_tick(uint64_t now_ms) {
 	}
 	if (this->_wal_pin_state == wal_pin::state_absent && this->_wal_pin_deletions_disabled && this->_db != NULL) {
 		// a release whose enable failed: retry it
-		if (this->_db->EnableFileDeletions(false).ok()) {
+		if (!_test_enable_fault && this->_db->EnableFileDeletions(false).ok()) {
 			this->_wal_pin_deletions_disabled = false;
 		}
 	}

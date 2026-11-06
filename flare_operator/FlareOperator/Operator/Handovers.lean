@@ -268,6 +268,18 @@ def continuationPrepare (ns : String) (st : FlareClusterState) (e : Handover.Ent
   let lAfter := src.latestSeq
   if src.boot != e.oldBoot then
     return (← fallback "the old master restarted (or its process is unreadable)" [])
+  -- under load the followers are a few sequences behind L at V1; flared
+  -- keeps a running follower on its demoted source, so they drain that
+  -- finite tail: wait for it (bounded) before deciding (42163241045: the
+  -- successor's cursor 16808 vs L 16838, decided at once, no continuation)
+  let behind : List HistoryContinuation.ReplicaObs := match lAfter with
+    | some l => obsList.filter fun (r : HistoryContinuation.ReplicaObs) => !r.needsRebuild
+        && (r.followState == some "following" || r.followState == some "idle")
+        && (match r.cursor with | some c => c < l | none => false)
+    | none => []
+  if !behind.isEmpty && now < e.phaseMs + HandoverDrive.tailWaitMs then
+    IO.eprintln s!"[flare-operator] {tag}: waiting for {behind.map (fun (r : HistoryContinuation.ReplicaObs) => r.key)} to reach the old master's last sequence {lAfter.getD 0} (their follow cursors {behind.map (fun (r : HistoryContinuation.ReplicaObs) => r.cursor)})"
+    return none
   let some succObs := obsList.find? (·.key == e.successor)
     | fallback "the successor could not be read" []
   if let some why := HistoryContinuation.excluded src lBefore lAfter succObs then

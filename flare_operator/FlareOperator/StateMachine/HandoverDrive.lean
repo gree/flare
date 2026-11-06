@@ -11,6 +11,12 @@ import FlareOperator.StateMachine.Handover
 
 namespace FlareOperator.HandoverDrive
 
+/-- How long the prepare waits for followers a few sequences behind the old
+    master's last sequence L to drain that tail (flared keeps following the
+    demoted master) before it decides with what it reads. Inside the
+    handover's Th. -/
+def tailWaitMs : Nat := 3000
+
 open FlareOperator.Handover
 
 -- ═══════════════════════════════════════════════════════════════════════

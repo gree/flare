@@ -2488,7 +2488,25 @@ int cluster::_reconcile_wal_follower_locked() {
 			desired = false;
 		} else {
 			node_partition_map::iterator p = this->_node_partition_map.find(me->second.node_partition);
-			if (p == this->_node_partition_map.end() || p->second.master.node_key.empty()
+			if (p != this->_node_partition_map.end() && p->second.master.node_key.empty()
+					&& this->_wal_follower_thread && !this->_wal_follower_source.empty()) {
+				// An ordered handover's master/down placeholder (the partition
+				// keeps no master key): the master this follower ALREADY
+				// follows was demoted and writes nothing more, but its last
+				// writes may not be applied here yet. Keep that follower so
+				// it drains the finite tail up to the old master's last
+				// sequence (history continuation: the cursor must reach L;
+				// 42163241045 stopped it a few sequences short under load).
+				// Never started toward a down node, only kept.
+				node_map::iterator src = this->_node_map.find(this->_wal_follower_source);
+				if (src != this->_node_map.end() && src->second.node_role == role_master
+						&& src->second.node_state == state_down
+						&& src->second.node_partition == me->second.node_partition) {
+					source_key = this->_wal_follower_source;
+				} else {
+					desired = false;
+				}
+			} else if (p == this->_node_partition_map.end() || p->second.master.node_key.empty()
 					|| p->second.master.node_key == this->_node_key) {
 				desired = false;
 			} else {

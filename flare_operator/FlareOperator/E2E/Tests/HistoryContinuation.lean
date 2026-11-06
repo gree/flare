@@ -191,19 +191,22 @@ private def hcCfg : ClusterConfig := {
   nodeGuard := true
 }
 
-private def hcCmd (ip cmd : String) : IO String := do
-  match ← execInDebugPod hcCfg.debugPod hcCfg.«namespace» s!"printf '{cmd}\\r\\nquit\\r\\n' | nc -w 10 {ip} {hcCfg.flarePort}" with
+private def hcCmdIn (cfg : ClusterConfig) (ip cmd : String) : IO String := do
+  match ← execInDebugPod cfg.debugPod cfg.«namespace» s!"printf '{cmd}\\r\\nquit\\r\\n' | nc -w 10 {ip} {cfg.flarePort}" with
   | .ok o => return o
   | .error e => return s!"ERROR {e}"
 
-private def hcStat (ip key : String) : IO (Option String) := do
-  return statOf (← hcCmd ip "stats") key
+private def hcStatIn (cfg : ClusterConfig) (ip key : String) : IO (Option String) := do
+  return statOf (← hcCmdIn cfg ip "stats") key
 
-private def hcWrite (ip pfx : String) (n : Nat) : IO Nat := do
-  let cmd := s!"(awk 'BEGIN\{for(i=0;i<{n};i++) printf \"set {pfx}_%d 0 0 5\\r\\nvalue\\r\\n\", i}'; sleep 2) | nc -w 60 {ip} {hcCfg.flarePort} | grep -c STORED"
-  match ← execInDebugPod hcCfg.debugPod hcCfg.«namespace» cmd with
+private def hcWriteIn (cfg : ClusterConfig) (ip pfx : String) (n : Nat) : IO Nat := do
+  let cmd := s!"(awk 'BEGIN\{for(i=0;i<{n};i++) printf \"set {pfx}_%d 0 0 5\\r\\nvalue\\r\\n\", i}'; sleep 2) | nc -w 60 {ip} {cfg.flarePort} | grep -c STORED"
+  match ← execInDebugPod cfg.debugPod cfg.«namespace» cmd with
   | .ok o => return o.trim.toNat?.getD 0
   | .error _ => return 0
+
+private def hcStat (ip key : String) : IO (Option String) := hcStatIn hcCfg ip key
+private def hcWrite (ip pfx : String) (n : Nat) : IO Nat := hcWriteIn hcCfg ip pfx n
 
 def handoverSuite : TestSuite := {
   name := "history-continuation-handover"
@@ -282,6 +285,182 @@ def handoverSuite : TestSuite := {
         if eO.isNone || eO != eN then return .fail s!"epochs differ: remaining {eO}, new master {eN}"
         if wrote < 200 then return .fail s!"post-switch writes {wrote}/200"
         if !follows then return .fail "the remaining replica does not follow the new master's WAL"
+        return .pass }
+  ]
+}
+
+-- ─── control: WAL follow off — the replicas rebuild as before (A4) ─────
+
+private def foCfg : ClusterConfig :=
+  { hcCfg with
+    name := "hist-cont-follow-off"
+    «namespace» := "flare-hist-cont-follow-off"
+    debugPod := "debug-hist-cont-follow-off"
+    walFollow := false }
+
+/-- The negative control of `handoverSuite`: the same planned handover with
+    continuation on but WAL follow off (pf-dev's setting). Nothing proves the
+    remaining replica holds the old master's history up to L, so the
+    operator does not continue it ("is not continued", or no continuation at
+    all) and it rebuilds as before (staged switch or snapshot bootstrap),
+    ending on the new master's epoch with no write lost. -/
+def handoverFollowOffSuite : TestSuite := {
+  name := "history-continuation-handover-follow-off"
+  setup := do
+    deployCluster foCfg
+    IO.sleep 50000
+  teardown := cleanupCluster foCfg
+  onFailure := dumpClusterDiagnostics foCfg.«namespace» s!"app={foCfg.operatorName}"
+  tests := [
+    { name := "history continuation (A4 control): with WAL follow off a planned handover does not continue the remaining replica — it rebuilds as before, on the new master's epoch, with every key present"
+      run := do
+        let ns := foCfg.«namespace»
+        let stat := hcStatIn foCfg
+        let view := fun (_ : Unit) => do
+          return parseNodeSync (← operatorTcpCmd foCfg.debugPod ns foCfg.operatorName foCfg.operatorPort "node sync")
+        let entries ← view ()
+        let some mFqdn := findMasterFqdn entries 0 | return .fail "no Active P0 master"
+        let slaves := (entries.filter fun e => e.role == 1 && e.state == 0 && e.partition == 0).map (podOf ·.fqdn)
+        let [s1, s2] := slaves | return .fail s!"precondition: want 2 Active slaves, have {slaves}"
+        let mPod := podOf mFqdn
+        let some mIp ← getPodIp mPod ns | return .fail "no master IP"
+        -- the control's premise: follow is off on every pod
+        for r in [mPod, s1, s2] do
+          let some ip ← getPodIp r ns | return .fail s!"no IP for {r}"
+          let st ← stat ip "repl_follow_state"
+          if st == some "following" then return .fail s!"precondition: {r} follows the WAL ({st}); this control needs follow off"
+        if (← hcWriteIn foCfg mIp "pre" 300) < 300 then return .fail "precondition writes not all STORED"
+        IO.sleep 5000
+        let mut before : List (String × (Option String × Option String)) := []
+        for r in [s1, s2] do
+          let some ip ← getPodIp r ns | return .fail s!"no IP for {r}"
+          before := before ++ [(r, ((← stat ip "rocksdb_staged_switched"), (← stat ip "rocksdb_snapshot_bootstrap")))]
+        let t0 := (← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%SZ"] }).stdout.trim
+        let mUid ← match ← kubectlGetJsonpath "pod" mPod ns "{.metadata.uid}" with
+          | .ok o => pure o.trim | .error _ => pure ""
+        let gone ← waitForCondition s!"the master {mPod} is deleted after its handover (graceful deletes repeated)" 240 do
+          discard <| kubectl ["delete", "pod", mPod, "-n", ns, "--wait=false"]
+          match ← kubectlGetJsonpath "pod" mPod ns "{.metadata.uid}" with
+          | .ok o => return o.trim != mUid
+          | .error _ => return true
+        if !gone then return .fail "the master was not deleted within 240 s (the node guard kept refusing)"
+        let switched ← waitForCondition "a replica is the Active master" 240 do
+          let es ← view ()
+          return ((findMasterFqdn es 0).map podOf).any (fun x => x == s1 || x == s2)
+        if !switched then return .fail "no handover to a replica within 240 s"
+        let es ← view ()
+        let some newM := (findMasterFqdn es 0).map podOf | return .fail "no master after the switch"
+        let other := if newM == s1 then s2 else s1
+        let some nIp ← getPodIp newM ns | return .fail "no IP for the new master"
+        -- the remaining replica rebuilds and comes back Active
+        let rebuilt ← waitForCondition s!"the remaining replica {other} rebuilds and is an Active slave again" 300 do
+          let some ip ← getPodIp other ns | return false
+          let now := ((← stat ip "rocksdb_staged_switched"), (← stat ip "rocksdb_snapshot_bootstrap"))
+          let es ← view ()
+          let active := es.any fun e => podOf e.fqdn == other && e.role == 1 && e.state == 0 && e.partition == 0
+          return active && before.lookup other != some now
+        let some oIp ← getPodIp other ns | return .fail "no IP for the remaining replica"
+        let opLog ← match ← kubectl ["logs", "-n", ns, "-l", s!"app={foCfg.operatorName}", "--since-time", t0, "--tail=-1"] with
+          | .ok o => pure o | .error _ => pure ""
+        let flLog ← match ← kubectl ["logs", "-n", ns, other, "-c", "flared", "--since-time", t0] with
+          | .ok o => pure o | .error _ => pure ""
+        let committed := containsSubstr flLog "COMMITTED as replica"
+        let notContinued := (opLog.splitOn "\n").any fun l =>
+          containsSubstr l "HISTORY CONTINUATION" && (containsSubstr l s!"{other}" && containsSubstr l "is not continued"
+            || containsSubstr l "no continuation, the replicas rebuild as before")
+        let after := ((← stat oIp "rocksdb_staged_switched"), (← stat oIp "rocksdb_snapshot_bootstrap"))
+        let eO ← stat oIp "rocksdb_source_epoch"
+        let eN ← stat nIp "rocksdb_source_epoch"
+        let items := ((← stat oIp "curr_items").bind String.toNat?)
+        IO.eprintln s!"# new master {newM}, remaining {other}: rebuilt={rebuilt} (staged/snapshot {before.lookup other} -> {after}); committed={committed}; not-continued logged={notContinued}; epoch remaining {eO} new master {eN}; items {items}"
+        if committed then return .fail s!"the remaining replica {other} committed a continued history with follow off"
+        if !notContinued then return .fail "the operator did not log that the replica is not continued"
+        if !rebuilt then return .fail s!"the remaining replica {other} did not rebuild within 300 s ({before.lookup other} -> {after})"
+        if eO.isNone || eO != eN then return .fail s!"epochs differ after the rebuild: remaining {eO}, new master {eN}"
+        if items.getD 0 < 300 then return .fail s!"the rebuilt replica has {items} items, want >= 300"
+        return .pass }
+  ]
+}
+
+-- ─── the operator's OnDelete rolling replaces the master by a handover (A4) ─
+
+private def rlCfg : ClusterConfig :=
+  { hcCfg with
+    name := "hist-cont-rolling"
+    «namespace» := "flare-hist-cont-rolling"
+    debugPod := "debug-hist-cont-rolling" }
+
+/-- The pods of the cluster as (name, uid, revision). -/
+private def rlPods (cfg : ClusterConfig) : IO (List (String × String × String)) := do
+  match ← kubectl ["get", "pods", "-n", cfg.«namespace», "-l", s!"cluster={cfg.name}", "-o",
+      "jsonpath={range .items[*]}{.metadata.name}|{.metadata.uid}|{.metadata.labels.controller-revision-hash}{\"\\n\"}{end}"] with
+  | .ok o => return ((o.splitOn "\n").filterMap fun l => match l.trim.splitOn "|" with
+      | [n, u, r] => if n.startsWith s!"{cfg.name}-nodes-" then some (n, u, r) else none
+      | _ => none)
+  | .error _ => return []
+
+/-- A template change rolls the StatefulSet (OnDelete): the operator
+    replaces the pods one at a time, the master last by a handover. The
+    replica that is not the successor at that handover commits the
+    continued history: its flared log shows `COMMITTED as replica` and no
+    staged rebuild after it. Every key written before and during the roll
+    is on the final master. -/
+def handoverRollingSuite : TestSuite := {
+  name := "history-continuation-handover-rolling"
+  setup := do
+    deployCluster rlCfg
+    IO.sleep 50000
+  teardown := cleanupCluster rlCfg
+  onFailure := dumpClusterDiagnostics rlCfg.«namespace» s!"app={rlCfg.operatorName}"
+  tests := [
+    { name := "history continuation (A4): the operator's OnDelete rolling hands the master over and the replica that is not the successor COMMITS the continued history — no staged rebuild after the commit, every key on the final master"
+      run := do
+        let ns := rlCfg.«namespace»
+        let stat := hcStatIn rlCfg
+        let view := fun (_ : Unit) => do
+          return parseNodeSync (← operatorTcpCmd rlCfg.debugPod ns rlCfg.operatorName rlCfg.operatorPort "node sync")
+        let some mFqdn := findMasterFqdn (← view ()) 0 | return .fail "no Active P0 master"
+        let some mIp ← getPodIp (podOf mFqdn) ns | return .fail "no master IP"
+        if (← hcWriteIn rlCfg mIp "pre" 300) < 300 then return .fail "precondition writes not all STORED"
+        let pods0 ← rlPods rlCfg
+        if pods0.length != 3 then return .fail s!"precondition: want 3 pods, have {pods0.map (·.1)}"
+        let t0 := (← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%SZ"] }).stdout.trim
+        match ← kubectl ["patch", "statefulset", s!"{rlCfg.name}-nodes", "-n", ns, "--type=merge", "-p",
+            s!"\{\"spec\":\{\"template\":\{\"metadata\":\{\"annotations\":\{\"e2e.flare.gree.net/roll\":\"{t0}\"}}}}}"] with
+        | .error e => return .fail s!"could not change the StatefulSet template: {e}"
+        | .ok _ => pure ()
+        -- every pod replaced (new uid) and the cluster settled: 1 master, 2 Active slaves
+        let rolled ← waitForCondition "every pod is replaced by the operator's rolling and the partition is 1 master + 2 Active slaves" 900 do
+          let ps ← rlPods rlCfg
+          let replaced := ps.length == 3 && pods0.all fun (n, u, _) => ps.any fun (n', u', _) => n' == n && u' != u
+          let es ← view ()
+          let slaves := (es.filter fun e => e.role == 1 && e.state == 0 && e.partition == 0).length
+          return replaced && (findMasterFqdn es 0).isSome && slaves == 2
+        if !rolled then return .fail "the rolling did not replace every pod and settle within 900 s"
+        let some newM := (findMasterFqdn (← view ()) 0).map podOf | return .fail "no master after the rolling"
+        let some nIp ← getPodIp newM ns | return .fail "no IP for the final master"
+        let wrote ← hcWriteIn rlCfg nIp "post" 200
+        -- the commit, and no staged rebuild after it, in the committing pod's log
+        let mut committer : Option String := none
+        let mut rebuiltAfter := false
+        for (n, _, _) in ← rlPods rlCfg do
+          let lg ← match ← kubectl ["logs", "-n", ns, n, "-c", "flared", "--since-time", t0] with
+            | .ok o => pure o | .error _ => pure ""
+          match lg.splitOn "COMMITTED as replica" with
+          | _ :: rest@(_ :: _) =>
+            committer := some n
+            let tail := "COMMITTED as replica".intercalate rest
+            rebuiltAfter := containsSubstr tail "staged rebuild may start"
+          | _ => pure ()
+        let items := ((← stat nIp "curr_items").bind String.toNat?)
+        let opLog ← match ← kubectl ["logs", "-n", ns, "-l", s!"app={rlCfg.operatorName}", "--since-time", t0, "--tail=-1"] with
+          | .ok o => pure o | .error _ => pure ""
+        let cont := (opLog.splitOn "\n").filter fun l => containsSubstr l "HISTORY CONTINUATION"
+        IO.eprintln s!"# final master {newM}; committer {committer}, staged rebuild after the commit={rebuiltAfter}; post writes {wrote}/200; items on the master {items}\n# continuation: {cont.map (·.trim.take 200)}"
+        let some c := committer | return .fail "no replica committed a continued history during the rolling"
+        if rebuiltAfter then return .fail s!"{c} started a staged rebuild after it committed the continued history"
+        if wrote < 200 then return .fail s!"post-rolling writes {wrote}/200"
+        if items.getD 0 < 500 then return .fail s!"the final master has {items} items, want >= 500"
         return .pass }
   ]
 }

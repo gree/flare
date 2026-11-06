@@ -564,13 +564,18 @@ private def rcSuccessor (log : String) : Option String :=
       | none => none
     else none
 
-/-- Every pod's own_role, by pod name (unreadable pods left out). -/
+/-- Every pod's own_role, by pod name (unreadable pods left out). A master
+    that is not active (the handover's master/down placeholder: it applies
+    no write, 42147154242) reads `master-<state>`, so "master" = an ACTIVE
+    master that takes writes. -/
 private def rcRoles (cfg : ClusterConfig) (pods : List String) : IO (List (String × String)) := do
   let mut out := []
   for pd in pods do
     if let some ip ← getPodIp pd cfg.«namespace» then
-      if let some r ← hcStatIn cfg ip "own_role" then
-        out := out ++ [(pd, r)]
+      let st := statOf (← hcCmdIn cfg ip "stats")
+      if let some r := st "own_role" then
+        let state := (st "own_state").getD "unknown"
+        out := out ++ [(pd, if r == "master" && state != "active" then s!"master-{state}" else r)]
   return out
 
 /-- Setup shared by the two recovery suites: 1 master + 3 slaves, 300 keys
@@ -712,17 +717,23 @@ def recoveryUnfencedSuite : TestSuite :=
             if rs.any (·.2 == "master") then masters := masters ++ [rs]
             if containsSubstr (← rcOpLog cfg t0) "HALTED" then halted := true
             IO.sleep 1000
+          -- the old master (the master/down placeholder) applies no write
+          -- while halted: a write waits for a master and is not STORED
+          let oldStored ← match ← getPodIp mPod ns with
+            | some ip => hcWriteIn cfg ip "halted" 1
+            | none => pure 0
           let log ← rcOpLog cfg t0
           let ev ← match ← kubectl ["get", "events", "-n", ns, "--field-selector", "reason=FlareHandoverSuccessorUnfenced", "-o", "name"] with
             | .ok o => pure (!o.trim.isEmpty) | .error _ => pure false
           let lines := (log.splitOn "\n").filter fun l => containsSubstr l "HANDOVER p0" || containsSubstr l "NODE GUARD"
-          IO.eprintln s!"# master {mPod}, successor {sPod}: halted={halted}, event={ev}, master samples {masters.length}\n# {lines.map (·.trim.take 200)}"
+          IO.eprintln s!"# master {mPod}, successor {sPod}: halted={halted}, event={ev}, active-master samples {masters.length} ({masters.take 2}), write to the old master STORED={oldStored}\n# {lines.map (·.trim.take 200)}"
           discard <| rcOpExec cfg "rm -f /tmp/bskip"
           if !halted then return .fail "the handover did not halt (no HALTED reason in the operator log)"
           if !containsSubstr log "CRITICAL: HANDOVER p0" then return .fail "no CRITICAL line for the halted handover"
           if !ev then return .fail "no FlareHandoverSuccessorUnfenced Event"
           if containsSubstr log "replaces it" then return .fail "a replica replaced the successor without a kubelet-confirmed stop"
-          if !masters.isEmpty then return .fail s!"a pod answered master while the successor's stop was unconfirmed: {masters}"
+          if !masters.isEmpty then return .fail s!"a pod answered as an ACTIVE master while the successor's stop was unconfirmed: {masters.take 3}"
+          if oldStored != 0 then return .fail "the old master (the master/down placeholder) STORED a write while the handover was halted"
           return .pass }
     ] }
 

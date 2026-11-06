@@ -861,4 +861,78 @@ roleRef: \{kind: Role, name: flare-operator-handover-fence, apiGroup: rbac.autho
           return .pass }
     ] }
 
+-- ─── the operator restarts while the replicas commit (A4) ─────
+
+/-- A4: the operator pod is deleted while the handover is committingReplicas
+    (V2 withheld from one prepared replica keeps it there). The new operator
+    resumes from status.handovers: the successor becomes the one active
+    master, the committed replica keeps its copy (no staged rebuild after its
+    commit), every key is kept. -/
+def recoveryOperatorRestartSuite : TestSuite :=
+  let cfg := rcCfg "rc-oprestart"
+  { name := "history-continuation-recovery-operator-restart"
+    setup := do
+      deployCluster cfg
+      IO.sleep 50000
+    teardown := cleanupCluster cfg
+    onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
+    tests := [
+      { name := "history continuation (A4): an operator restart during committingReplicas resumes from status.handovers — the successor is the one active master, the committed replica keeps its copy, every key kept"
+        run := do
+          let ns := cfg.«namespace»
+          let (mPod, sPod, slaves, t0) ← match ← rcStart cfg with
+            | .ok x => pure x
+            | .error e => return .fail e
+          let all := mPod :: slaves
+          let opUid ← match ← kubectl ["get", "pods", "-n", ns, "-l", s!"app={cfg.operatorName}", "-o", "jsonpath={.items[0].metadata.uid}"] with
+            | .ok o => pure o.trim | .error e => return .fail s!"no operator pod: {e}"
+          match ← kubectl ["delete", "pods", "-n", ns, "-l", s!"app={cfg.operatorName}", "--wait=false"] with
+          | .error e => return .fail s!"could not delete the operator pod: {e}"
+          | .ok _ => pure ()
+          -- the withheld replica gets the maps again once a new operator runs
+          let back ← waitForCondition "a new operator pod is Running" 180 do
+            match ← kubectl ["get", "pods", "-n", ns, "-l", s!"app={cfg.operatorName}", "-o", "jsonpath={range .items[*]}{.metadata.uid} {.status.phase}{\"\\n\"}{end}"] with
+            | .ok o => return (o.splitOn "\n").any fun l => !containsSubstr l opUid && containsSubstr l "Running"
+            | .error _ => return false
+          if !back then return .fail "no new operator pod within 180 s"
+          discard <| rcOpExec cfg "rm -f /tmp/bskip"
+          let mut twoMasters : List (List (String × String)) := []
+          let mut settled := false
+          for _ in [0:240] do
+            let rs ← rcRoles cfg all
+            let ms := rs.filter (·.2 == "master")
+            if ms.length > 1 then twoMasters := twoMasters ++ [rs]
+            if ms.length == 1 && ms.any (·.1 == sPod) then
+              settled := true
+              break
+            IO.sleep 1000
+          let rs ← rcRoles cfg all
+          let some newM := (rs.find? (·.2 == "master")).map (·.1) | return .fail s!"no active master after the restart: {rs}"
+          let some nIp ← getPodIp newM ns | return .fail "no IP for the master"
+          let items := ((← hcStatIn cfg nIp "curr_items").bind String.toNat?)
+          let wrote ← hcWriteIn cfg nIp "post" 200
+          -- the replica that committed before the restart: no staged rebuild after it
+          let mut committer : Option String := none
+          let mut rebuiltAfter := false
+          for n in slaves do
+            if n == sPod then continue
+            let lg ← match ← kubectl ["logs", "-n", ns, n, "-c", "flared", "--since-time", t0] with
+              | .ok o => pure o | .error _ => pure ""
+            match lg.splitOn "COMMITTED as replica" with
+            | _ :: rest@(_ :: _) =>
+              committer := some n
+              rebuiltAfter := containsSubstr ("COMMITTED as replica".intercalate rest) "staged rebuild may start"
+            | _ => pure ()
+          let opLog ← rcOpLog cfg t0
+          let resumed := (opLog.splitOn "\n").filter fun l => containsSubstr l "HANDOVER p0" && containsSubstr l " -> "
+          IO.eprintln s!"# successor {sPod}, master now {newM} (settled={settled}); committer {committer} rebuilt after={rebuiltAfter}; two-master samples {twoMasters.length}; items {items}; post {wrote}/200\n# new operator: {resumed.map (·.trim.take 200)}"
+          if !settled then return .fail s!"the successor {sPod} is not the one active master after the restart ({rs})"
+          if !twoMasters.isEmpty then return .fail s!"two active masters: {twoMasters.take 2}"
+          let some c := committer | return .fail "no replica committed the continued history"
+          if rebuiltAfter then return .fail s!"{c} started a staged rebuild after its commit"
+          if items.getD 0 < 300 then return .fail s!"the master has {items} items, want >= 300"
+          if wrote < 200 then return .fail s!"post-restart writes {wrote}/200"
+          return .pass }
+    ] }
+
 end FlareOperator.E2E.Tests.HistoryContinuation

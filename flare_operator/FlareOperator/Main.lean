@@ -2670,6 +2670,14 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
               (PromotionEvidence.reclassifyAllows passCls freshCls).1
                 && b0 == PromotionEvidence.bindingOf (fresh.map (·.1)) (fresh.map (·.2))
             | none => if proven then PromotionEvidence.handoverCommitAllows freshCls else PromotionEvidence.commitTimeAllows freshCls
+          -- A3b: the replacement of a stopped successor holds the handover's
+          -- continued history (master_id, E'), exactly — as at the commit read
+          let contHistI ← handoverContinuedHistoryRef.get
+          let continuedI := proven && match fresh with
+            | some (_, out) => contHistI.any fun (kk, m, ep) =>
+                kk == k && statStr out "rocksdb_master_id" == some m && statStr out "rocksdb_source_epoch" == some ep
+            | none => false
+          let consistent := consistent || continuedI
           let seenK := match fresh with
             | some (u, r) => seenOf u (some r)
             | none => .unreadable

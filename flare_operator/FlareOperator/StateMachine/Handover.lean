@@ -553,7 +553,10 @@ def blockedKeys (l : Ledger) : List String :=
     the successor's kubelet-confirmed stop). `slavesOf` = the partition's
     slaves in the live map. -/
 def frozenKeys (l : Ledger) (slavesOf : Nat → List String) : List String :=
-  (l.entries.filter fun e => e.phase == .committingReplicas || (e.phase == .promoting && e.v2.isSome)).foldl
+  -- a replacement (fencedOut) is frozen before its V3 too: the failover
+  -- must not pick another copy meanwhile (42150306213 tried one)
+  (l.entries.filter fun e => e.phase == .committingReplicas
+      || (e.phase == .promoting && (e.v2.isSome || !e.fencedOut.isEmpty))).foldl
     (fun acc e => acc ++ (e.successor :: (if e.fencedOut.isEmpty then [] else [e.fencedOut])) ++ slavesOf e.partition) []
     |>.eraseDups
 

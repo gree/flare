@@ -97,9 +97,10 @@ private def recoveryResults : List (String × Bool) := Id.run do
               (step ccfg prom doneObs).1.phase == .done)]
   -- the frozen keys: every copy of the partition while committing or V2 is out
   let slavesOf := fun (p : Nat) => if p == 0 then ["s:12121", "r1:12121", "r2:12121"] else []
-  r := r ++ [("recovery: while committingReplicas or promoting with V2 out, the partition's copies (and a fenced successor) are not promoted by the failover/refill; not before V2, not after",
+  r := r ++ [("recovery: while committingReplicas, promoting with V2 out, or replacing a stopped successor (before its V3 too), the partition's copies (and a fenced successor) are not promoted by the failover/refill; not before V2 otherwise, not after",
               frozenKeys { entries := [sent] } slavesOf == ["s:12121", "r1:12121", "r2:12121"]
-                && frozenKeys { entries := [rp] } slavesOf == []
+                && frozenKeys { entries := [rp] } slavesOf == ["r2:12121", "s:12121", "r1:12121"]
+                && frozenKeys { entries := [{ rp with fencedOut := "" }] } slavesOf == []
                 && frozenKeys { entries := [{ rp with v2 := some 11 }] } slavesOf == ["r2:12121", "s:12121", "r1:12121"]
                 && frozenKeys { entries := [{ sent with phase := .done }] } slavesOf == []
                 && frozenKeys { entries := [{ sent with phase := .draining }] } slavesOf == [])]

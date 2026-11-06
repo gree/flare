@@ -27,13 +27,16 @@ open Std.Net (SocketAddress SocketAddressV4) in
 /-- A local peer for the real probe path (review of a074161, P2): it accepts
     one connection on 127.0.0.1 and either answers `version` (`answer`) or
     holds the connection open without a byte (a wedged flared that still
-    accepts). Returns its port. -/
-private def probePeer (answer : Bool) (holdMs : Nat) : IO Nat := do
+    accepts). Returns its port and its task: the caller waits for the task
+    before the run ends (a peer still sleeping on its socket when `main`
+    returned crashed the process at exit: exit 139 after every check
+    passed, kjob-run-flare-operator-af77 / -de80). -/
+private def probePeer (answer : Bool) (holdMs : Nat) : IO (Nat × Task (Except IO.Error Unit)) := do
   let srv ← Socket.new
   srv.bind (SocketAddress.v4 (SocketAddressV4.mk ⟨#v[127, 0, 0, 1]⟩ 0))
   srv.listen 4
   let port := (← srv.getSockName).port.toNat
-  let _ ← IO.asTask (prio := .dedicated) do
+  let t ← IO.asTask (prio := .dedicated) do
     match ← IO.wait (← srv.accept).result! with
     | .error _ => pure ()
     | .ok c =>
@@ -43,7 +46,7 @@ private def probePeer (answer : Bool) (holdMs : Nat) : IO Nat := do
       IO.sleep holdMs.toUInt32
       let _ ← c.shutdown
       let _ ← srv.shutdown
-  return port
+  return (port, t)
 
 /-- The real probe against `ip:port`: its answer and how long it took. -/
 private def timedProbe (ip : String) (port timeoutMs : Nat) : IO (Bool × Nat) := do
@@ -264,10 +267,12 @@ def probeResults : IO (List (String × Bool)) := do
   -- the real probe path, bounded by the caller's timeout (review of a074161)
   let tmo := UnreachableNode.monitorReadTimeoutMs
   let slack := 300
-  let (stallOk, stallMs) ← timedProbe "127.0.0.1" (← probePeer false 3000) tmo
+  let (stallPort, stallPeer) ← probePeer false 3000
+  let (stallOk, stallMs) ← timedProbe "127.0.0.1" stallPort tmo
   r := r ++ [(s!"reachability probe: a peer that accepts but never answers is unreachable within the {tmo} ms timeout (took {stallMs} ms)",
     !stallOk && stallMs + 50 ≥ tmo && stallMs ≤ tmo + slack)]
-  let (answerOk, answerMs) ← timedProbe "127.0.0.1" (← probePeer true 1000) tmo
+  let (answerPort, answerPeer) ← probePeer true 1000
+  let (answerOk, answerMs) ← timedProbe "127.0.0.1" answerPort tmo
   r := r ++ [(s!"reachability probe: a peer that answers VERSION is reachable (took {answerMs} ms)",
     answerOk && answerMs ≤ tmo)]
   -- a connect that never completes (unroutable address): the whole probe
@@ -275,6 +280,9 @@ def probeResults : IO (List (String × Bool)) := do
   let (blackOk, blackMs) ← timedProbe "10.255.255.1" 12121 400
   r := r ++ [(s!"reachability probe: a connect that does not complete ends within the timeout (400 ms, took {blackMs} ms)",
     !blackOk && blackMs ≤ 400 + slack)]
+  -- both peers end (hold elapsed, sockets shut) before the run returns
+  let _ ← IO.wait stallPeer
+  let _ ← IO.wait answerPeer
   return r
 
 end FlareOperator.UnitTestsFailover

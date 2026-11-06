@@ -580,7 +580,14 @@ private def rcRoles (cfg : ClusterConfig) (pods : List String) : IO (List (Strin
     pod, slaves, t0). -/
 private def rcStart (cfg : ClusterConfig) : IO (Except String (String × String × List String × String)) := do
   let ns := cfg.«namespace»
-  let es := parseNodeSync (← operatorTcpCmd cfg.debugPod ns cfg.operatorName cfg.operatorPort "node sync")
+  -- 4 pods take longer than the 50 s setup (42145565770: 2 of 3 slaves Active)
+  let view := fun (_ : Unit) => do
+    return parseNodeSync (← operatorTcpCmd cfg.debugPod ns cfg.operatorName cfg.operatorPort "node sync")
+  let settled ← waitForCondition "1 Active P0 master and 3 Active slaves" 240 do
+    let es ← view ()
+    return (findMasterFqdn es 0).isSome && (es.filter fun e => e.role == 1 && e.state == 0 && e.partition == 0).length == 3
+  if !settled then return .error "precondition: the cluster did not reach 1 master + 3 Active slaves within 240 s"
+  let es ← view ()
   let some mFqdn := findMasterFqdn es 0 | return .error "no Active P0 master"
   let slaves := (es.filter fun e => e.role == 1 && e.state == 0 && e.partition == 0).map (podOf ·.fqdn)
   if slaves.length != 3 then return .error s!"precondition: want 3 Active slaves, have {slaves}"

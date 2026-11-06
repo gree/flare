@@ -2689,6 +2689,16 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
           | .modern b _ true _ _ _ =>
             let iid := s!"t{gated.state.nodeMapVersion}-p{p}-{(← IO.monoNanosNow) % 1000000}"
             let it : AuthoritativeHistory.Intent := { id := iid, partition := p.toNat, kind := "promotion", target := k, binding := b, fromGen := rec.gen, fromHist := rec.hist, expectedVersion := gated.state.nodeMapVersion }
+            -- A3b: the pending intent of a successor the handover fenced out
+            -- (its stop proven, this copy replaces it) is superseded here, in
+            -- the same store write as the new intent: a refused promotion
+            -- ends the pass before observeHistory could drop it (42156735060)
+            let fenced := (← handoverRef.get).entries.filter fun e =>
+              e.partition == p.toNat && e.phase == .promoting && e.successor == k && !e.fencedOut.isEmpty
+            if let some old := st.intentFor p.toNat then
+              if fenced.any (·.fencedOut == old.target) then
+                IO.eprintln s!"[flare-operator] history intent {old.id} of {old.target} superseded: its stop is proven and {k} replaces it"
+                st := { st with intents := st.intents.filter (·.id != old.id) }
             match AuthoritativeHistory.beginIntent st it with
             | some st' =>
               st := st'

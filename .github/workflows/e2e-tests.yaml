@@ -113,7 +113,7 @@ jobs:
             {"group":"node-ops-webhook-tls","suites":"node-ops-webhook-tls"},
             {"group":"node-ops-switch-tmpfs-a","suites":"node-ops-switch-tmpfs-delete,node-ops-switch-tmpfs-rolling"},
             {"group":"node-ops-switch-tmpfs-b","suites":"node-ops-switch-tmpfs-rollboth,node-ops-switch-tmpfs-gate"},
-            {"group":"node-ops-switch-continuation","suites":"node-ops-switch-tmpfs-continuation-delete"},
+            {"group":"node-ops-switch-continuation","suites":"node-ops-switch-tmpfs-continuation-delete,node-ops-switch-tmpfs-continuation-cordon-master"},
             {"group":"node-ops-switch-tmpfs-c","suites":"node-ops-switch-tmpfs-drain,node-ops-switch-tmpfs-savefail"},
             {"group":"node-ops-cordon","suites":"node-ops-switch-tmpfs-cordon-master,node-ops-switch-tmpfs-cordon-replica,node-ops-switch-tmpfs-cordon-blocked,node-ops-switch-tmpfs-cordon-cancel"},
             {"group":"node-ops-cordon-b","suites":"node-ops-switch-tmpfs-cordon-no-successor,node-ops-switch-tmpfs-cordon-operator-restart,node-ops-switch-tmpfs-cordon-two-nodes,node-ops-switch-tmpfs-cordon-no-operator,node-ops-switch-tmpfs-cordon-restart-quiet"},
@@ -373,8 +373,13 @@ jobs:
           sudo sysctl -w fs.inotify.max_user_instances=1024 fs.inotify.max_user_watches=524288
           case "$SUITE_GROUP" in node-ops*) multi=1 ;; *) multi=0 ;; esac
           if [ "$SUITE_GROUP" = single-suite ] && echo ",$SUITES," | grep -q ',node-ops-'; then multi=1; fi
+          # the continuation cordon move needs a fourth data worker
+          kindcfg=.github/kind/multinode.yaml
+          if [ "$SUITE_GROUP" = node-ops-switch-continuation ] || echo ",$SUITES," | grep -q ',node-ops-switch-tmpfs-continuation-cordon-master,'; then
+            kindcfg=.github/kind/multinode4.yaml
+          fi
           if [ "$multi" = 1 ]; then
-            kind create cluster --name flare-e2e --config .github/kind/multinode.yaml --wait 240s
+            kind create cluster --name flare-e2e --config "$kindcfg" --wait 240s
             kubectl get nodes -L flare-e2e/data -o wide
           else
             kind create cluster --name flare-e2e --wait 120s

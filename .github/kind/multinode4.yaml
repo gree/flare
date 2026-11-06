@@ -1,0 +1,20 @@
+# Multi-node kind with FOUR data workers, for the history-continuation
+# cordon move (node-ops-switch-tmpfs-continuation-cordon-master): three copies,
+# one per worker, and a fourth worker free for the pod recreated off the
+# cordoned one (with three workers it stays Pending: 42163244887).
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+  - role: worker
+    labels:
+      flare-e2e/data: "true"
+  - role: worker
+    labels:
+      flare-e2e/data: "true"
+  - role: worker
+    labels:
+      flare-e2e/data: "true"
+  - role: worker
+    labels:
+      flare-e2e/data: "true"

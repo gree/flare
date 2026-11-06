@@ -19,6 +19,7 @@
 -/
 
 import FlareOperator.Operator.Handovers
+import FlareOperator.Operator.Fence
 import FlareOperator.K8s.FlareCluster
 import FlareOperator.StateMachine.TopologyObservation
 import FlareOperator.K8s.Bridge
@@ -543,6 +544,8 @@ private def nodeGuardAnswer (crName ns leaseName identity : String) (stateRef : 
   match Admission.parseReview body with
   | .error e => return Admission.malformedResponse body e
   | .ok r0 =>
+    -- the break-glass receipt of a halted handover (mutating, flareclusters UPDATE)
+    if r0.resource == "flareclusters" then return ← Fence.answer crName ns r0
     -- an EVICTION (kubectl drain, the autoscaler) removes the pod inside the
     -- apiserver without calling the pods DELETE webhook: it is judged here as
     -- the delete of that pod, read now (the eviction names it only). A pod
@@ -4419,6 +4422,8 @@ def main (args : List String) : IO Unit := do
     let port := ((← IO.getEnv "FLARE_WEBHOOK_PORT").bind (·.toNat?)).getD 9444
     Server.WebhookServer.serveBackground port.toUInt16 (nodeGuardAnswer crName ns leaseName identity stateRef)
     IO.eprintln s!"[flare-operator] node guard webhook serving on 127.0.0.1:{port}"
+    -- the break-glass receipt key (created once, never replaced)
+    discard <| Fence.ensureKey ns
 
   -- SAF-09 (review 2026-10-05): running the operator and initialising a data
   -- cluster are separate. With NO FlareCluster (a confirmed NotFound) the

@@ -71,5 +71,16 @@ rules:
     resources: ["validatingwebhookconfigurations"]
     resourceNames: ["{{ include "flare-operator.fullname" . }}-node-guard-{{ .Values.namespace }}"]
     verbs: ["get", "patch"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["mutatingwebhookconfigurations"]
+    resourceNames: ["{{ include "flare-operator.fullname" . }}-handover-fence-{{ .Values.namespace }}"]
+    verbs: ["get", "patch"]
+  {{- end }}
+  {{- if .Values.nodeGuard.enabled }}
+  # the handover-fence receipt: asks whether the requester may break-glass
+  # (a SubjectAccessReview is a question, nothing is stored)
+  - apiGroups: ["authorization.k8s.io"]
+    resources: ["subjectaccessreviews"]
+    verbs: ["create"]
   {{- end }}
 {{- end }}

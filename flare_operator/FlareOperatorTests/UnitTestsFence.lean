@@ -5,6 +5,8 @@
 -/
 import FlareOperator.Crypto.Sha256
 import FlareOperator.StateMachine.HandoverFence
+import FlareOperator.StateMachine.Handover
+import FlareOperator.K8s.Admission
 
 namespace FlareOperator.UnitTestsFence
 
@@ -78,6 +80,16 @@ def results : List (String × Bool) := Id.run do
   r := r ++ [("fence: the annotation patch escapes / as ~1 (add, replace, remove)",
               has addP "\"path\":\"/metadata/annotations/flare.gree.net~1handover-fenced-receipt\"" && has addP "\"op\":\"add\"" && has addP "\"value\":\"x\""
                 && has repP "\"op\":\"replace\"" && has remP "\"op\":\"remove\"" && !has remP "\"value\"")]
+  r := r ++ [("admission: base64 (RFC 4648 vectors) for the mutating webhook's patch",
+              Admission.base64 "".toUTF8 == "" && Admission.base64 "f".toUTF8 == "Zg==" && Admission.base64 "fo".toUTF8 == "Zm8="
+                && Admission.base64 "foo".toUTF8 == "Zm9v" && Admission.base64 "foobar".toUTF8 == "Zm9vYmFy")]
+  let fb := match good with | .ok f => (FencedBy.toJson f).compress | .error _ => ""
+  let base : Handover.Entry := { partition := 0, oldMaster := "m", successor := "s", successorBinding := "u1|b1|c1", fencedBy := fb }
+  r := r ++ [("fence: a consumed break-glass counts as the successor's stop only for the binding it names (not for a replacement successor, not unconsumed)",
+              !fb.isEmpty && Handover.successorStopConfirmed base
+                && !Handover.successorStopConfirmed { base with successorBinding := "u3|b3|c3" }
+                && !Handover.successorStopConfirmed { base with fencedBy := "" }
+                && !Handover.successorStopConfirmed { base with fencedBy := "garbage" })]
   return r
 
 end FlareOperator.UnitTestsFence

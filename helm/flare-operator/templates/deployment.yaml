@@ -100,6 +100,10 @@ spec:
               value: "on"
             - name: FLARE_WEBHOOK_PORT
               value: "9444"
+            # the break-glass receipt key of a halted handover (created once by
+            # the operator, never replaced; docs/design-handover-history-continuation.md)
+            - name: FLARE_RECEIPT_KEY_SECRET
+              value: "{{ include "flare-operator.fullname" . }}-receipt-key"
             {{- end }}
             {{- if .Values.clusterName }}
             - name: FLARE_CLUSTER_NAME
@@ -195,6 +199,8 @@ spec:
               value: {{ include "flare-operator.nodeGuardTlsSecret" . | quote }}
             - name: WEBHOOK_CONFIG
               value: "{{ include "flare-operator.fullname" . }}-node-guard-{{ .Values.namespace }}"
+            - name: FENCE_WEBHOOK_CONFIG
+              value: "{{ include "flare-operator.fullname" . }}-handover-fence-{{ .Values.namespace }}"
             - name: SVC
               value: "{{ include "flare-operator.fullname" . }}-webhook"
             - name: INTERVAL
@@ -275,10 +281,14 @@ spec:
                 else
                   # every webhook whose caBundle differs, patched by index; the
                   # test op on its name refuses the patch if the list changed
-                  # since it was read
+                  # since it was read. The node guard (validating) and the
+                  # handover-fence receipt (mutating) configurations.
+                  for kc in "validatingwebhookconfiguration $WEBHOOK_CONFIG" "mutatingwebhookconfiguration $FENCE_WEBHOOK_CONFIG"; do
+                  set -- $kc
+                  kind=$1; cfg=$2
                   ops=""
                   i=0
-                  if kubectl get validatingwebhookconfiguration "$WEBHOOK_CONFIG" \
+                  if kubectl get "$kind" "$cfg" \
                       -o 'jsonpath={range .webhooks[*]}{.name}{" "}{.clientConfig.caBundle}{"\n"}{end}' > hooks.txt 2>err.txt; then
                     while read -r name cb; do
                       [ -n "$name" ] || continue
@@ -288,19 +298,20 @@ spec:
                       i=$((i + 1))
                     done < hooks.txt
                     if [ -n "$ops" ]; then
-                      if kubectl patch validatingwebhookconfiguration "$WEBHOOK_CONFIG" --type=json \
+                      if kubectl patch "$kind" "$cfg" --type=json \
                           --field-manager=flare-webhook-cert -p "[$ops]" >/dev/null 2>err.txt; then
-                        log "caBundle of $WEBHOOK_CONFIG set from $SECRET"
+                        log "caBundle of $cfg set from $SECRET"
                       else
-                        log "patch $WEBHOOK_CONFIG: $(cat err.txt)"
+                        log "patch $cfg: $(cat err.txt)"
                       fi
-                    elif [ "$last" != "$ca" ]; then
-                      log "caBundle of $WEBHOOK_CONFIG matches $SECRET"
+                    elif [ "$kind" = validatingwebhookconfiguration ] && [ "$last" != "$ca" ]; then
+                      log "caBundle of $cfg matches $SECRET"
                       last=$ca
                     fi
                   else
-                    log "get $WEBHOOK_CONFIG: $(cat err.txt)"
+                    log "get $cfg: $(cat err.txt)"
                   fi
+                  done
                 fi
                 sleep "$INTERVAL"
               done

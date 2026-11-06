@@ -21,6 +21,10 @@ structure Review where
   «namespace» : String
   /-- userInfo.username of the requester -/
   username : String := ""
+  /-- userInfo.uid and .groups (the break-glass SubjectAccessReview asks
+      about exactly this requester) -/
+  userUid : String := ""
+  groups : List String := []
   dryRun : Bool := false
   object : Json := Json.null
   oldObject : Json := Json.null
@@ -46,6 +50,10 @@ def parseReview (body : String) : Except String Review := do
     | n => n
   return { uid, operation := str req "operation", resource := res, subResource := str req "subResource",
            name, «namespace» := ns, username := str (req.getObjValD "userInfo") "username",
+           userUid := str (req.getObjValD "userInfo") "uid",
+           groups := match (req.getObjValD "userInfo").getObjVal? "groups" with
+             | .ok (Json.arr a) => a.toList.filterMap fun g => g.getStr?.toOption
+             | _ => [],
            dryRun := (req.getObjValAs? Bool "dryRun").toOption.getD false,
            object := obj, oldObject := old, options := req.getObjValD "options" }
 
@@ -100,6 +108,36 @@ def reviewResponse (uid : String) (allowed : Bool) (message : String)
   let status : Json := if allowed then Json.mkObj [] else
     Json.mkObj [("code", Json.num code), ("reason", Json.str reason), ("message", Json.str message)]
   let resp := Json.mkObj ([("uid", Json.str uid), ("allowed", Json.bool allowed)] ++ (if allowed then [] else [("status", status)]))
+  (Json.mkObj [("apiVersion", Json.str "admission.k8s.io/v1"), ("kind", Json.str "AdmissionReview"), ("response", resp)]).compress
+
+/-- An annotation of the new object of an UPDATE. -/
+def Review.newAnnotation (r : Review) (key : String) : Option String :=
+  (((r.object.getObjValD "metadata").getObjValD "annotations").getObjValAs? String key).toOption
+
+/-- Base64 (RFC 4648, with padding). -/
+def base64 (b : ByteArray) : String := Id.run do
+  let tbl := "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".toList.toArray
+  let mut out := ""
+  let n := b.size
+  let mut i := 0
+  while i + 2 < n do
+    let x := (b.get! i).toNat * 65536 + (b.get! (i+1)).toNat * 256 + (b.get! (i+2)).toNat
+    out := out.push tbl[x / 262144 % 64]! |>.push tbl[x / 4096 % 64]! |>.push tbl[x / 64 % 64]! |>.push tbl[x % 64]!
+    i := i + 3
+  if n - i == 1 then
+    let x := (b.get! i).toNat * 65536
+    out := out.push tbl[x / 262144 % 64]! |>.push tbl[x / 4096 % 64]! |>.push '=' |>.push '='
+  else if n - i == 2 then
+    let x := (b.get! i).toNat * 65536 + (b.get! (i+1)).toNat * 256
+    out := out.push tbl[x / 262144 % 64]! |>.push tbl[x / 4096 % 64]! |>.push tbl[x / 64 % 64]! |>.push '='
+  return out
+
+/-- An allowed reply of a MUTATING webhook carrying a JSON patch (`ops`; an
+    empty list = allowed unchanged). -/
+def patchResponse (uid : String) (ops : List Json) : String :=
+  let resp := Json.mkObj ([("uid", Json.str uid), ("allowed", Json.bool true)] ++
+    (if ops.isEmpty then [] else
+      [("patchType", Json.str "JSONPatch"), ("patch", Json.str (base64 (Json.arr ops.toArray).compress.toUTF8))]))
   (Json.mkObj [("apiVersion", Json.str "admission.k8s.io/v1"), ("kind", Json.str "AdmissionReview"), ("response", resp)]).compress
 
 /-- A reply for a review that could not be parsed: refused (fail closed). -/

@@ -4,6 +4,7 @@
   checks, split out of Main.lean.
 -/
 import FlareOperator.Operator.Base
+import FlareOperator.Operator.Fence
 
 namespace FlareOperator
 
@@ -166,6 +167,9 @@ def contReading (pods : List Bridge.PodInfo) (k ns : String) : IO HandoverDrive.
 /-- WAL pins of finished continuations still to release (memory only: the
     pin's own deadline and the free-space floor release it after a restart). -/
 initialize releaseDueRef : IO.Ref (List HandoverDrive.ReleaseDue) ← IO.mkRef []
+/-- hids whose consumed break-glass was finished (approval id recorded,
+    annotations removed) by this process -/
+initialize fenceFinishedRef : IO.Ref (List String) ← IO.mkRef []
 
 /-- `wal_pin release <hid>` to the new master once every continued replica's
     cursor passed S (idempotent: `already` is as good as `released`). -/
@@ -609,6 +613,36 @@ def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterState)
             IO.eprintln s!"[flare-operator] HANDOVER p{e.partition}: the recorded stops could not be read ({err}); the successor's stop stays unconfirmed"
             pure e
         else pure e
+      -- addenda 6–9: a person's break-glass for this halted handover — the
+      -- value, the webhook's receipt (HMAC), this hid and the successor's
+      -- binding, an approval id not used before; consumed once (fencedBy,
+      -- saved with the ledger; the annotations go on a later tick)
+      let e ← if contOn && e.fencedBy.isEmpty && !obs.successorAlive && !Handover.successorStopConfirmed e
+            && !e.hid.isEmpty && e.reason.startsWith "HALTED"
+            && (e.phase == .committingReplicas || (e.phase == .promoting && e.v2.isSome)) then do
+          match ← Fence.readInputs crName ns with
+          | .ok (some value, receipt, recent) =>
+            let key := (← Fence.ensureKey ns).getD ByteArray.empty
+            match HandoverFence.consume key e.hid e.successorBinding false recent value receipt (← utcNowIso) with
+            | .ok f =>
+              IO.eprintln s!"[flare-operator] HANDOVER p{e.partition}: break-glass {f.value} by {f.username} (uid {f.userUid}, review {f.reviewUid}) consumed: the successor {e.successor} is declared stopped"
+              Bridge.emitEvent crName ns "FlareHandoverFenced" s!"p{e.partition} {e.hid}: {f.username} declared the successor {e.successor} stopped ({f.value})" true
+              pure { e with fencedBy := (HandoverFence.FencedBy.toJson f).compress }
+            | .error why =>
+              IO.eprintln s!"[flare-operator] {if receipt.isNone then "CRITICAL: " else ""}HANDOVER p{e.partition}: the handover-fenced value {value} is not used: {why}"
+              pure e
+          | .ok (none, _, _) => pure e
+          | .error err =>
+            IO.eprintln s!"[flare-operator] HANDOVER p{e.partition}: the handover-fenced annotation could not be read ({err.take 200})"
+            pure e
+        else pure e
+      -- the consumed fence is in the stored ledger: record the approval id
+      -- and remove the annotations (once per process and hid)
+      if !e.fencedBy.isEmpty && !(← fenceFinishedRef.get).contains e.hid && !(← handoverDirtyRef.get)
+          && (Handover.find? (← handoverRef.get) e.partition).any (·.fencedBy == e.fencedBy) then
+        if let some v := (Lean.Json.parse e.fencedBy).toOption.bind HandoverFence.FencedBy.fromJson? |>.bind (fun f => HandoverFence.parseValue? f.value) then
+          Fence.finish crName ns v.approvalId
+        fenceFinishedRef.modify (e.hid :: ·)
       let (e1, act) := Handover.step cfg e obs
       if e.phase == .requested && e1.phase == .demoting then
         let demoteBoot := (PromotionEvidence.bindingOf none succOut).bootId.getD "?"

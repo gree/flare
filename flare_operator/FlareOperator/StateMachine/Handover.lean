@@ -34,6 +34,7 @@
 -/
 import Lean.Data.Json
 import FlareOperator.K8s.FlareCluster
+import FlareOperator.StateMachine.HandoverFence
 
 namespace FlareOperator.Handover
 
@@ -152,6 +153,11 @@ structure Entry where
       replica after its kubelet-confirmed stop; no map makes it Master again
       in this handover (it is a proxy in V3) -/
   fencedOut : String := ""
+  /-- addenda 6–9: the break-glass consumed for this handover (the compact
+      JSON of HandoverFence.FencedBy: value, who, review uid, when); a
+      person declared the silent successor stopped or cut off. Used once;
+      kept for the audit. -/
+  fencedBy : String := ""
   deriving Repr, Inhabited, BEq
 
 structure Ledger where
@@ -302,11 +308,25 @@ private def toPhase (e : Entry) (p : Phase) (now : Nat) (why : String := "") : E
 /-- The pod UID of a recorded binding (`uid|boot|copy`). -/
 def bindingUid (b : String) : String := (b.splitOn "|").head?.getD ""
 
+/-- The consumed break-glass (`fencedBy`, HandoverFence.FencedBy as JSON)
+    names the successor `binding`. -/
+def fenceNames (fencedBy binding : String) : Bool :=
+  !fencedBy.isEmpty && !binding.isEmpty &&
+    match Lean.Json.parse fencedBy with
+    | .ok j => match (HandoverFence.FencedBy.fromJson? j).bind (fun f => HandoverFence.parseValue? f.value) with
+      | some v => v.binding == binding
+      | none => false
+    | .error _ => false
+
 /-- The successor's stop is proven: its kubelet confirmed the removal of
     the very pod the demote recorded (addendum 5 §1). -/
 def successorStopConfirmed (e : Entry) : Bool :=
-  !e.successorStopped.isEmpty && !e.successorBinding.isEmpty
-    && bindingUid e.successorBinding == e.successorStopped
+  (!e.successorStopped.isEmpty && !e.successorBinding.isEmpty
+    && bindingUid e.successorBinding == e.successorStopped)
+  -- or a person's break-glass that names THIS successor's binding (it was
+  -- checked against the hid when consumed; after a replacement it no
+  -- longer names the new successor)
+  || fenceNames e.fencedBy e.successorBinding
 
 /-- Addendum 2 §3: the first committed replica (prepared order = map order)
     replaces a successor whose stop is proven. It holds the old master's
@@ -613,6 +633,7 @@ def Entry.toJson (e : Entry) : Json :=
     ++ [("leaderEpoch", Json.num e.leaderEpoch)]
     ++ (if e.successorStopped.isEmpty then [] else [("successorStopped", Json.str e.successorStopped)])
     ++ (if e.fencedOut.isEmpty then [] else [("fencedOut", Json.str e.fencedOut)])
+    ++ (if e.fencedBy.isEmpty then [] else [("fencedBy", Json.str e.fencedBy)])
 
 open Lean in
 def Entry.fromJson? (j : Json) : Option Entry := do
@@ -648,7 +669,8 @@ def Entry.fromJson? (j : Json) : Option Entry := do
          leaderEpoch := (o "leaderEpoch").getD 0,
          fullSent := (j.getObjValAs? Bool "fullSent").toOption.getD false,
          successorStopped := (j.getObjValAs? String "successorStopped").toOption.getD "",
-         fencedOut := (j.getObjValAs? String "fencedOut").toOption.getD "" }
+         fencedOut := (j.getObjValAs? String "fencedOut").toOption.getD "",
+         fencedBy := (j.getObjValAs? String "fencedBy").toOption.getD "" }
 
 open Lean in
 def Ledger.toJson (l : Ledger) : Json :=

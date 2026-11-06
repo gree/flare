@@ -7,15 +7,33 @@ package flare_operator where
     ⟨`autoImplicit, false⟩
   ]
 
+/-- The operator: every module but the E2E harness (FlareOperator.E2E is
+    its own library below). A new top-level directory under FlareOperator/
+    is listed here. -/
 @[default_target]
 lean_lib FlareOperator where
-  globs := #[.submodules `FlareOperator]
+  globs := #[.one `FlareOperator.Main, .one `FlareOperator.Kubectl, .one `FlareOperator.TcpServer,
+    .submodules `FlareOperator.Crypto, .submodules `FlareOperator.Flare,
+    .submodules `FlareOperator.Health, .submodules `FlareOperator.K8s,
+    .submodules `FlareOperator.Metrics, .submodules `FlareOperator.Migration,
+    .submodules `FlareOperator.Operator, .submodules `FlareOperator.Repro,
+    .submodules `FlareOperator.Server, .submodules `FlareOperator.StateMachine]
 
 lean_exe flare_operator where
   root := `FlareOperator.Main
 
+/-- The E2E harness, compiled at -O0 like the unit checks: its suites are
+    long constant scripts (E2E/Tests/ContinuousReplicationLimits.c took 28 min
+    of C compile at -O3 in a cache-miss build, kjob-run-flare-operator-8ad1);
+    it drives kubectl and waits, so -O0 costs nothing at run time. Nothing in
+    the operator imports it. -/
+lean_lib FlareOperatorE2E where
+  globs := #[.submodules `FlareOperator.E2E]
+  moreLeancArgs := #["-O0"]
+
 lean_exe flare_e2e where
   root := `FlareOperator.E2E.Main
+  moreLeancArgs := #["-O0"]
 
 lean_exe circuit_breaker_sim where
   root := `FlareOperator.StateMachine.CircuitBreakerSimMain

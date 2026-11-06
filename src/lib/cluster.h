@@ -184,6 +184,9 @@ protected:
 	// (cleared when this node stops being master): a retried boot shift in
 	// the same tenure must not advance it again (rc68: 7 -> 8 in one map).
 	bool _master_epoch_advanced;
+	// the version of the map being applied (history continuation commits
+	// only on the exact armed map)
+	uint64_t _applying_map_version;
 	bool _reannounce_active;
 	bool _activation_pending;
 	pthread_mutex_t				_mutex_master_reconstruction;

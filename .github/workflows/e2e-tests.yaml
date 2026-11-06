@@ -84,7 +84,7 @@ jobs:
           # only minutes before the limit (Lean build ~60 min on those runners).
           default='[
             {"group":"topology","suites":"failover,read-balance,scale-out-master,scale-out-slave,scale-in-slave,scale-in-master,continuous-replication-enable-purged"},
-            {"group":"replication","suites":"cluster-replication,wal-retention-config,strict-durability,continuous-replication-purge,continuous-replication-limits,continuous-replication-lag-hold-tmpfs,continuous-replication-rebuild-tmpfs,continuous-replication-parked-slot"},
+            {"group":"replication","suites":"cluster-replication,wal-retention-config,strict-durability,continuous-replication-purge,continuous-replication-limits,continuous-replication-lag-hold-tmpfs,continuous-replication-rebuild-tmpfs,continuous-replication-parked-slot,history-continuation-wal-pin-restart,history-continuation-handover,history-continuation-handover-follow-off,history-continuation-handover-rolling,history-continuation-recovery-replace,history-continuation-recovery-unfenced,history-continuation-recovery-breakglass,history-continuation-recovery-operator-restart"},
             {"group":"wal-recovery","suites":"wal-bandwidth-throttle,wal-incremental-sync,wal-purged-fallback,orphan-scan-purge,terminating-pod-handling,continuous-replication-multipart-lag-hold"},
             {"group":"empty-source","suites":"empty-source"},
             {"group":"r3-source","suites":"r3-source-change,read-timeout-reload,v-capture-resources"},
@@ -113,6 +113,7 @@ jobs:
             {"group":"node-ops-webhook-tls","suites":"node-ops-webhook-tls"},
             {"group":"node-ops-switch-tmpfs-a","suites":"node-ops-switch-tmpfs-delete,node-ops-switch-tmpfs-rolling"},
             {"group":"node-ops-switch-tmpfs-b","suites":"node-ops-switch-tmpfs-rollboth,node-ops-switch-tmpfs-gate"},
+            {"group":"node-ops-switch-continuation","suites":"node-ops-switch-tmpfs-continuation-delete,node-ops-switch-tmpfs-continuation-cordon-master"},
             {"group":"node-ops-switch-tmpfs-c","suites":"node-ops-switch-tmpfs-drain,node-ops-switch-tmpfs-savefail"},
             {"group":"node-ops-cordon","suites":"node-ops-switch-tmpfs-cordon-master,node-ops-switch-tmpfs-cordon-replica,node-ops-switch-tmpfs-cordon-blocked,node-ops-switch-tmpfs-cordon-cancel"},
             {"group":"node-ops-cordon-b","suites":"node-ops-switch-tmpfs-cordon-no-successor,node-ops-switch-tmpfs-cordon-operator-restart,node-ops-switch-tmpfs-cordon-two-nodes,node-ops-switch-tmpfs-cordon-no-operator,node-ops-switch-tmpfs-cordon-restart-quiet"},
@@ -372,8 +373,13 @@ jobs:
           sudo sysctl -w fs.inotify.max_user_instances=1024 fs.inotify.max_user_watches=524288
           case "$SUITE_GROUP" in node-ops*) multi=1 ;; *) multi=0 ;; esac
           if [ "$SUITE_GROUP" = single-suite ] && echo ",$SUITES," | grep -q ',node-ops-'; then multi=1; fi
+          # the continuation cordon move needs a fourth data worker
+          kindcfg=.github/kind/multinode.yaml
+          if [ "$SUITE_GROUP" = node-ops-switch-continuation ] || echo ",$SUITES," | grep -q ',node-ops-switch-tmpfs-continuation-cordon-master,'; then
+            kindcfg=.github/kind/multinode4.yaml
+          fi
           if [ "$multi" = 1 ]; then
-            kind create cluster --name flare-e2e --config .github/kind/multinode.yaml --wait 240s
+            kind create cluster --name flare-e2e --config "$kindcfg" --wait 240s
             kubectl get nodes -L flare-e2e/data -o wide
           else
             kind create cluster --name flare-e2e --wait 120s

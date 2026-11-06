@@ -79,6 +79,7 @@ const char* const storage_rocksdb::kReplRebuiltFromKey = "__flare_repl_rebuilt_f
 // Same format, the evidence of the stored copy while a rebuild is in progress.
 const char* const storage_rocksdb::kReplRebuiltFromSuspendedKey = "__flare_repl_rebuilt_from_suspended";
 const char* const storage_rocksdb::kCopyIdKey = "__flare_copy_id";
+const char* const storage_rocksdb::kReplPendingHistoryKey = "__flare_repl_pending_history";
 // Receipts of COMPLETED bulks (truncate / flush_all): "<pred copy> <succ copy>
 // <new epoch>" per line, the last kBulkChainKeep, written only AFTER the new
 // epoch was recorded (docs/design-authoritative-history.md: the operator
@@ -102,7 +103,7 @@ bool storage_rocksdb::is_reserved_key(const string& key) {
 		|| key == kReplSourceEpochKey || key == kReplSourceEpochReasonKey || key == kReplIncarnationKey
 		|| key == kReplRestoreDoneKey || key == kReplRebuiltFromKey || key == kReplRebuiltFromSuspendedKey || key == kCopyIdKey
 		|| key == kBulkChainKey || key == kBulkPendingKey
-		|| key == kPartitionBindingKey || key == kRestoredUnverifiedKey;
+		|| key == kPartitionBindingKey || key == kRestoredUnverifiedKey || key == kReplPendingHistoryKey;
 }
 // }}}
 
@@ -185,6 +186,7 @@ storage_rocksdb::storage_rocksdb(
 	pthread_mutex_init(&this->_orphan_scan_mutex, NULL);
 	pthread_rwlock_init(&this->_mutex_master_id, NULL);
 	pthread_mutex_init(&this->_mutex_rebuild_status, NULL);
+	pthread_mutex_init(&this->_mutex_wal_pin, NULL);
 	pthread_mutex_init(&this->_mutex_switch_unresolved, NULL);
 	this->_wholelock_writers_waiting = 0;
 	pthread_mutex_init(&this->_tomb_count_mutex, NULL);
@@ -211,6 +213,7 @@ storage_rocksdb::~storage_rocksdb() {
 	pthread_rwlock_destroy(&this->_mutex_generations);
 	pthread_mutex_destroy(&this->_tomb_count_mutex);
 	pthread_mutex_destroy(&this->_tomb_live_mutex);
+	pthread_mutex_destroy(&this->_mutex_wal_pin);
 	pthread_mutex_destroy(&this->_resync_failure_mutex);
 	pthread_mutex_destroy(&this->_orphan_scan_mutex);
 	pthread_rwlock_destroy(&this->_mutex_master_id);
@@ -1500,10 +1503,17 @@ rocksdb::Status storage_rocksdb::_open_db(const string& path) {
 	}
 
 	vector<rocksdb::ColumnFamilyHandle*> handles;
-	rocksdb::Status st = rocksdb::DB::Open(rocksdb::DBOptions(this->_options), path, descriptors, &handles, &this->_db);
+	rocksdb::DBOptions open_options(this->_options);
+	// WAL_PIN (wal_pin.h) is read BEFORE DB::Open: the open's own cleanup
+	// would otherwise archive-purge or delete what a pinned follower needs
+	this->_wal_pin_before_open(open_options);
+	rocksdb::Status st = rocksdb::DB::Open(open_options, path, descriptors, &handles, &this->_db);
 	if (!st.ok()) {
 		return st;
 	}
+	// before any follower can be answered (the caller has not published the
+	// handle yet)
+	this->_wal_pin_after_open();
 	this->_cf_default = handles[0];
 	this->_cf_meta = NULL;
 	if (has_meta) {
@@ -2831,6 +2841,771 @@ int storage_rocksdb::enable_file_deletions() {
 	pthread_rwlock_unlock(&this->_mutex_wholelock);
 	return r;
 }
+
+// {{{ history continuation across an ordered handover (pending -> commit)
+string storage_rocksdb::serialize_pending(const pending_history& p) {
+	ostringstream o;
+	o << "v1 " << p.role << " " << p.hid << " " << p.partition << " " << p.successor << " "
+		<< p.from_epoch << " " << p.to_epoch << " " << p.seq << " " << p.master_id << " "
+		<< p.deadline_ms << " " << (p.incarnation.empty() ? string("-") : p.incarnation)
+		<< " " << p.armed_version;
+	return o.str();
+}
+
+bool storage_rocksdb::parse_pending(const string& text, pending_history& p) {
+	istringstream in(text);
+	string ver, extra;
+	pending_history r;
+	in >> ver >> r.role >> r.hid >> r.partition >> r.successor >> r.from_epoch >> r.to_epoch
+		>> r.seq >> r.master_id >> r.deadline_ms >> r.incarnation >> r.armed_version;
+	if (in.fail() || (in >> extra) || ver != "v1" || (r.role != "successor" && r.role != "replica")
+			|| r.hid.empty() || r.successor.empty() || r.from_epoch.empty() || r.to_epoch.empty()
+			|| r.master_id.empty() || r.deadline_ms == 0) {
+		return false;
+	}
+	if (r.incarnation == "-") {
+		r.incarnation.clear();
+	}
+	p = r;
+	return true;
+}
+
+// caller holds _mutex_wholelock (read or write). ABSENT only on NotFound;
+// a read error or a record that does not parse is an ERROR (review of
+// ef2f35a, P2: an unreadable pending record is never "already gone")
+storage_rocksdb::pending_read storage_rocksdb::_read_pending_locked(pending_history& out) {
+	if (this->_db == NULL) {
+		return pending_error;
+	}
+	if (_test_pending_read_fault) {
+		return pending_error;
+	}
+	string v;
+	rocksdb::Status st = this->_db->Get(this->_read_options, kReplPendingHistoryKey, &v);
+	if (st.IsNotFound()) {
+		return pending_absent;
+	}
+	if (!st.ok()) {
+		log_err("pending history could not be read: %s", st.ToString().c_str());
+		return pending_error;
+	}
+	if (!parse_pending(v, out)) {
+		log_err("pending history is unreadable [%s]", v.c_str());
+		return pending_error;
+	}
+	return pending_present;
+}
+
+bool storage_rocksdb::_test_pending_read_fault = false;
+bool storage_rocksdb::_test_enable_fault = false;
+
+// RocksDB's own reading of "rocksdb.is-file-deletions-enabled" (8.3.2
+// answers 1 while deletions are enabled and 0 while any disable is held,
+// whatever rocksdb/db.h says): compared with the value right after open by
+// the tests. false when it cannot be read.
+bool storage_rocksdb::file_deletion_disables(uint64_t& n) {
+	pthread_rwlock_rdlock(&this->_mutex_wholelock);
+	const bool ok = this->_db != NULL && this->_db->GetIntProperty("rocksdb.is-file-deletions-enabled", &n);
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	return ok;
+}
+
+bool storage_rocksdb::get_pending_history(pending_history& out) {
+	pthread_rwlock_rdlock(&this->_mutex_wholelock);
+	bool found = false;
+	if (this->_db != NULL) {
+		string v;
+		rocksdb::Status st = this->_db->Get(this->_read_options, kReplPendingHistoryKey, &v);
+		if (st.ok()) {
+			found = parse_pending(v, out);
+			if (!found) {
+				log_err("pending history is unreadable [%s]: treated as none (nothing is activated from it)", v.c_str());
+			}
+		}
+	}
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	return found;
+}
+
+int storage_rocksdb::history_promote_prepare(const string& hid, uint64_t partition, const string& successor,
+		uint64_t deadline_ms, pending_history& out, string& result) {
+	if (this->_staging) {
+		result = "refused:not_live";
+		return -1;
+	}
+	// read, compare and persist in ONE exclusive section (review of
+	// ef2f35a, P1): two first requests of one hid never mint two tuples
+	this->_wholelock_wrlock_copy_change();
+	int r = -1;
+	do {
+		if (this->_db == NULL) {
+			result = "refused:not_live";
+			break;
+		}
+		pending_history cur;
+		const pending_read pr = this->_read_pending_locked(cur);
+		if (pr == pending_error) {
+			result = "refused:pending_unreadable";
+			break;
+		}
+		if (pr == pending_present) {
+			// idempotent only for the same request (review of ef2f35a, P2)
+			if (cur.hid == hid && cur.role == "successor" && cur.partition == partition
+					&& cur.successor == successor && cur.deadline_ms == deadline_ms) {
+				out = cur;
+				result = "already";
+				r = 0;
+			} else {
+				result = cur.hid == hid ? "refused:different_tuple" : "refused:another_pending";
+			}
+			break;
+		}
+		const string epoch = this->get_source_epoch();
+		if (epoch.empty() || this->generations_broken()) {
+			result = "refused:generations_unavailable";
+			break;
+		}
+		pending_history p;
+		p.role = "successor";
+		p.hid = hid;
+		p.partition = partition;
+		p.successor = successor;
+		p.from_epoch = epoch;
+		p.to_epoch = _mint_generation(epoch);
+		// under the whole-lock: read the handle directly
+		p.seq = this->_db->GetLatestSequenceNumber();
+		// the cursor > own sequence branch of a promotion (cluster.cc):
+		// decided and minted here, published only at the commit
+		if (this->_get_repl_last_lsn_locked() > p.seq) {
+			uuid_t uuid;
+			char buf[37];
+			uuid_generate(uuid);
+			uuid_unparse_lower(uuid, buf);
+			p.master_id = buf;
+		} else {
+			p.master_id = this->get_master_id();
+		}
+		p.deadline_ms = deadline_ms;
+		p.incarnation = this->get_incarnation();
+		if (this->_persist_generation(kReplPendingHistoryKey, serialize_pending(p)) < 0) {
+			result = "failed:persist";
+			break;
+		}
+		log_notice("history continuation: handover %s prepared on the successor: %s -> %s at seq %llu (master_id %s)",
+			hid.c_str(), p.from_epoch.c_str(), p.to_epoch.c_str(), (unsigned long long)p.seq, p.master_id.c_str());
+		out = p;
+		result = "prepared";
+		r = 0;
+	} while (0);
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	return r;
+}
+
+int storage_rocksdb::history_replica_prepare(const pending_history& in, const string& expected_incarnation, string& result) {
+	if (this->_staging) {
+		result = "refused:not_live";
+		return -1;
+	}
+	this->_wholelock_wrlock_copy_change();
+	int r = -1;
+	do {
+		if (this->_db == NULL) {
+			result = "refused:not_live";
+			break;
+		}
+		pending_history cur;
+		const pending_read pr = this->_read_pending_locked(cur);
+		if (pr == pending_error) {
+			result = "refused:pending_unreadable";
+			break;
+		}
+		if (pr == pending_present) {
+			if (cur.hid == in.hid && cur.role == "replica" && cur.partition == in.partition && cur.successor == in.successor
+					&& cur.from_epoch == in.from_epoch && cur.to_epoch == in.to_epoch && cur.seq == in.seq
+					&& cur.master_id == in.master_id && cur.deadline_ms == in.deadline_ms && cur.incarnation == expected_incarnation) {
+				result = "already";
+				r = 0;
+			} else {
+				result = cur.hid == in.hid ? "refused:different_tuple" : "refused:another_pending";
+			}
+			break;
+		}
+		if (this->get_source_epoch() != in.from_epoch) {
+			result = "refused:epoch";
+			break;
+		}
+		if (expected_incarnation.empty() || this->get_incarnation() != expected_incarnation) {
+			result = "refused:incarnation";
+			break;
+		}
+		pending_history p = in;
+		p.role = "replica";
+		p.incarnation = expected_incarnation;
+		p.armed_version = 0;
+		if (this->_persist_generation(kReplPendingHistoryKey, serialize_pending(p)) < 0) {
+			result = "failed:persist";
+			break;
+		}
+		log_notice("history continuation: handover %s prepared on this replica: %s -> %s, continue from seq %llu of %s",
+			p.hid.c_str(), p.from_epoch.c_str(), p.to_epoch.c_str(), (unsigned long long)p.seq, p.successor.c_str());
+		result = "prepared";
+		r = 0;
+	} while (0);
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	return r;
+}
+
+int storage_rocksdb::history_commit(const string& hid, string& result) {
+	pending_history p;
+	if (!this->get_pending_history(p)) {
+		result = "refused:no_pending";
+		return -1;
+	}
+	if (p.hid != hid) {
+		result = "refused:other_handover";
+		return -1;
+	}
+	bool pinned_here = false;
+	if (p.role == "successor") {
+		// the new master keeps every WAL file from S until the prepared
+		// replicas are past it (WAL_PIN), written BEFORE the history is
+		// committed so a crash in between still protects S+1 on
+		string pr;
+		if (this->wal_pin_set(p.hid, p.seq, p.deadline_ms + this->_wal_pin_max_ms, pr) < 0) {
+			result = "failed:wal_pin:" + pr;
+			return -1;
+		}
+		pinned_here = (pr == "pinned");
+		// the range retained must be exactly this history's S
+		const wal_pin_status w = this->get_wal_pin_status();
+		if (w.state != "active" || w.hid != p.hid || w.seq != p.seq) {
+			if (pinned_here) {
+				string rr;
+				this->wal_pin_release(p.hid, rr);
+			}
+			result = "refused:pin_mismatch";
+			return -1;
+		}
+	}
+	this->_wholelock_wrlock_copy_change();
+	int r = -1;
+	do {
+		if (this->_db == NULL) {
+			result = "refused:closed";
+			break;
+		}
+		// the decision is taken HERE, under the same exclusive lock as a
+		// discard and the deadline: what was read before may be gone
+		pending_history now_p;
+		if (this->_read_pending_locked(now_p) != pending_present || now_p.hid != hid || serialize_pending(now_p) != serialize_pending(p)) {
+			result = "refused:pending_changed";
+			break;
+		}
+		const uint64_t now_ms = wal_pin::now_ms();
+		if (now_ms == 0 || now_ms >= p.deadline_ms) {
+			result = "refused:deadline";
+			break;
+		}
+		if (this->get_incarnation() != p.incarnation) {
+			result = "refused:incarnation";
+			break;
+		}
+		rocksdb::WriteBatch b;
+		b.Put(kReplSourceEpochKey, p.to_epoch);
+		b.Put(kReplSourceEpochReasonKey, "continued");
+		b.Put(kReplMasterIdKey, p.master_id);
+		if (p.role == "replica") {
+			// continues the new master's WAL from S; rebuilt from its history
+			b.Put(kReplLastLsnKey, boost::lexical_cast<string>(p.seq));
+			b.Put(kReplRebuiltFromKey, p.master_id + " " + p.to_epoch + " " + p.to_epoch);
+		} else {
+			// the successor: its own history now; the cursor > own sequence
+			// branch of a promotion moves the cursor with the new master_id
+			if (this->_get_repl_last_lsn_locked() > p.seq) {
+				b.Put(kReplLastLsnKey, boost::lexical_cast<string>(p.seq));
+			}
+			b.Delete(kReplRebuiltFromKey);
+			b.Delete(kReplRebuiltFromSuspendedKey);
+		}
+		b.Delete(kReplPendingHistoryKey);
+		rocksdb::WriteOptions wo;
+		wo.sync = true;
+		rocksdb::Status st = this->_db->Write(wo, &b);
+		if (!st.ok()) {
+			log_err("history continuation: commit of %s failed: %s (nothing changed)", hid.c_str(), st.ToString().c_str());
+			result = "failed:write";
+			break;
+		}
+		pthread_rwlock_wrlock(&this->_mutex_generations);
+		this->_source_epoch = p.to_epoch;
+		this->_source_epoch_reason = "continued";
+		if (p.role == "replica") {
+			this->_rebuilt_from_master_id = p.master_id;
+			this->_rebuilt_from_epoch = p.to_epoch;
+		} else {
+			this->_rebuilt_from_master_id.clear();
+			this->_rebuilt_from_epoch.clear();
+			this->_suspended_from_master_id.clear();
+			this->_suspended_from_epoch.clear();
+		}
+		pthread_rwlock_unlock(&this->_mutex_generations);
+		pthread_rwlock_wrlock(&this->_mutex_master_id);
+		this->_master_id = p.master_id;
+		pthread_rwlock_unlock(&this->_mutex_master_id);
+		log_notice("history continuation: handover %s COMMITTED as %s: epoch %s -> %s, master_id %s%s",
+			hid.c_str(), p.role.c_str(), p.from_epoch.c_str(), p.to_epoch.c_str(), p.master_id.c_str(),
+			p.role == "replica" ? (", cursor " + boost::lexical_cast<string>(p.seq)).c_str() : "");
+		result = "committed";
+		r = 0;
+	} while (0);
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	if (r != 0 && pinned_here) {
+		// not committed: the pin taken for it goes too
+		string pr;
+		this->wal_pin_release(hid, pr);
+	}
+	return r;
+}
+
+int storage_rocksdb::history_arm(const string& hid, uint64_t map_version, string& result) {
+	if (map_version == 0) {
+		result = "refused:version";
+		return -1;
+	}
+	this->_wholelock_wrlock_copy_change();
+	int r = -1;
+	pending_history p;
+	if (this->_read_pending_locked(p) != pending_present || p.hid != hid) {
+		result = "refused:no_pending";
+	} else if (p.armed_version == map_version) {
+		result = "already";
+		r = 0;
+	} else if (p.armed_version != 0) {
+		result = "refused:armed_for_another_version";
+	} else {
+		p.armed_version = map_version;
+		rocksdb::WriteOptions wo;
+		wo.sync = true;
+		rocksdb::Status st = this->_db->Put(wo, kReplPendingHistoryKey, serialize_pending(p));
+		if (st.ok()) {
+			log_notice("history continuation: pending handover %s armed for map v%llu", hid.c_str(), (unsigned long long)map_version);
+			result = "armed";
+			r = 0;
+		} else {
+			result = "failed:write";
+		}
+	}
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	return r;
+}
+
+int storage_rocksdb::history_on_map(int partition, const string& master_key, const string& own_key, uint64_t map_version) {
+	pending_history p;
+	if (partition < 0 || !this->get_pending_history(p) || (int64_t)p.partition != (int64_t)partition) {
+		return 0;
+	}
+	string r;
+	if (master_key.empty()) {
+		return 0;		// no master yet (the demote map): keep waiting
+	}
+	if (master_key == p.successor) {
+		// commit only on the exact map it was armed for, as a replica that
+		// is not the successor itself
+		if (p.role == "replica" && own_key != p.successor && p.armed_version != 0 && map_version == p.armed_version) {
+			return this->history_commit(p.hid, r) == 0 ? 1 : -1;
+		}
+		return 0;
+	}
+	// another master: the handover was rolled back (V1') or replaced
+	this->history_discard(p.hid, "the map names another master (" + master_key + ")", r);
+	return 0;
+}
+
+int storage_rocksdb::history_on_promotion(int partition, const string& own_key, uint64_t map_version) {
+	pending_history p;
+	if (!this->get_pending_history(p) || p.role != "successor" || (int64_t)p.partition != (int64_t)partition
+			|| own_key != p.successor || p.armed_version == 0 || map_version != p.armed_version) {
+		return 0;
+	}
+	string r;
+	if (this->history_commit(p.hid, r) == 0) {
+		return 1;
+	}
+	log_err("history continuation: the prepared history %s could not be committed at the promotion (%s): the epoch is advanced as usual (the prepared replicas rebuild)", p.hid.c_str(), r.c_str());
+	this->history_discard(p.hid, "commit failed at the promotion", r);
+	return -1;
+}
+
+int storage_rocksdb::history_discard(const string& hid, const string& why, string& result) {
+	// decided only under the lock, from a read that tells absence from an
+	// error (review of ef2f35a, P2)
+	this->_wholelock_wrlock_copy_change();
+	int r = -1;
+	pending_history now_p;
+	const pending_read pr = this->_read_pending_locked(now_p);
+	if (pr == pending_absent) {
+		result = "already";
+		r = 0;
+	} else if (pr == pending_error) {
+		// fail closed: never report a discard that did not happen
+		result = "failed:pending_unreadable";
+	} else if (!hid.empty() && now_p.hid != hid) {
+		result = "refused:other_handover";
+	} else if (this->_db != NULL) {
+		rocksdb::WriteOptions wo;
+		wo.sync = true;
+		rocksdb::Status st = this->_db->Delete(wo, kReplPendingHistoryKey);
+		if (st.ok()) {
+			log_notice("history continuation: pending handover %s discarded (%s)", now_p.hid.c_str(), why.c_str());
+			result = "discarded";
+			r = 0;
+		} else {
+			result = "failed:write";
+		}
+	}
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	return r;
+}
+// }}}
+
+// {{{ WAL retention across an ordered handover (wal_pin.h)
+/**
+ *	Before DB::Open of the LIVE copy: read WAL_PIN. A marker that is valid,
+ *	or that exists but cannot be read or judged (fail closed), opens with the
+ *	keep-all WAL options: every obsolete WAL file is archived and none is
+ *	purged by the open's cleanup. Only a readable marker whose deadline has
+ *	passed is removed, and that open is a normal one.
+ */
+void storage_rocksdb::_wal_pin_before_open(rocksdb::DBOptions& opts) {
+	if (this->_staging) {
+		return;
+	}
+	pthread_mutex_lock(&this->_mutex_wal_pin);
+	wal_pin::pin p;
+	string why;
+	wal_pin::state st = wal_pin::read(this->_data_dir, wal_pin::now_ms(), this->_wal_pin_max_ms, p, why);
+	if (st == wal_pin::state_expired) {
+		if (wal_pin::remove(this->_data_dir) == 0) {
+			log_notice("WAL_PIN: the pin of handover %s (seq %llu) expired before this open: removed, normal open", p.hid.c_str(), (unsigned long long)p.seq);
+			st = wal_pin::state_absent;
+		} else {
+			// could not remove it: keep protecting
+			why = "an expired marker could not be removed";
+			st = wal_pin::state_invalid;
+		}
+	}
+	this->_wal_pin_state = st;
+	this->_wal_pin = p;
+	// durable since the marker carries it (review of 2de21f2, P1): a retry
+	// of the same request after a restart is the same pin
+	this->_wal_pin_requested_deadline = p.requested_deadline_ms;
+	this->_wal_pin_reason = why;
+	this->_wal_pin_deletions_disabled = false;
+	this->_wal_pin_protected_open = (st == wal_pin::state_valid || st == wal_pin::state_invalid);
+	if (this->_wal_pin_protected_open) {
+		opts.WAL_ttl_seconds = wal_pin::kKeepAllTtlSeconds;
+		opts.WAL_size_limit_MB = wal_pin::kKeepAllSizeLimitMb;
+		opts.recycle_log_file_num = 0;
+		if (st == wal_pin::state_valid) {
+			log_notice("WAL_PIN: handover %s pins the WAL from seq %llu until %llu: opening with every WAL file kept", p.hid.c_str(), (unsigned long long)p.seq, (unsigned long long)p.deadline_ms);
+		} else {
+			log_err("CRITICAL: WAL_PIN exists but cannot be used (%s): opening with every WAL file kept (fail closed); release it with a matching history_release or an approved release for this boot", why.c_str());
+		}
+	}
+	pthread_mutex_unlock(&this->_mutex_wal_pin);
+}
+
+void storage_rocksdb::_wal_pin_after_open() {
+	if (this->_staging || this->_db == NULL) {
+		return;
+	}
+	pthread_mutex_lock(&this->_mutex_wal_pin);
+	if (this->_wal_pin_state == wal_pin::state_valid || this->_wal_pin_state == wal_pin::state_invalid) {
+		rocksdb::Status s = this->_db->DisableFileDeletions();
+		if (s.ok()) {
+			this->_wal_pin_deletions_disabled = true;
+		} else {
+			// the keep-all options still keep every archived WAL file
+			log_err("WAL_PIN: DisableFileDeletions after open failed: %s (the keep-all WAL options still apply)", s.ToString().c_str());
+		}
+	}
+	pthread_mutex_unlock(&this->_mutex_wal_pin);
+}
+
+// caller holds _mutex_wholelock (read) and then _mutex_wal_pin — the order
+// every path takes them in (an open runs under the whole lock and takes
+// _mutex_wal_pin inside).
+//
+// The marker goes FIRST, deletions are re-enabled only after it is durably
+// gone (review of 2f6294a, P1-1): a release that fails at any step leaves
+// this handle exactly as protected as before (DisableFileDeletions still
+// held, state still valid). An unlink that succeeded with a failed fsync is
+// uncertain (the marker may come back at a crash): it is reported as a
+// failure and the handle stays protected; the next release retries.
+int storage_rocksdb::_wal_pin_release_locked(const string& why) {
+	if (wal_pin::remove(this->_data_dir) < 0) {
+		log_err("WAL_PIN: the marker of %s could not be removed durably: the pin stays (deletions still disabled)", this->_wal_pin.hid.c_str());
+		return -1;
+	}
+	this->_wal_pin_state = wal_pin::state_absent;
+	this->_wal_pin_reason = why;
+	this->_wal_pin_released++;
+	if (this->_wal_pin_deletions_disabled && this->_db != NULL) {
+		// non-forced: releases only this pin's DisableFileDeletions
+		rocksdb::Status s = _test_enable_fault ? rocksdb::Status::IOError("injected enable failure")
+			: this->_db->EnableFileDeletions(false);
+		if (s.ok()) {
+			this->_wal_pin_deletions_disabled = false;
+		} else {
+			// over-protecting, never under: deletions stay disabled and the
+			// tick retries the enable
+			log_err("WAL_PIN: EnableFileDeletions after the release of %s failed: %s — deletions stay disabled until it succeeds", this->_wal_pin.hid.c_str(), s.ToString().c_str());
+		}
+	}
+	log_notice("WAL_PIN: released the pin of handover %s (seq %llu): %s%s", this->_wal_pin.hid.c_str(), (unsigned long long)this->_wal_pin.seq, why.c_str(),
+		this->_wal_pin_protected_open ? " — this handle was opened with every WAL file kept: archived WAL is now purged by flared with the configured TTL / size" : "");
+	return 0;
+}
+
+int storage_rocksdb::wal_pin_set(const string& hid, uint64_t seq, uint64_t deadline_ms, string& result) {
+	pthread_rwlock_rdlock(&this->_mutex_wholelock);
+	pthread_mutex_lock(&this->_mutex_wal_pin);
+	int r = -1;
+	if (this->_wal_pin_state == wal_pin::state_valid && this->_wal_pin.hid == hid) {
+		// idempotent only for the SAME pin (review of f0171df, P2): the
+		// sequence and the requested deadline must match, else the caller
+		// would be told S is retained while another range is
+		const bool same_deadline = deadline_ms == this->_wal_pin.deadline_ms
+			|| (this->_wal_pin_requested_deadline != 0 && deadline_ms == this->_wal_pin_requested_deadline);
+		if (seq == this->_wal_pin.seq && same_deadline) {
+			result = "already";
+			r = 0;
+		} else {
+			result = "refused:different_pin";
+		}
+	} else if (this->_wal_pin_state == wal_pin::state_valid || this->_wal_pin_state == wal_pin::state_invalid) {
+		result = "refused:another_pin";
+	} else {
+		wal_pin::pin p;
+		p.hid = hid;
+		p.seq = seq;
+		// never further ahead than the pin limit: a marker beyond twice the
+		// limit is not believed at the next open (wal_pin::decide), so a
+		// longer request is capped here, not stored as an invalid marker
+		const uint64_t now = wal_pin::now_ms();
+		p.deadline_ms = (now > 0 && deadline_ms > now + this->_wal_pin_max_ms) ? now + this->_wal_pin_max_ms : deadline_ms;
+		p.requested_deadline_ms = deadline_ms;
+		string why;
+		if (!wal_pin::parse(wal_pin::serialize(p), p, why)) {
+			result = "refused:" + why;
+		} else if (wal_pin::write(this->_data_dir, p) < 0) {
+			result = "failed:write";
+		} else if (this->_db == NULL
+				|| (!this->_wal_pin_deletions_disabled && !this->_db->DisableFileDeletions().ok())) {
+			// a disable still held from a release whose enable failed is
+			// REUSED, never stacked (review of 4eb6974, P2): one disable per
+			// handle, balanced by the one enable of the next release
+			wal_pin::remove(this->_data_dir);
+			result = "failed:disable_file_deletions";
+		} else {
+			this->_wal_pin_deletions_disabled = true;
+			this->_wal_pin_state = wal_pin::state_valid;
+			this->_wal_pin = p;
+			this->_wal_pin_requested_deadline = deadline_ms;
+			this->_wal_pin_reason = "";
+			log_notice("WAL_PIN: handover %s pins the WAL from seq %llu until %llu", hid.c_str(), (unsigned long long)seq, (unsigned long long)deadline_ms);
+			result = "pinned";
+			r = 0;
+		}
+	}
+	pthread_mutex_unlock(&this->_mutex_wal_pin);
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	return r;
+}
+
+int storage_rocksdb::wal_pin_release(const string& hid, string& result) {
+	pthread_rwlock_rdlock(&this->_mutex_wholelock);
+	pthread_mutex_lock(&this->_mutex_wal_pin);
+	int r = -1;
+	if (this->_wal_pin_state == wal_pin::state_absent) {
+		result = "already";
+		r = 0;
+	} else if (this->_wal_pin_state == wal_pin::state_invalid) {
+		result = "refused:invalid_marker";
+	} else if (this->_wal_pin.hid != hid) {
+		result = "refused:other_handover";
+	} else if (this->_wal_pin_release_locked("released by the operator") == 0) {
+		result = "released";
+		r = 0;
+	} else {
+		result = "failed";
+	}
+	pthread_mutex_unlock(&this->_mutex_wal_pin);
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	return r;
+}
+
+int storage_rocksdb::wal_pin_release_invalid(const string& boot_id, const string& own_boot_id, string& result) {
+	pthread_rwlock_rdlock(&this->_mutex_wholelock);
+	pthread_mutex_lock(&this->_mutex_wal_pin);
+	int r = -1;
+	if (boot_id.empty() || boot_id != own_boot_id) {
+		result = "refused:boot_id";
+	} else if (this->_wal_pin_state != wal_pin::state_invalid) {
+		result = this->_wal_pin_state == wal_pin::state_absent ? "already" : "refused:not_invalid";
+		r = this->_wal_pin_state == wal_pin::state_absent ? 0 : -1;
+	} else if (this->_wal_pin_release_locked("an invalid marker released by an approved request for boot " + boot_id) == 0) {
+		result = "released";
+		r = 0;
+	} else {
+		result = "failed";
+	}
+	pthread_mutex_unlock(&this->_mutex_wal_pin);
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	return r;
+}
+
+namespace {
+struct archived_wal {
+	string path;
+	string name;
+	uint64_t bytes;
+	time_t mtime;
+};
+}	// anonymous namespace
+
+int storage_rocksdb::wal_pin_tick(uint64_t now_ms) {
+	if (this->_staging) {
+		return 0;
+	}
+	bool purge = false;
+	// read outside the locks below (it takes its own)
+	const int64_t free_bytes = this->rebuild_space_available();
+	pthread_rwlock_rdlock(&this->_mutex_wholelock);
+	pthread_mutex_lock(&this->_mutex_wal_pin);
+	if (this->_wal_pin_state == wal_pin::state_valid && now_ms > 0 && this->_wal_pin.deadline_ms <= now_ms) {
+		this->_wal_pin_release_locked("the deadline passed");
+	}
+	if (this->_wal_pin_state == wal_pin::state_valid || this->_wal_pin_state == wal_pin::state_invalid) {
+		int64_t floor = this->_wal_pin_floor_bytes;
+		if (floor < 0) {
+			floor = this->_rebuild_reserve_bytes > 0 ? this->_rebuild_reserve_bytes / 2 : 0;
+		}
+		if (floor > 0) {
+			if (free_bytes >= 0 && free_bytes < floor) {
+				log_err("CRITICAL: WAL_PIN: free space %lld is below the floor %lld: the pin of %s is released (a follower behind S rebuilds in full; the master's data is kept)",
+					(long long)free_bytes, (long long)floor, this->_wal_pin.hid.c_str());
+				if (this->_wal_pin_release_locked("free space below the floor") == 0) {
+					this->_wal_pin_floor_releases++;
+				}
+			}
+		}
+	}
+	if (this->_wal_pin_state == wal_pin::state_absent && this->_wal_pin_deletions_disabled && this->_db != NULL) {
+		// a release whose enable failed: retry it
+		if (!_test_enable_fault && this->_db->EnableFileDeletions(false).ok()) {
+			this->_wal_pin_deletions_disabled = false;
+		}
+	}
+	purge = this->_wal_pin_protected_open && this->_wal_pin_state == wal_pin::state_absent;
+	int removed = 0;
+	if (purge) {
+		// the whole destructive section runs under the SAME locks a new pin
+		// takes (review of 2f6294a, P1-2): a pin set concurrently waits
+		// until the purge is over, and a pin set before it is seen here
+		if (_test_hook_wal_purge_decided != NULL) {
+			_test_hook_wal_purge_decided(this);
+		}
+		removed = this->_wal_archive_purge_locked(now_ms);
+	}
+	pthread_mutex_unlock(&this->_mutex_wal_pin);
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	{
+		// a prepared history whose handover neither committed nor aborted
+		// by its deadline is dropped (nothing active was changed)
+		pending_history ph;
+		if (now_ms > 0 && this->get_pending_history(ph) && ph.deadline_ms <= now_ms) {
+			string dr;
+			this->history_discard(ph.hid, "its deadline passed", dr);
+		}
+	}
+	return removed;
+}
+
+// caller holds _mutex_wholelock (read) and _mutex_wal_pin
+int storage_rocksdb::_wal_archive_purge_locked(uint64_t now_ms) {
+	if (this->_wal_pin_state != wal_pin::state_absent) {
+		return 0;
+	}
+
+	// This handle keeps every archived WAL file (opened under a pin): purge
+	// the archive by the configured policy, as RocksDB would have.
+	const string dir = this->_data_path + "/archive";
+	DIR* d = opendir(dir.c_str());
+	if (d == NULL) {
+		return 0;
+	}
+	vector<archived_wal> files;
+	uint64_t total = 0;
+	struct dirent* e;
+	while ((e = readdir(d)) != NULL) {
+		const string name = e->d_name;
+		if (name.size() < 5 || name.compare(name.size() - 4, 4, ".log") != 0) {
+			continue;
+		}
+		struct stat sb;
+		const string path = dir + "/" + name;
+		if (::stat(path.c_str(), &sb) != 0) {
+			continue;
+		}
+		archived_wal w;
+		w.path = path;
+		w.name = name;
+		w.bytes = (uint64_t)sb.st_size;
+		w.mtime = sb.st_mtime;
+		files.push_back(w);
+		total += w.bytes;
+	}
+	closedir(d);
+	// WAL file names are zero-padded log numbers: name order is age order
+	sort(files.begin(), files.end(), [](const archived_wal& a, const archived_wal& b) { return a.name < b.name; });
+	const time_t now = (time_t)(now_ms / 1000);
+	const uint64_t cap = this->_wal_size_limit_mb * 1024 * 1024;
+	int removed = 0;
+	for (size_t i = 0; i < files.size(); i++) {
+		const bool too_old = this->_wal_ttl_seconds > 0 && now > files[i].mtime && (uint64_t)(now - files[i].mtime) > this->_wal_ttl_seconds;
+		const bool over_cap = cap > 0 && total > cap;
+		const bool none_kept = this->_wal_ttl_seconds == 0 && this->_wal_size_limit_mb == 0;
+		if (!(too_old || over_cap || none_kept)) {
+			continue;
+		}
+		if (::unlink(files[i].path.c_str()) == 0) {
+			total -= files[i].bytes;
+			removed++;
+		}
+	}
+	if (removed > 0) {
+		log_info("WAL_PIN: purged %d archived WAL file(s) by the configured TTL / size (this handle was opened with every WAL file kept)", removed);
+	}
+	return removed;
+}
+
+storage_rocksdb::wal_pin_status storage_rocksdb::get_wal_pin_status() {
+	wal_pin_status r;
+	pthread_mutex_lock(&this->_mutex_wal_pin);
+	r.state = wal_pin::state_name(this->_wal_pin_state);
+	r.hid = this->_wal_pin.hid;
+	r.seq = this->_wal_pin.seq;
+	r.deadline_ms = this->_wal_pin.deadline_ms;
+	r.reason = this->_wal_pin_reason;
+	r.protected_open = this->_wal_pin_protected_open;
+	r.deletions_disabled = this->_wal_pin_deletions_disabled;
+	r.released = this->_wal_pin_released;
+	r.floor_releases = this->_wal_pin_floor_releases;
+	pthread_mutex_unlock(&this->_mutex_wal_pin);
+	return r;
+}
+// }}}
 
 int storage_rocksdb::remove_snapshot_checkpoint(const string& path) {
 	// Only ever remove a serve dir of our own — refuse anything else so a
@@ -4889,6 +5664,11 @@ uint64_t storage_rocksdb::_collect_tombstones_locked(uint64_t budget) {
 		return 0;
 	}
 	const uint64_t cursor = this->_get_repl_last_lsn_locked();
+	// labels are positions in ONE source's sequence space: the cursor
+	// compares only with rows of the current epoch. A row of another epoch
+	// (kept across a history continuation, design 6th rev. §8-3) is absent
+	// for every decision and is dropped whatever its label.
+	const string epoch = this->get_source_epoch();
 	rocksdb::ReadOptions ro = this->_read_options;
 	ro.fill_cache = false;
 	rocksdb::Iterator* it = this->_db->NewIterator(ro, this->_cf_meta);
@@ -4927,7 +5707,8 @@ uint64_t storage_rocksdb::_collect_tombstones_locked(uint64_t budget) {
 		} catch (boost::bad_lexical_cast&) {
 			continue;
 		}
-		if (label <= cursor) {
+		const bool other_epoch = !epoch.empty() && v.substr(0, p1) != epoch;
+		if (other_epoch || label <= cursor) {
 			batch.Delete(this->_cf_meta, last);
 			dropped++;
 		}
@@ -5371,6 +6152,7 @@ uint64_t storage_rocksdb::get_repl_last_lsn() {
 }
 
 void (*storage_rocksdb::_test_hook_reader_checked)() = NULL;
+void (*storage_rocksdb::_test_hook_wal_purge_decided)(storage_rocksdb*) = NULL;
 void (*storage_rocksdb::_test_hook_reap_scanned)() = NULL;
 
 uint64_t storage_rocksdb::_get_repl_last_lsn_locked() {

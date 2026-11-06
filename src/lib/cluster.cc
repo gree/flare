@@ -74,6 +74,7 @@ cluster::cluster(thread_pool* req_tp, thread_pool* other_tp, string server_name,
 		_master_reconstruction(0),
 		_boot_shift_pending(false),
 		_master_epoch_advanced(false),
+		_applying_map_version(0),
 		_reannounce_active(false),
 		_activation_pending(false),
 		_node_map_version(0),
@@ -1285,6 +1286,7 @@ void cluster::write_section_leave() {
 int cluster::_reconstruct_node(vector<node> v, uint64_t node_map_version) {
 	stack<node_shift_state> shift_state_stack;
 	stack<node_shift_role> shift_role_stack;
+	this->_applying_map_version = node_map_version;
 
 	pthread_rwlock_wrlock(&this->_mutex_node_map);
 	pthread_rwlock_wrlock(&this->_mutex_node_partition_map);
@@ -1457,6 +1459,25 @@ int cluster::_reconstruct_node(vector<node> v, uint64_t node_map_version) {
 			if (this->_storage->check_partition_binding(want, false, why) != 0) {
 				log_err("CRITICAL: this Active slave's copy does not match the map's partition binding: %s", why.c_str());
 			}
+		}
+	}
+
+	// History continuation: a prepared replica commits once the map names
+	// the prepared successor as its partition's master (the operator sends
+	// this map to the prepared replicas BEFORE the successor), and drops the
+	// pending history when the map names another master (rollback).
+	{
+		node_map::iterator me = this->_node_map.find(this->_node_key);
+		if (me != this->_node_map.end() && me->second.node_partition >= 0 && me->second.node_role != role_master
+				&& this->_storage != NULL) {
+			string master_key;
+			for (node_map::iterator it = this->_node_map.begin(); it != this->_node_map.end(); it++) {
+				if (it->second.node_role == role_master && it->second.node_partition == me->second.node_partition
+						&& it->second.node_state == state_active) {
+					master_key = it->first;
+				}
+			}
+			this->_storage->history_on_map(me->second.node_partition, master_key, this->_node_key, node_map_version);
 		}
 	}
 
@@ -2467,7 +2488,25 @@ int cluster::_reconcile_wal_follower_locked() {
 			desired = false;
 		} else {
 			node_partition_map::iterator p = this->_node_partition_map.find(me->second.node_partition);
-			if (p == this->_node_partition_map.end() || p->second.master.node_key.empty()
+			if (p != this->_node_partition_map.end() && p->second.master.node_key.empty()
+					&& this->_wal_follower_thread && !this->_wal_follower_source.empty()) {
+				// An ordered handover's master/down placeholder (the partition
+				// keeps no master key): the master this follower ALREADY
+				// follows was demoted and writes nothing more, but its last
+				// writes may not be applied here yet. Keep that follower so
+				// it drains the finite tail up to the old master's last
+				// sequence (history continuation: the cursor must reach L;
+				// 42163241045 stopped it a few sequences short under load).
+				// Never started toward a down node, only kept.
+				node_map::iterator src = this->_node_map.find(this->_wal_follower_source);
+				if (src != this->_node_map.end() && src->second.node_role == role_master
+						&& src->second.node_state == state_down
+						&& src->second.node_partition == me->second.node_partition) {
+					source_key = this->_wal_follower_source;
+				} else {
+					desired = false;
+				}
+			} else if (p == this->_node_partition_map.end() || p->second.master.node_key.empty()
 					|| p->second.master.node_key == this->_node_key) {
 				desired = false;
 			} else {
@@ -2662,8 +2701,15 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 		// source exists, each advanced it (rc68: epoch 7, 8 in one map
 		// application). One tenure is one history; a second token only
 		// forces the followers of the first to rebuild again.
+		const int continued = this->_master_epoch_advanced ? 0
+			: this->_storage->history_on_promotion(new_partition, this->_node_key, this->_applying_map_version);
 		if (this->_master_epoch_advanced) {
 			log_notice("promotion: the source epoch was already advanced for this master tenure — not advanced again", 0);
+		} else if (continued == 1) {
+			// ordered handover with history continuation: the epoch, master_id
+			// and cursor prepared before this map were committed together
+			log_notice("promotion: the prepared history of the ordered handover was committed (the remaining replicas continue it)", 0);
+			this->_master_epoch_advanced = true;
 		} else if (this->_storage->advance_source_epoch("promotion") < 0) {
 			// Fail closed: the storage marks its generations unavailable and
 			// every replication path refuses on that, rather than this node

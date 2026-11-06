@@ -245,4 +245,100 @@ webhooks:
         namespace: {{ $ns }}
         path: /statefulsets
         port: 443
+---
+{{- /*
+  The break-glass of a halted history-continuation handover
+  (docs/design-handover-history-continuation.md addenda 6–10): a FlareCluster
+  UPDATE that adds or changes the flare.gree.net/handover-fenced annotation
+  gets a receipt (HMAC) in the same update, only after a SubjectAccessReview
+  allows the requester verb break-glass on flareclusters/handover-fence.
+  failurePolicy Ignore: with no operator answering, FlareCluster updates go
+  through but an annotation then has no receipt and is never used (fail
+  closed where it matters, never blocks a helm upgrade of the CR).
+*/}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: {{ include "flare-operator.fullname" . }}-handover-fence-{{ $ns }}
+  labels:
+    {{- include "flare-operator.labels" . | nindent 4 }}
+  {{- if eq $mode "certManager" }}
+  annotations:
+    cert-manager.io/inject-ca-from: {{ $ns }}/{{ $certName }}
+  {{- end }}
+webhooks:
+  - name: handover-fence.node-guard.flare.gree.net
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Ignore
+    reinvocationPolicy: Never
+    timeoutSeconds: {{ .Values.nodeGuard.timeoutSeconds }}
+    matchPolicy: Equivalent
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ $ns }}
+    rules:
+      - apiGroups: ["flare.gree.net"]
+        apiVersions: ["*"]
+        operations: ["UPDATE"]
+        resources: ["flareclusters"]
+        scope: Namespaced
+    clientConfig:
+      {{- with $caBundle }}
+      caBundle: {{ . }}
+      {{- end }}
+      service:
+        name: {{ $svc }}
+        namespace: {{ $ns }}
+        path: /flareclusters
+        port: 443
+{{- if .Values.rbac.create }}
+---
+# the receipt key Secret: created once by the operator, read back (never replaced)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $fullname }}-receipt-key
+  namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["{{ $fullname }}-receipt-key"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $fullname }}-receipt-key
+  namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "flare-operator.serviceAccountName" . }}
+    namespace: {{ $ns }}
+roleRef:
+  kind: Role
+  name: {{ $fullname }}-receipt-key
+  apiGroup: rbac.authorization.k8s.io
+---
+# who may break-glass a halted handover: bind this Role to the people who
+# may declare a silent successor stopped (no binding by default; addendum 9)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $fullname }}-handover-fence
+  namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["flare.gree.net"]
+    resources: ["flareclusters/handover-fence"]
+    verbs: ["break-glass"]
+{{- end }}
 {{- end }}

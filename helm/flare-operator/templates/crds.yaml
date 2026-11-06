@@ -280,6 +280,26 @@ spec:
                     node map versions of the demote, promote and rollback maps.
                   type: object
                   x-kubernetes-preserve-unknown-fields: true
+                handoverApprovals:
+                  description: |
+                    The approval ids of consumed handover-fenced break-glass values,
+                    the newest 64 (an id is refused again only within these; the
+                    safety comes from the hid and the successor binding).
+                  type: array
+                  items:
+                    type: string
+                handoverStops:
+                  description: |
+                    Kubelet-confirmed stops of flared pods the node guard recorded
+                    while a history-continuation handover could still promote them
+                    (docs/design-handover-history-continuation.md addendum 5):
+                    [{key, uid, at}], the newest 16. Only such a record proves a
+                    silent successor's process stopped; NotFound or another UID
+                    does not (force delete, a partitioned node).
+                  type: array
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
                 replicaRepairs:
                   description: |
                     Replica-repair ledger (SC-03): reconstruction requests

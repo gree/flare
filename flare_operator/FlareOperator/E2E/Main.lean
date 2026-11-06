@@ -39,6 +39,7 @@ import FlareOperator.E2E.Tests.VCaptureResources
 import FlareOperator.E2E.Tests.ReplicaRepair
 import FlareOperator.E2E.Tests.ContinuousReplication
 import FlareOperator.E2E.Tests.ContinuousReplicationLimits
+import FlareOperator.E2E.Tests.HistoryContinuation
 import FlareOperator.E2E.Tests.StatsCost
 import FlareOperator.E2E.Tests.PrepareEvidence
 import FlareOperator.E2E.Tests.NativeMetrics
@@ -105,6 +106,14 @@ def main (args : List String) : IO UInt32 :=
     Tests.ContinuousReplicationLimits.multiHoldSuite,
     Tests.ContinuousReplicationLimits.rebuildTmpfsSuite,
     Tests.ContinuousReplicationLimits.parkedSlotSuite,
+    Tests.HistoryContinuation.walPinRestartSuite,
+    Tests.HistoryContinuation.handoverSuite,
+    Tests.HistoryContinuation.handoverFollowOffSuite,
+    Tests.HistoryContinuation.handoverRollingSuite,
+    Tests.HistoryContinuation.recoveryReplaceSuite,
+    Tests.HistoryContinuation.recoveryUnfencedSuite,
+    Tests.HistoryContinuation.recoveryBreakGlassSuite,
+    Tests.HistoryContinuation.recoveryOperatorRestartSuite,
     Tests.ContinuousReplicationLimits.upgradeSuite,
     Tests.ContinuousReplicationLimits.identitySuite,
     Tests.ContinuousReplicationLimits.emptySourceSuite,

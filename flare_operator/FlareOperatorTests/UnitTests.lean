@@ -32,6 +32,7 @@ import FlareOperator.E2E.Helpers
 import FlareOperator.E2E.PromotionTimeline
 import FlareOperator.StateMachine.SourceEligibility
 import FlareOperator.StateMachine.RebuildConcurrency
+import FlareOperator.StateMachine.HistoryContinuation
 import FlareOperator.StateMachine.AuthoritativeHistory
 import FlareOperator.StateMachine.CopyDiscardApproval
 import FlareOperator.StateMachine.PromotionEvidence
@@ -40,6 +41,7 @@ import FlareOperatorTests.UnitTestsRolling
 import FlareOperatorTests.UnitTestsNodeGuard
 import FlareOperatorTests.UnitTestsFailover
 import FlareOperatorTests.UnitTestsNodeMove
+import FlareOperatorTests.UnitTestsFence
 
 open FlareOperator.K8s
 open FlareOperator.ReplicaRepair
@@ -2478,6 +2480,57 @@ private def checkRebuildConcurrency (ctx : Ctx) : IO Unit := do
       && resumeCandidate (st [m0, m1, ("x", holdNode .Slave .Prepare 1 "x")]) 1 1 ["x"] == some "x"
       && resumeCandidate (st [m0, m1, ("x", holdNode .Slave .Prepare 1 "x")]) 1 1 ["x"] ["y"] == none)
 
+-- ─── history continuation across an ordered handover (A3) ──────────────
+
+open FlareOperator.HistoryContinuation in
+private def checkHistoryContinuation (ctx : Ctx) : IO Unit := do
+  let src : SourceObs := { latestSeq := some 100, epoch := some "7:e", masterId := some "M", boot := some 1 }
+  let ok : ReplicaObs := {
+    key := "r1", bindingAtStart := some "u/1/c", bindingNow := some "u/1/c", cursor := some 100,
+    followState := some "following", epoch := some "7:e", masterId := some "M", inFlightFromOld := some 0,
+    activeSlave := true, ready := true, r3Eligible := true }
+  check ctx "history continuation: a replica whose follow cursor is the old master's last sequence (same epoch, master_id, binding, nothing in flight) is prepared"
+    (excluded src (some 100) (some 100) ok == none)
+  check ctx "history continuation: a cursor behind or ahead of L, or unreadable, excludes it"
+    ((excluded src (some 100) (some 100) { ok with cursor := some 99 }).isSome
+      && (excluded src (some 100) (some 100) { ok with cursor := some 101 }).isSome
+      && (excluded src (some 100) (some 100) { ok with cursor := none }).isSome)
+  check ctx "history continuation: L moved between the readings (or unreadable) excludes every replica"
+    ((excluded src (some 99) (some 100) ok).isSome && (excluded src (some 100) none ok).isSome
+      && (excluded { src with latestSeq := some 101 } (some 100) (some 100) ok).isSome)
+  check ctx "history continuation: follow off / disconnected / needs_rebuild excludes it (it rebuilds as before); idle at the barrier with the cursor at L does not"
+    ((excluded src (some 100) (some 100) { ok with followState := none }).isSome
+      && (excluded src (some 100) (some 100) { ok with followState := some "disconnected" }).isSome
+      && (excluded src (some 100) (some 100) { ok with needsRebuild := true }).isSome
+      && (excluded src (some 100) (some 100) { ok with followState := some "idle" }).isNone)
+  check ctx "history continuation: another epoch or master_id, or the old master's unreadable, excludes it"
+    ((excluded src (some 100) (some 100) { ok with epoch := some "6:x" }).isSome
+      && (excluded src (some 100) (some 100) { ok with masterId := some "N" }).isSome
+      && (excluded { src with epoch := none } (some 100) (some 100) { ok with epoch := none }).isSome)
+  check ctx "history continuation: a forward still in flight from the old master (or unreadable) excludes it"
+    ((excluded src (some 100) (some 100) { ok with inFlightFromOld := some 1 }).isSome
+      && (excluded src (some 100) (some 100) { ok with inFlightFromOld := none }).isSome)
+  check ctx "history continuation: another pod/process/copy, not Ready, not Active, not R3, partial, quarantine or a pending repair excludes it"
+    ((excluded src (some 100) (some 100) { ok with bindingNow := some "u/2/c" }).isSome
+      && (excluded src (some 100) (some 100) { ok with bindingAtStart := none }).isSome
+      && (excluded src (some 100) (some 100) { ok with ready := false }).isSome
+      && (excluded src (some 100) (some 100) { ok with activeSlave := false }).isSome
+      && (excluded src (some 100) (some 100) { ok with r3Eligible := false }).isSome
+      && (excluded src (some 100) (some 100) { ok with partialCopy := true }).isSome
+      && (excluded src (some 100) (some 100) { ok with quarantined := true }).isSome
+      && (excluded src (some 100) (some 100) { ok with repairPending := true }).isSome)
+  let (prep, out) := partition src (some 100) (some 100) [ok, { ok with key := "r2", cursor := some 98 }, { ok with key := "r3" }]
+  check ctx "history continuation: partition keeps map order and says why the others rebuild"
+    (prep == ["r1", "r3"] && out.map Prod.fst == ["r2"])
+  check ctx "history continuation: the pin is released only when every prepared replica is past S (an unreadable cursor keeps it)"
+    (releaseReady 100 ["r1", "r3"] [("r1", some 101), ("r3", some 105)]
+      && !releaseReady 100 ["r1", "r3"] [("r1", some 101), ("r3", some 100)]
+      && !releaseReady 100 ["r1", "r3"] [("r1", some 101), ("r3", none)]
+      && !releaseReady 100 ["r1", "r3"] [("r1", some 101)]
+      && releaseReady 100 [] [])
+  check ctx "history continuation: the handover id binds partition, attempt and demote time"
+    (handoverId 0 2 1700 == "p0-a2-1700" && handoverId 0 2 1700 != handoverId 0 3 1700)
+
 -- ─── copy retention §7: discard approvals ───────────────────────────────
 
 open FlareOperator.CopyDiscardApproval in
@@ -3225,6 +3278,8 @@ def run : IO UInt32 := do
     check ctx name ok
   for (name, ok) in FlareOperator.UnitTestsNodeMove.results do
     check ctx name ok
+  for (name, ok) in FlareOperator.UnitTestsFence.results do
+    check ctx name ok
   checkObserve ctx
   checkRequestResolve ctx
   checkGate ctx
@@ -3273,6 +3328,7 @@ def run : IO UInt32 := do
   checkActivationOrder ctx
   checkSourceEligibility ctx
   checkRebuildConcurrency ctx
+  checkHistoryContinuation ctx
   checkAuthoritativeHistory ctx
   checkAuthority29Transitions ctx
   checkRestoreProvenance ctx

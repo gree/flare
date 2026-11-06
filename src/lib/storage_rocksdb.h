@@ -49,6 +49,7 @@
 
 #include "storage.h"
 #include "util.h"
+#include "wal_pin.h"
 
 using namespace std;
 
@@ -106,6 +107,11 @@ public:
 	// R3-D: the evidence of the STORED copy while a rebuild is in progress
 	// (moved here, durably, when an attempt starts; never advertised)
 	static const char* const kReplRebuiltFromSuspendedKey;
+	// History continuation across an ordered handover (design
+	// docs/design-handover-history-continuation.md): a PENDING history,
+	// prepared but not active. "v1 <role> <hid> <partition> <successor>
+	// <from_epoch> <to_epoch> <seq> <master_id> <deadline_ms> <incarnation>"
+	static const char* const kReplPendingHistoryKey;
 	// Copy retention (docs/design-copy-retention.md §2): the persistent
 	// identity of THIS stored copy, "<uuid>:<generation>". A different copy
 	// (swap, reset, quarantine, a staging copy) gets a new uuid; replacing the
@@ -216,6 +222,30 @@ protected:
 	// (staged rebuilds stop). Why the last staged rebuild stopped ("" = not
 	// blocked), for stats.
 	int64_t _rebuild_reserve_bytes = -1;
+	// WAL retention across an ordered handover (wal_pin.h). The marker on
+	// disk is the truth; these describe this DB handle. Guarded by
+	// _mutex_wal_pin.
+	pthread_mutex_t _mutex_wal_pin;
+	wal_pin::state _wal_pin_state = wal_pin::state_absent;
+	wal_pin::pin _wal_pin;
+	string _wal_pin_reason;
+	// this handle was opened with the keep-all WAL options (a marker was
+	// present at open): archived WAL is then purged by flared itself with
+	// the configured TTL / size once the pin is released
+	bool _wal_pin_protected_open = false;
+	// this handle holds one DisableFileDeletions for the pin
+	bool _wal_pin_deletions_disabled = false;
+	uint64_t _wal_pin_max_ms = 120000;
+	// the deadline the current pin was REQUESTED with (before the cap); 0
+	// after an open from the marker (only the stored deadline is known)
+	uint64_t _wal_pin_requested_deadline = 0;
+	int64_t _wal_pin_floor_bytes = -1;	// -1 = half the rebuild reserve
+	uint64_t _wal_pin_released = 0;
+	uint64_t _wal_pin_floor_releases = 0;
+	void _wal_pin_before_open(rocksdb::DBOptions& opts);
+	void _wal_pin_after_open();
+	int _wal_pin_release_locked(const string& why);
+	int _wal_archive_purge_locked(uint64_t now_ms);
 	pthread_mutex_t _mutex_rebuild_status;
 	string _rebuild_blocked;
 	uint64_t _staged_switched = 0;
@@ -473,6 +503,78 @@ public:
 	// disk growth bounded by the transfer duration.
 	int disable_file_deletions();
 	int enable_file_deletions();
+	// WAL retention across an ordered handover (wal_pin.h). set: the marker
+	// is written durably FIRST, then file deletions are disabled on this
+	// handle; the same hid again is a no-op. release: only the pin of that
+	// hid (idempotent: no marker = "already"); an invalid marker is released
+	// only by release_invalid naming this process's boot id. tick: releases
+	// at the deadline or when free space falls below the floor.
+	// History continuation (design 6th rev. §4-3..6). prepare persists a
+	// pending record only (nothing active changes). commit makes it active
+	// in ONE batch of reserved default-CF keys (epoch, reason, master_id,
+	// cursor, rebuilt_from; the meta family is kept, epoch-scoped). discard
+	// drops it. All are idempotent per hid.
+	struct pending_history {
+		string role;		// "successor" | "replica"
+		string hid;
+		uint64_t partition = 0;
+		string successor;
+		string from_epoch;
+		string to_epoch;
+		uint64_t seq = 0;
+		string master_id;
+		uint64_t deadline_ms = 0;
+		string incarnation;
+		// the V2 map version the operator armed this record with (0 = not
+		// armed): the commit happens only on that exact map
+		uint64_t armed_version = 0;
+	};
+	static string serialize_pending(const pending_history& p);
+	static bool parse_pending(const string& text, pending_history& p);
+	bool get_pending_history(pending_history& out);
+	// successor: mint E' (from the current epoch), S (own latest sequence)
+	// and, when the cursor is ahead of S, a new master_id; persist as pending
+	int history_promote_prepare(const string& hid, uint64_t partition, const string& successor,
+		uint64_t deadline_ms, pending_history& out, string& result);
+	// replica: requires source epoch == from_epoch and incarnation ==
+	// expected (the copy read at the barrier)
+	int history_replica_prepare(const pending_history& in, const string& expected_incarnation, string& result);
+	int history_commit(const string& hid, string& result);
+	int history_discard(const string& hid, const string& why, string& result);
+	// arm: bind the pending record of `hid` to the V2 map version (sent by
+	// the operator BEFORE that map; idempotent for the same version)
+	int history_arm(const string& hid, uint64_t map_version, string& result);
+	virtual int history_on_map(int partition, const string& master_key, const string& own_key, uint64_t map_version);
+	virtual int history_on_promotion(int partition, const string& own_key, uint64_t map_version);
+	int wal_pin_set(const string& hid, uint64_t seq, uint64_t deadline_ms, string& result);
+	enum pending_read { pending_absent = 0, pending_present, pending_error };
+	pending_read _read_pending_locked(pending_history& out);
+	// TEST SEAM (unit tests only): the pending record reads as an error
+	static bool _test_pending_read_fault;
+	int wal_pin_release(const string& hid, string& result);
+	int wal_pin_release_invalid(const string& boot_id, const string& own_boot_id, string& result);
+	int wal_pin_tick(uint64_t now_ms);
+	void set_wal_pin_max_ms(uint64_t ms) { this->_wal_pin_max_ms = ms; }
+	void set_wal_pin_floor_bytes(int64_t b) { this->_wal_pin_floor_bytes = b; }
+	struct wal_pin_status {
+		string state;
+		string hid;
+		uint64_t seq = 0;
+		uint64_t deadline_ms = 0;
+		string reason;
+		bool protected_open = false;
+		bool deletions_disabled = false;
+		uint64_t released = 0;
+		uint64_t floor_releases = 0;
+	};
+	wal_pin_status get_wal_pin_status();
+	// TEST SEAM (unit tests only): called inside wal_pin_tick after the
+	// archive purge was decided, with the purge's locks held
+	static void (*_test_hook_wal_purge_decided)(storage_rocksdb*);
+	// TEST SEAM (unit tests only): EnableFileDeletions of a WAL_PIN release
+	// fails as if RocksDB refused it
+	static bool _test_enable_fault;
+	bool file_deletion_disables(uint64_t& n);
 	// Slave side: replace the live DB with the received checkpoint (staging
 	// dir is renamed into place under the whole-storage write lock — readers
 	// and writers are excluded for the swap) and seed the replication cursor

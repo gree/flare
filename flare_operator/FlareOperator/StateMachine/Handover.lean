@@ -34,6 +34,7 @@
 -/
 import Lean.Data.Json
 import FlareOperator.K8s.FlareCluster
+import FlareOperator.StateMachine.HandoverFence
 
 namespace FlareOperator.Handover
 
@@ -46,6 +47,13 @@ inductive Phase where
   | promoting
   | done
   | aborted
+  /-- history continuation (docs/design-handover-history-continuation.md
+      addendum 2): the successor and the eligible replicas are prepared -/
+  | preparing
+  /-- V2 went (or goes) to the prepared replicas only; they commit on it -/
+  | committingReplicas
+  /-- no replica committed (proven): V1' and discards, nothing else -/
+  | rollingBack
   deriving Repr, BEq, Inhabited
 
 def Phase.toString : Phase → String
@@ -55,6 +63,9 @@ def Phase.toString : Phase → String
   | .promoting => "promoting"
   | .done => "done"
   | .aborted => "aborted"
+  | .preparing => "preparing"
+  | .committingReplicas => "committingReplicas"
+  | .rollingBack => "rollingBack"
 
 instance : ToString Phase := ⟨Phase.toString⟩
 
@@ -65,11 +76,14 @@ def Phase.fromString? : String → Option Phase
   | "promoting" => some .promoting
   | "done" => some .done
   | "aborted" => some .aborted
+  | "preparing" => some .preparing
+  | "committingReplicas" => some .committingReplicas
+  | "rollingBack" => some .rollingBack
   | _ => none
 
 /-- A phase in which the old master is master/down in the maps sent. -/
 def Phase.oldIsDown : Phase → Bool
-  | .demoting | .draining => true
+  | .demoting | .draining | .preparing | .committingReplicas => true
   | _ => false
 
 /-- One handover, per partition. -/
@@ -116,6 +130,39 @@ structure Entry where
   demotedMs : Nat := 0
   phaseMs : Nat := 0
   reason : String := ""
+  /-- history continuation: the handover id, the successor's prepared S,
+      E' and master_id, the prepared replicas with their binding at the
+      prepare, the replicas whose commit was confirmed (binding, epoch,
+      master_id, map version, no pending), the leader epoch that wrote
+      this entry, and whether V2 went to every pod (after the targeted
+      send to the prepared replicas) -/
+  hid : String := ""
+  contSeq : Option Nat := none
+  toEpoch : String := ""
+  contMasterId : String := ""
+  prepared : List (String × String) := []
+  committed : List String := []
+  leaderEpoch : Nat := 0
+  fullSent : Bool := false
+  /-- addendum 5: the successor pod (UID) whose removal its kubelet
+      confirmed (recorded by the node guard): only this proves the
+      successor's process stopped — NotFound or another UID does not
+      (force delete, a partitioned node) -/
+  successorStopped : String := ""
+  /-- addendum 2 §3 / 4 §2: the original successor replaced by a committed
+      replica after its kubelet-confirmed stop; no map makes it Master again
+      in this handover (it is a proxy in V3) -/
+  fencedOut : String := ""
+  /-- addenda 6–9: the break-glass consumed for this handover (the compact
+      JSON of HandoverFence.FencedBy: value, who, review uid, when); a
+      person declared the silent successor stopped or cut off. Used once;
+      kept for the audit. -/
+  fencedBy : String := ""
+  /-- the successor was armed for this continuation's V2 (the promoting
+      full send): it commits E' = toEpoch at promotion, so the completion
+      also requires that epoch (an arm refusal promotes it the ordinary
+      way, with a new epoch) -/
+  successorArmed : Bool := false
   deriving Repr, Inhabited, BEq
 
 structure Ledger where
@@ -133,6 +180,10 @@ structure Config where
       the fallback while a lossless handover can still be tried) -/
   maxAttempts : Nat := 3
   retryDelayMs : Nat := 5000
+  /-- history continuation (docs/design-handover-history-continuation.md):
+      after a clean drain, prepare the successor and the eligible replicas
+      so they keep their copies instead of rebuilding -/
+  continuation : Bool := false
   deriving Repr
 
 /-- What Main observed this pass for one entry. `none` = not readable now;
@@ -160,6 +211,18 @@ structure Obs where
   /-- the successor's binding (pod UID, boot id, copy id) read this tick;
       none = unreadable -/
   successorBinding : Option String := none
+  /-- history continuation (read by Main this tick, each bound to the
+      prepared binding): replicas whose commit is confirmed, and whether
+      EVERY prepared replica was read fresh and still holds its pending
+      (no commit — addendum 4 §1; unreadable is never zero) -/
+  committedKeys : List String := []
+  zeroCommitProven : Bool := false
+  /-- the successor answered this tick with a complete reply and the SAME
+      binding (pod UID, boot id, copy id) the demote recorded: the process
+      that may hold V2 is alive and reachable (addendum 4) -/
+  successorAlive : Bool := false
+  /-- the successor's rocksdb_source_epoch read this tick -/
+  successorEpoch : Option String := none
   deriving Repr
 
 /-- What Main does after a step. -/
@@ -169,6 +232,11 @@ inductive Action where
       version it got with `recordSent`) -/
   | send
   | finish
+  /-- history continuation: prepare the successor and the eligible replicas
+      (Main reads, prepares and records with `afterPrepare`) -/
+  | prepare
+  /-- send V2 to the prepared replicas only -/
+  | sendTargeted
   deriving Repr, BEq
 
 /-- The counters to the successor have not grown since the start, and the
@@ -244,6 +312,51 @@ def successorChanged (e : Entry) (o : Obs) : Bool :=
 private def toPhase (e : Entry) (p : Phase) (now : Nat) (why : String := "") : Entry :=
   { e with phase := p, phaseMs := now, reason := if why.isEmpty then e.reason else why }
 
+/-- The pod UID of a recorded binding (`uid|boot|copy`). -/
+def bindingUid (b : String) : String := (b.splitOn "|").head?.getD ""
+
+/-- The consumed break-glass (`fencedBy`, HandoverFence.FencedBy as JSON)
+    names the successor `binding`. -/
+def fenceNames (fencedBy binding : String) : Bool :=
+  !fencedBy.isEmpty && !binding.isEmpty &&
+    match Lean.Json.parse fencedBy with
+    | .ok j => match (HandoverFence.FencedBy.fromJson? j).bind (fun f => HandoverFence.parseValue? f.value) with
+      | some v => v.binding == binding
+      | none => false
+    | .error _ => false
+
+/-- The successor's stop is proven: its kubelet confirmed the removal of
+    the very pod the demote recorded (addendum 5 §1). -/
+def successorStopConfirmed (e : Entry) : Bool :=
+  (!e.successorStopped.isEmpty && !e.successorBinding.isEmpty
+    && bindingUid e.successorBinding == e.successorStopped)
+  -- or a person's break-glass that names THIS successor's binding (it was
+  -- checked against the hid when consumed; after a replacement it no
+  -- longer names the new successor)
+  || fenceNames e.fencedBy e.successorBinding
+
+/-- Addendum 2 §3: the first committed replica (prepared order = map order)
+    replaces a successor whose stop is proven. It holds the old master's
+    history up to L and nothing after (no master since H), so promoting it
+    loses no write; it has no successor pending, so its promotion advances
+    the epoch as usual (not a continuation: `hid` is cleared) and the other
+    committed replicas rebuild. The original successor is fenced out (a
+    proxy in this map, V3). -/
+def replaceSuccessor (e : Entry) (now : Nat) : Option Entry :=
+  match e.prepared.find? (fun (k, _) => e.committed.contains k) with
+  | some (k, b) =>
+    some { toPhase e .promoting now s!"the successor {e.successor} stopped (its kubelet confirmed it): {k}, committed to the continued history, replaces it (the other committed replicas rebuild)" with
+      successor := k, successorBinding := b, fencedOut := e.successor,
+      successorStopped := "", v2 := none, fullSent := false, successorArmed := false,
+      hid := "", prepared := [], committed := [] }
+  | none => none
+
+/-- Stay in the phase and say why (addendum 4 §1 / 5 §2): nothing is
+    promoted and nothing rolled back; writes wait (W). Main logs a reason
+    that starts with "HALTED" as CRITICAL once and emits an Event. -/
+private def halt (e : Entry) (why : String) : Entry :=
+  { e with reason := s!"HALTED: {why}" }
+
 /-- One step of one entry. Pure: the caller sends a map for `.send` and then
     records its version with `recordSent`. -/
 def step (cfg : Config) (e : Entry) (o : Obs) : Entry × Action :=
@@ -296,7 +409,10 @@ def step (cfg : Config) (e : Entry) (o : Obs) : Entry × Action :=
         else (e, .none)
     else
       if o.inFlightToSuccessor == some 0 && drainClean e o then
-        ({ toPhase e .promoting o.nowMs with drainProven := true }, .send)
+        if cfg.continuation then
+          ({ toPhase e .preparing o.nowMs with drainProven := true }, .prepare)
+        else
+          ({ toPhase e .promoting o.nowMs with drainProven := true }, .send)
       else if expired then (toPhase e .aborted o.nowMs s!"not drained within {cfg.handoverMs} ms ({e.phase})", .send)
       else (e, .none)
   | .promoting =>
@@ -306,9 +422,72 @@ def step (cfg : Config) (e : Entry) (o : Obs) : Entry × Action :=
         (toPhase e .aborted o.nowMs "the successor's pod, process or copy changed before the promote", .send)
       else (e, .send)
     | some v2 =>
-      if allApplied o.entryVersions v2 && o.successorOwnRole == some "master" then
+      -- after a continuation the V2 so far went to the prepared replicas
+      -- only: now the successor and every other pod (same version)
+      -- continuation on: done only for THE successor (the recorded binding)
+      -- and, when it was armed, on the continued epoch (review of 6dfdc2f:
+      -- a replacement pod reporting V2 and master is not the successor)
+      let epochOk := !e.successorArmed || (!e.toEpoch.isEmpty && o.successorEpoch == some e.toEpoch)
+      let sameSuccessor := !cfg.continuation || (o.successorAlive && epochOk)
+      if !e.hid.isEmpty && !e.fullSent then (e, .send)
+      else if allApplied o.entryVersions v2 && o.successorOwnRole == some "master" && sameSuccessor then
         (toPhase e .done o.nowMs, .finish)
+      -- addendum 4 §2: after V2 went to the successor it may already be
+      -- the master; no other replica is promoted unless its stop is
+      -- confirmed by its kubelet (then a committed replica replaces it, or,
+      -- with none committed, the failover rules take the partition)
+      -- (history continuation only: off, the failover rules decide as before)
+      else if cfg.continuation && o.nowMs >= e.phaseMs + cfg.handoverMs && !o.successorAlive then
+        if successorStopConfirmed e then
+          match replaceSuccessor e o.nowMs with
+          | some e' => (e', .send)
+          | none => ({ toPhase e .aborted o.nowMs s!"the successor {e.successor} stopped after V2 (its kubelet confirmed it) and no replica committed: the failover rules apply" with noRollback := true }, .finish)
+        else
+          (halt e s!"V2 went to the successor {e.successor}, which does not answer with its binding (its stop is not confirmed by its kubelet): no other replica is promoted", .none)
+      else if cfg.continuation && o.nowMs >= e.phaseMs + cfg.handoverMs && !epochOk then
+        (halt e s!"the successor {e.successor} answers with its binding but not on the continued epoch {e.toEpoch} ({o.successorEpoch.getD "unreadable"}): not done, no other replica is promoted", .none)
       else (e, .none)
+  | .preparing =>
+    -- Main prepares in the same tick it gets .prepare and records the
+    -- result with afterPrepare; a restart in this phase prepares again
+    -- (prepare is idempotent per hid)
+    let expired := o.nowMs >= e.demotedMs + cfg.handoverMs
+    if !o.oldSameProcess || !o.successorEligible || successorChanged e o || expired then
+      -- nothing is active anywhere yet: drop the pending records, back to
+      -- the old master (V1')
+      ({ toPhase e .rollingBack o.nowMs "the handover could not be prepared (successor, old master or deadline)" with committed := [] }, .send)
+    else (e, .prepare)
+  | .committingReplicas =>
+    let expired := o.nowMs >= e.demotedMs + cfg.handoverMs
+    let e := { e with committed := (e.committed ++ o.committedKeys.filter (fun k => e.prepared.any (·.1 == k))).eraseDups }
+    if e.v2.isNone then (e, .sendTargeted)
+    else if e.prepared.all (fun (k, _) => e.committed.contains k) then
+      (toPhase e .promoting o.nowMs, .send)
+    else if expired then
+      if !e.committed.isEmpty then
+        -- some committed: never back to the old master (addendum 2 §3)
+        if o.successorAlive then
+          -- the uncommitted ones rebuild later
+          (toPhase e .promoting o.nowMs s!"{e.prepared.length - e.committed.length} prepared replica(s) not confirmed committed in time: they rebuild", .send)
+        else if successorStopConfirmed e then
+          match replaceSuccessor e o.nowMs with
+          | some e' => (e', .send)
+          | none => (halt e "no committed replica to replace the stopped successor", .none)
+        else
+          (halt e s!"{e.committed.length} replica(s) committed and the successor {e.successor} does not answer with its binding (its stop is not confirmed by its kubelet): nothing is promoted, nothing rolled back", .none)
+      else if o.zeroCommitProven then
+        ({ toPhase e .rollingBack o.nowMs "no prepared replica committed (proven) within the deadline" with committed := [] }, .send)
+      else if o.successorAlive then
+        -- unknown, but the successor (clean at H) answers with its binding:
+        -- it is safe in every case (addendum 4 §1)
+        (toPhase e .promoting o.nowMs "commits unknown at the deadline: the prepared successor is promoted", .send)
+      else
+        (halt e s!"commits unknown at the deadline and the successor {e.successor} does not answer with its binding: nothing is promoted, nothing rolled back", .none)
+    else (e, .sendTargeted)
+  | .rollingBack =>
+    match e.vBack with
+    | none => (e, .send)
+    | some vb => if allApplied o.entryVersions vb then (toPhase e .aborted o.nowMs "rolled back to the old master", .finish) else (e, .none)
   | .aborted =>
     -- a rollback map was due (V1 was sent, the old master still the same
     -- process): wait until every pod has it
@@ -322,9 +501,24 @@ def step (cfg : Config) (e : Entry) (o : Obs) : Entry × Action :=
 def recordSent (e : Entry) (version : Nat) : Entry :=
   match e.phase with
   | .demoting | .draining => if e.v1.isNone then { e with v1 := some version } else e
-  | .promoting => if e.v2.isNone then { e with v2 := some version } else e
+  | .promoting =>
+    if e.v2.isNone then { e with v2 := some version }
+    else if !e.hid.isEmpty && !e.fullSent then { e with fullSent := true }
+    else e
+  | .committingReplicas => if e.v2.isNone then { e with v2 := some version } else e
+  | .rollingBack => if e.vBack.isNone then { e with vBack := some version } else e
   | .aborted => if e.v1.isSome && e.vBack.isNone && !e.noRollback then { e with vBack := some version } else e
   | _ => e
+
+/-- Record the prepare (Main): the successor's S / E' / master_id and the
+    prepared replicas with their binding. No replica prepared = no
+    continuation: promote as before (the pending successor record is
+    dropped by Main). -/
+def afterPrepare (e : Entry) (now : Nat) (hid : String) (seq : Nat) (toEpoch masterId : String)
+    (prepared : List (String × String)) : Entry :=
+  let e := { e with hid, contSeq := some seq, toEpoch, contMasterId := masterId, prepared, committed := [] }
+  if prepared.isEmpty then { toPhase e .promoting now "no replica eligible to continue: they rebuild" with hid := "" }
+  else toPhase e .committingReplicas now
 
 /-- The map an entry's phase asks for, applied to `s`. Requested / aborted
     without V1 change nothing. -/
@@ -332,20 +526,28 @@ def apply (s : FlareClusterState) (e : Entry) : FlareClusterState :=
   match s.lookupNode e.oldMaster, s.lookupNode e.successor with
   | some old, some succ =>
     match e.phase with
-    | .demoting | .draining =>
+    | .demoting | .draining | .preparing =>
       -- the partition keeps the old master as its master/down placeholder:
       -- flared preserves the partition with no master, writes wait (W)
       s.addNode e.oldMaster { old with role := FlareRole.Master, state := FlareState.Down,
                                        partition := Int.ofNat e.partition }
-    | .promoting | .done =>
+    | .promoting | .done | .committingReplicas =>
       let s := s.addNode e.oldMaster { old with role := FlareRole.Proxy, state := FlareState.Active,
                                                 partition := -1, formerSlaveOf := -1 }
+      -- V3: the replaced successor is never Master again in this handover
+      let s := match (if e.fencedOut.isEmpty then none else s.lookupNode e.fencedOut) with
+        | some f => s.addNode e.fencedOut { f with role := FlareRole.Proxy, state := FlareState.Active,
+                                                   partition := -1, formerSlaveOf := -1 }
+        | none => s
       let s := s.addNode e.successor { succ with role := FlareRole.Master, state := FlareState.Active,
                                                  partition := Int.ofNat e.partition, balance := 100 }
       let slaves := match s.partitionMap.find? (fun (i, _) => i == e.partition) with
-        | some (_, p) => p.slaves.filter (· != e.successor)
+        | some (_, p) => p.slaves.filter (fun k => k != e.successor && k != e.fencedOut)
         | none => []
       s.setPartition e.partition { master := some e.successor, slaves := slaves }
+    | .rollingBack =>
+      s.addNode e.oldMaster { old with role := FlareRole.Master, state := FlareState.Active,
+                                       partition := Int.ofNat e.partition }
     | .aborted =>
       if e.v1.isSome && !e.noRollback then
         s.addNode e.oldMaster { old with role := FlareRole.Master, state := FlareState.Active,
@@ -358,6 +560,19 @@ def apply (s : FlareClusterState) (e : Entry) : FlareClusterState :=
     runs: the successor waits for the drain, then the handover promotes it. -/
 def blockedKeys (l : Ledger) : List String :=
   (l.entries.filter fun e => e.phase == .requested || e.phase.oldIsDown).map (·.successor)
+
+/-- Addendum 4 §2 / 5: while a continuation commits or a V2 is out, the
+    partition's copies are not promoted by the failover or the refill —
+    only the handover promotes (its successor, or a committed replica after
+    the successor's kubelet-confirmed stop). `slavesOf` = the partition's
+    slaves in the live map. -/
+def frozenKeys (l : Ledger) (slavesOf : Nat → List String) : List String :=
+  -- a replacement (fencedOut) is frozen before its V3 too: the failover
+  -- must not pick another copy meanwhile (42150306213 tried one)
+  (l.entries.filter fun e => e.phase == .committingReplicas
+      || (e.phase == .promoting && (e.v2.isSome || !e.fencedOut.isEmpty))).foldl
+    (fun acc e => acc ++ (e.successor :: (if e.fencedOut.isEmpty then [] else [e.fencedOut])) ++ slavesOf e.partition) []
+    |>.eraseDups
 
 /-- An aborted handover that rolled back (or never sent a map) and may be
     tried again for the same old master pod. -/
@@ -427,6 +642,16 @@ def Entry.toJson (e : Entry) : Json :=
       ("reason", Json.str e.reason)] : List (String × Json))
     ++ optNat "v1" e.v1 ++ optNat "v2" e.v2 ++ optNat "vBack" e.vBack
     ++ optNat "oldBoot" e.oldBoot ++ optNat "dropped0" e.dropped0 ++ optNat "failed0" e.failed0
+    ++ (if e.hid.isEmpty then [] else
+        [("hid", Json.str e.hid), ("toEpoch", Json.str e.toEpoch), ("contMasterId", Json.str e.contMasterId),
+         ("prepared", Json.arr (e.prepared.map fun (k, b) => Json.mkObj [("key", Json.str k), ("binding", Json.str b)]).toArray),
+         ("committed", Json.arr (e.committed.map Json.str).toArray),
+         ("fullSent", Json.bool e.fullSent)] ++ optNat "contSeq" e.contSeq)
+    ++ [("leaderEpoch", Json.num e.leaderEpoch)]
+    ++ (if e.successorStopped.isEmpty then [] else [("successorStopped", Json.str e.successorStopped)])
+    ++ (if e.fencedOut.isEmpty then [] else [("fencedOut", Json.str e.fencedOut)])
+    ++ (if e.fencedBy.isEmpty then [] else [("fencedBy", Json.str e.fencedBy)])
+    ++ (if e.successorArmed then [("successorArmed", Json.bool true)] else [])
 
 open Lean in
 def Entry.fromJson? (j : Json) : Option Entry := do
@@ -445,7 +670,26 @@ def Entry.fromJson? (j : Json) : Option Entry := do
          startedMs := (o "startedMs").getD 0, demotedMs := (o "demotedMs").getD 0,
          phaseMs := (o "phaseMs").getD 0,
          successorBinding := (j.getObjValAs? String "successorBinding").toOption.getD "",
-         reason := (j.getObjValAs? String "reason").toOption.getD "" }
+         reason := (j.getObjValAs? String "reason").toOption.getD "",
+         hid := (j.getObjValAs? String "hid").toOption.getD "",
+         contSeq := o "contSeq",
+         toEpoch := (j.getObjValAs? String "toEpoch").toOption.getD "",
+         contMasterId := (j.getObjValAs? String "contMasterId").toOption.getD "",
+         prepared := match j.getObjVal? "prepared" with
+           | .ok (Json.arr a) => a.toList.filterMap fun x =>
+               match (x.getObjValAs? String "key").toOption, (x.getObjValAs? String "binding").toOption with
+               | some k, some b => some (k, b)
+               | _, _ => none
+           | _ => [],
+         committed := match j.getObjVal? "committed" with
+           | .ok (Json.arr a) => a.toList.filterMap fun x => (x.getStr?).toOption
+           | _ => [],
+         leaderEpoch := (o "leaderEpoch").getD 0,
+         fullSent := (j.getObjValAs? Bool "fullSent").toOption.getD false,
+         successorStopped := (j.getObjValAs? String "successorStopped").toOption.getD "",
+         fencedOut := (j.getObjValAs? String "fencedOut").toOption.getD "",
+         fencedBy := (j.getObjValAs? String "fencedBy").toOption.getD "",
+         successorArmed := (j.getObjValAs? Bool "successorArmed").toOption.getD false }
 
 open Lean in
 def Ledger.toJson (l : Ledger) : Json :=

@@ -315,7 +315,8 @@ spec:
     that is not reached costs nothing. -/
 def operatorDeploymentYaml (cfg : ClusterConfig) : String :=
   let env := cfg.operatorEnv ++ (if cfg.nodeGuard then
-      [("FLARE_NODE_GUARD", "on"), ("FLARE_WEBHOOK_PORT", "9444"), ("FLARE_OPERATOR_SERVICE_ACCOUNT", "flare-operator")]
+      [("FLARE_NODE_GUARD", "on"), ("FLARE_WEBHOOK_PORT", "9444"), ("FLARE_OPERATOR_SERVICE_ACCOUNT", "flare-operator"),
+       ("FLARE_RECEIPT_KEY_SECRET", s!"{cfg.operatorName}-receipt-key")]
     else []) ++ (if cfg.nodeReplacement then
       [("FLARE_NODE_REPLACEMENT_MIN_COPIES", toString cfg.nodeReplacementMinCopies)]
     else [("FLARE_NODE_REPLACEMENT", "off")])
@@ -849,7 +850,77 @@ webhooks:
     ++ hook "statefulsets.node-guard.flare.gree.net" "/statefulsets"
       "      - apiGroups: [\"apps\"]\n        apiVersions: [\"v1\"]\n        operations: [\"UPDATE\", \"DELETE\"]\n        resources: [\"statefulsets\", \"statefulsets/scale\"]\n        scope: Namespaced"
       "")
-  IO.eprintln s!"# node guard webhook flare-node-guard-{ns} -> {svc}.{ns}.svc (TLS sidecar {cfg.tlsSidecarImage})"
+  -- the handover-fence receipt (as the chart): the mutating webhook on
+  -- FlareCluster UPDATE (failurePolicy Ignore), the receipt key Secret's
+  -- Role, and the (unbound) break-glass Role a suite binds to its approver
+  applyYaml s!"apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: flare-handover-fence-{ns}
+webhooks:
+  - name: handover-fence.node-guard.flare.gree.net
+    admissionReviewVersions: [\"v1\"]
+    sideEffects: None
+    failurePolicy: Ignore
+    reinvocationPolicy: Never
+    timeoutSeconds: 5
+    matchPolicy: Equivalent
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {ns}
+    rules:
+      - apiGroups: [\"flare.gree.net\"]
+        apiVersions: [\"*\"]
+        operations: [\"UPDATE\"]
+        resources: [\"flareclusters\"]
+        scope: Namespaced
+    clientConfig:
+      caBundle: {ca}
+      service:
+        name: {svc}
+        namespace: {ns}
+        path: /flareclusters
+        port: 443
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {cfg.operatorName}-receipt-key
+  namespace: {ns}
+rules:
+  - apiGroups: [\"\"]
+    resources: [\"secrets\"]
+    verbs: [\"create\"]
+  - apiGroups: [\"\"]
+    resources: [\"secrets\"]
+    resourceNames: [\"{cfg.operatorName}-receipt-key\"]
+    verbs: [\"get\"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {cfg.operatorName}-receipt-key
+  namespace: {ns}
+subjects:
+  - kind: ServiceAccount
+    name: flare-operator
+    namespace: {ns}
+roleRef:
+  kind: Role
+  name: {cfg.operatorName}-receipt-key
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {cfg.operatorName}-handover-fence
+  namespace: {ns}
+rules:
+  - apiGroups: [\"flare.gree.net\"]
+    resources: [\"flareclusters/handover-fence\"]
+    verbs: [\"break-glass\"]
+"
+  IO.eprintln s!"# node guard webhook flare-node-guard-{ns} -> {svc}.{ns}.svc (TLS sidecar {cfg.tlsSidecarImage}); handover-fence receipt flare-handover-fence-{ns}"
 
 /-- Deploy a full cluster: namespace → CRD/RBAC → FlareCluster CR → partition services →
     debug pod → empty ConfigMap → operator → StatefulSet -/
@@ -1177,6 +1248,7 @@ def cleanupCluster (cfg : ClusterConfig) : IO Unit := do
   let ns := cfg.«namespace»
   if cfg.nodeGuard then
     discard <| kubectl ["delete", "validatingwebhookconfiguration", s!"flare-node-guard-{ns}", "--ignore-not-found"]
+    discard <| kubectl ["delete", "mutatingwebhookconfiguration", s!"flare-handover-fence-{ns}", "--ignore-not-found"]
   kubectlDelete "flarecluster" cfg.name ns
   kubectlDelete "statefulset" s!"{cfg.name}-nodes" ns
   kubectlDelete "deployment" cfg.operatorName ns

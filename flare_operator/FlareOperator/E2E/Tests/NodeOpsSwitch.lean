@@ -618,6 +618,14 @@ private def switchRun (c : Ctx) (op : SwitchOp) : IO (Except String SwitchObs) :
       if let some n := drained then uncordon n
     let (ips1, red) ← observe c 600 (redundant c (if offAtDrain.isSome then none else drained))
     c.event s!"redundancy restored={red}"
+    -- more than two copies: redundancy comes back with a remaining replica
+    -- before the recreated pod has rebuilt; wait for it to be Ready too
+    -- (42159308670 / 42159654121 sampled it Pending: 'no pod moved')
+    if c.cfg.replicas > 2 then
+      let allReady ← waitForCondition s!"all {c.cfg.replicas} flared pods Ready (the recreated one rebuilt)" 300 do
+        let ps := (← c.pods).getD []
+        return ps.length == c.cfg.replicas && ps.all fun (r : PodRow) => r.ready && !r.deleting
+      c.event s!"all pods Ready={allReady}"
     -- did pods move
     let after := (← c.pods).getD []
     -- replaced = a new incarnation (another UID) that is Ready; a Pending or

@@ -820,9 +820,11 @@ roleRef: \{kind: Role, name: flare-operator-handover-fence, apiGroup: rbac.autho
           let refused := match r1 with | .error e => containsSubstr e "break-glass" | .ok _ => false
           -- 2. the approver, another hid: receipted, not used
           let r2 ← anno "approver" (value "E2E-2" "p0-a9-1")
-          IO.sleep 5000
+          -- the halted handover reads the annotation on its next tick; ticks
+          -- are not paced for this (42166322388 logged it after a fixed 5 s)
+          let notUsed ← waitForCondition "the value for another hid is reported as not used" 30 do
+            return containsSubstr (← rcOpLog cfg t0) "is not used: the value names handover p0-a9-1"
           let log2 ← rcOpLog cfg t0
-          let notUsed := containsSubstr log2 "is not used: the value names handover p0-a9-1"
           let replacedEarly := containsSubstr log2 "replaces it"
           let rcptOf := fun (_ : Unit) => do
             match ← kubectlGetJsonpath "flarecluster" cr ns "{.metadata.annotations.flare\\.gree\\.net/handover-fenced-receipt}" with

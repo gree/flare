@@ -52,16 +52,32 @@ def canAdvance (stored next : Phase) : Bool :=
   | .rollingBack => next == .aborted
   | .done | .aborted => false
 
-/-- May `x` (written by the leader of `epoch`) replace what is stored? Another
-    handover (other attempt or old pod) is not compared. A newer leader's
-    entry (higher epoch) or a stored phase ahead of `x` refuses. -/
+/-- A stored entry may be followed by ANOTHER handover of its partition
+    (another attempt, or another old master pod) only once it is over:
+    done, or aborted. The next one is then another old master pod, or the
+    next attempt (attempt + 1) of the same pod after an abort. Anything else
+    — a lower or skipped attempt, or a stored handover still running — is a
+    stale writer (review of 0cf92ba: an older leader's delayed CAS read the
+    new attempt and overwrote the whole ledger with the old one). -/
+def startsAfter (s x : Entry) : Bool :=
+  (s.phase == .done || s.phase == .aborted)
+    && (if s.oldUid != x.oldUid then true
+        else s.phase == .aborted && x.attempt == s.attempt + 1)
+
+/-- May `x` (written by the leader of `epoch`) replace what is stored? A
+    stored entry written by a newer leader refuses, whichever handover it
+    is. The same handover (old pod and attempt) may only move its phase
+    forward; another one only start after the stored one is over
+    (`startsAfter`). Nothing stored for the partition: allowed. -/
 def casAllowed (stored : Ledger) (x : Entry) (epoch : Nat) : Except String Unit :=
   match Handover.find? stored x.partition with
   | none => .ok ()
   | some s =>
-    if s.oldUid != x.oldUid || s.attempt != x.attempt then .ok ()
-    else if s.leaderEpoch > epoch then
+    if s.leaderEpoch > epoch then
       .error s!"the stored entry was written by a newer leader (epoch {s.leaderEpoch} > {epoch})"
+    else if s.oldUid != x.oldUid || s.attempt != x.attempt then
+      if startsAfter s x then .ok ()
+      else .error s!"the stored entry is another handover (old pod {s.oldUid}, attempt {s.attempt}, {s.phase}) that {x.oldUid}/attempt {x.attempt} may not follow"
     else if !canAdvance s.phase x.phase then
       .error s!"the stored phase {s.phase} is ahead of {x.phase}"
     else .ok ()

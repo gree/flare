@@ -310,8 +310,32 @@ def results : List (String × Bool) := Id.run do
               !ok? { ent with phase := .committingReplicas } 3 && ok? { ent with phase := .committingReplicas } 4
                 && ok? { ent with phase := .promoting } 5 && !ok? { ent with phase := .preparing } 5
                 && !ok? { ent with phase := .rollingBack, hid := "x" } 3 && ok? { ent with phase := .rollingBack } 4
-                && ok? { ent with phase := .preparing, attempt := 2 } 4
                 && (match HandoverDrive.casAllowed {} ent 1 with | .ok _ => true | .error _ => false))]
+  -- review of 0cf92ba (P1): a stale leader's delayed CAS of an older attempt
+  -- must not overwrite a newer attempt; a new attempt starts only after the
+  -- stored one is over
+  let okIn := fun (l : Ledger) (x : Entry) (ep : Nat) => match HandoverDrive.casAllowed l x ep with | .ok _ => true | .error _ => false
+  let newer : Ledger := { entries := [{ ent with phase := .preparing, attempt := 2, leaderEpoch := 5 }] }
+  let newerJson := newer.toJson.compress
+  r := r ++ [("drive: an older leader's entry of attempt 1 is refused over a stored attempt 2 of a newer leader (any phase); the stored ledger is unchanged",
+              !okIn newer { ent with phase := .committingReplicas, attempt := 1 } 4
+                && !okIn newer { ent with phase := .rollingBack, attempt := 1 } 4
+                && !okIn newer { ent with phase := .promoting, attempt := 1, oldUid := "other" } 4
+                && !okIn newer { ent with phase := .committingReplicas, attempt := 1 } 5
+                && newer.toJson.compress == newerJson)]
+  let running : Ledger := { entries := [{ ent with phase := .committingReplicas, attempt := 1, leaderEpoch := 4 }] }
+  let abortedL : Ledger := { entries := [{ ent with phase := .aborted, attempt := 1, leaderEpoch := 4 }] }
+  let doneL : Ledger := { entries := [{ ent with phase := .done, attempt := 1, leaderEpoch := 4 }] }
+  r := r ++ [("drive: a new attempt starts only after the stored one is over — attempt + 1 of the same pod after an abort, or another old pod after done/aborted; never over a running one, a skipped or a lower attempt",
+              okIn abortedL { ent with phase := .requested, attempt := 2 } 4
+                && okIn abortedL { ent with phase := .requested, attempt := 1, oldUid := "new-pod" } 4
+                && okIn doneL { ent with phase := .requested, attempt := 1, oldUid := "new-pod" } 4
+                && !okIn doneL { ent with phase := .requested, attempt := 2 } 4
+                && !okIn running { ent with phase := .requested, attempt := 2 } 4
+                && !okIn running { ent with phase := .requested, oldUid := "new-pod" } 4
+                && !okIn abortedL { ent with phase := .requested, attempt := 3 } 4
+                && !okIn { entries := [{ ent with phase := .aborted, attempt := 2, leaderEpoch := 4 }] } { ent with phase := .requested, attempt := 1 } 4
+                && !okIn abortedL { ent with phase := .requested, attempt := 2 } 3)]
   let good := [("r1:12121", rd "u2|b2|c2" "-" "9:e" 9), ("r2:12121", rd "u3|b3|c3" "-" "9:e" 8)]
   r := r ++ [("drive: committed needs the same binding, no pending, epoch = toEpoch, master_id and version ≥ V2",
               HandoverDrive.committedKeys ent good == ["r1:12121"]

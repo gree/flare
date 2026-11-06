@@ -593,6 +593,22 @@ def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterState)
           handoverHeldLogRef.modify fun l => (e.partition, m) :: l.filter (·.1 != e.partition)
       | none =>
         if prevHeld.isSome then handoverHeldLogRef.modify (·.filter (·.1 != e.partition))
+      -- addendum 5: a silent successor of an open continuation is stopped
+      -- only if its kubelet confirmed it (recorded by the node guard in
+      -- status.handoverStops for this very pod UID); copied into the entry
+      let e ← if contOn && e.successorStopped.isEmpty && !obs.successorAlive
+            && (e.phase == .committingReplicas || (e.phase == .promoting && e.v2.isSome)) then do
+          let uid := Handover.bindingUid e.successorBinding
+          match ← Bridge.readHandoverStops crName ns with
+          | .ok (_, stops) =>
+            if !uid.isEmpty && stops.contains (e.successor, uid) then
+              IO.eprintln s!"[flare-operator] HANDOVER p{e.partition}: the kubelet confirmed the stop of the successor {e.successor} (uid {uid})"
+              pure { e with successorStopped := uid }
+            else pure e
+          | .error err =>
+            IO.eprintln s!"[flare-operator] HANDOVER p{e.partition}: the recorded stops could not be read ({err}); the successor's stop stays unconfirmed"
+            pure e
+        else pure e
       let (e1, act) := Handover.step cfg e obs
       if e.phase == .requested && e1.phase == .demoting then
         let demoteBoot := (PromotionEvidence.bindingOf none succOut).bootId.getD "?"

@@ -772,6 +772,51 @@ def casNodeMoves (crName ns : String) (old : Option Lean.Json) (new : NodeMove.L
   else if out.exitCode == 124 then return .error s!"node moves CAS timed out after {timeoutSec}s (outcome unknown; re-read)"
   else return .error s!"node moves CAS refused: {out.stderr.trim}"
 
+/-- The kubelet-confirmed stops of flared pods the node guard recorded
+    (design addendum 5 §1): `status.handoverStops` = [{key, uid, at}], the
+    newest last. A field of its own: the handover loop rewrites
+    `status.handovers` from its own copy and would drop a field the webhook
+    wrote there. `none` = absent. -/
+def readHandoverStops (crName ns : String) : IO (Except String (Option Lean.Json × List (String × String))) := do
+  match ← kubectl ["get", "flarecluster", crName, "-n", ns, "-o", "json"] with
+  | .error e => return .error e
+  | .ok out =>
+    match Lean.Json.parse out with
+    | .error e => return .error s!"the FlareCluster did not parse: {e}"
+    | .ok j =>
+      match (j.getObjVal? "status" >>= (·.getObjVal? "handoverStops")).toOption with
+      | none => return .ok (none, [])
+      | some raw@(Lean.Json.arr a) =>
+        return .ok (some raw, a.toList.filterMap fun x =>
+          match (x.getObjValAs? String "key").toOption, (x.getObjValAs? String "uid").toOption with
+          | some k, some u => some (k, u)
+          | _, _ => none)
+      | some _ => return .error "status.handoverStops is not a list"
+
+/-- Append one kubelet-confirmed stop (CAS on the list read: a concurrent
+    append makes this one fail and the caller holds the delete, so the
+    kubelet retries). The newest 16 are kept. Bounded by `timeoutSec`. -/
+def addHandoverStop (crName ns key uid at_ : String) (timeoutSec : Nat := 4) : IO (Except String Unit) := do
+  match ← readHandoverStops crName ns with
+  | .error e => return .error e
+  | .ok (raw, cur) =>
+    if cur.contains (key, uid) then return .ok ()
+    let olds : List Lean.Json := match raw with
+      | some (Lean.Json.arr a) => a.toList
+      | _ => []
+    let entry := Lean.Json.mkObj [("key", Lean.Json.str key), ("uid", Lean.Json.str uid), ("at", Lean.Json.str at_)]
+    let new := (olds ++ [entry]).drop ((olds.length + 1) - 16)
+    let ops : List Lean.Json :=
+      (match raw with
+       | some o => [Lean.Json.mkObj [("op", "test"), ("path", "/status/handoverStops"), ("value", o)]]
+       | none => []) ++
+      [Lean.Json.mkObj [("op", "add"), ("path", "/status/handoverStops"), ("value", Lean.Json.arr new.toArray)]]
+    let args := ["patch", "flarecluster", crName, "-n", ns, "--subresource=status", "--type=json", "-p", (Lean.Json.arr ops.toArray).compress]
+    let out ← IO.Process.output { cmd := "timeout", args := #["-k", "1", toString timeoutSec, "kubectl"] ++ args.toArray }
+    if out.exitCode == 0 then return .ok ()
+    else if out.exitCode == 124 then return .error s!"the stop record timed out after {timeoutSec}s (outcome unknown)"
+    else return .error s!"the stop record was refused: {out.stderr.trim}"
+
 /-- Put the serving label on / take it off a pod, only if it is still the
     pod with `uid`. Adding refuses a terminating pod: such a pod never gets
     the label back. -/

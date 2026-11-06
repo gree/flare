@@ -202,13 +202,25 @@ def broadcastTopologyToPods (crName ns : String) (version : Nat) (nodes : List F
     | .error e =>
       IO.eprintln s!"[TopologyBroadcast] Pod list unavailable; targeted delivery unconfirmed: {e}"
       return false
-  let targets := pods.filter fun p => keys.contains p.toNodeKey
-  let missing := keys.filter fun k => !targets.any (·.toNodeKey == k)
+  -- TEST SEAM (as in broadcastTopologyToAllPods; unset in production): pods
+  -- named in FLARE_TEST_BROADCAST_SKIP_FILE are not sent this map either
+  -- (history-continuation recovery E2E: V2 reaches only some prepared
+  -- replicas). The skip leaves the delivery unconfirmed.
+  let skip ← match ← IO.getEnv "FLARE_TEST_BROADCAST_SKIP_FILE" with
+    | some f =>
+      try pure (((← IO.FS.readFile f).splitOn "\n").map String.trim |>.filter (· != ""))
+      catch _ => pure []
+    | none => pure []
+  let skipped := pods.filter fun p => keys.contains p.toNodeKey && skip.contains p.name
+  if !skipped.isEmpty then
+    IO.eprintln s!"[TopologyBroadcast] TEST SEAM: not sending the targeted v{version} to {skipped.map (·.name)}"
+  let targets := pods.filter fun p => keys.contains p.toNodeKey && !skip.contains p.name
+  let missing := keys.filter fun k => !targets.any (·.toNodeKey == k) && !skipped.any (·.toNodeKey == k)
   IO.eprintln s!"[TopologyBroadcast] Targeted node sync v{version} to {targets.map (·.name)}{if missing.isEmpty then "" else s!" (no pod for {missing})"}"
   let tasks ← targets.mapM fun pod =>
     IO.asTask (prio := .dedicated) (sendNodeSyncToNode pod.ip 12121 version nodes)
   let deadline := (← IO.monoMsNow) + 15000
-  let mut confirmed := missing.isEmpty
+  let mut confirmed := missing.isEmpty && skipped.isEmpty
   for t in tasks do
     let mut finished := false
     for _ in [0:300] do

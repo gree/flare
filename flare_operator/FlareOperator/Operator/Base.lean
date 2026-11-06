@@ -495,4 +495,9 @@ initialize historyStoreRef : IO.Ref (Option AuthoritativeHistory.Store) ← IO.m
     candidate's binding must match). -/
 initialize desiredPartitionsRef : IO.Ref Nat ← IO.mkRef 0
 
+/-- The wall clock as an ISO-8601 UTC string. -/
+def utcNowIso : IO String := do
+  let out ← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%SZ"] }
+  return out.stdout.trim
+
 end FlareOperator

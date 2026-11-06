@@ -564,6 +564,27 @@ private def nodeGuardAnswer (crName ns leaseName identity : String) (stateRef : 
       | some sa => if sa.isEmpty then "" else s!"system:serviceaccount:{ns}:{sa}"
       | none => ""
     let st ← stateRef.get
+    -- addendum 5 §1: the kubelet's own DELETE confirms it STOPPED a pod that
+    -- an open continuation handover could still promote (its successor,
+    -- same pod UID): recorded before the delete is allowed, in a status
+    -- field of its own (the handover loop rewrites status.handovers). Not
+    -- recorded = held (429): the kubelet retries. An unloaded ledger records
+    -- every such confirm (a true fact; fail toward the record).
+    let stopHold ← if r.«namespace» == ns && r.resource == "pods" && r.operation == "DELETE" && !r.dryRun
+        && NodeGuard.isClusterPod crName r.podSubdomain && !r.podUid.isEmpty
+        && NodeGuard.kubeletConfirms r.username r.podNodeName r.podTerminating then do
+        let key := if r.podHostname.isEmpty || r.podSubdomain.isEmpty then ""
+          else FlareClusterState.toNodeKey s!"{r.podHostname}.{r.podSubdomain}.{ns}.svc.cluster.local" 12121
+        let relevant := !(← handoverLoadedRef.get) || (← handoverRef.get).entries.any fun e =>
+          (e.phase == .committingReplicas || (e.phase == .promoting && e.v2.isSome))
+            && e.successor == key && Handover.bindingUid e.successorBinding == r.podUid
+        if !relevant || key.isEmpty then pure none
+        else match ← Bridge.addHandoverStop crName ns key r.podUid (← utcNowIso) with
+          | .ok _ =>
+            IO.eprintln s!"[flare-operator] NODE GUARD: the kubelet of {r.podNodeName} confirmed the stop of {key} (uid {r.podUid}); recorded for its handover"
+            pure none
+          | .error e => pure (some s!"flare: the kubelet's stop of {r.name} could not be recorded for its handover ({e}); retry")
+      else pure none
     let verdict ← if r.«namespace» != ns then
         pure (NodeGuard.Verdict.allow "not this cluster's namespace")
       -- the webhook sees every pod delete of the namespace (no label
@@ -649,6 +670,9 @@ private def nodeGuardAnswer (crName ns leaseName identity : String) (stateRef : 
               FlareClusterState.toNodeKey s!"{crName}-nodes-{i}.{crName}-nodes.{ns}.svc.cluster.local" 12121)
           | _ => pure (NodeGuard.Verdict.allow "replicas not changed")
       | _, _ => pure (NodeGuard.Verdict.allow "not gated")
+    let verdict := match stopHold with
+      | some why => NodeGuard.Verdict.hold why
+      | none => verdict
     match verdict with
     | .hold why =>
       IO.eprintln s!"[flare-operator] NODE GUARD: HELD {r.operation} {r.resource} {r.name}{if r.podUid.isEmpty then "" else s!" (uid {r.podUid})"} by {r.username}{if r.dryRun then " (dry run)" else ""}: {why}"
@@ -872,10 +896,6 @@ initialize historyCrRef : IO.Ref String ← IO.mkRef ""
 initialize historyLeaseRef : IO.Ref (String × String) ← IO.mkRef ("", "")
 
 private def historyCm (crName : String) : String := s!"{crName}-history"
-
-private def utcNowIso : IO String := do
-  let out ← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%SZ"] }
-  return out.stdout.trim
 
 /-- (persisted text: some (some t) present / some none absent / none unreadable, resourceVersion) -/
 private def readHistory (crName ns : String) : IO (Option (Option String) × String) := do

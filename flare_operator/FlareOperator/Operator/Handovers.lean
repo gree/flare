@@ -324,6 +324,14 @@ def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterState)
     (route : IO Unit) (renew : IO Bool) (publishTo : String → List String → IO Bool)
     (leaseName identity : String) : IO (List String) := do
   let contOn ← historyContinuationOn
+  -- addendum 4 §2 / 5: while a continuation commits or its V2 is out, only
+  -- the handover promotes in that partition (continuation on only)
+  let frozen := fun (l : Handover.Ledger) => do
+    if !contOn then return ([] : List String)
+    let st ← stateRef.get
+    return Handover.frozenKeys l fun p => match st.partitionMap.find? (fun (i, _) => i == p) with
+      | some (_, part) => part.slaves
+      | none => []
   -- set below from this pass's pod read; an early return leaves `none` (no
   -- observation: the FSM's drain then leaves every Terminating master)
   handoverSeenAliveRef.set none
@@ -355,7 +363,7 @@ def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterState)
     | .ok ps => pure ps
     | .error e =>
       IO.eprintln s!"[flare-operator] handover: pods unreadable ({e}); handovers held this pass"
-      return Handover.blockedKeys led0 ++ Handover.drainHeldKeys led0
+      return Handover.blockedKeys led0 ++ Handover.drainHeldKeys led0 ++ (← frozen led0)
   let cfg : Handover.Config := { continuation := contOn }
   let now ← IO.monoMsNow
   let state0 ← stateRef.get
@@ -551,7 +559,10 @@ def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterState)
         successorR3 := succR3,
         successorBinding := succBinding,
         committedKeys := HandoverDrive.committedKeys e contReads,
-        zeroCommitProven := HandoverDrive.zeroProven e contReads }
+        zeroCommitProven := HandoverDrive.zeroProven e contReads,
+        -- a complete reply with the binding the demote recorded (addendum 4)
+        successorAlive := !e.successorBinding.isEmpty && succBinding == some e.successorBinding
+          && (succOut.map statsReplyComplete).getD false }
       -- still requested and this successor is not accepted now: another
       -- Active slave the precheck accepts takes its place (nothing was sent)
       if e.phase == .requested && (!succEligible || !succR3 || succBinding.isNone) then
@@ -588,6 +599,12 @@ def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterState)
         -- the reading the drain then proves current (SAF-08: the successor's
         -- own process; the commit accepts the handover exception only for it)
         IO.eprintln s!"[flare-operator] PROMOTION EVIDENCE (handover demote, the successor's own R3 reading): {e.successor}={succCls.label} [boot {demoteBoot}] binding {e1.successorBinding}"
+      -- a halted handover (addendum 4 §1 / 5 §2): CRITICAL and an Event once
+      -- per reason; it resumes by the same rules once the successor answers
+      -- or its kubelet confirms the stop
+      if e1.reason.startsWith "HALTED" && e1.reason != e.reason then
+        IO.eprintln s!"[flare-operator] CRITICAL: HANDOVER p{e.partition} {e.oldMaster} -> {e.successor} ({e1.phase}): {e1.reason}"
+        Bridge.emitEvent crName ns "FlareHandoverSuccessorUnfenced" s!"p{e.partition} {e1.phase}: {e1.reason}" true
       if e1.phase != e.phase then
         IO.eprintln s!"[flare-operator] HANDOVER p{e.partition} {e.oldMaster} -> {e.successor}: {e.phase} -> {e1.phase} after {now - e.phaseMs} ms (since start {now - e.startedMs} ms){if e1.reason.isEmpty || e1.reason == e.reason then "" else s!" — {e1.reason}"}"
         if e1.phase == .aborted then
@@ -858,7 +875,7 @@ def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterState)
     if !transit || now >= bound then break
   handoverRef.set out
   handoverActiveRef.set (out.entries.any fun e => e.phase != .aborted)
-  return Handover.blockedKeys out ++ Handover.drainHeldKeys out
+  return Handover.blockedKeys out ++ Handover.drainHeldKeys out ++ (← frozen out)
 
 initialize rollingStablePassesRef : IO.Ref Nat ← IO.mkRef 0
 initialize rollingLastRef : IO.Ref String ← IO.mkRef ""

@@ -34,6 +34,81 @@ private def okObs (now : Nat) : Obs :=
 private def roleOf (s : FlareClusterState) (k : String) : Option (FlareRole × FlareState) :=
   (s.lookupNode k).map fun n => (n.role, n.state)
 
+/-- A3b (addendum 2 §3, 4, 5): recovery from a partial commit, a stopped
+    successor and an unknown outcome. -/
+private def recoveryResults : List (String × Bool) := Id.run do
+  let ccfg : Config := { continuation := true }
+  let mut r : List (String × Bool) := []
+  -- partition 0: m master, s successor, r1 / r2 prepared replicas
+  let trio : FlareClusterState :=
+    { nodeMap := [("m:12121", node "m" .Master .Active 0), ("s:12121", node "s" .Slave .Active 0),
+                  ("r1:12121", node "r1" .Slave .Active 0), ("r2:12121", node "r2" .Slave .Active 0)],
+      partitionMap := [(0, { master := some "m:12121", slaves := ["s:12121", "r1:12121", "r2:12121"] })] }
+  let sent : Entry :=
+    { fresh with phase := .committingReplicas, demotedMs := 1100, phaseMs := 1300, v1 := some 5, v2 := some 9,
+                 successorBinding := "u1|b1|c1", drainProven := true, hid := "p0-a1-1100", contSeq := some 500,
+                 toEpoch := "9:e", contMasterId := "M",
+                 prepared := [("r1:12121", "u2|b2|c2"), ("r2:12121", "u3|b3|c3")], committed := ["r2:12121"] }
+  let late := 1100 + 10000
+  -- the successor answers: promoting
+  let (a, aa) := step ccfg sent { okObs late with successorAlive := true }
+  -- no answer, its stop not confirmed: halted (nothing promoted, nothing rolled back)
+  let (h, ha) := step ccfg sent (okObs late)
+  -- a stop recorded for ANOTHER pod UID is not this successor's
+  let (hx, _) := step ccfg { sent with successorStopped := "u9" } (okObs late)
+  r := r ++ [("recovery: one commit at the deadline — the successor answering with its binding is promoted; silent and its stop unconfirmed (or confirmed for another pod UID) = HALTED in committingReplicas, no map",
+              a.phase == .promoting && aa == .send
+                && h.phase == .committingReplicas && ha == .none && h.reason.startsWith "HALTED" && h.v2 == some 9
+                && hx.phase == .committingReplicas && hx.reason.startsWith "HALTED")]
+  -- the kubelet confirmed the successor's stop: the first COMMITTED replica
+  -- in prepared order (r2, not r1) replaces it; the old successor is fenced
+  let (rp, rpa) := step ccfg { sent with successorStopped := "u1" } (okObs late)
+  let m3 := apply trio rp
+  r := r ++ [("recovery: the successor's kubelet-confirmed stop -> the first committed replica replaces it (not an uncommitted one), V3 is a fresh promotion (no hid, no V2), the old successor is a proxy",
+              rpa == .send && rp.phase == .promoting && rp.successor == "r2:12121" && rp.successorBinding == "u3|b3|c3"
+                && rp.fencedOut == "s:12121" && rp.hid.isEmpty && rp.v2.isNone && rp.prepared.isEmpty && rp.committed.isEmpty
+                && roleOf m3 "r2:12121" == some (.Master, .Active) && roleOf m3 "s:12121" == some (.Proxy, .Active)
+                && roleOf m3 "m:12121" == some (.Proxy, .Active)
+                && (m3.partitionMap.find? (·.1 == 0)).map (fun (_, p) => (p.master, p.slaves)) == some (some "r2:12121", ["r1:12121"]))]
+  -- unknown commits at the deadline: the live successor is promoted; silent = HALTED
+  let unk := { sent with committed := [] }
+  r := r ++ [("recovery: commits unknown at the deadline — the successor answering is promoted; silent = HALTED (no rollback, no other promotion); proven none still rolls back",
+              (step ccfg unk { okObs late with successorAlive := true }).1.phase == .promoting
+                && (step ccfg unk (okObs late)).1.reason.startsWith "HALTED" && (step ccfg unk (okObs late)).1.phase == .committingReplicas
+                && (step ccfg unk { okObs late with zeroCommitProven := true }).1.phase == .rollingBack
+                && (step ccfg { unk with successorStopped := "u1" } (okObs late)).1.reason.startsWith "HALTED")]
+  -- promoting after V2 went to the successor (addendum 4 §2)
+  let prom : Entry := { sent with phase := .promoting, phaseMs := 2000, fullSent := true }
+  let pl := 2000 + 10000
+  let (pw, pwa) := step ccfg prom (okObs 3000)
+  let (ph, pha) := step ccfg prom (okObs pl)
+  let (pr, pra) := step ccfg { prom with successorStopped := "u1" } (okObs pl)
+  let (pn, pna) := step ccfg { prom with successorStopped := "u1", committed := [] } (okObs pl)
+  let (poff, poffa) := step {} prom (okObs pl)
+  r := r ++ [("recovery: promoting after V2 — waits within Th; silent past Th = HALTED; its kubelet-confirmed stop -> a committed replica replaces it, none committed -> aborted (no rollback: the failover rules); continuation off = as before (waits)",
+              pw == prom && pwa == .none
+                && ph.phase == .promoting && pha == .none && ph.reason.startsWith "HALTED"
+                && pr.phase == .promoting && pra == .send && pr.successor == "r2:12121" && pr.fencedOut == "s:12121"
+                && pn.phase == .aborted && pna == .finish && pn.noRollback
+                && poff == prom && poffa == .none)]
+  -- the applied promotion still finishes, alive or not
+  let doneObs : Obs := { okObs pl with entryVersions := [("s:12121", some 9), ("m:12121", some 9)], successorOwnRole := some "master" }
+  r := r ++ [("recovery: a successor that applied V2 (all pods at V2, own_role master) finishes the handover even past Th",
+              (step ccfg prom doneObs).1.phase == .done)]
+  -- the frozen keys: every copy of the partition while committing or V2 is out
+  let slavesOf := fun (p : Nat) => if p == 0 then ["s:12121", "r1:12121", "r2:12121"] else []
+  r := r ++ [("recovery: while committingReplicas or promoting with V2 out, the partition's copies (and a fenced successor) are not promoted by the failover/refill; not before V2, not after",
+              frozenKeys { entries := [sent] } slavesOf == ["s:12121", "r1:12121", "r2:12121"]
+                && frozenKeys { entries := [rp] } slavesOf == []
+                && frozenKeys { entries := [{ rp with v2 := some 11 }] } slavesOf == ["r2:12121", "s:12121", "r1:12121"]
+                && frozenKeys { entries := [{ sent with phase := .done }] } slavesOf == []
+                && frozenKeys { entries := [{ sent with phase := .draining }] } slavesOf == [])]
+  let rt := Ledger.fromJson? ({ entries := [{ rp with successorStopped := "u1" }] } : Ledger).toJson
+  r := r ++ [("recovery: successorStopped and fencedOut survive the status JSON",
+              rt.map (fun l => l.entries.map fun x => (x.successorStopped, x.fencedOut, x.successor)) == some [("u1", "s:12121", "r2:12121")]
+                && bindingUid "u1|b1|c1" == "u1")]
+  return r
+
 -- the checks are one long `do` (each `r := r ++ …` nests the rest): past
 -- ~70 of them the default recursion depth is exceeded
 set_option maxRecDepth 4096 in
@@ -269,10 +344,10 @@ def results : List (String × Bool) := Id.run do
               pa1 == .send && p1s.fullSent && p1s.v2 == some 9 && (step ccfg p1s (okObs 1800)).2 == .none)]
   -- the deadline in committingReplicas (handoverMs 10000 from demotedMs 1100)
   let late := 1100 + 10000
-  let (x1, _) := step ccfg sent { okObs late with committedKeys := ["r1:12121"] }
+  let (x1, _) := step ccfg sent { okObs late with committedKeys := ["r1:12121"], successorAlive := true }
   let (x2, _) := step ccfg sent { okObs late with zeroCommitProven := true }
-  let (x3, _) := step ccfg sent (okObs late)
-  r := r ++ [("continuation: at the deadline one commit -> promoting (never back), proven none -> rollingBack, unknown -> promoting the prepared successor (no rollback)",
+  let (x3, _) := step ccfg sent { okObs late with successorAlive := true }
+  r := r ++ [("continuation: at the deadline one commit -> promoting (never back), proven none -> rollingBack, unknown -> promoting the prepared successor (no rollback) — the successor answering with its binding",
               x1.phase == .promoting && x2.phase == .rollingBack && x3.phase == .promoting)]
   let rb := recordSent x2 11
   let rbApplied : Obs := { okObs (late + 100) with entryVersions := [("m:12121", some 11), ("s:12121", some 11)] }
@@ -402,6 +477,7 @@ def results : List (String × Bool) := Id.run do
                 && HandoverDrive.publishGate false [] none == .skip
                 && HandoverDrive.publishGate false [] (some ks) == .skip
                 && HandoverDrive.holdsV2 held && !HandoverDrive.holdsV2 prom && !HandoverDrive.holdsV2 { held with phase := .done })]
+  r := r ++ recoveryResults
   return r
 
 end FlareOperator.UnitTestsHandover

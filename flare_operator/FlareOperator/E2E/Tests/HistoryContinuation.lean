@@ -830,10 +830,17 @@ roleRef: \{kind: Role, name: flare-operator-handover-fence, apiGroup: rbac.autho
           -- 2b. an authorized requester rewrites only the receipt: the webhook
           -- puts the stored one back
           let rcpt0 ← rcptOf ()
-          discard <| kubectl ["annotate", "flarecluster", cr, "-n", ns, "--overwrite", "--as", "approver",
+          let tLog0 ← rcOpLog cfg t0
+          let rw ← kubectl ["annotate", "flarecluster", cr, "-n", ns, "--overwrite", "--as", "approver",
             s!"flare.gree.net/handover-fenced-receipt=E2E-2/p0-a9-1/r/approver/u/{String.mk (List.replicate 64 'a')}"]
           let rcpt1 ← rcptOf ()
-          let restored := !rcpt0.isEmpty && rcpt1 == rcpt0
+          IO.sleep 2000
+          -- the UPDATE was admitted (not refused) AND the webhook said it
+          -- replaced the requester's receipt (review of e4b53c4: a refused
+          -- update would also leave the stored receipt)
+          let replacedLogged : Bool := (((← rcOpLog cfg t0).splitOn "a receipt written by approver was replaced with the stored one").length) >
+            ((tLog0.splitOn "a receipt written by approver was replaced with the stored one").length)
+          let restored := rw.isOk && replacedLogged && !rcpt0.isEmpty && rcpt1 == rcpt0
           -- 2c. the webhook removed: a value for THIS hid with a forged
           -- receipt goes in unchecked — the operator must not use it
           let mwc := s!"flare-handover-fence-{ns}"
@@ -889,7 +896,7 @@ roleRef: \{kind: Role, name: flare-operator-handover-fence, apiGroup: rbac.autho
           if !refused then return .fail s!"the updater (no break-glass permission) was not refused by the webhook: {r1}"
           if replacedEarly then return .fail "the successor was replaced before the right value"
           if !notUsed then return .fail "a value for another hid was not reported as not used"
-          if !restored then return .fail s!"a receipt rewritten by the requester was not put back by the webhook ({rcpt0.take 60} -> {rcpt1.take 60})"
+          if !restored then return .fail s!"a receipt rewritten by the requester was not put back by the webhook (update admitted={rw.isOk}, webhook log={replacedLogged}, {rcpt0.take 60} -> {rcpt1.take 60})"
           if forgedUsed then return .fail "a forged receipt (the webhook removed) was CONSUMED"
           if !forgedRefused then return .fail "a forged receipt (the webhook removed) was not reported as not the webhook's"
           if !consumed then return .fail "the right value was not consumed (no replacement)"

@@ -1065,6 +1065,72 @@ void test_history_commit_keeps_meta_and_gc_drops_old_epoch_rows() {
 	cut_remove_path(dir, NULL);
 }
 
+namespace {
+	storage::entry val_entry(const string& key, const string& v, uint64_t version) {
+		storage::entry e;
+		e.key = key;
+		e.flag = 0;
+		e.expire = 0;
+		e.version = version;
+		e.size = v.size();
+		shared_byte d(new uint8_t[v.size()]);
+		memcpy(d.get(), v.data(), v.size());
+		e.data = d;
+		return e;
+	}
+}
+
+// Design §7 (negative): old-epoch forwards that reach a replica AFTER its
+// commit of the continued history, in reverse order (the delete first, then
+// the set it came after) — both refused, the data unchanged. Before the
+// commit the same old-epoch forward applies (the refusal is the commit's).
+void test_history_old_epoch_forwards_after_commit_refused_in_reverse_order() {
+	const char dir[] = "tmp_rocksdb_history_reverse";
+	storage_rocksdb* s = make_small_wal(dir);
+	cut_assert_equal_int(0, s->open());
+	cut_assert_equal_int(0, storage_set_string(s, "k", "v"));
+	const string e0 = s->get_source_epoch();
+	const string inc = s->get_incarnation();
+	// control: before the commit an old-epoch forward is applied
+	storage::entry pre = val_entry("k2", "pre", 1);
+	cut_assert_equal_int(storage_rocksdb::apply_applied, s->apply_forwarded_change(e0, inc, 900000, pre, false));
+	storage_rocksdb::pending_history in;
+	in.hid = "p0-a1-9";
+	in.partition = 0;
+	in.successor = "succ:12121";
+	in.from_epoch = e0;
+	in.to_epoch = "99:reverse";
+	in.seq = 4242;
+	in.master_id = "new-master-id";
+	in.deadline_ms = wal_pin::now_ms() + 60000;
+	string res;
+	cut_assert_equal_int(0, s->history_replica_prepare(in, inc, res));
+	cut_assert_equal_int(0, s->history_arm("p0-a1-9", 77, res));
+	cut_assert_equal_int(1, s->history_on_map(0, "succ:12121", "me:12121", 77));
+	cut_assert_equal_string("99:reverse", s->get_source_epoch().c_str());
+	// the late old-epoch changes, newest first: the delete of k, then a set
+	// of k and of k2 that preceded it — every one refused
+	storage::entry del; del.key = "k";
+	cut_assert_equal_int(storage_rocksdb::apply_refused_session, s->apply_forwarded_change(e0, inc, 900002, del, true));
+	storage::entry late = val_entry("k", "late", 2);
+	cut_assert_equal_int(storage_rocksdb::apply_refused_session, s->apply_forwarded_change(e0, inc, 900001, late, false));
+	storage::entry late2 = val_entry("k2", "late", 2);
+	cut_assert_equal_int(storage_rocksdb::apply_refused_session, s->apply_forwarded_change(e0, inc, 900001, late2, false));
+	string out;
+	cut_assert_equal_int(0, storage_get_string(s, "k", out));
+	cut_assert_equal_string("v", out.c_str());
+	cut_assert_equal_int(0, storage_get_string(s, "k2", out));
+	cut_assert_equal_string("pre", out.c_str());
+	// a change of the new epoch still applies
+	storage::entry now1 = val_entry("k", "new", 3);
+	cut_assert_equal_int(storage_rocksdb::apply_applied, s->apply_forwarded_change("99:reverse", s->get_incarnation(), 4243, now1, false));
+	cut_assert_equal_int(0, storage_get_string(s, "k", out));
+	cut_assert_equal_string("new", out.c_str());
+	s->close();
+	delete s;
+	cut_remove_path(dir, NULL);
+}
+
 void test_wal_incremental_replication_basic() {
 	storage_rocksdb* master = make_rocksdb(wal_master_dir);
 	storage_rocksdb* slave  = make_rocksdb(wal_slave_dir);

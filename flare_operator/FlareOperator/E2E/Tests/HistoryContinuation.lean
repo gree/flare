@@ -552,13 +552,15 @@ private def rcOpLog (cfg : ClusterConfig) (since : String) : IO String := do
   | .ok o => return o
   | .error _ => return ""
 
-/-- The successor of the p0 handover once it is committingReplicas (from the
-    operator's phase line `HANDOVER p0 <old> -> <succ>: preparing -> committingReplicas`). -/
+/-- The successor of the p0 handover once it is committingReplicas: the
+    prepare line `HISTORY CONTINUATION p0 <hid>: prepared <succ> (E'=…`
+    (the move to committingReplicas is recorded by afterPrepare, with no
+    phase line: 42144453260). -/
 private def rcSuccessor (log : String) : Option String :=
   (log.splitOn "\n").findSome? fun l =>
-    if containsSubstr l "HANDOVER p0 " && containsSubstr l "preparing -> committingReplicas" then
-      match (l.splitOn " -> ").drop 1 |>.head? with
-      | some rest => some (podOf ((rest.splitOn ":").head?.getD "").trim)
+    if containsSubstr l "HISTORY CONTINUATION p0 " && containsSubstr l ": prepared " && containsSubstr l "(E'=" then
+      match (l.splitOn ": prepared ").drop 1 |>.head? with
+      | some rest => some (podOf ((rest.splitOn " ").head?.getD "").trim)
       | none => none
     else none
 
@@ -606,7 +608,7 @@ private def rcStart (cfg : ClusterConfig) : IO (Except String (String × String 
         succ := some s
         break
     IO.sleep 250
-  let some sPod := succ | return .error "the handover did not reach committingReplicas with V2 sent within 30 s"
+  let some sPod := succ | return .error "the handover did not reach committingReplicas with V2 sent within 30 s (no prepare line and V2 send in the operator log)"
   return .ok (mPod, sPod, slaves, t0)
 
 /-- A3b (addendum 2 §3 / 5): V2 reaches one prepared replica (the other is

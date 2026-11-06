@@ -2449,14 +2449,28 @@ private def checkRebuildConcurrency (ctx : Ctx) : IO Unit := do
   let mAfter := st [("p", holdNode .Master .Prepare 0 "p"), ("x", holdNode .Slave .Prepare 1 "x"), m1]
   check ctx "rebuild concurrency: a master reconstruction is not gated (the partition needs a master)"
     ((gate mBefore mAfter 1 1).held.isEmpty)
-  -- a parked rebuild with nothing in flight gives back its CLUSTER slot only
+  -- a parked rebuild with nothing in flight gives back its cluster slot AND
+  -- its partition's slot (pf-dev 2026-11-05: a replica parked on no_space
+  -- with its old copy held the partition's slot against an empty replica)
   let parkedBefore := st [m0, m1, ("x", holdNode .Slave .Prepare 1 "x"), ("a", holdNode .Proxy .Active (-1) "a"),
     ("b", holdNode .Proxy .Active (-1) "b")]
   let parkedAfter := st [m0, m1, ("x", holdNode .Slave .Prepare 1 "x"), ("a", holdNode .Slave .Prepare 0 "a"),
     ("b", holdNode .Slave .Prepare 1 "b")]
-  check ctx "rebuild concurrency: a parked idle rebuild frees the cluster slot (a in P0 admitted) but not its partition's (b in P1 held)"
-    ((gate parkedBefore parkedAfter 1 1 [] ["x"]).held.map Prod.fst == ["b"]
+  check ctx "rebuild concurrency: a parked idle rebuild frees the cluster slot (a in P0 admitted; b waits for the cluster limit, not for x)"
+    ((gate parkedBefore parkedAfter 1 1 [] ["x"]).held == [("b", "the cluster already has 1 running rebuild(s) (limit 1)")]
       && (gate parkedBefore parkedAfter 1 1).held.map Prod.fst == ["a", "b"])
+  let sameBefore := st [m0, m1, ("x", holdNode .Slave .Prepare 1 "x"), ("b", holdNode .Proxy .Active (-1) "b")]
+  let sameAfter := st [m0, m1, ("x", holdNode .Slave .Prepare 1 "x"), ("b", holdNode .Slave .Prepare 1 "b")]
+  check ctx "rebuild concurrency: a parked idle rebuild frees its PARTITION's slot (b in P1 admitted beside parked x); a running x still holds it"
+    ((gate sameBefore sameAfter 1 1 [] ["x"]).held.isEmpty
+      && ((gate sameBefore sameAfter 1 1 [] ["x"]).state.lookupNode "b").map (·.role) == some FlareRole.Slave
+      && (gate sameBefore sameAfter 1 1).held.map Prod.fst == ["b"]
+      && (gate sameBefore sameAfter 1 1 ["x"] ["x"]).held.map Prod.fst == ["b"])
+  let twoParked := st [m0, m1, ("x", holdNode .Slave .Prepare 1 "x"), ("b", holdNode .Slave .Prepare 1 "b")]
+  check ctx "rebuild concurrency: of two parked rebuilds in one partition one is resumed (the other parked one holds no slot); none while one of them runs"
+    (resumeCandidate twoParked 1 1 ["x", "b"] == some "x"
+      && resumeCandidate twoParked 1 1 ["x"] == none
+      && resumeCandidate twoParked 1 1 ["x", "b"] ["b"] == none)
   let resumeState := st [m0, m1, ("x", holdNode .Slave .Prepare 1 "x"), ("a", holdNode .Slave .Prepare 0 "a")]
   check ctx "rebuild concurrency: a parked rebuild is resumed only when no other rebuild runs (it takes its slot again)"
     (resumeCandidate resumeState 1 1 ["x"] == none

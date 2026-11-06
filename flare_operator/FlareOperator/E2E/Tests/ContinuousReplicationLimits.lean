@@ -1362,6 +1362,104 @@ def rebuildTmpfsSuite : TestSuite := {
   ]
 }
 
+-- ─── a parked no_space rebuild does not hold an empty replica's rebuild ───
+
+-- pf-dev 2026-11-05 in miniature: after a promotion one replica kept its old
+-- copy, its full rebuild parked on rebuild_blocked=no_space, and the parked
+-- rebuild held the partition's one rebuild slot: the EMPTY replica (which
+-- fits) stayed REBUILD HELD as a Proxy until the parked one was deleted.
+-- Same sizing as rebuildTmpfsCfg (~125 MB copy + 128 MiB reserve do not fit
+-- next to an old copy in 384Mi), 3 copies.
+private def parkedSlotCfg : ClusterConfig := { rebuildTmpfsCfg with
+  name := "cont-repl-parked-slot"
+  «namespace» := "flare-cont-repl-parked-slot"
+  replicas := 3
+  debugPod := "debug-cont-repl-parked-slot" }
+
+def parkedSlotSuite : TestSuite := {
+  name := "continuous-replication-parked-slot"
+  setup := do
+    deployCluster parkedSlotCfg
+    IO.sleep 50000
+  teardown := cleanupCluster parkedSlotCfg
+  onFailure := dumpClusterDiagnostics parkedSlotCfg.«namespace» s!"app={parkedSlotCfg.operatorName}"
+  tests :=
+    let c : Ctx := { cfg := parkedSlotCfg }
+    [
+    { name := "rebuild slot (§10): a replica whose rebuild is PARKED on no_space (old copy kept) does not hold the partition's slot — another replica, emptied, rebuilds and becomes Active meanwhile; the parked one keeps its copy"
+      run := do
+        let ns := parkedSlotCfg.«namespace»
+        let entries ← c.nodeView
+        let some mFqdn := findMasterFqdn entries 0 | return .fail "no Active P0 master in the operator's map"
+        let slaves := (entries.filter fun e => e.role == 1 && e.state == 0 && e.partition == 0).map (podOf ·.fqdn)
+        let [s1, s2] := slaves | return .fail s!"precondition: want 2 Active slaves, have {slaves}"
+        let mPod := podOf mFqdn
+        let some mIp ← getPodIp mPod ns | return .fail "no master IP"
+        let some s1Ip ← getPodIp s1 ns | return .fail "no IP for the first slave"
+        let big ← c.bulkWriteRandom mIp "rnd" 2400 50000
+        if big < 2400 then return .fail s!"stored {big}/2400 random values"
+        for (pod, label) in [(s1, "first"), (s2, "second")] do
+          let some ip ← getPodIp pod ns | return .fail s!"no IP for {pod}"
+          if !(← convergedItems c mIp ip s!"{label} replica matches the master") then
+            return .fail s!"{label} replica {pod}: items master={← c.currItems mIp} replica={← c.currItems ip}"
+        let items1 ← c.currItems s1Ip
+        -- s1's flared restarts with its tmpfs copy kept: its staged rebuild
+        -- cannot fit next to the old copy and parks
+        if let .error e ← c.killFlaredIn s1 then return .fail s!"precondition: could not restart flared in {s1}: {e}"
+        let parked ← waitForCondition s!"{s1} parks: rebuild_blocked=no_space, rebuild_parked 1" 480 do
+          let some ip ← getPodIp s1 ns | return false
+          return (← c.statStr ip "rebuild_blocked") == some "no_space" && (← c.statNat ip "rebuild_parked") == some 1
+        if !parked then return .fail s!"precondition: {s1}'s rebuild did not park on no_space"
+        let t0 := (← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%SZ"] }).stdout.trim
+        let uid0 ← c.podUid s2
+        -- s2 is emptied (a graceful delete clears its tmpfs): its pod comes
+        -- back with nothing, needs a new assignment, and fits
+        match ← kubectl ["delete", "pod", s2, "-n", ns, "--wait=true", "--timeout=180s"] with
+        | .error e => return .fail s!"could not delete {s2}: {e}"
+        | .ok _ => pure ()
+        -- the map still has the OLD pod as Slave/Active right after the
+        -- delete (bf 42055533108: "Active" after 0 s with 0 items): wait for
+        -- the NEW pod (another UID), Ready, Active in the map AND holding
+        -- the master's items
+        -- observed TOGETHER (review of 085a362, P2): while the emptied s2
+        -- rebuilds (Prepare) and when it is Active, s1 is still parked
+        let parkedDuringPrepare ← IO.mkRef false
+        let parkedAtActive ← IO.mkRef false
+        let s1Parked : IO Bool := do
+          let some ip ← getPodIp s1 ns | return false
+          return (← c.statStr ip "rebuild_blocked") == some "no_space" && (← c.statNat ip "rebuild_parked") == some 1
+        let active ← waitForCondition s!"the emptied {s2} (a new pod) rebuilds: Ready, Slave/Active, the master's items" 600 do
+          let uid ← c.podUid s2
+          if uid.isNone || uid == uid0 then return false
+          let view ← c.nodeView
+          if view.any (fun e => podOf e.fqdn == s2 && e.role == 1 && e.state == 1) && (← s1Parked) then
+            parkedDuringPrepare.set true
+          if !(← c.ready s2) then return false
+          if !(view.any fun e => podOf e.fqdn == s2 && e.role == 1 && e.state == 0) then return false
+          let some ip ← getPodIp s2 ns | return false
+          if (← c.currItems ip) < big then return false
+          parkedAtActive.set (← s1Parked)
+          return true
+        let log ← c.opLogSince t0
+        let heldByPart := (log.splitOn "\n").filter fun l =>
+          containsSubstr l "REBUILD HELD" && containsSubstr l s2 && containsSubstr l "partition 0 already has"
+        let some s1IpNow ← getPodIp s1 ns | return .fail "no IP for the first slave after the test"
+        let items1Now ← c.currItems s1IpNow
+        let s2Items ← match ← getPodIp s2 ns with
+          | some ip => c.currItems ip
+          | none => pure 0
+        IO.eprintln s!"# parked {s1} items {items1}→{items1Now}; emptied {s2} active={active} items {s2Items} (master {← c.currItems mIp}); REBUILD HELD by the partition for {s2}: {heldByPart.length}; {s1} parked while {s2} was Prepare: {← parkedDuringPrepare.get}, when {s2} became Active: {← parkedAtActive.get}"
+        if !active then
+          return .fail s!"the emptied {s2} did not become Slave/Active while {s1} was parked (held by the partition {heldByPart.length} time(s); first: {(heldByPart.head?.getD "(none)").trim.take 220})"
+        if s2Items < big then return .fail s!"{s2} is Active with {s2Items} items, fewer than the {big} written"
+        if !(← parkedAtActive.get) then
+          return .fail s!"{s1} was not parked (no_space) at the moment {s2} became Active: the two were not observed together"
+        if items1Now < items1 then return .fail s!"the parked replica's copy shrank ({items1}→{items1Now}): something was discarded"
+        if (← masterPodOf c) != some mPod then return .fail "the master moved"
+        return .pass }
+  ]
+}
+
 -- ─── upgrade from the deployed release, on tmpfs = memory limit ───────────
 
 -- pf-dev's 2026-10-05 roll in miniature: rc56 (no source epochs) rolled to

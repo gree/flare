@@ -33,6 +33,7 @@
 #include <connection_tcp.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <stdint.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <time.h>
@@ -539,6 +540,38 @@ void test_wal_pin_release_failure_keeps_the_pin() {
 // review of 4eb6974, P2: a release whose EnableFileDeletions fails keeps
 // its disable; a pin set right after REUSES it (never stacks a second
 // one), and the next release balances it — deletions end up enabled.
+// The free-space floor (design 6th rev.): the tick releases a pin once the
+// free space is below the floor (CRITICAL, floor_releases +1, deletions
+// enabled again, reason "free space below the floor"); above the floor, or
+// with no floor (the default -1 = half of an unset reserve = 0), it stays.
+void test_wal_pin_free_space_floor_releases() {
+	const char dir[] = "tmp_rocksdb_wal_pin_floor";
+	storage_rocksdb* s = make_small_wal(dir);
+	cut_assert_equal_int(0, s->open());
+	const uint64_t first = fill_and_archive(s, "fl");
+	string res;
+	// no floor: nothing is released by the tick
+	cut_assert_equal_int(0, s->wal_pin_set("hf", first, wal_pin::now_ms() + 60000, res));
+	s->wal_pin_tick(wal_pin::now_ms());
+	cut_assert_equal_string("active", s->get_wal_pin_status().state.c_str());
+	// a floor of 1 byte: the free space is above it
+	s->set_wal_pin_floor_bytes(1);
+	s->wal_pin_tick(wal_pin::now_ms());
+	storage_rocksdb::wal_pin_status w = s->get_wal_pin_status();
+	cut_assert_equal_string("active", w.state.c_str());
+	cut_assert_equal_int(0, (int)w.floor_releases);
+	// a floor above any free space: released
+	s->set_wal_pin_floor_bytes(INT64_MAX / 2);
+	s->wal_pin_tick(wal_pin::now_ms());
+	w = s->get_wal_pin_status();
+	cut_assert_equal_string("none", w.state.c_str());
+	cut_assert_equal_int(1, (int)w.floor_releases);
+	cut_assert_equal_string("free space below the floor", w.reason.c_str());
+	cut_assert_false(w.deletions_disabled);
+	s->close();
+	delete s;
+}
+
 void test_wal_pin_failed_enable_then_new_pin_stays_balanced() {
 	const char dir[] = "tmp_rocksdb_wal_pin_enfail";
 	storage_rocksdb* s = make_small_wal(dir);

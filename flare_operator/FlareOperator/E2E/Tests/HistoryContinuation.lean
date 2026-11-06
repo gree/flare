@@ -166,6 +166,73 @@ def walPinRestartSuite : TestSuite := {
         if (statOf rel "wal_pin_result") != some "released" then return .fail s!"release: {rel.trim}"
         if !(containsSubstr ctlRead "lsn_purged") then
           return .fail s!"control: without the marker the restart did not purge the WAL (answer {ctlRead}) — the test did not produce the deletion"
+        return .pass },
+    { name := "WAL_PIN (A4): a pin whose deadline passes is released by the tick (state none, reason the deadline, released +1, deletions enabled again)"
+      run := do
+        let ns := walPinCfg.«namespace»
+        let entries := parseNodeSync (← operatorTcpCmd walPinCfg.debugPod ns walPinCfg.operatorName walPinCfg.operatorPort "node sync")
+        let some mFqdn := findMasterFqdn entries 0 | return .fail "no Active P0 master"
+        let some sEntry := entries.find? (fun e => e.fqdn != mFqdn && e.role == 1 && e.state == 0) | return .fail "no Active slave"
+        let some ip ← podIp (podOf sEntry.fqdn) | return .fail "no replica IP"
+        let some s := (← stat ip "rocksdb_latest_sequence_number").bind String.toNat? | return .fail "no latest sequence"
+        let rel0 := ((← stat ip "wal_pin_released").bind String.toNat?).getD 0
+        let r ← nodeCmd ip s!"wal_pin set hc-e2e-deadline {s} {(← nowMs) + 8000}"
+        if !(containsSubstr r "STAT wal_pin_result pinned") then return .fail s!"wal_pin set: {r.trim}"
+        let pinnedNow := (← stat ip "wal_pin_state") == some "active" && (← stat ip "wal_pin_deletions_disabled") == some "1"
+        let released ← waitForCondition "the pin is released by its deadline" 40 do
+          return (← stat ip "wal_pin_state") == some "none"
+        let reason := (← stat ip "wal_pin_reason").getD "?"
+        let rel1 := ((← stat ip "wal_pin_released").bind String.toNat?).getD 0
+        let dis := (← stat ip "wal_pin_deletions_disabled").getD "?"
+        IO.eprintln s!"# deadline pin: active while set={pinnedNow}; released={released}; reason {reason}; released {rel0} -> {rel1}; deletions_disabled {dis}"
+        if !pinnedNow then return .fail "the pin was not active (deletions disabled) right after the set"
+        if !released then return .fail "the pin was not released within 40 s of its 8 s deadline"
+        if rel1 != rel0 + 1 then return .fail s!"wal_pin_released {rel0} -> {rel1}, want +1"
+        if dis != "0" then return .fail s!"file deletions still disabled after the release ({dis})"
+        return .pass },
+    { name := "WAL_PIN (A4): an invalid marker is read before DB::Open and fails closed (state invalid, deletions disabled, the deadline does not release it); only release_invalid with this process's boot id releases it"
+      run := do
+        let ns := walPinCfg.«namespace»
+        let entries := parseNodeSync (← operatorTcpCmd walPinCfg.debugPod ns walPinCfg.operatorName walPinCfg.operatorPort "node sync")
+        let some mFqdn := findMasterFqdn entries 0 | return .fail "no Active P0 master"
+        let some sEntry := entries.find? (fun e => e.fqdn != mFqdn && e.role == 1 && e.state == 0) | return .fail "no Active slave"
+        let pod := podOf sEntry.fqdn
+        let some ip ← podIp pod | return .fail "no replica IP"
+        -- the data dir of the image under test (persistent or tmpfs layout)
+        let dir ← match ← kubectl ["exec", "-n", ns, pod, "-c", "flared", "--", "sh", "-c", "for d in /data/flare /tmp/flare; do [ -d $d ] && echo $d && break; done"] with
+          | .ok o => pure o.trim | .error e => return .fail s!"no data dir: {e}"
+        if dir.isEmpty then return .fail "no data dir found in the flared container"
+        match ← kubectl ["exec", "-n", ns, pod, "-c", "flared", "--", "sh", "-c", s!"printf 'v1 garbage\\n' > {dir}/WAL_PIN && sync"] with
+        | .error e => return .fail s!"could not write the invalid marker: {e}"
+        | .ok _ => pure ()
+        let rc0 ← restartCount pod
+        if let .error e ← killFlaredIn pod then return .fail s!"kill: {e}"
+        let back ← waitForCondition s!"{pod}'s flared answers after the restart" 300 do
+          let some ipNow ← podIp pod | return false
+          return (← restartCount pod) > rc0 && (← stat ipNow "wal_pin_state").isSome
+        if !back then return .fail "flared did not come back"
+        let some ip2 ← podIp pod | return .fail "no IP after the restart"
+        let st := (← stat ip2 "wal_pin_state").getD "?"
+        let prot := (← stat ip2 "wal_pin_protected_open").getD "?"
+        let dis := (← stat ip2 "wal_pin_deletions_disabled").getD "?"
+        -- the tick does not release an invalid marker (no trusted deadline)
+        IO.sleep 5000
+        let stLater := (← stat ip2 "wal_pin_state").getD "?"
+        let boot := (← stat ip2 "reconstruction_boot_id").getD ""
+        let wrong ← nodeCmd ip2 s!"wal_pin release_invalid {boot}0"
+        let ok ← nodeCmd ip2 s!"wal_pin release_invalid {boot}"
+        let stAfter := (← stat ip2 "wal_pin_state").getD "?"
+        let disAfter := (← stat ip2 "wal_pin_deletions_disabled").getD "?"
+        let gone ← match ← kubectl ["exec", "-n", ns, pod, "-c", "flared", "--", "sh", "-c", s!"[ -e {dir}/WAL_PIN ] && echo present || echo absent"] with
+          | .ok o => pure o.trim | .error _ => pure "?"
+        IO.eprintln s!"# invalid marker in {dir}: after restart state {st} protected_open {prot} deletions_disabled {dis}; 5 s later {stLater}; release (wrong boot) {(statOf wrong "wal_pin_result").getD wrong.trim}; release (boot {boot}) {(statOf ok "wal_pin_result").getD ok.trim}; then state {stAfter} deletions_disabled {disAfter}, marker {gone}"
+        if st != "invalid" then return .fail s!"after the restart wal_pin_state is {st}, not invalid"
+        if prot != "1" || dis != "1" then return .fail s!"an invalid marker did not open protected (protected_open {prot}, deletions_disabled {dis})"
+        if stLater != "invalid" then return .fail s!"the invalid marker was released without a request ({stLater})"
+        if statOf wrong "wal_pin_result" != some "refused:boot_id" then return .fail s!"release_invalid with another boot id: {wrong.trim}"
+        if statOf ok "wal_pin_result" != some "released" then return .fail s!"release_invalid with this boot id: {ok.trim}"
+        if stAfter != "none" || disAfter != "0" || gone != "absent" then
+          return .fail s!"after the release: state {stAfter}, deletions_disabled {disAfter}, marker {gone}"
         return .pass }
   ]
 }
@@ -464,5 +531,190 @@ def handoverRollingSuite : TestSuite := {
         return .pass }
   ]
 }
+
+-- ─── recovery: the successor stops during committingReplicas (A3b) ─────
+
+private def rcCfg (tag : String) : ClusterConfig :=
+  { hcCfg with
+    name := s!"hist-cont-{tag}"
+    «namespace» := s!"flare-hist-cont-{tag}"
+    debugPod := s!"debug-hist-cont-{tag}"
+    replicas := 4
+    operatorEnv := hcCfg.operatorEnv ++ [("FLARE_TEST_BROADCAST_SKIP_FILE", "/tmp/bskip")] }
+
+private def rcOpExec (cfg : ClusterConfig) (cmd : String) : IO (Except String String) := do
+  match ← kubectl ["get", "pods", "-n", cfg.«namespace», "-l", s!"app={cfg.operatorName}", "-o", "jsonpath={.items[0].metadata.name}"] with
+  | .ok o => kubectl ["exec", "-n", cfg.«namespace», o.trim, "--", "sh", "-c", cmd]
+  | .error e => return .error e
+
+private def rcOpLog (cfg : ClusterConfig) (since : String) : IO String := do
+  match ← kubectl ["logs", "-n", cfg.«namespace», "-l", s!"app={cfg.operatorName}", "--since-time", since, "--tail=-1"] with
+  | .ok o => return o
+  | .error _ => return ""
+
+/-- The successor of the p0 handover once it is committingReplicas (from the
+    operator's phase line `HANDOVER p0 <old> -> <succ>: preparing -> committingReplicas`). -/
+private def rcSuccessor (log : String) : Option String :=
+  (log.splitOn "\n").findSome? fun l =>
+    if containsSubstr l "HANDOVER p0 " && containsSubstr l "preparing -> committingReplicas" then
+      match (l.splitOn " -> ").drop 1 |>.head? with
+      | some rest => some (podOf ((rest.splitOn ":").head?.getD "").trim)
+      | none => none
+    else none
+
+/-- Every pod's own_role, by pod name (unreadable pods left out). -/
+private def rcRoles (cfg : ClusterConfig) (pods : List String) : IO (List (String × String)) := do
+  let mut out := []
+  for pd in pods do
+    if let some ip ← getPodIp pd cfg.«namespace» then
+      if let some r ← hcStatIn cfg ip "own_role" then
+        out := out ++ [(pd, r)]
+  return out
+
+/-- Setup shared by the two recovery suites: 1 master + 3 slaves, 300 keys
+    followed by every slave, V2 withheld from the last slave (map order), the
+    master's graceful delete asked once (its handover starts), and the wait
+    until the handover is committingReplicas. Returns (master pod, successor
+    pod, slaves, t0). -/
+private def rcStart (cfg : ClusterConfig) : IO (Except String (String × String × List String × String)) := do
+  let ns := cfg.«namespace»
+  let es := parseNodeSync (← operatorTcpCmd cfg.debugPod ns cfg.operatorName cfg.operatorPort "node sync")
+  let some mFqdn := findMasterFqdn es 0 | return .error "no Active P0 master"
+  let slaves := (es.filter fun e => e.role == 1 && e.state == 0 && e.partition == 0).map (podOf ·.fqdn)
+  if slaves.length != 3 then return .error s!"precondition: want 3 Active slaves, have {slaves}"
+  let mPod := podOf mFqdn
+  let some mIp ← getPodIp mPod ns | return .error "no master IP"
+  if (← hcWriteIn cfg mIp "pre" 300) < 300 then return .error "precondition writes not all STORED"
+  let caught ← waitForCondition "every slave's follow cursor reaches the master's last sequence" 180 do
+    let some l := (← hcStatIn cfg mIp "rocksdb_latest_sequence_number").bind String.toNat? | return false
+    let mut ok := true
+    for r in slaves do
+      let some ip ← getPodIp r ns | return false
+      ok := ok && ((← hcStatIn cfg ip "rocksdb_repl_last_lsn").bind String.toNat?) == some l
+    return ok
+  if !caught then return .error "precondition: the slaves did not catch up by WAL follow"
+  let some withheld := slaves.getLast? | return .error "no slave"
+  match ← rcOpExec cfg s!"echo {withheld} > /tmp/bskip" with
+  | .error e => return .error s!"could not arm the broadcast skip: {e}"
+  | .ok _ => pure ()
+  let t0 := (← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%SZ"] }).stdout.trim
+  discard <| kubectl ["delete", "pod", mPod, "-n", ns, "--wait=false"]
+  let mut succ : Option String := none
+  for _ in [0:120] do
+    if let some s ← (rcSuccessor <$> rcOpLog cfg t0) then
+      if containsSubstr (← rcOpLog cfg t0) "V2 sent to the prepared replicas" then
+        succ := some s
+        break
+    IO.sleep 250
+  let some sPod := succ | return .error "the handover did not reach committingReplicas with V2 sent within 30 s"
+  return .ok (mPod, sPod, slaves, t0)
+
+/-- A3b (addendum 2 §3 / 5): V2 reaches one prepared replica (the other is
+    withheld); the successor is then deleted gracefully (override) and its
+    kubelet confirms the stop. The committed replica replaces it (V3), at
+    most one pod answers master at any time, the old successor never again,
+    and every key is on the new master. -/
+def recoveryReplaceSuite : TestSuite :=
+  let cfg := rcCfg "rc-replace"
+  { name := "history-continuation-recovery-replace"
+    setup := do
+      deployCluster cfg
+      IO.sleep 50000
+    teardown := cleanupCluster cfg
+    onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
+    tests := [
+      { name := "history continuation recovery (A3b): the successor's kubelet-confirmed stop during committingReplicas -> the committed replica becomes the master (V3), never two masters, the old successor fenced, every key kept"
+        run := do
+          let ns := cfg.«namespace»
+          let (mPod, sPod, slaves, t0) ← match ← rcStart cfg with
+            | .ok x => pure x
+            | .error e => return .fail e
+          let all := mPod :: slaves
+          -- the successor stops: override + graceful delete; its kubelet confirms
+          let sUid ← match ← kubectlGetJsonpath "pod" sPod ns "{.metadata.uid}" with
+            | .ok o => pure o.trim | .error e => return .fail s!"no successor uid: {e}"
+          discard <| kubectl ["annotate", "pod", sPod, "-n", ns, "--overwrite", s!"flare.gree.net/delete-override={sUid}"]
+          discard <| kubectl ["delete", "pod", sPod, "-n", ns, "--grace-period=1", "--wait=false"]
+          -- sample every pod's own_role until the replacement is the master
+          let mut twoMasters : List (List (String × String)) := []
+          let mut succAgain := false
+          let mut replaced := false
+          for _ in [0:90] do
+            let rs ← rcRoles cfg all
+            let ms := rs.filter (·.2 == "master")
+            if ms.length > 1 then twoMasters := twoMasters ++ [rs]
+            let log ← rcOpLog cfg t0
+            if containsSubstr log "replaces it" then replaced := true
+            if replaced && ms.any (·.1 == sPod) then
+              -- a NEW pod under the successor's name as master would be the fault
+              succAgain := true
+            if replaced && ms.length == 1 && ms.any (·.1 != sPod) then break
+            IO.sleep 1000
+          discard <| rcOpExec cfg "rm -f /tmp/bskip"
+          let log ← rcOpLog cfg t0
+          let some newM := ((← rcRoles cfg all).find? (·.2 == "master")).map (·.1)
+            | return .fail s!"no master after the recovery (replaced={replaced})"
+          let flLog ← match ← kubectl ["logs", "-n", ns, newM, "-c", "flared", "--since-time", t0] with
+            | .ok o => pure o | .error _ => pure ""
+          let some nIp ← getPodIp newM ns | return .fail "no IP for the new master"
+          let items := ((← hcStatIn cfg nIp "curr_items").bind String.toNat?)
+          let wrote ← hcWriteIn cfg nIp "post" 200
+          let lines := (log.splitOn "\n").filter fun l => containsSubstr l "HANDOVER p0" || containsSubstr l "NODE GUARD: the kubelet"
+          IO.eprintln s!"# master {mPod}, successor {sPod}, new master {newM}; replaced={replaced}; two-master samples {twoMasters.length}; successor master again={succAgain}; items {items}; post {wrote}/200\n# {lines.map (·.trim.take 200)}"
+          if !replaced then return .fail "the committed replica did not replace the stopped successor"
+          if !containsSubstr log "NODE GUARD: the kubelet" then return .fail "the kubelet's stop was not recorded by the node guard"
+          if !twoMasters.isEmpty then return .fail s!"two pods answered master: {twoMasters}"
+          if succAgain then return .fail s!"the stopped successor's name {sPod} answered master after the replacement"
+          if newM == sPod || newM == mPod then return .fail s!"the new master is {newM}, not a committed replica"
+          if !containsSubstr flLog "COMMITTED as replica" then return .fail s!"the new master {newM} had not committed the continued history"
+          if items.getD 0 < 300 then return .fail s!"the new master has {items} items, want >= 300"
+          if wrote < 200 then return .fail s!"post-recovery writes {wrote}/200"
+          return .pass }
+    ] }
+
+/-- A3b (addendum 5 §2-3): the successor is force-deleted (no kubelet
+    confirm reaches the guard). The handover HALTS with CRITICAL and the
+    Event FlareHandoverSuccessorUnfenced; no other replica is promoted and no
+    pod answers master in the window. -/
+def recoveryUnfencedSuite : TestSuite :=
+  let cfg := rcCfg "rc-unfenced"
+  { name := "history-continuation-recovery-unfenced"
+    setup := do
+      deployCluster cfg
+      IO.sleep 50000
+    teardown := cleanupCluster cfg
+    onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
+    tests := [
+      { name := "history continuation recovery (A3b): a force-deleted successor (no kubelet confirm) halts the handover — CRITICAL + Event, nothing promoted, no pod answers master"
+        run := do
+          let ns := cfg.«namespace»
+          let (mPod, sPod, slaves, t0) ← match ← rcStart cfg with
+            | .ok x => pure x
+            | .error e => return .fail e
+          let all := mPod :: slaves
+          let sUid ← match ← kubectlGetJsonpath "pod" sPod ns "{.metadata.uid}" with
+            | .ok o => pure o.trim | .error e => return .fail s!"no successor uid: {e}"
+          discard <| kubectl ["annotate", "pod", sPod, "-n", ns, "--overwrite", s!"flare.gree.net/delete-override={sUid}"]
+          discard <| kubectl ["delete", "pod", sPod, "-n", ns, "--force", "--grace-period=0", "--wait=false"]
+          let mut masters : List (List (String × String)) := []
+          let mut halted := false
+          for _ in [0:60] do
+            let rs ← rcRoles cfg all
+            if rs.any (·.2 == "master") then masters := masters ++ [rs]
+            if containsSubstr (← rcOpLog cfg t0) "HALTED" then halted := true
+            IO.sleep 1000
+          let log ← rcOpLog cfg t0
+          let ev ← match ← kubectl ["get", "events", "-n", ns, "--field-selector", "reason=FlareHandoverSuccessorUnfenced", "-o", "name"] with
+            | .ok o => pure (!o.trim.isEmpty) | .error _ => pure false
+          let lines := (log.splitOn "\n").filter fun l => containsSubstr l "HANDOVER p0" || containsSubstr l "NODE GUARD"
+          IO.eprintln s!"# master {mPod}, successor {sPod}: halted={halted}, event={ev}, master samples {masters.length}\n# {lines.map (·.trim.take 200)}"
+          discard <| rcOpExec cfg "rm -f /tmp/bskip"
+          if !halted then return .fail "the handover did not halt (no HALTED reason in the operator log)"
+          if !containsSubstr log "CRITICAL: HANDOVER p0" then return .fail "no CRITICAL line for the halted handover"
+          if !ev then return .fail "no FlareHandoverSuccessorUnfenced Event"
+          if containsSubstr log "replaces it" then return .fail "a replica replaced the successor without a kubelet-confirmed stop"
+          if !masters.isEmpty then return .fail s!"a pod answered master while the successor's stop was unconfirmed: {masters}"
+          return .pass }
+    ] }
 
 end FlareOperator.E2E.Tests.HistoryContinuation

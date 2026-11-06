@@ -110,6 +110,8 @@ def main (args : List String) : IO UInt32 :=
     Tests.HistoryContinuation.handoverSuite,
     Tests.HistoryContinuation.handoverFollowOffSuite,
     Tests.HistoryContinuation.handoverRollingSuite,
+    Tests.HistoryContinuation.recoveryReplaceSuite,
+    Tests.HistoryContinuation.recoveryUnfencedSuite,
     Tests.ContinuousReplicationLimits.upgradeSuite,
     Tests.ContinuousReplicationLimits.identitySuite,
     Tests.ContinuousReplicationLimits.emptySourceSuite,

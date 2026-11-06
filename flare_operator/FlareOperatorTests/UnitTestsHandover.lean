@@ -34,6 +34,9 @@ private def okObs (now : Nat) : Obs :=
 private def roleOf (s : FlareClusterState) (k : String) : Option (FlareRole × FlareState) :=
   (s.lookupNode k).map fun n => (n.role, n.state)
 
+-- the checks are one long `do` (each `r := r ++ …` nests the rest): past
+-- ~70 of them the default recursion depth is exceeded
+set_option maxRecDepth 4096 in
 /-- Every check: (name, ok). -/
 def results : List (String × Bool) := Id.run do
   let cfg : Config := {}

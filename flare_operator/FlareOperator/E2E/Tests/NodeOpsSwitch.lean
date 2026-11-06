@@ -1891,6 +1891,53 @@ private def scenarioSuite (sc : Scenario) (st : SwitchStorage) : TestSuite :=
     afterEach := fun i => saveFullLogs cfg.«namespace» s!"after-test-{i}"
     tests := [{ name := sc.title, run := match sc with | .op o => switchTest c o | .gate => gateTest c | .sigtermHold => sigtermHoldTest c | .abortExhaust => abortExhaustTest c | .nodeGuard => nodeGuardTest c | .cordonBlocked => cordonBlockedTest c | .cordonCancel => cordonCancelTest c | .cordonNoSuccessor => cordonNoSuccessorTest c | .cordonOperatorRestart => cordonOperatorRestartTest c | .cordonTwoNodes => cordonTwoNodesTest c | .cordonNoOperator => cordonNoOperatorTest c | .cordonRestartQuiet => cordonRestartQuietTest c | .cordonStuck => cordonStuckTest c | .cordonPinned => cordonBlockedTest c pinnedCond (some "cannot leave the node") }] }
 
+/-- A4 (history continuation, flare-hc-e2e): S1 with three copies and the
+    continuation on, under the same client-like load — 0 write errors, 0
+    acknowledged writes missing (the S1 verdict) — and the replica that is not
+    the successor keeps its copy: its flared log shows `COMMITTED as replica`
+    and no staged rebuild after it. -/
+def continuationSwitchTest (c : Ctx) : IO TestResult := do
+  let t0 := (← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%SZ"] }).stdout.trim
+  let r ← switchTest c .deleteMaster
+  match r with
+  | .pass =>
+    let ns := c.cfg.«namespace»
+    let pods ← match ← kubectl ["get", "pods", "-n", ns, "-l", s!"cluster={c.cfg.name}", "-o", "jsonpath={.items[*].metadata.name}"] with
+      | .ok o => pure ((o.splitOn " ").filter (· != ""))
+      | .error e => return .fail s!"pods unreadable: {e}"
+    let mut committer : Option String := none
+    let mut rebuiltAfter := false
+    for n in pods do
+      let lg ← match ← kubectl ["logs", "-n", ns, n, "-c", "flared", "--since-time", t0] with
+        | .ok o => pure o | .error _ => pure ""
+      match lg.splitOn "COMMITTED as replica" with
+      | _ :: rest@(_ :: _) =>
+        committer := some n
+        rebuiltAfter := rebuiltAfter || ((("COMMITTED as replica".intercalate rest).splitOn "staged rebuild may start").length > 1)
+      | _ => pure ()
+    IO.eprintln s!"# [{c.test}] continuation: committed replica {committer}, staged rebuild after the commit={rebuiltAfter}"
+    match committer with
+    | none => return .fail "0 errors / 0 missing, but no replica committed the continued history (it rebuilt)"
+    | some n => if rebuiltAfter then return .fail s!"{n} started a staged rebuild after committing the continued history" else return .pass
+  | other => return other
+
+/-- node-ops-switch-tmpfs-continuation-delete: 3 copies, continuation on. -/
+def continuationSwitchSuite : TestSuite :=
+  let cfg := { cfgOf "node-swt-cont-delete" true false with
+    replicas := 3, operatorEnv := [("FLARE_OPERATOR_HISTORY_CONTINUATION", "on")] }
+  let c : Ctx := { cfg, suite := "node-ops-switch-tmpfs-continuation-delete", test := "s-continuation-delete" }
+  { name := "node-ops-switch-tmpfs-continuation-delete"
+    setup := do
+      deployCluster cfg
+      IO.sleep 50000
+    teardown := do
+      for w in ← dataWorkers do uncordon w
+      cleanupCluster cfg
+    onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
+    afterEach := fun i => saveFullLogs cfg.«namespace» s!"after-test-{i}"
+    tests := [{ name := "(A4) kubectl delete pod of the MASTER with three copies and history continuation on, under a client-like load: 0 write errors, 0 acknowledged writes missing, and the replica that is not the successor keeps its copy (COMMITTED as replica, no staged rebuild after it)",
+                run := continuationSwitchTest c }] }
+
 def scenarios : List Scenario := [.op .deleteMaster, .op .rollingRestart, .op .rollBoth, .op .drainMaster, .gate, .sigtermHold, .op .deleteMasterSaveFail, .op .deleteMasterAbortRetry, .abortExhaust, .nodeGuard, .op .deleteMasterLeaseTakeover, .op .deleteMasterObserveFail, .op .helmUpgrade]
 
 /-- node-ops-switch-<scenario> (PVC on local-path), node-ops-switch-tmpfs-<scenario>,
@@ -1902,5 +1949,6 @@ def switchSuites : List TestSuite :=
     ++ [Scenario.op .cordonMaster, .op .cordonReplica, .cordonBlocked, .cordonCancel, .cordonNoSuccessor, .cordonOperatorRestart, .cordonTwoNodes, .cordonNoOperator, .cordonRestartQuiet, .cordonStuck].map (fun sc => scenarioSuite sc .tmpfs)
     ++ [Scenario.op .cordonMaster, .op .cordonReplica].map (fun sc => scenarioSuite sc .pvcNfs)
     ++ [scenarioSuite .cordonPinned .pvcLocal]
+    ++ [continuationSwitchSuite]
 
 end FlareOperator.E2E.Tests.NodeOpsSwitch

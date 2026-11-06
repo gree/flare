@@ -726,4 +726,128 @@ def recoveryUnfencedSuite : TestSuite :=
           return .pass }
     ] }
 
+-- ─── break-glass of a halted handover (A3c, addenda 6–10) ─────
+
+/-- `kubectl apply` of a manifest (stdin through a temp file). -/
+private def bgApply (manifest : String) : IO (Except String String) := do
+  let path := s!"/tmp/flare-e2e-bg-{← IO.monoNanosNow}.yaml"
+  IO.FS.writeFile path manifest
+  let r ← kubectl ["apply", "-f", path]
+  try IO.FS.removeFile path catch _ => pure ()
+  return r
+
+/-- A3c: the handover halts (the successor force-deleted); a user who may
+    update the FlareCluster but not break-glass is refused by the webhook;
+    an approver's value for another hid is receipted but not used; the
+    right value is consumed once (fencedBy, Event), the committed replica
+    replaces the successor, the annotations are removed, and the same value
+    applied again changes nothing. -/
+def recoveryBreakGlassSuite : TestSuite :=
+  let cfg := rcCfg "rc-bglass"
+  { name := "history-continuation-recovery-breakglass"
+    setup := do
+      deployCluster cfg
+      IO.sleep 50000
+    teardown := cleanupCluster cfg
+    onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
+    tests := [
+      { name := "history continuation break-glass (A3c): refused without the break-glass permission, another hid not used, the right value consumed once, the committed replica replaces the silent successor"
+        run := do
+          let ns := cfg.«namespace»
+          let cr := cfg.name
+          -- an updater (update only) and an approver (update + break-glass)
+          let rbac := s!"apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: \{name: fc-updater, namespace: {ns}}
+rules:
+- apiGroups: [flare.gree.net]
+  resources: [flareclusters]
+  verbs: [get, list, update, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: \{name: fc-updater, namespace: {ns}}
+subjects:
+- \{kind: User, name: updater, apiGroup: rbac.authorization.k8s.io}
+- \{kind: User, name: approver, apiGroup: rbac.authorization.k8s.io}
+roleRef: \{kind: Role, name: fc-updater, apiGroup: rbac.authorization.k8s.io}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: \{name: fc-approver, namespace: {ns}}
+subjects:
+- \{kind: User, name: approver, apiGroup: rbac.authorization.k8s.io}
+roleRef: \{kind: Role, name: flare-operator-handover-fence, apiGroup: rbac.authorization.k8s.io}
+"
+          if let .error e ← bgApply rbac then return .fail s!"could not create the test RBAC: {e}"
+          let (mPod, sPod, slaves, t0) ← match ← rcStart cfg with
+            | .ok x => pure x
+            | .error e => return .fail e
+          let sUid ← match ← kubectlGetJsonpath "pod" sPod ns "{.metadata.uid}" with
+            | .ok o => pure o.trim | .error e => return .fail s!"no successor uid: {e}"
+          discard <| kubectl ["annotate", "pod", sPod, "-n", ns, "--overwrite", s!"flare.gree.net/delete-override={sUid}"]
+          discard <| kubectl ["delete", "pod", sPod, "-n", ns, "--force", "--grace-period=0", "--wait=false"]
+          let halted ← waitForCondition "the handover halts (CRITICAL … HALTED)" 60 do
+            return containsSubstr (← rcOpLog cfg t0) "HALTED"
+          if !halted then return .fail "the handover did not halt after the successor's force delete"
+          let log0 ← rcOpLog cfg t0
+          -- the hid and the successor's binding from the operator's log
+          let hid := ((log0.splitOn "\n").findSome? fun l =>
+            if containsSubstr l "HISTORY CONTINUATION p0 " && containsSubstr l ": prepared " then
+              ((l.splitOn "HISTORY CONTINUATION p0 ").drop 1).head?.bind fun x => (x.splitOn ":").head?
+            else none).getD ""
+          let binding := ((log0.splitOn "\n").findSome? fun l =>
+            if containsSubstr l "PROMOTION EVIDENCE (handover demote" && containsSubstr l s!"{sPod}." then
+              ((l.splitOn " binding ").drop 1).head?.map (·.trim)
+            else none).getD ""
+          let parts := binding.splitOn "|"
+          if hid.isEmpty || parts.length != 3 then return .fail s!"could not read the hid ({hid}) or the successor binding ({binding})"
+          let value := fun (ap h : String) => s!"{ap}/{h}/{"/".intercalate parts}"
+          let anno := fun (who v : String) => kubectl ["annotate", "flarecluster", cr, "-n", ns, "--overwrite", "--as", who, s!"flare.gree.net/handover-fenced={v}"]
+          -- 1. update permission only: refused by the webhook
+          let r1 ← anno "updater" (value "E2E-1" hid)
+          let refused := match r1 with | .error e => containsSubstr e "break-glass" | .ok _ => false
+          -- 2. the approver, another hid: receipted, not used
+          let r2 ← anno "approver" (value "E2E-2" "p0-a9-1")
+          IO.sleep 5000
+          let log2 ← rcOpLog cfg t0
+          let notUsed := containsSubstr log2 "is not used: the value names handover p0-a9-1"
+          let replacedEarly := containsSubstr log2 "replaces it"
+          -- 3. the right value: consumed once, the committed replica takes over
+          let r3 ← anno "approver" (value "E2E-3" hid)
+          let consumed ← waitForCondition "the break-glass is consumed and a committed replica replaces the successor" 90 do
+            let l ← rcOpLog cfg t0
+            return containsSubstr l "break-glass E2E-3/" && containsSubstr l "replaces it"
+          let annGone ← waitForCondition "the consumed annotations are removed" 60 do
+            match ← kubectlGetJsonpath "flarecluster" cr ns "{.metadata.annotations}" with
+            | .ok o => return !containsSubstr o "handover-fenced"
+            | .error _ => return false
+          let fencedBy ← match ← kubectlGetJsonpath "flarecluster" cr ns "{.status.handovers.entries[0].fencedBy}" with
+            | .ok o => pure o | .error _ => pure ""
+          let approvals ← match ← kubectlGetJsonpath "flarecluster" cr ns "{.status.handoverApprovals}" with
+            | .ok o => pure o | .error _ => pure ""
+          let ev ← match ← kubectl ["get", "events", "-n", ns, "--field-selector", "reason=FlareHandoverFenced", "-o", "name"] with
+            | .ok o => pure (!o.trim.isEmpty) | .error _ => pure false
+          -- 4. the same value again: nothing more (one consume)
+          discard <| anno "approver" (value "E2E-3" hid)
+          IO.sleep 5000
+          let logEnd ← rcOpLog cfg t0
+          let consumes := ((logEnd.splitOn "break-glass E2E-3/").length) - 1
+          discard <| rcOpExec cfg "rm -f /tmp/bskip"
+          let all := mPod :: slaves
+          let roles ← rcRoles cfg all
+          IO.eprintln s!"# successor {sPod} binding {binding}, hid {hid}; updater refused={refused} ({r1}); other hid: {r2.isOk} not used={notUsed}; right value: {r3.isOk} consumed={consumed}, annotations removed={annGone}, fencedBy={fencedBy.take 200}, approvals {approvals}, event={ev}; consumes {consumes}; roles {roles}"
+          if !refused then return .fail s!"the updater (no break-glass permission) was not refused by the webhook: {r1}"
+          if replacedEarly then return .fail "the successor was replaced before the right value"
+          if !notUsed then return .fail "a value for another hid was not reported as not used"
+          if !consumed then return .fail "the right value was not consumed (no replacement)"
+          if !annGone then return .fail "the consumed annotations were not removed"
+          if !containsSubstr fencedBy "approver" then return .fail s!"fencedBy does not name the approver: {fencedBy}"
+          if !containsSubstr approvals "E2E-3" then return .fail s!"the approval id was not recorded: {approvals}"
+          if !ev then return .fail "no FlareHandoverFenced Event"
+          if consumes != 1 then return .fail s!"the value was consumed {consumes} times"
+          if (roles.filter (·.2 == "master")).length != 1 then return .fail s!"not exactly one master after the replacement: {roles}"
+          return .pass }
+    ] }
+
 end FlareOperator.E2E.Tests.HistoryContinuation

@@ -53,7 +53,36 @@ class WebhookTlsModeTest(unittest.TestCase):
         spec = pod_spec(ds)
         self.assertEqual([c["name"] for c in spec["containers"]], ["flare-operator", "webhook-tls"])
         self.assertEqual(spec["volumes"], [{"name": "webhook-tls", "secret": {"secretName": "rel-flare-operator-webhook-tls"}}])
-        self.assertNotIn("Role", [d["kind"] for d in ds])
+        # no webhook-cert Role in this mode; only the handover-fence receipt
+        # key and the (unbound) break-glass Role
+        self.assertEqual(sorted(d["metadata"]["name"] for d in ds if d["kind"] == "Role"),
+                         ["rel-flare-operator-handover-fence", "rel-flare-operator-receipt-key"])
+        mwc = one(ds, "MutatingWebhookConfiguration", "rel-flare-operator-handover-fence-ns")
+        self.assertEqual({w["clientConfig"].get("caBundle") for w in mwc["webhooks"]}, bundles)
+
+    def test_handover_fence_webhook_and_rbac(self):
+        ds = self.ok()
+        mwc = one(ds, "MutatingWebhookConfiguration", "rel-flare-operator-handover-fence-ns")
+        [w] = mwc["webhooks"]
+        # never blocks a FlareCluster update without the operator; writes nothing
+        self.assertEqual(w["failurePolicy"], "Ignore")
+        self.assertEqual(w["sideEffects"], "None")
+        self.assertEqual(w["rules"], [{"apiGroups": ["flare.gree.net"], "apiVersions": ["*"], "operations": ["UPDATE"],
+                                       "resources": ["flareclusters"], "scope": "Namespaced"}])
+        self.assertEqual(w["clientConfig"]["service"]["path"], "/flareclusters")
+        bg = one(ds, "Role", "rel-flare-operator-handover-fence")
+        self.assertEqual(bg["rules"], [{"apiGroups": ["flare.gree.net"], "resources": ["flareclusters/handover-fence"],
+                                        "verbs": ["break-glass"]}])
+        # unbound by default (addendum 9)
+        self.assertFalse(any(d["kind"] == "RoleBinding" and d["roleRef"]["name"] == "rel-flare-operator-handover-fence" for d in ds))
+        key = one(ds, "Role", "rel-flare-operator-receipt-key")
+        self.assertIn({"apiGroups": [""], "resources": ["secrets"], "resourceNames": ["rel-flare-operator-receipt-key"],
+                       "verbs": ["get"]}, key["rules"])
+        self.assertEqual(one(ds, "RoleBinding", "rel-flare-operator-receipt-key")["roleRef"]["name"], "rel-flare-operator-receipt-key")
+        self.assertIn({"apiGroups": ["authorization.k8s.io"], "resources": ["subjectaccessreviews"], "verbs": ["create"]},
+                      one(ds, "ClusterRole")["rules"])
+        env = {e["name"]: e.get("value") for e in pod_spec(ds)["containers"][0]["env"]}
+        self.assertEqual(env["FLARE_RECEIPT_KEY_SECRET"], "rel-flare-operator-receipt-key")
 
     def test_operator_mode_renders_no_secret_and_no_ca_bundle(self):
         ds = self.ok("nodeGuard.tls.mode=operator")
@@ -69,6 +98,9 @@ class WebhookTlsModeTest(unittest.TestCase):
         env = {e["name"]: e.get("value") for e in cert[0]["env"]}
         self.assertEqual(env["SECRET"], "rel-flare-operator-webhook-tls-operator")
         self.assertEqual(env["WEBHOOK_CONFIG"], "rel-flare-operator-node-guard-ns")
+        self.assertEqual(env["FENCE_WEBHOOK_CONFIG"], "rel-flare-operator-handover-fence-ns")
+        for w in one(ds, "MutatingWebhookConfiguration")["webhooks"]:
+            self.assertNotIn("caBundle", w["clientConfig"])
         self.assertIn("--field-manager=flare-webhook-cert", cert[0]["args"][0])
         self.assertIn("resources", cert[0])
         vol = [v for v in spec["volumes"] if v["name"] == "webhook-tls"][0]
@@ -80,6 +112,8 @@ class WebhookTlsModeTest(unittest.TestCase):
         cr = one(ds, "ClusterRole")
         self.assertIn({"apiGroups": ["admissionregistration.k8s.io"], "resources": ["validatingwebhookconfigurations"],
                        "resourceNames": ["rel-flare-operator-node-guard-ns"], "verbs": ["get", "patch"]}, cr["rules"])
+        self.assertIn({"apiGroups": ["admissionregistration.k8s.io"], "resources": ["mutatingwebhookconfigurations"],
+                       "resourceNames": ["rel-flare-operator-handover-fence-ns"], "verbs": ["get", "patch"]}, cr["rules"])
         self.assertFalse(any("secrets" in r["resources"] for r in cr["rules"]))
 
     def test_operator_mode_render_is_stable(self):
@@ -93,6 +127,7 @@ class WebhookTlsModeTest(unittest.TestCase):
         for mode in ["helm", "certManager"]:
             ds = self.ok(f"nodeGuard.tls.mode={mode}")
             self.assertFalse(any("validatingwebhookconfigurations" in r["resources"] for r in one(ds, "ClusterRole")["rules"]), mode)
+            self.assertFalse(any("mutatingwebhookconfigurations" in r["resources"] for r in one(ds, "ClusterRole")["rules"]), mode)
 
     def test_secret_mode(self):
         ds = self.ok("nodeGuard.tls.mode=secret", "nodeGuard.tls.secretName=mine", "nodeGuard.tls.caBundle=Q0E=")

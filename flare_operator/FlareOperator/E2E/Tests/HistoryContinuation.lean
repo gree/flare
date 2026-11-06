@@ -824,8 +824,46 @@ roleRef: \{kind: Role, name: flare-operator-handover-fence, apiGroup: rbac.autho
           let log2 ← rcOpLog cfg t0
           let notUsed := containsSubstr log2 "is not used: the value names handover p0-a9-1"
           let replacedEarly := containsSubstr log2 "replaces it"
-          -- 3. the right value: consumed once, the committed replica takes over
-          let r3 ← anno "approver" (value "E2E-3" hid)
+          let rcptOf := fun (_ : Unit) => do
+            match ← kubectlGetJsonpath "flarecluster" cr ns "{.metadata.annotations.flare\\.gree\\.net/handover-fenced-receipt}" with
+            | .ok o => pure o.trim | .error _ => pure ""
+          -- 2b. an authorized requester rewrites only the receipt: the webhook
+          -- puts the stored one back
+          let rcpt0 ← rcptOf ()
+          discard <| kubectl ["annotate", "flarecluster", cr, "-n", ns, "--overwrite", "--as", "approver",
+            s!"flare.gree.net/handover-fenced-receipt=E2E-2/p0-a9-1/r/approver/u/{String.mk (List.replicate 64 'a')}"]
+          let rcpt1 ← rcptOf ()
+          let restored := !rcpt0.isEmpty && rcpt1 == rcpt0
+          -- 2c. the webhook removed: a value for THIS hid with a forged
+          -- receipt goes in unchecked — the operator must not use it
+          let mwc := s!"flare-handover-fence-{ns}"
+          let saved := s!"/tmp/flare-e2e-mwc-{ns}.json"
+          let sv ← IO.Process.output { cmd := "sh", args := #["-c",
+            s!"kubectl get mutatingwebhookconfiguration {mwc} -o json | jq 'del(.metadata.resourceVersion,.metadata.uid,.metadata.creationTimestamp,.metadata.generation,.metadata.managedFields)' > {saved}"] }
+          if sv.exitCode != 0 then return .fail s!"could not save the mutating webhook: {sv.stderr.trim}"
+          discard <| kubectl ["delete", "mutatingwebhookconfiguration", mwc]
+          IO.sleep 3000
+          let forgedValue := value "E2E-F" hid
+          discard <| kubectl ["annotate", "flarecluster", cr, "-n", ns, "--overwrite",
+            s!"flare.gree.net/handover-fenced={forgedValue}",
+            s!"flare.gree.net/handover-fenced-receipt=E2E-F/{hid}/r/admin/u/{String.mk (List.replicate 64 '0')}"]
+          IO.sleep 8000
+          let logF ← rcOpLog cfg t0
+          let forgedRefused := containsSubstr logF s!"the handover-fenced value {forgedValue} is not used: the receipt is not the webhook's"
+          let forgedUsed := containsSubstr logF "break-glass E2E-F/"
+          discard <| kubectl ["annotate", "flarecluster", cr, "-n", ns, "flare.gree.net/handover-fenced-", "flare.gree.net/handover-fenced-receipt-"]
+          let rs ← IO.Process.output { cmd := "kubectl", args := #["create", "-f", saved] }
+          if rs.exitCode != 0 then return .fail s!"could not restore the mutating webhook: {rs.stderr.trim}"
+          IO.sleep 3000
+          -- 3. the right value, applied twice at once: consumed once, the
+          -- committed replica takes over
+          let tA ← IO.asTask (anno "approver" (value "E2E-3" hid))
+          let tB ← IO.asTask (anno "approver" (value "E2E-3" hid))
+          let r3 := match ← IO.wait tA, ← IO.wait tB with
+            | .ok (.ok a), _ => Except.ok a
+            | _, .ok (.ok b) => .ok b
+            | .ok (.error e), _ => .error e
+            | .error e, _ => .error s!"{e}"
           let consumed ← waitForCondition "the break-glass is consumed and a committed replica replaces the successor" 90 do
             let l ← rcOpLog cfg t0
             return containsSubstr l "break-glass E2E-3/" && containsSubstr l "replaces it"
@@ -847,10 +885,13 @@ roleRef: \{kind: Role, name: flare-operator-handover-fence, apiGroup: rbac.autho
           discard <| rcOpExec cfg "rm -f /tmp/bskip"
           let all := mPod :: slaves
           let roles ← rcRoles cfg all
-          IO.eprintln s!"# successor {sPod} binding {binding}, hid {hid}; updater refused={refused} ({r1}); other hid: {r2.isOk} not used={notUsed}; right value: {r3.isOk} consumed={consumed}, annotations removed={annGone}, fencedBy={fencedBy.take 200}, approvals {approvals}, event={ev}; consumes {consumes}; roles {roles}"
+          IO.eprintln s!"# successor {sPod} binding {binding}, hid {hid}; updater refused={refused} ({r1}); other hid: {r2.isOk} not used={notUsed}; receipt rewrite restored={restored}; forged receipt without the webhook: refused={forgedRefused} used={forgedUsed}; right value (twice at once): {r3.isOk} consumed={consumed}, annotations removed={annGone}, fencedBy={fencedBy.take 200}, approvals {approvals}, event={ev}; consumes {consumes}; roles {roles}"
           if !refused then return .fail s!"the updater (no break-glass permission) was not refused by the webhook: {r1}"
           if replacedEarly then return .fail "the successor was replaced before the right value"
           if !notUsed then return .fail "a value for another hid was not reported as not used"
+          if !restored then return .fail s!"a receipt rewritten by the requester was not put back by the webhook ({rcpt0.take 60} -> {rcpt1.take 60})"
+          if forgedUsed then return .fail "a forged receipt (the webhook removed) was CONSUMED"
+          if !forgedRefused then return .fail "a forged receipt (the webhook removed) was not reported as not the webhook's"
           if !consumed then return .fail "the right value was not consumed (no replacement)"
           if !annGone then return .fail "the consumed annotations were not removed"
           if !containsSubstr fencedBy "approver" then return .fail s!"fencedBy does not name the approver: {fencedBy}"

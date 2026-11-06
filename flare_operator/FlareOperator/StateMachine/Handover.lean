@@ -158,6 +158,11 @@ structure Entry where
       person declared the silent successor stopped or cut off. Used once;
       kept for the audit. -/
   fencedBy : String := ""
+  /-- the successor was armed for this continuation's V2 (the promoting
+      full send): it commits E' = toEpoch at promotion, so the completion
+      also requires that epoch (an arm refusal promotes it the ordinary
+      way, with a new epoch) -/
+  successorArmed : Bool := false
   deriving Repr, Inhabited, BEq
 
 structure Ledger where
@@ -216,6 +221,8 @@ structure Obs where
       binding (pod UID, boot id, copy id) the demote recorded: the process
       that may hold V2 is alive and reachable (addendum 4) -/
   successorAlive : Bool := false
+  /-- the successor's rocksdb_source_epoch read this tick -/
+  successorEpoch : Option String := none
   deriving Repr
 
 /-- What Main does after a step. -/
@@ -340,7 +347,7 @@ def replaceSuccessor (e : Entry) (now : Nat) : Option Entry :=
   | some (k, b) =>
     some { toPhase e .promoting now s!"the successor {e.successor} stopped (its kubelet confirmed it): {k}, committed to the continued history, replaces it (the other committed replicas rebuild)" with
       successor := k, successorBinding := b, fencedOut := e.successor,
-      successorStopped := "", v2 := none, fullSent := false,
+      successorStopped := "", v2 := none, fullSent := false, successorArmed := false,
       hid := "", prepared := [], committed := [] }
   | none => none
 
@@ -417,8 +424,13 @@ def step (cfg : Config) (e : Entry) (o : Obs) : Entry × Action :=
     | some v2 =>
       -- after a continuation the V2 so far went to the prepared replicas
       -- only: now the successor and every other pod (same version)
+      -- continuation on: done only for THE successor (the recorded binding)
+      -- and, when it was armed, on the continued epoch (review of 6dfdc2f:
+      -- a replacement pod reporting V2 and master is not the successor)
+      let epochOk := !e.successorArmed || (!e.toEpoch.isEmpty && o.successorEpoch == some e.toEpoch)
+      let sameSuccessor := !cfg.continuation || (o.successorAlive && epochOk)
       if !e.hid.isEmpty && !e.fullSent then (e, .send)
-      else if allApplied o.entryVersions v2 && o.successorOwnRole == some "master" then
+      else if allApplied o.entryVersions v2 && o.successorOwnRole == some "master" && sameSuccessor then
         (toPhase e .done o.nowMs, .finish)
       -- addendum 4 §2: after V2 went to the successor it may already be
       -- the master; no other replica is promoted unless its stop is
@@ -432,6 +444,8 @@ def step (cfg : Config) (e : Entry) (o : Obs) : Entry × Action :=
           | none => ({ toPhase e .aborted o.nowMs s!"the successor {e.successor} stopped after V2 (its kubelet confirmed it) and no replica committed: the failover rules apply" with noRollback := true }, .finish)
         else
           (halt e s!"V2 went to the successor {e.successor}, which does not answer with its binding (its stop is not confirmed by its kubelet): no other replica is promoted", .none)
+      else if cfg.continuation && o.nowMs >= e.phaseMs + cfg.handoverMs && !epochOk then
+        (halt e s!"the successor {e.successor} answers with its binding but not on the continued epoch {e.toEpoch} ({o.successorEpoch.getD "unreadable"}): not done, no other replica is promoted", .none)
       else (e, .none)
   | .preparing =>
     -- Main prepares in the same tick it gets .prepare and records the
@@ -637,6 +651,7 @@ def Entry.toJson (e : Entry) : Json :=
     ++ (if e.successorStopped.isEmpty then [] else [("successorStopped", Json.str e.successorStopped)])
     ++ (if e.fencedOut.isEmpty then [] else [("fencedOut", Json.str e.fencedOut)])
     ++ (if e.fencedBy.isEmpty then [] else [("fencedBy", Json.str e.fencedBy)])
+    ++ (if e.successorArmed then [("successorArmed", Json.bool true)] else [])
 
 open Lean in
 def Entry.fromJson? (j : Json) : Option Entry := do
@@ -673,7 +688,8 @@ def Entry.fromJson? (j : Json) : Option Entry := do
          fullSent := (j.getObjValAs? Bool "fullSent").toOption.getD false,
          successorStopped := (j.getObjValAs? String "successorStopped").toOption.getD "",
          fencedOut := (j.getObjValAs? String "fencedOut").toOption.getD "",
-         fencedBy := (j.getObjValAs? String "fencedBy").toOption.getD "" }
+         fencedBy := (j.getObjValAs? String "fencedBy").toOption.getD "",
+         successorArmed := (j.getObjValAs? Bool "successorArmed").toOption.getD false }
 
 open Lean in
 def Ledger.toJson (l : Ledger) : Json :=

@@ -92,9 +92,27 @@ private def recoveryResults : List (String × Bool) := Id.run do
                 && pn.phase == .aborted && pna == .finish && pn.noRollback
                 && poff == prom && poffa == .none)]
   -- the applied promotion still finishes, alive or not
-  let doneObs : Obs := { okObs pl with entryVersions := [("s:12121", some 9), ("m:12121", some 9)], successorOwnRole := some "master" }
-  r := r ++ [("recovery: a successor that applied V2 (all pods at V2, own_role master) finishes the handover even past Th",
+  let doneObs : Obs := { okObs pl with entryVersions := [("s:12121", some 9), ("m:12121", some 9)], successorOwnRole := some "master",
+                                       successorAlive := true, successorEpoch := some "9:e" }
+  r := r ++ [("recovery: a successor that applied V2 (all pods at V2, own_role master, its recorded binding) finishes the handover even past Th",
               (step ccfg prom doneObs).1.phase == .done)]
+  -- review of 6dfdc2f (P1): another pod / process / copy under the
+  -- successor's name reporting V2 and master is not the successor
+  let other : Obs := { doneObs with successorAlive := false }
+  let (o1, oa1) := step ccfg prom { other with nowMs := 3000 }
+  let (o2, _) := step ccfg prom other
+  let armed := { prom with successorArmed := true }
+  let (w1, _) := step ccfg armed { doneObs with successorEpoch := some "8:old", nowMs := 3000 }
+  let (w2, _) := step ccfg armed { doneObs with successorEpoch := some "8:old" }
+  let (w3, _) := step ccfg armed { doneObs with successorEpoch := none }
+  r := r ++ [("recovery: promoting is done only for THE successor — another UID / boot / copy reporting V2 and master is not done (HALTED past Th, no replacement without a confirmed stop); armed, the wrong or an unreadable epoch is not done (HALTED past Th), toEpoch is; continuation off as before",
+              o1 == prom && oa1 == .none && o2.phase == .promoting && o2.reason.startsWith "HALTED" && o2.successor == "s:12121"
+                && w1.phase == .promoting && !w1.reason.startsWith "HALTED"
+                && w2.phase == .promoting && w2.reason.startsWith "HALTED"
+                && w3.phase == .promoting && w3.reason.startsWith "HALTED"
+                && (step ccfg armed doneObs).1.phase == .done
+                && (step {} prom other).1.phase == .done
+                && (Ledger.fromJson? ({ entries := [armed] } : Ledger).toJson).map (fun l => l.entries.map (·.successorArmed)) == some [true])]
   -- the frozen keys: every copy of the partition while committing or V2 is out
   let slavesOf := fun (p : Nat) => if p == 0 then ["s:12121", "r1:12121", "r2:12121"] else []
   r := r ++ [("recovery: while committingReplicas, promoting with V2 out, or replacing a stopped successor (before its V3 too), the partition's copies (and a fenced successor) are not promoted by the failover/refill; not before V2 otherwise, not after",

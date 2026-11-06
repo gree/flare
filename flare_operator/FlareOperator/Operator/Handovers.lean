@@ -566,7 +566,8 @@ def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterState)
         zeroCommitProven := HandoverDrive.zeroProven e contReads,
         -- a complete reply with the binding the demote recorded (addendum 4)
         successorAlive := !e.successorBinding.isEmpty && succBinding == some e.successorBinding
-          && (succOut.map statsReplyComplete).getD false }
+          && (succOut.map statsReplyComplete).getD false,
+        successorEpoch := succOut.bind (statStr · "rocksdb_source_epoch") }
       -- still requested and this successor is not accepted now: another
       -- Active slave the precheck accepts takes its place (nothing was sent)
       if e.phase == .requested && (!succEligible || !succR3 || succBinding.isNone) then
@@ -869,6 +870,7 @@ def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterState)
           let res := r.bind HandoverDrive.historyResult
           if HandoverDrive.armOk res then
             IO.eprintln s!"[flare-operator] HANDOVER p{e.partition}: successor {e1.successor} armed for v{sendV} (V2 = v{v2}; {res.getD ""})"
+            e1 := { e1 with successorArmed := true }
           else
             IO.eprintln s!"[flare-operator] HANDOVER p{e.partition}: arm of {e1.hid} for v{sendV} on the successor {e1.successor} answered {res.getD "nothing"}: the ordinary promotion goes on (it advances its epoch; committed replicas rebuild)"
       let e2 ← if act == .send then do

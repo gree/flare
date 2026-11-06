@@ -1196,16 +1196,35 @@ private def observeHistory (stateRef : IO.Ref FlareClusterState) (crName ns : St
       if holdResolve then
         IO.eprintln s!"[flare-operator] TEST SEAM: intent resolution of p{p} held (FLARE_TEST_HOLD_RESOLVE_FILE)"
     | none => pure ()
+    -- A3b (addenda 4 / 5): an intent whose target is the successor of an
+    -- open history-continuation handover belongs to that handover. While it
+    -- is open and the target does not read with the intent's binding, the
+    -- intent waits (the handover halts, or replaces the successor after its
+    -- proven stop) instead of holding the partition; once the handover
+    -- fenced the target out (a committed replica replaces it), the intent is
+    -- dropped as superseded and the replacement's own intent can begin.
+    let hos := (← handoverRef.get).entries.filter (·.partition == p)
+    let targetSeenBound := fun (i : AuthoritativeHistory.Intent) =>
+      match (seen.lookup i.target).getD .unreadable with
+      | .modern b _ _ _ _ _ => b == i.binding
+      | _ => false
     match (if holdResolve then none else store.intentFor p) with
     | some i =>
-      match persisted with
-      | none => pure ()
-      | some pm =>
-        let there := (pm.lookupNode i.target).map (fun n => n.role == FlareRole.Master && n.partition == Int.ofNat p) |>.getD false
-        let (s', c) := AuthoritativeHistory.resolveIntent store i pm.nodeMapVersion pm.transitions there
-          ((seen.lookup i.target).getD .unreadable) now
-        store := s'
-        changes := note c changes
+      if hos.any (fun e => e.phase == .promoting && e.fencedOut == i.target) then
+        store := { store with intents := store.intents.filter (·.id != i.id) }
+        changes := changes ++ [s!"p{p}: intent dropped: {i.id}: superseded — its target {i.target} stopped (proven) and a committed replica replaces it"]
+      else if hos.any (fun e => e.successor == i.target && (e.phase == .committingReplicas || (e.phase == .promoting && e.v2.isSome)))
+          && !targetSeenBound i then
+        pure ()
+      else
+        match persisted with
+        | none => pure ()
+        | some pm =>
+          let there := (pm.lookupNode i.target).map (fun n => n.role == FlareRole.Master && n.partition == Int.ofNat p) |>.getD false
+          let (s', c) := AuthoritativeHistory.resolveIntent store i pm.nodeMapVersion pm.transitions there
+            ((seen.lookup i.target).getD .unreadable) now
+          store := s'
+          changes := note c changes
     | none =>
       match store.part p with
       | some (.known r _) =>

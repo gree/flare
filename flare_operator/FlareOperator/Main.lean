@@ -2452,8 +2452,17 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
           attributedRejoin := (n?.map fun n => PromotionEvidence.isAttributedRejoin (n.role == FlareRole.Slave) (n.state == FlareState.Prepare) n.partition n.lastMasterOf n.formerSlaveOf).getD false }
         let cls := PromotionEvidence.classify replyNow obs
         IO.eprintln s!"[flare-operator] PROMOTION EVIDENCE (read at commit, a pass that did not read the candidates): {k}={cls.label} [boot {(PromotionEvidence.bindingOf none replyNow).bootId.getD "?"}]"
-        let allows := if proven then PromotionEvidence.handoverCommitAllows cls else PromotionEvidence.commitTimeAllows cls
-        if proven && allows && !PromotionEvidence.commitTimeAllows cls then
+        -- A3b: a committed replica replacing a stopped successor holds the
+        -- handover's continued history (master_id, E'), not the recorded E
+        let contHist ← handoverContinuedHistoryRef.get
+        let continued := proven && match replyNow with
+          | some out => contHist.any fun (kk, m, ep) =>
+              kk == k && statStr out "rocksdb_master_id" == some m && statStr out "rocksdb_source_epoch" == some ep
+          | none => false
+        let allows := if proven then PromotionEvidence.handoverCommitAllows cls || continued else PromotionEvidence.commitTimeAllows cls
+        if continued && !PromotionEvidence.handoverCommitAllows cls then
+          IO.eprintln s!"[flare-operator] promotion of {k}: {cls.label} at commit, accepted: it holds the continued history of its handover (committed replica replacing a stopped successor)"
+        else if proven && allows && !PromotionEvidence.commitTimeAllows cls then
           IO.eprintln s!"[flare-operator] promotion of {k}: {cls.label} at commit, accepted for an ordered handover whose drain was proven clean"
         if podNow.isNone || !allows then
           IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: an existing copy promoted on a pass that did not read it, read at commit as {cls.label}{if podNow.isNone then " (pod unreadable)" else ""} — nothing from this pass is committed, the next pass reads again"

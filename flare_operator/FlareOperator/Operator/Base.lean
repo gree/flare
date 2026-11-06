@@ -448,6 +448,11 @@ initialize handoverRef : IO.Ref Handover.Ledger ← IO.mkRef {}
     committed now (set right before commitPromote; the ledger in
     handoverRef is written only at the end of runHandovers). -/
 initialize handoverCommitBindingRef : IO.Ref (List (String × String)) ← IO.mkRef []
+/-- A3b: the replacement of a stopped successor promotes a replica that
+    COMMITTED the continued history (key, master_id, E'): the authoritative
+    history still names E, so the commit-time reading says "rejoining"; this
+    exact history is the handover's own and is accepted (nothing else). -/
+initialize handoverContinuedHistoryRef : IO.Ref (List (String × String × String)) ← IO.mkRef []
 /-- Masters (node key, pod UID) to hand over now although their pod is not
     Terminating (review of 9756855: a delete is irreversible, so the switch
     comes first): asked by a refused delete in the node guard or by rolling.

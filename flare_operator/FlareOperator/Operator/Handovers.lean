@@ -810,6 +810,8 @@ def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterState)
         let before ← stateRef.get
         -- the lossless exception only after a drain proven clean
         handoverCommitBindingRef.set [(e1.successor, e1.successorBinding)]
+        handoverContinuedHistoryRef.set (if !e1.fencedOut.isEmpty && !e1.contMasterId.isEmpty && !e1.toEpoch.isEmpty
+          then [(e1.successor, e1.contMasterId, e1.toEpoch)] else [])
         let ok ← commitPromote (if e1.drainProven then some (e1.successor, (succPod.map (·.uid)).getD "") else none) (Handover.apply before e1)
         let after ← stateRef.get
         let promoted := (after.lookupNode e1.successor).any (·.role == FlareRole.Master)
@@ -821,7 +823,16 @@ def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterState)
           act := .none
         else
           IO.eprintln s!"[flare-operator] HANDOVER p{e.partition}: the promotion of {e1.successor} was REFUSED by the promotion gates"
-          if oldSameProcess then
+          if !e1.fencedOut.isEmpty then
+            -- a replacement after commits: never back to the old master (the
+            -- committed replicas refuse its epoch); held, asked again next tick
+            let why := s!"HALTED: the promotion gates refused {e1.successor}, the committed replica replacing the stopped successor {e1.fencedOut}: nothing is promoted, nothing rolled back"
+            if e1.reason != why then
+              IO.eprintln s!"[flare-operator] CRITICAL: HANDOVER p{e.partition}: {why}"
+              Bridge.emitEvent crName ns "FlareHandoverSuccessorUnfenced" s!"p{e.partition}: {why}" true
+            e1 := { e1 with reason := why }
+            act := .none
+          else if oldSameProcess then
             e1 := { e1 with phase := .aborted, phaseMs := now, reason := "the promotion gates refused the successor" }
             act := .send
           else

@@ -62,17 +62,23 @@ def ensureKey (ns : String) : IO (Option ByteArray) := do
     | _ => return none
 
 /-- Ask the API server whether the requester may break-glass this
-    FlareCluster's handover fence. `none` = no answer (refused). -/
-def sarAllowed (ns name username userUid : String) (groups : List String) : IO (Option Bool) := do
+    FlareCluster's handover fence. `.error` = no answer (refused). A raw
+    POST: no API discovery inside the webhook's 5 s (42147157735: the
+    typed `kubectl create -f` did not answer in time). -/
+def sarAllowed (ns name username userUid : String) (groups : List String) : IO (Except String Bool) := do
   try
     let pid ← IO.Process.getPID
     let path : System.FilePath := s!"/tmp/flare-operator-sar-{pid}-{← IO.monoNanosNow}.json"
     IO.FS.writeFile path (HandoverFence.sarJson ns name username userUid groups).compress
-    let out ← IO.Process.output { cmd := "timeout", args := #["-k", "1", "4", "kubectl", "create", "-f", path.toString, "-o", "json"] }
+    let out ← IO.Process.output { cmd := "timeout", args := #["-k", "1", "4", "kubectl", "create", "--raw",
+      "/apis/authorization.k8s.io/v1/subjectaccessreviews", "-f", path.toString] }
     try IO.FS.removeFile path catch _ => pure ()
-    if out.exitCode != 0 then return none
-    return HandoverFence.sarAllowed? out.stdout
-  catch _ => return none
+    if out.exitCode != 0 then
+      return .error s!"exit {out.exitCode}: {out.stderr.trim.take 300}"
+    match HandoverFence.sarAllowed? out.stdout with
+    | some b => return .ok b
+    | none => return .error s!"unreadable reply: {out.stdout.trim.take 200}"
+  catch e => return .error s!"{e}"
 
 /-- The mutating webhook's answer for a FlareCluster UPDATE of this cluster
     (addenda 8–9): a new or changed handover-fenced value gets a receipt
@@ -97,7 +103,7 @@ def answer (crName ns : String) (r : Admission.Review) : IO String := do
     return Admission.patchResponse r.uid [HandoverFence.annotationPatch HandoverFence.receiptAnnotation old newR.isSome]
   | .authorize v =>
     match ← sarAllowed ns crName r.username r.userUid r.groups with
-    | some true =>
+    | .ok true =>
       let some key ← ensureKey ns
         | IO.eprintln s!"[flare-operator] NODE GUARD: handover-fenced REFUSED for {r.username}: no receipt key"
           return Admission.reviewResponse r.uid false "flare: the handover fence cannot be receipted now (no key); retry"
@@ -105,11 +111,11 @@ def answer (crName ns : String) (r : Admission.Review) : IO String := do
       let rc := HandoverFence.receiptFor key value v r.uid r.username r.userUid
       IO.eprintln s!"[flare-operator] NODE GUARD: handover-fenced {value} by {r.username} (uid {r.userUid}, review {r.uid}): receipted"
       return Admission.patchResponse r.uid [HandoverFence.annotationPatch HandoverFence.receiptAnnotation (some rc) newR.isSome]
-    | some false =>
+    | .ok false =>
       IO.eprintln s!"[flare-operator] NODE GUARD: handover-fenced REFUSED for {r.username}: no break-glass permission on flareclusters/handover-fence"
       return Admission.reviewResponse r.uid false s!"flare: {r.username} may not break-glass the handover fence (verb break-glass on flareclusters/handover-fence, group flare.gree.net)"
-    | none =>
-      IO.eprintln s!"[flare-operator] NODE GUARD: handover-fenced REFUSED for {r.username}: the SubjectAccessReview did not answer"
+    | .error why =>
+      IO.eprintln s!"[flare-operator] NODE GUARD: handover-fenced REFUSED for {r.username}: the SubjectAccessReview did not answer ({why})"
       return Admission.reviewResponse r.uid false "flare: the permission could not be checked (SubjectAccessReview); retry"
 
 /-- The fence annotations of the FlareCluster and the approval ids status

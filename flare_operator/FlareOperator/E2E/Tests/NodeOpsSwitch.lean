@@ -1896,9 +1896,9 @@ private def scenarioSuite (sc : Scenario) (st : SwitchStorage) : TestSuite :=
     acknowledged writes missing (the S1 verdict) — and the replica that is not
     the successor keeps its copy: its flared log shows `COMMITTED as replica`
     and no staged rebuild after it. -/
-def continuationSwitchTest (c : Ctx) : IO TestResult := do
+def continuationSwitchTest (c : Ctx) (op : SwitchOp := .deleteMaster) : IO TestResult := do
   let t0 := (← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%SZ"] }).stdout.trim
-  let r ← switchTest c .deleteMaster
+  let r ← switchTest c op
   match r with
   | .pass =>
     let ns := c.cfg.«namespace»
@@ -1938,6 +1938,27 @@ def continuationSwitchSuite : TestSuite :=
     tests := [{ name := "(A4) kubectl delete pod of the MASTER with three copies and history continuation on, under a client-like load: 0 write errors, 0 acknowledged writes missing, and the replica that is not the successor keeps its copy (COMMITTED as replica, no staged rebuild after it)",
                 run := continuationSwitchTest c }] }
 
+/-- node-ops-switch-tmpfs-continuation-cordon-master: C1 (cordon + drain of
+    the master's worker, the node guard and the cordon move) with three
+    copies and the continuation on: the C1 verdict and no rebuild of the
+    replica that is not the successor. -/
+def continuationCordonSuite : TestSuite :=
+  let cfg := { cfgOf "node-swt-cont-cordon" true false with
+    replicas := 3, nodeGuard := true, nodeReplacement := true, nodeReplacementMinCopies := 2,
+    operatorEnv := [("FLARE_OPERATOR_HISTORY_CONTINUATION", "on")] }
+  let c : Ctx := { cfg, suite := "node-ops-switch-tmpfs-continuation-cordon-master", test := "s-continuation-cordon-master" }
+  { name := "node-ops-switch-tmpfs-continuation-cordon-master"
+    setup := do
+      deployCluster cfg
+      IO.sleep 50000
+    teardown := do
+      for w in ← dataWorkers do uncordon w
+      cleanupCluster cfg
+    onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
+    afterEach := fun i => saveFullLogs cfg.«namespace» s!"after-test-{i}"
+    tests := [{ name := "(A4) kubectl cordon + drain of the MASTER's worker (node guard, cordon move) with three copies and history continuation on, under a client-like load: 0 write errors, 0 acknowledged writes missing, and the replica that is not the successor keeps its copy (COMMITTED as replica, no staged rebuild after it)",
+                run := continuationSwitchTest c .cordonMaster }] }
+
 def scenarios : List Scenario := [.op .deleteMaster, .op .rollingRestart, .op .rollBoth, .op .drainMaster, .gate, .sigtermHold, .op .deleteMasterSaveFail, .op .deleteMasterAbortRetry, .abortExhaust, .nodeGuard, .op .deleteMasterLeaseTakeover, .op .deleteMasterObserveFail, .op .helmUpgrade]
 
 /-- node-ops-switch-<scenario> (PVC on local-path), node-ops-switch-tmpfs-<scenario>,
@@ -1949,6 +1970,6 @@ def switchSuites : List TestSuite :=
     ++ [Scenario.op .cordonMaster, .op .cordonReplica, .cordonBlocked, .cordonCancel, .cordonNoSuccessor, .cordonOperatorRestart, .cordonTwoNodes, .cordonNoOperator, .cordonRestartQuiet, .cordonStuck].map (fun sc => scenarioSuite sc .tmpfs)
     ++ [Scenario.op .cordonMaster, .op .cordonReplica].map (fun sc => scenarioSuite sc .pvcNfs)
     ++ [scenarioSuite .cordonPinned .pvcLocal]
-    ++ [continuationSwitchSuite]
+    ++ [continuationSwitchSuite, continuationCordonSuite]
 
 end FlareOperator.E2E.Tests.NodeOpsSwitch

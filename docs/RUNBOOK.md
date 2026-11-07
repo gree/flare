@@ -70,13 +70,30 @@ its manager owns, so applying the new chart (`type: OnDelete`, no
 updateStrategy 'RollingUpdate'` (the ArgoCD diff shows it as an error). Do it
 in two syncs:
 
-1. Patch the flared StatefulSet in the overlay with the value it already has
-   (`updateStrategy: {type: RollingUpdate, rollingUpdate: {partition: 0}}`)
-   and sync. Nothing changes (`metadata.generation` stays, no pod is
-   replaced), but ArgoCD now owns both fields (check `managedFields`, or a
-   server dry-run).
+1. Read the live value first and copy it exactly (it is not always 0):
+
+   ```bash
+   kubectl -n <ns> get sts <cluster>-nodes -o jsonpath='{.spec.updateStrategy}'
+   #   {"rollingUpdate":{"partition":0},"type":"RollingUpdate"}   (pf-dev)
+   ```
+
+   Patch the flared StatefulSet in the overlay with that value
+   (`updateStrategy: {type: RollingUpdate, rollingUpdate: {partition: <live
+   value>}}`) and nothing else: keep the chart version, the images and every
+   other value as they are, so this sync carries no other change. Before
+   syncing, the diff (ArgoCD diff, or a server dry-run) must show no change
+   to the StatefulSet's `spec` — in particular none to `updateStrategy` and
+   none to the pod `template`. **If it shows any, stop and find out why**: the
+   strategy is still `RollingUpdate`, and with `partition: 0` every ordinal is
+   up for update, so a template change synced now replaces the pods by the
+   StatefulSet controller (no handover, the master included) before the move
+   to `OnDelete`. After the sync, check that `metadata.generation` did not
+   change, that no pod was replaced, and that `managedFields` shows ArgoCD's
+   manager owning `updateStrategy.type` and `rollingUpdate.partition`.
 2. Remove that patch together with the chart upgrade and sync. ArgoCD drops
-   the `rollingUpdate` it owns and the strategy becomes `OnDelete`.
+   the `rollingUpdate` it owns and the strategy becomes `OnDelete`; check
+   `spec.updateStrategy` is `{"type":"OnDelete"}` before the operator starts
+   replacing pods (`ROLLING:` in its log).
 
 pf-dev did this for rc70 (moc2-k8s #10343, then #10332). helm's three-way
 merge does not need it.

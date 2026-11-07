@@ -60,6 +60,27 @@ time, with graceful deletes ([node guard](#node-guard)). With `replicas: 1`
 (no replica) a master has nobody to hand over to: rolling waits on it and
 the master is not replaced.
 
+**Under ArgoCD server-side apply (`ServerSideApply=true`), own
+`updateStrategy` first.** A StatefulSet created by an rc68-or-older chart
+holds `updateStrategy.rollingUpdate.partition: 0`, a default the API server
+filled in that no field manager owns. Server-side apply removes only fields
+its manager owns, so applying the new chart (`type: OnDelete`, no
+`rollingUpdate`) keeps `rollingUpdate` and the StatefulSet is refused:
+`spec.updateStrategy.rollingUpdate: Invalid value: …: only allowed for
+updateStrategy 'RollingUpdate'` (the ArgoCD diff shows it as an error). Do it
+in two syncs:
+
+1. Patch the flared StatefulSet in the overlay with the value it already has
+   (`updateStrategy: {type: RollingUpdate, rollingUpdate: {partition: 0}}`)
+   and sync. Nothing changes (`metadata.generation` stays, no pod is
+   replaced), but ArgoCD now owns both fields (check `managedFields`, or a
+   server dry-run).
+2. Remove that patch together with the chart upgrade and sync. ArgoCD drops
+   the `rollingUpdate` it owns and the strategy becomes `OnDelete`.
+
+pf-dev did this for rc70 (moc2-k8s #10343, then #10332). helm's three-way
+merge does not need it.
+
 **First upgrade from rc68 or older: `legacyMasterSwitch`.** A master running
 an rc68-or-older flared cannot be handed over without possible loss, so by
 default the operator does not replace it: rolling waits with

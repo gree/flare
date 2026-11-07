@@ -73,9 +73,20 @@ in two syncs:
 1. Read the live value first and copy it exactly (it is not always 0):
 
    ```bash
-   kubectl -n <ns> get sts <cluster>-nodes -o jsonpath='{.spec.updateStrategy}'
-   #   {"rollingUpdate":{"partition":0},"type":"RollingUpdate"}   (pf-dev)
+   kubectl -n <ns> get sts <cluster>-nodes -o jsonpath-as-json='{.spec.updateStrategy}'
+   # [
+   #     {
+   #         "rollingUpdate": {
+   #             "partition": 0
+   #         },
+   #         "type": "RollingUpdate"
+   #     }
+   # ]
    ```
+
+   (`jsonpath-as-json` prints JSON, wrapped in a list; the output above is
+   from kubectl 1.36.3. Plain `jsonpath` prints this map as JSON or as
+   `map[…]` depending on the kubectl version.) pf-dev had `partition: 0`.
 
    Patch the flared StatefulSet in the overlay with that value
    (`updateStrategy: {type: RollingUpdate, rollingUpdate: {partition: <live

@@ -106,10 +106,25 @@ SAFETY-TODO.md.
   StatefulSet uses `updateStrategy: OnDelete`, and the operator replaces the
   Pods one at a time. See [RUNBOOK.md#upgrading](RUNBOOK.md#upgrading).
 - **A cordoned node is moved off proactively.** When a node is cordoned, the
-  operator moves its flare nodes before a drain evicts them: a master by
-  handover, a slave by building a new copy on another node first. It starts
-  only while the partition keeps `nodeReplacement.minCopies` (default 3)
-  real copies.
+  operator moves each flare node on it before a drain evicts it. No
+  replacement copy is built in advance; the copy being moved is gone until
+  its replacement has synced.
+  1. A master is first handed over to a slave on another node (above).
+  2. The node is demoted to a proxy, and its serving label is removed so
+     the client Service and load balancer stop sending to it.
+  3. Once it gets no new connections, the Pod is deleted: by the drain's
+     eviction, or by the operator 60 s after release.
+  4. The StatefulSet recreates the Pod on another node, and it syncs from
+     the master as a slave.
+  5. Once synced, it gets its serving label back.
+
+  While the Pod is being recreated and synced, the partition has one copy
+  fewer (in the pf-dev test of 2026-11-09, about 3.5 minutes for 15.9
+  million items). The move starts only if the partition has at least
+  `nodeReplacement.minCopies` (default 3) real copies, counting the one
+  being moved. With 3 copies, the master and one more copy remain during
+  the move. See
+  [RUNBOOK.md#cordon-move](RUNBOOK.md#cordon-move).
 - **History continuation after a handover** (PR #151). The remaining
   replicas take over the new master's history instead of rebuilding. Off
   unless the operator runs with `FLARE_OPERATOR_HISTORY_CONTINUATION=on`, and

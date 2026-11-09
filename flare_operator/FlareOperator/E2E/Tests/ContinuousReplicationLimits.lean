@@ -2064,7 +2064,14 @@ def identitySuite : TestSuite := {
               let winLines := ((← c.opLogSince since13).splitOn "\n")
               let wrongPromotion := winLines.any fun l => containsSubstr l "PROMOTION committed"
                 && (containsSubstr l s!"{other}." || containsSubstr l s!"{target}.")
-              let drainIncomplete := winLines.any fun l => containsSubstr l "NO promotable successor" && containsSubstr l s!"{m}."
+              -- the ordered handover logs its own stop instead (CI 42569844590,
+              -- a174c3e: both successors REFUSED by the promotion gates, then
+              -- "the planned handover of … gave up …; it stays the master")
+              let drainIncomplete := winLines.any fun l =>
+                (containsSubstr l "NO promotable successor"
+                  || (containsSubstr l "the planned handover of" && containsSubstr l "gave up"
+                      && containsSubstr l "it stays the master"))
+                && containsSubstr l s!"{m}."
               -- the other slave may be unfit for another LOGGED reason than R3 0
               -- (CI 37717620315: it was under an R3 repair rebuild — demoted
               -- to a proxy — when the drain came): a repair of it, or a

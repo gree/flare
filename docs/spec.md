@@ -1,44 +1,186 @@
-# flareのスペック
+# Flare Specification
 
-1, 全てのサーバーがproxy:違うパーティションのデータやslaveにきた書き込みなどが適切なサーバーに転送
-2, データにはバージョンがついている。すでに大きいバージョンがついているなら小さいバージョンのデータは書き込めない。異常系で同一パーティションのマスターが二ついる場合があったら不整合がでることは許容する。k8sのAPIに接続できないなどネットワーク障害での異常系を想定している。
-3, master / slave型
-4, 自動failoverの機能: masterがおちるとslaveがmasterになる。昇格先は operator から疎通できる slave のうち、最も新しいデータを持つもの（10/27）。「最も新しい」= 最後の master に追従していた slave の中で、その master から最後に適用した位置（sequence）が最大のもの。別の履歴の位置は比べられないので、追従していた slave が残っていないときだけ別の履歴の slave を候補にする（10/27 ユーザー確認）。
-5, 正常系では無停止/ダウンタイムなしで動作、ユーザーはいつでも読み書きできる
-6, 正常系のサーバー入れ替えや増設も無停止/ダウンタイムなし
-7, 異常系で突然ノードが落ちた場合はその分のデータはきえても問題ない、非同期レプリケーションで大丈夫
-8, master/slaveの非同期レプリケーションで読み出しのディレイ（レプリケーション遅延）はネットワーク的に近ければ0.5ms以下
-9, rocksdbをバックエンドだが、tmpfsまたはssd常にディスクを構築（storage is tmpfs or SSD.）
-10, rocksdbのスナップショットとWALでS3に逐次バックアップ：バックアップ遅延は5分程度. Disater Recoveryを想定。
-11, slaveの構築はmasterのデータから構築：rocksdbのスナップショットとWAL、従来モードでキーとバリューのフルダンプによる構築も可能
-12, operatorからflareのnodeにアクセスできない場合はdown判定し、対象がmasterならslaveをmasterに昇格、slaveなら別のslaveの再構築をする。operatorがflareノードのステートを遷移させる能力があり、それが疎通できないのであれば該当サーバーは直ちにdownにしてproxyにし、slaveがいれば直ちにmasterにするようにnode_mapをなるはやでおくる。operatorから到達できない・ヘルスチェックの判定はEC2でのflare indexサーバーと同等の処理を行う。（リトライ回数とウェイト時間の組み合わせ）ただし operator が**全てのノードに**届かないときは、k8s API や環境のネットワークの問題とみなし、down・昇格などを**何もしない**（alert だけ）。ネットワークが怪しい・壊れているときは動かさない方がよい（10/31 ユーザー決定）。
-13, operatorとk8sのAPIが正常に動作していたら異常系で同一パーティションのマスターが複数台になったとしても、一方をdownにし、ただちに復帰できなければならない。仮にoperatorやLBから到達できない自称masterのようなもの（operatorがnode_mapで配ったmasterと違うサーバー）はユーザーからの接続があれば問題があるが、基本的にはLBや他のnode（正常なnode_mapをもっているサーバー）からアクセスだけ有効でそこに先ほどの自称masterは排除される。不整合は許容しない: 全ノードに同じ node_map を配っているので、operator が配った版と違う版で master を名乗るノード（重複した master）は検出して down 扱いにする（10/31 ユーザー決定）。
+What flare on Kubernetes must do. The numbered requirements below are the
+user's; the dates mark when a requirement was added or decided. The sections
+after them give the rules that follow from the requirements and say where the
+current code stands. Implementation status is as of 2026-11-09
+(`feature/lossless-switch` d5703cf); operating procedures are in
+[RUNBOOK.md](RUNBOOK.md).
 
-## SAF 系（SAF-01〜11、SAF-10 C′）の要点
+**Normal operation** means the operator, the Kubernetes API and the network
+between them and the nodes work. **Abnormal operation** means something
+outside the operator's control failed: a node crashed, the network split, the
+API cannot be reached.
 
-出典: `docs/SAFETY-TODO.md`、`docs/SAF10-RELEASE-CHECKLIST.md`、`docs/design-authoritative-history.md`、`docs/STPA-node-state.md`（rc68 にもある）、`docs/design-node-operations-2026-10-19.md`（SAF-10 ブランチ `safety/saf-10-restore-provenance` のみ）。本番の系列（rc67/rc68）に入っていないものは「SAF-10 ブランチのみ」と書く。
+## Requirements {#requirements}
 
-### 正常系
+1. **Every server is a proxy.** A request for another partition, or a write
+   that reaches a slave, is forwarded to the right server.
+2. **Data is versioned.** A write with a smaller version than the stored one
+   is refused. If an abnormal event (a network failure, such as losing the
+   Kubernetes API) leaves two masters in one partition, the resulting
+   inconsistency is accepted.
+3. **Master/slave.** Each partition has one master and its slaves.
+4. **Automatic failover.** When a master goes down, a slave becomes master.
+   The successor is the slave the operator can reach that holds the newest
+   data (2026-10-27). "Newest" means: among the slaves that followed the last
+   master, the one that applied the highest position (sequence) from that
+   master. Positions in different histories cannot be compared, so a slave
+   of another history is a candidate only when no following slave is left
+   (confirmed by the user, 2026-10-27).
+5. **No downtime in normal operation.** Users can read and write at any time.
+6. **No downtime for planned changes.** Replacing or adding servers in normal
+   operation causes no downtime.
+7. **Data loss is accepted only in abnormal operation.** If a node fails
+   suddenly, the writes it had not replicated may be lost. Asynchronous
+   replication is enough.
+8. **Replication delay.** Between a master and a slave that are close on the
+   network, the read delay caused by replication is 0.5 ms or less.
+9. **Storage.** RocksDB is the backend, on tmpfs or SSD.
+10. **Backup.** RocksDB snapshots and WAL are backed up to S3 continuously,
+    about 5 minutes behind, for disaster recovery.
+11. **Building a slave.** A slave is built from the master's data: a RocksDB
+    snapshot and WAL, or, in the legacy mode, a full dump of keys and values.
+12. **An unreachable node goes down.** The operator is what moves a node
+    between states, so a node it cannot reach is marked down at once and
+    becomes a proxy. If it was a master, a node_map promoting a slave is sent
+    as soon as possible; if it was a slave, another slave is built. Whether a
+    node is unreachable is decided the way the flare index server on EC2
+    decides it (a number of retries with a wait between them).
+    **When the operator reaches no node at all**, the cause is taken to be
+    the Kubernetes API or the network, and the operator does **nothing**:
+    no down, no promotion, only an alert. Nothing is moved while the network
+    is suspect (user decision, 2026-10-31).
+13. **A duplicate master is resolved.** While the operator and the
+    Kubernetes API work, two masters in one partition must not last: one is
+    marked down and the partition recovers at once. A node that calls itself
+    master but is not the master in the operator's node_map is a problem
+    only for clients connected to it directly; the load balancer and the
+    other nodes (which hold the correct node_map) do not send to it.
+    Inconsistency is not accepted here: every node gets the same node_map,
+    so a node that claims master under a node_map version other than the one
+    the operator sent is detected and treated as down (user decision,
+    2026-10-31).
 
-- node_map の配布は、確定した状態から、現 leader だけが送る。旧 leader の古い状態は送らない（SAF-01）。
-- node_map の版は単調に増える。各ノードが適用した版を読み、届いていなければ再送する（SAF-09）。
-- master から slave への転送が落ちたら、その slave は down にして作り直す（10/27 方針）。今の replica repair も実際は「slave を proxy に降格 → master から作り直し（WAL の差分か全体 dump）」で、件数はその判断に使っているだけ。作り直しの途中に入った書き込みを取りこぼす競合がある（rolling で 75 件欠落、flare-bug-slave-catchup-map-race）ので、これは直す。continuous WAL replication（下）を ON にできれば転送の取りこぼしを WAL が埋めるので、作り直し自体が減る（ON にする。ただし最初のリリースでは見送り、次のリリースで入れる。10/31 ユーザー決定）。
-- slave は master の WAL を継続的に追いかけられる（continuous WAL replication）。転送と WAL のどちらで届いた変更も、同じ適用規則（変更元の sequence が大きいときだけ適用、削除は tombstone）で適用する（SAF-10b〜d。最初のリリースは OFF、次のリリースで ON）。
-- 昇格させるのは、operator から疎通でき、最も新しいデータを持つ slave（10/27 方針。4 を参照）。今の実装（SAF-03 の promotion by reason: 追いついた証拠・履歴の一致を要求）はこれより厳密で、条件を満たす slave が無いと master なしで待つ（rc68 の drain 試験で 10 分止まった原因の一つ）。簡単な規則に寄せる。ただし作り直し途中・空のコピーは昇格させない。
-- コピーは、代わりのコピーができるまで消さない（copy retention / copy protection）。
-- 計画的な退避（drain）は webhook で一度止め、準備してから通す（eviction guard。SAF-10 ブランチのみ、既定 OFF）。現在の方式は書き込みを約 46 秒止めてエラーを返すので、5・6 を満たさない。順序付きハンドオーバーに置き換える予定（flare-lossless-switch-paths）。
-- クラスタ間の移設（別の K8s クラスタへ flare クラスタごとデータを移す機能。FlareMigration / cluster replication。例: AWS から pf-dev への移行で使った）は、per-key の seed と、切替までの書き込み停止で行う。ノードの入れ替え（6）とは別の機能。重要な機能なので残す（10/31 ユーザー決定）。
+## Rules in normal operation {#normal}
 
-### 異常系
+Sources: [SAFETY-TODO.md](SAFETY-TODO.md),
+[design-authoritative-history.md](design-authoritative-history.md),
+[STPA-node-state.md](STPA-node-state.md). SAF-NN refers to the items in
+SAFETY-TODO.md.
 
-- 観測できない・読めない値は Unknown として扱い、「健全」「空」とみなさない。Pod の同一性（UID・boot id・copy id）を確かめてから削除や昇格をする（SAF-04・08）。
-- 300 s は昇格の一律な遅延ではなく、master の data-plane 障害を確認した後、通常の規則で昇格先を選べない場合にだけ使う最終手段の猶予とする。通常規則で選べる、到達可能・非空・作り直し中でない slave があれば、300 s 待たずに最も新しいコピーへ切り替える（4・12）。通常規則で選べる候補がない間は master なしとして alert を出し、復旧を再評価する。猶予は障害確認後の最初の「候補なし」判定から数える。operator/API の読み取り失敗や状態不明だけでは master 障害の確認にも猶予の開始にもならない。
-- 猶予の満了時にも通常候補がなければ、到達可能で、非空かつ作り直し中でないと確認できるコピーのうち最も新しいものだけを最終手段として昇格し、`PROMOTION NOT LOSS-FREE` を記録する（7 の範囲）。この場合はデータ損失の可能性を受け入れる。空・作り直し中・quarantined・観測不能／状態不明のコピーは、満了後も昇格させない。それ以外に昇格可能なコピーがなければ master なしを維持し、CRITICAL alert と手動復旧を要求する。元 master の復帰だけを理由に、通常候補が既にある切替を300 s保留しない。
-- 同時に落ちたノードが多すぎるときは、circuit breaker で自動の昇格・削除を止める（SAF-11）。
-- leader が lease を更新できなくなったら、自分で leader をやめて終了する（lease guard、fail closed。SAF-10 ブランチのみ）。
-- 起動時に node_map が失われていたら、承認なしに新規クラスタとして作り直さない（SAF-09）。
-- 履歴の比較は 4 の候補選択規則に従い、追従していた slave を厳密な履歴判定だけで候補から外さない。追従コピーが残っていない場合は、別履歴のコピーも 4 と上記 300 s の最終手段規則に従って扱い、履歴が異なることを理由に無期限に master なしにはしない。ただし、空・作り直し中・quarantined・観測不能／状態不明のコピーは昇格させない。実際に「追従していた slave が別の履歴と判定されて昇格できない」問題が起きた（同じ Pod 名の master が戻ったとき、残った slave が古い履歴のまま再構築されず、drain で後継がいなくなった。flare-bug-same-key-repromotion）。バックアップからの復元は、データがバックアップにしか残っていない場合の話なので、その場合は戻すしかない（戻したコピーを master にできなければならない。10/31 ユーザー決定）。採用の手続きを要求する仕組み（restore provenance）は SAF-10 ブランチのみで、SAF-10 の見直しは行わない（10/31）。
-- WAL の batch は CRC で検査し、壊れた batch を受けた slave は自分で作り直す。
-- master のデータが空になったら、データを持つ slave に切り替える（空 master の自己修復）。
-- operator から到達できないノードは down にして proxy にし、master なら slave を昇格する（12）。今の rc68 は Ready なら failover しない（`Main.lean` 3383、到達性 probe は alert のみ）ので、12 に合わせて変える。昇格先は operator から疎通できる slave だけ（疎通できない slave は failover 先にしない）。masterをdownさせる場合は昇格先がある場合だけ。operator が全てのノードに届かないときは何もしない（API・ネットワークの問題）。※10/31 午前の判断 A（到達性は alert のみ）は、この決定で置き換え。
-- C′（管理系だけが切れ、client は旧 master に届く）では、旧 master と新 master が同時に書き込みを受け得る。write authority（ttl 付きの約束で旧 master を止める仕組み）は実装済みだが OFF で、本番には入れない判断（2 で不整合を許容）。13 の「operator が健全なときに master の重複を検出して解消する」仕組みは、まだ無い。不整合は許容しないので実装する: 配った node_map と違う版で master を名乗るノードを検出して down 扱いにする（10/31）。
+- **node_map distribution.** Only the current leader sends a node_map, and
+  only from settled state; a former leader's stale state is never sent
+  (SAF-01). The leader does not send unless its lease is confirmed.
+- **node_map versions only increase.** The operator reads the version each
+  node applied and resends when a node is behind (SAF-09).
+- **A failed forward rebuilds the slave.** When a forward from the master to
+  a slave fails, the slave is taken down and rebuilt from the master (WAL
+  delta or full dump) (policy of 2026-10-27).
+- **Continuous WAL replication.** A slave follows the master's WAL. A change
+  that arrives by forward or by WAL is applied by the same rule: only when
+  its source sequence is higher; a delete is a tombstone (SAF-10b–d). WAL
+  follow fills the gaps of dropped forwards, so fewer rebuilds are needed.
+  - Decision of 2026-10-31: off in the first release, on from the next.
+  - Status: the chart default is `cluster.rocksdb.replFollowEnabled: true`.
+    pf-dev turned it on 2026-11-06 (moc2-k8s #10384).
+- **Promotion.** The successor is the reachable slave with the newest data
+  (requirement 4). An empty copy or one being rebuilt is never promoted.
+- **Copies are kept until replaced.** A copy is not removed before a copy
+  that replaces it exists (copy retention / copy protection).
+- **Planned master switches are ordered handovers.** Any switch the operator
+  starts on a reachable master (Pod delete, rolling update, drain, cordon)
+  loses no acknowledged write and returns no error; a write that arrives
+  during the switch waits briefly for the new master.
+  1. The old master is demoted.
+  2. The operator confirms it applied the demotion and has no forward in
+     flight to the successor.
+  3. The successor is promoted.
+
+  A deadline or an unfit successor aborts the switch and restores the old
+  master. This replaced the earlier fence, which stopped writes for about
+  46 s.
+- **Disruptive operations are gated.** The node guard webhook
+  (`nodeGuard.enabled: true` by default) holds Pod eviction, Pod delete and
+  StatefulSet updates of a node holding data until the handover is done. The
+  StatefulSet uses `updateStrategy: OnDelete`, and the operator replaces the
+  Pods one at a time. See [RUNBOOK.md#upgrading](RUNBOOK.md#upgrading).
+- **A cordoned node is moved off proactively.** When a node is cordoned, the
+  operator moves its flare nodes before a drain evicts them: a master by
+  handover, a slave by building a new copy on another node first. It starts
+  only while the partition keeps `nodeReplacement.minCopies` (default 3)
+  real copies.
+- **History continuation after a handover** (PR #151). The remaining
+  replicas take over the new master's history instead of rebuilding. Off
+  unless the operator runs with `FLARE_OPERATOR_HISTORY_CONTINUATION=on`, and
+  only effective with WAL follow on.
+- **Cluster migration is kept.** Moving a whole flare cluster to another
+  Kubernetes cluster (FlareMigration / cluster replication; used for the move
+  from AWS to pf-dev) seeds per key and stops writes until the switch. It is
+  a different feature from replacing nodes (requirement 6) and stays (user
+  decision, 2026-10-31).
+
+## Rules in abnormal operation {#abnormal}
+
+- **Unknown is not healthy.** A value that cannot be observed or read is
+  Unknown; it is never taken as "healthy" or "empty". The operator confirms
+  a Pod's identity (UID, boot id, copy id) before deleting or promoting it
+  (SAF-04, SAF-08).
+- **The 300 s last-resort grace.** It is not a delay on every promotion.
+  - **When it applies.** Only after a master's data-plane failure is
+    confirmed and the normal rules find no successor. If a reachable slave
+    that is not empty and not being rebuilt exists, the switch to the newest
+    copy happens without waiting (requirements 4 and 12).
+  - **While it runs.** The partition is masterless and alerts. The grace
+    starts at the first "no candidate" decision after the failure is
+    confirmed. A failed operator or API read, or an unknown state, neither
+    confirms a failure nor starts the grace.
+  - **When it expires with still no normal candidate.** Only the newest copy
+    confirmed reachable, not empty and not being rebuilt is promoted, and
+    `PROMOTION NOT LOSS-FREE` is logged. Data loss is accepted here
+    (requirement 7).
+  - **Never promoted, even after the grace.** Copies that are empty, being
+    rebuilt, quarantined, or unobservable or in an unknown state. If no
+    other copy is left, the partition stays masterless with a CRITICAL alert
+    and needs manual recovery.
+  - **The old master coming back** does not hold a switch for 300 s when a
+    normal candidate exists.
+- **Circuit breaker.** When too many nodes are down at once, automatic
+  promotion and deletion stop (SAF-11).
+- **Lost lease.** A leader whose lease is not renewed stops: it sends no
+  node_map and runs no step until the lease is confirmed again (fail
+  closed).
+- **Lost node_map at startup.** The operator does not rebuild the cluster as
+  new without approval (SAF-09).
+- **History comparison follows requirement 4.** A slave that followed the
+  last master is not excluded by a strict history check alone. When no
+  following copy is left, copies of another history are handled by
+  requirement 4 and the last-resort rule above; a different history alone
+  does not keep a partition masterless forever. Empty, rebuilding,
+  quarantined and unobservable copies are still never promoted.
+  - Background: this went wrong once. The master's Pod came back under the
+    same name; the remaining slave kept its old history and was not rebuilt,
+    so a drain found no successor (flare-bug-same-key-repromotion).
+- **Restore from backup.** When the data is left only in the backup, the
+  restored copy must be able to become master (user decision, 2026-10-31).
+  The restore-provenance procedure of the SAF-10 branch is not carried
+  over, and SAF-10 is not being reworked.
+- **WAL integrity.** WAL batches are checked with CRC-32; a slave that
+  receives a corrupt batch rebuilds itself.
+- **Empty master.** A master whose data became empty is switched to a slave
+  that has data.
+- **Unreachable node** (requirement 12). An unreachable node is marked down
+  and becomes a proxy. A master is taken down only when there is a
+  successor, and the successor must be reachable from the operator. When the
+  operator reaches no node, nothing is done. Status: implemented
+  (flare-rule12-unreachable-down).
+- **Duplicate master** (requirement 13). A node claiming master under
+  another node_map version is detected and marked down. Status: implemented,
+  with the metrics `flare_operator_duplicate_master_claims` and
+  `flare_operator_duplicate_master_down`
+  (flare-rule13-duplicate-master).
+- **C′: only the control plane is cut.** If clients still reach the old
+  master while the operator cannot, the old and the new master can both
+  accept writes. Write authority (a promise with a TTL that stops the old
+  master) was built on the SAF-10 branch but is not in this release line.
+  This is an accepted gap under requirement 2.

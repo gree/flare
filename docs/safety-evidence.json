@@ -2111,9 +2111,9 @@
         "SAF-09"
       ],
       "review": {
-        "commit": "16cf16e42b84fac22c87ae7801d8bccc1f59252b",
+        "commit": "833a141ac047574c3de5783f54cbab7a9b50f877",
         "date": "2026-11-09",
-        "note": "PR #157 (a174c3e..16cf16e) change-impact note. Code: Reconciler.autoAssign gains one branch that leaves a registering proxy unassigned while another partition's master is Master/Prepare and the slot is a new partition (pIdx != 0); GeneralSafety.autoAssign_cle gets the matching CLE.rfl case. Tests: two flare_unit checks in FlareOperatorTests/UnitTests.lean (no second Prepare master while one prepares; the next partition gets its Prepare master once the first is Active); ContinuousReplicationLimits copy-identity 13 also accepts the ordered handover's 'the planned handover of … gave up …; it stays the master' line as the incomplete drain. Cause: CI 42569844590 attempt 2 on a174c3e (failover-order: p1 and p2 Prepare masters in one map after p1's send was skipped for a concurrent registration; flared keeps one prepare partition and neither reconstructed). Verification: flare_unit 1009 ok, nix-linux 42585612065 success; targeted E2E 42584677734 / 42585607794. Impact on SC-01: none — the change adds no topology send and does not touch leader or authority checks; the touched files are referenced here for other checks."
+        "note": "Change-impact note for test/follow-off-after-both-on (49b529a..833a141): test-only. continuous-replication-enable now waits for BOTH nodes to log 'repl_follow_enabled: 0 -> 1' before patching follow off. Cause: CI 42595764031 (49b529a) failover-data 25 — each pod's ConfigMap volume refreshes on its own; the master's file went from the pre-change content straight to follow off (reloads 0 -> 0 only), so the rollback's '1 -> 0' wait timed out after 240 s although the replica applied on and off and the operator confirmed off. No operator or flared code changes; no claim, check or scenario of this control changes."
       },
       "status": {
         "implemented": {
@@ -3347,9 +3347,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "16cf16e42b84fac22c87ae7801d8bccc1f59252b",
+        "commit": "833a141ac047574c3de5783f54cbab7a9b50f877",
         "date": "2026-11-09",
-        "note": "PR #157 (a174c3e..16cf16e) change-impact note. Code: Reconciler.autoAssign gains one branch that leaves a registering proxy unassigned while another partition's master is Master/Prepare and the slot is a new partition (pIdx != 0); GeneralSafety.autoAssign_cle gets the matching CLE.rfl case. Tests: two flare_unit checks in FlareOperatorTests/UnitTests.lean (no second Prepare master while one prepares; the next partition gets its Prepare master once the first is Active); ContinuousReplicationLimits copy-identity 13 also accepts the ordered handover's 'the planned handover of … gave up …; it stays the master' line as the incomplete drain. Cause: CI 42569844590 attempt 2 on a174c3e (failover-order: p1 and p2 Prepare masters in one map after p1's send was skipped for a concurrent registration; flared keeps one prepare partition and neither reconstructed). Verification: flare_unit 1009 ok, nix-linux 42585612065 success; targeted E2E 42584677734 / 42585607794. Impact on SC-03: none — repair-pending handling and Reconciler repair paths are unchanged; only the new-partition master assignment is held back."
+        "note": "Change-impact note for test/follow-off-after-both-on (49b529a..833a141): test-only. continuous-replication-enable now waits for BOTH nodes to log 'repl_follow_enabled: 0 -> 1' before patching follow off. Cause: CI 42595764031 (49b529a) failover-data 25 — each pod's ConfigMap volume refreshes on its own; the master's file went from the pre-change content straight to follow off (reloads 0 -> 0 only), so the rollback's '1 -> 0' wait timed out after 240 s although the replica applied on and off and the operator confirmed off. No operator or flared code changes; no claim, check or scenario of this control changes."
       },
       "status": {
         "implemented": {
@@ -4623,9 +4623,9 @@
         "SAF-08"
       ],
       "review": {
-        "commit": "16cf16e42b84fac22c87ae7801d8bccc1f59252b",
+        "commit": "833a141ac047574c3de5783f54cbab7a9b50f877",
         "date": "2026-11-09",
-        "note": "PR #157 (a174c3e..16cf16e) change-impact note. Code: Reconciler.autoAssign gains one branch that leaves a registering proxy unassigned while another partition's master is Master/Prepare and the slot is a new partition (pIdx != 0); GeneralSafety.autoAssign_cle gets the matching CLE.rfl case. Tests: two flare_unit checks in FlareOperatorTests/UnitTests.lean (no second Prepare master while one prepares; the next partition gets its Prepare master once the first is Active); ContinuousReplicationLimits copy-identity 13 also accepts the ordered handover's 'the planned handover of … gave up …; it stays the master' line as the incomplete drain. Cause: CI 42569844590 attempt 2 on a174c3e (failover-order: p1 and p2 Prepare masters in one map after p1's send was skipped for a concurrent registration; flared keeps one prepare partition and neither reconstructed). Verification: flare_unit 1009 ok, nix-linux 42585612065 success; targeted E2E 42584677734 / 42585607794. Impact on SC-04: supportive — a Prepare master is now seated only when no other Prepare master exists, so its activation (reconstruction from the existing partitions) can complete; promotion and activation rules themselves are unchanged."
+        "note": "Change-impact note for test/follow-off-after-both-on (49b529a..833a141): test-only. continuous-replication-enable now waits for BOTH nodes to log 'repl_follow_enabled: 0 -> 1' before patching follow off. Cause: CI 42595764031 (49b529a) failover-data 25 — each pod's ConfigMap volume refreshes on its own; the master's file went from the pre-change content straight to follow off (reloads 0 -> 0 only), so the rollback's '1 -> 0' wait timed out after 240 s although the replica applied on and off and the operator confirmed off. No operator or flared code changes; no claim, check or scenario of this control changes."
       },
       "status": {
         "implemented": {
@@ -6241,9 +6241,9 @@
         "SAF-07"
       ],
       "review": {
-        "commit": "16cf16e42b84fac22c87ae7801d8bccc1f59252b",
+        "commit": "833a141ac047574c3de5783f54cbab7a9b50f877",
         "date": "2026-11-09",
-        "note": "PR #157 (a174c3e..16cf16e) change-impact note. Code: Reconciler.autoAssign gains one branch that leaves a registering proxy unassigned while another partition's master is Master/Prepare and the slot is a new partition (pIdx != 0); GeneralSafety.autoAssign_cle gets the matching CLE.rfl case. Tests: two flare_unit checks in FlareOperatorTests/UnitTests.lean (no second Prepare master while one prepares; the next partition gets its Prepare master once the first is Active); ContinuousReplicationLimits copy-identity 13 also accepts the ordered handover's 'the planned handover of … gave up …; it stays the master' line as the incomplete drain. Cause: CI 42569844590 attempt 2 on a174c3e (failover-order: p1 and p2 Prepare masters in one map after p1's send was skipped for a concurrent registration; flared keeps one prepare partition and neither reconstructed). Verification: flare_unit 1009 ok, nix-linux 42585612065 success; targeted E2E 42584677734 / 42585607794. Impact on SC-06: the masterless refill (promoteMasterlessPartition) is unchanged; autoAssign's plain master assignment for a new partition now waits for the preparing master instead of creating a second Prepare master that left both partitions masterless. Partial-copy promotion is not affected."
+        "note": "Change-impact note for test/follow-off-after-both-on (49b529a..833a141): test-only. continuous-replication-enable now waits for BOTH nodes to log 'repl_follow_enabled: 0 -> 1' before patching follow off. Cause: CI 42595764031 (49b529a) failover-data 25 — each pod's ConfigMap volume refreshes on its own; the master's file went from the pre-change content straight to follow off (reloads 0 -> 0 only), so the rollback's '1 -> 0' wait timed out after 240 s although the replica applied on and off and the operator confirmed off. No operator or flared code changes; no claim, check or scenario of this control changes."
       },
       "status": {
         "implemented": {
@@ -7025,9 +7025,9 @@
         "SAF-08"
       ],
       "review": {
-        "commit": "16cf16e42b84fac22c87ae7801d8bccc1f59252b",
+        "commit": "833a141ac047574c3de5783f54cbab7a9b50f877",
         "date": "2026-11-09",
-        "note": "PR #157 (a174c3e..16cf16e) change-impact note. Code: Reconciler.autoAssign gains one branch that leaves a registering proxy unassigned while another partition's master is Master/Prepare and the slot is a new partition (pIdx != 0); GeneralSafety.autoAssign_cle gets the matching CLE.rfl case. Tests: two flare_unit checks in FlareOperatorTests/UnitTests.lean (no second Prepare master while one prepares; the next partition gets its Prepare master once the first is Active); ContinuousReplicationLimits copy-identity 13 also accepts the ordered handover's 'the planned handover of … gave up …; it stays the master' line as the incomplete drain. Cause: CI 42569844590 attempt 2 on a174c3e (failover-order: p1 and p2 Prepare masters in one map after p1's send was skipped for a concurrent registration; flared keeps one prepare partition and neither reconstructed). Verification: flare_unit 1009 ok, nix-linux 42585612065 success; targeted E2E 42584677734 / 42585607794. Impact on SC-07: none — liveness and streak handling are unchanged; only the test oracle of copy-identity 13 is widened to the handover's logged safe stop (no slave promoted, the master kept every key)."
+        "note": "Change-impact note for test/follow-off-after-both-on (49b529a..833a141): test-only. continuous-replication-enable now waits for BOTH nodes to log 'repl_follow_enabled: 0 -> 1' before patching follow off. Cause: CI 42595764031 (49b529a) failover-data 25 — each pod's ConfigMap volume refreshes on its own; the master's file went from the pre-change content straight to follow off (reloads 0 -> 0 only), so the rollback's '1 -> 0' wait timed out after 240 s although the replica applied on and off and the operator confirmed off. No operator or flared code changes; no claim, check or scenario of this control changes."
       },
       "status": {
         "implemented": {
@@ -10062,9 +10062,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "16cf16e42b84fac22c87ae7801d8bccc1f59252b",
+        "commit": "833a141ac047574c3de5783f54cbab7a9b50f877",
         "date": "2026-11-09",
-        "note": "PR #157 (a174c3e..16cf16e) change-impact note. Code: Reconciler.autoAssign gains one branch that leaves a registering proxy unassigned while another partition's master is Master/Prepare and the slot is a new partition (pIdx != 0); GeneralSafety.autoAssign_cle gets the matching CLE.rfl case. Tests: two flare_unit checks in FlareOperatorTests/UnitTests.lean (no second Prepare master while one prepares; the next partition gets its Prepare master once the first is Active); ContinuousReplicationLimits copy-identity 13 also accepts the ordered handover's 'the planned handover of … gave up …; it stays the master' line as the incomplete drain. Cause: CI 42569844590 attempt 2 on a174c3e (failover-order: p1 and p2 Prepare masters in one map after p1's send was skipped for a concurrent registration; flared keeps one prepare partition and neither reconstructed). Verification: flare_unit 1009 ok, nix-linux 42585612065 success; targeted E2E 42584677734 / 42585607794. Impact on SC-16: none — continuous fetch is untouched."
+        "note": "Change-impact note for test/follow-off-after-both-on (49b529a..833a141): test-only. continuous-replication-enable now waits for BOTH nodes to log 'repl_follow_enabled: 0 -> 1' before patching follow off. Cause: CI 42595764031 (49b529a) failover-data 25 — each pod's ConfigMap volume refreshes on its own; the master's file went from the pre-change content straight to follow off (reloads 0 -> 0 only), so the rollback's '1 -> 0' wait timed out after 240 s although the replica applied on and off and the operator confirmed off. No operator or flared code changes; no claim, check or scenario of this control changes."
       },
       "status": {
         "implemented": {
@@ -12051,9 +12051,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "16cf16e42b84fac22c87ae7801d8bccc1f59252b",
+        "commit": "833a141ac047574c3de5783f54cbab7a9b50f877",
         "date": "2026-11-09",
-        "note": "PR #157 (a174c3e..16cf16e) change-impact note. Code: Reconciler.autoAssign gains one branch that leaves a registering proxy unassigned while another partition's master is Master/Prepare and the slot is a new partition (pIdx != 0); GeneralSafety.autoAssign_cle gets the matching CLE.rfl case. Tests: two flare_unit checks in FlareOperatorTests/UnitTests.lean (no second Prepare master while one prepares; the next partition gets its Prepare master once the first is Active); ContinuousReplicationLimits copy-identity 13 also accepts the ordered handover's 'the planned handover of … gave up …; it stays the master' line as the incomplete drain. Cause: CI 42569844590 attempt 2 on a174c3e (failover-order: p1 and p2 Prepare masters in one map after p1's send was skipped for a concurrent registration; flared keeps one prepare partition and neither reconstructed). Verification: flare_unit 1009 ok, nix-linux 42585612065 success; targeted E2E 42584677734 / 42585607794. Impact on SC-18: none — history handling is untouched; the HELD history seen in the failure was the consequence of the two Prepare masters, not of a history rule."
+        "note": "Change-impact note for test/follow-off-after-both-on (49b529a..833a141): test-only. continuous-replication-enable now waits for BOTH nodes to log 'repl_follow_enabled: 0 -> 1' before patching follow off. Cause: CI 42595764031 (49b529a) failover-data 25 — each pod's ConfigMap volume refreshes on its own; the master's file went from the pre-change content straight to follow off (reloads 0 -> 0 only), so the rollback's '1 -> 0' wait timed out after 240 s although the replica applied on and off and the operator confirmed off. No operator or flared code changes; no claim, check or scenario of this control changes."
       },
       "status": {
         "implemented": {
@@ -12786,9 +12786,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "16cf16e42b84fac22c87ae7801d8bccc1f59252b",
+        "commit": "833a141ac047574c3de5783f54cbab7a9b50f877",
         "date": "2026-11-09",
-        "note": "PR #157 (a174c3e..16cf16e) change-impact note. Code: Reconciler.autoAssign gains one branch that leaves a registering proxy unassigned while another partition's master is Master/Prepare and the slot is a new partition (pIdx != 0); GeneralSafety.autoAssign_cle gets the matching CLE.rfl case. Tests: two flare_unit checks in FlareOperatorTests/UnitTests.lean (no second Prepare master while one prepares; the next partition gets its Prepare master once the first is Active); ContinuousReplicationLimits copy-identity 13 also accepts the ordered handover's 'the planned handover of … gave up …; it stays the master' line as the incomplete drain. Cause: CI 42569844590 attempt 2 on a174c3e (failover-order: p1 and p2 Prepare masters in one map after p1's send was skipped for a concurrent registration; flared keeps one prepare partition and neither reconstructed). Verification: flare_unit 1009 ok, nix-linux 42585612065 success; targeted E2E 42584677734 / 42585607794. Impact on SC-20: none — delete history is untouched."
+        "note": "Change-impact note for test/follow-off-after-both-on (49b529a..833a141): test-only. continuous-replication-enable now waits for BOTH nodes to log 'repl_follow_enabled: 0 -> 1' before patching follow off. Cause: CI 42595764031 (49b529a) failover-data 25 — each pod's ConfigMap volume refreshes on its own; the master's file went from the pre-change content straight to follow off (reloads 0 -> 0 only), so the rollback's '1 -> 0' wait timed out after 240 s although the replica applied on and off and the operator confirmed off. No operator or flared code changes; no claim, check or scenario of this control changes."
       },
       "status": {
         "implemented": {

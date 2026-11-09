@@ -18,6 +18,14 @@ class EvidenceTests(unittest.TestCase):
     def setUp(self):
         self.data = json.loads((ROOT / safety.REGISTER).read_text())
 
+    def without_candidate(self):
+        """The register as it is with no release candidate set: the stored
+        candidate's runs and fixes are commits a fixture repository does not
+        have, and its CI stage is derived from them."""
+        self.data.pop("candidate", None)
+        for control in self.data["controls"]:
+            safety.derive_status(control, None, ROOT)
+
     def run_record(self, check="CHECK-01", result="pass", commit="1" * 40):
         return {"check": check, "result": result, "commit": commit,
                 "date": "2026-09-10", "command": "run fault-injection scenario",
@@ -65,6 +73,7 @@ class EvidenceTests(unittest.TestCase):
             safety.validate(self.data, ROOT)
 
     def test_production_approval_needs_a_candidate(self):
+        self.without_candidate()
         c = self.data["controls"][0]
         c["status"]["production_approved"] = {"state": "yes", "by": "release owner", "date": "2026-10-05", "note": "x"}
         with self.assertRaisesRegex(ValueError, "needs a release candidate"):
@@ -259,6 +268,7 @@ class EvidenceTests(unittest.TestCase):
     def test_cli_detects_renamed_reference_against_git_base(self):
         # An isolated fixture exercises real --base diff handling, including deletion
         # of the old path. No tracked project files are changed by this test.
+        self.without_candidate()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             # Every LOCAL path the register points at has to exist in the

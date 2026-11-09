@@ -257,7 +257,12 @@ def switchVerdict (o : SwitchObs) : Option String :=
     else if !o.redundant then some "redundancy (master + active replica) was not restored within the bound"
     else none
 
-private def switchRun (c : Ctx) (op : SwitchOp) : IO (Except String SwitchObs) := do
+/-- `noreplyDeletes`: a third load deletes each key it stored with `noreply`
+    (a client's fire-and-forget delete, as on pf-dev 2026-11-09). The master
+    forwards those deletes to its replica: a forward that is never answered
+    was counted as `proxy_write_failed` for that replica, which made it no
+    successor for a cordon move and failed a handover's drain check. -/
+private def switchRun (c : Ctx) (op : SwitchOp) (noreplyDeletes : Bool := false) : IO (Except String SwitchObs) := do
   match ← c.placement with
   | .error e => return .error e
   | .ok p =>
@@ -288,6 +293,9 @@ private def switchRun (c : Ctx) (op : SwitchOp) : IO (Except String SwitchObs) :
     let peerHost := if op == .deleteMasterAbortRetry || op == .deleteMasterLeaseTakeover then svcHost c
       else s!"{c.cfg.name}-nodes-external.{c.cfg.«namespace»}.svc.cluster.local"
     if !(← c.startLoad "peer" peerHost 2 200) then return .error (notSetUp "the proxy-path load did not start")
+    if noreplyDeletes then
+      if !(← c.startLoad "nrdel" (svcHost c) 1 20 (noreplyDelete := true)) then
+        return .error (notSetUp "the noreply-delete load did not start")
     let before := (← c.pods).getD []
     let opUids := fun (_ : Unit) => do
       match ← kubectl ["get", "pods", "-n", c.cfg.«namespace», "-l", s!"app={c.cfg.operatorName}", "-o", "jsonpath={.items[*].metadata.uid}"] with
@@ -656,6 +664,22 @@ private def switchRun (c : Ctx) (op : SwitchOp) : IO (Except String SwitchObs) :
     let peer? ← c.stopLoad "peer" 2
     let (some svcRes, some peerRes) := (svc?, peer?)
       | return .error (unobservable "a load log could not be read or failed its integrity check (never counted as 'no error')")
+    if noreplyDeletes then
+      -- the deletes happened (each follows a STORED set), and the final
+      -- master counted none of its forwards to the replica as failed
+      let nr? ← c.stopLoad "nrdel" 1
+      let sent := (nr?.map fun r => (r.recs.filter (·.ack)).length).getD 0
+      let newM0 := (← c.roles).bind (·.1)
+      let mIp := (((← c.pods).getD []).find? (fun (r : PodRow) => some r.name == newM0)).map (·.ip)
+      let st ← match mIp with
+        | some ip => c.stats ip
+        | none => pure none
+      let failed := st.bind (statOf · "proxy_write_failed")
+      c.event s!"noreply deletes sent: {sent}; the final master {newM0} proxy_write_failed={failed}"
+      if sent == 0 then
+        checkFail := some ((checkFail.map (· ++ "; ")).getD "" ++ "the noreply-delete load sent no delete")
+      else if failed != some "0" then
+        checkFail := some ((checkFail.map (· ++ "; ")).getD "" ++ s!"the final master counted proxy_write_failed={failed} (noreply forwards counted as failed?)")
     let ips := ips0 ++ ips1 ++ ips2
     let newM := (← c.roles).bind (·.1)
     let ps := (← c.pods).getD []
@@ -694,7 +718,7 @@ private def podIncarnations (c : Ctx) : IO (List (String × String × String × 
       | _ => none
   | .error _ => return []
 
-def switchTest (c : Ctx) (op : SwitchOp) : IO TestResult := do
+def switchTest (c : Ctx) (op : SwitchOp) (noreplyDeletes : Bool := false) : IO TestResult := do
   -- a flared that restarts INSIDE its pod (same UID) during an operation
   -- that only replaces or keeps pods is no part of the operation
   -- (41278035134: a master's flared died with no log line): recorded before
@@ -703,7 +727,7 @@ def switchTest (c : Ctx) (op : SwitchOp) : IO TestResult := do
   let inc0 ← podIncarnations c
   for (n, u, r, cid, last) in inc0 do
     IO.eprintln s!"# [{c.test}] before: {n} uid {u} restarts {r} container {cid} lastState.terminated {last}"
-  let run ← switchRun c op
+  let run ← switchRun c op noreplyDeletes
   let inc1 ← podIncarnations c
   let mut unexpected : List String := []
   for (n, u, r, cid, last) in inc1 do
@@ -1775,6 +1799,8 @@ inductive Scenario where
   | cordonStuck
   /-- the replica's data is on a node-local PV (kind's local-path) -/
   | cordonPinned
+  /-- C1 with a third load of noreply deletes -/
+  | cordonMasterNoreply
   deriving BEq
 
 def Scenario.slug : Scenario → String
@@ -1802,6 +1828,7 @@ def Scenario.slug : Scenario → String
   | .cordonRestartQuiet => "cordon-restart-quiet"
   | .cordonStuck => "cordon-stuck"
   | .cordonPinned => "cordon-pinned"
+  | .cordonMasterNoreply => "cordon-master-noreply"
 
 def Scenario.title : Scenario → String
   | .op .deleteMaster => "(S1) kubectl delete pod of the MASTER under a client-like load: the pod is replaced; 0 write errors, 0 acknowledged writes missing on the final master and replica"
@@ -1826,6 +1853,7 @@ def Scenario.title : Scenario → String
   | .cordonNoOperator => "(C8) the operator is away (scaled to 0): the node guard fails closed, cordon + drain of the replica's worker evicts nothing (the drain fails), the replica keeps its pod; redundant after the operator returns"
   | .cordonStuck => "(C10) a cordon move goes STUCK: a client keeps a connection to replica A, A's worker is cordoned, the move stays unserved and past the 60 s unserved deadline is marked stuck (held, Warning FlareCordonMoveStuck, flare_operator_cordon_moves_stuck >= 1); a drain of A's worker is refused (429) and A keeps its pod; a NEW move of replica B (its worker cordoned next) runs to done meanwhile; the closed connection does not release the stuck move, the uncordon cancels it and A serves again on the same pod; 0 write errors, 0 missing"
   | .cordonPinned => "(C11) PVC on a node-local volume (local-path): cordon + drain (90 s) of the replica's worker never starts a move — the recreated pod could not leave the node; the drain's evictions are held, the replica keeps its pod and serving label, FlareCordonMoveBlocked says its data cannot leave the node; uncordon ends it"
+  | .cordonMasterNoreply => "(C12) C1 (kubectl cordon + drain of the MASTER's worker, node guard, cordon move) while a third load deletes each key it stored with noreply (20/s): the forwards of those deletes to the replica are answered and not counted as failed, so the replica is still the move's successor and the handover drains; the move completes, 0 write errors, 0 missing, and the final master's proxy_write_failed is 0"
   | .cordonCancel => "(C4) cordon of the replica's worker, uncordon once its move is proxied: the move is cancelled, the replica gets the serving label back on the same pod and is a synced replica again"
   | .sigtermHold => "(S6) a sync client write held on a cut replica across a SIGTERM (cut removed 40 s after it): the client gets STORED and the replica holds the value"
 
@@ -1868,7 +1896,7 @@ private def scenarioSuite (sc : Scenario) (st : SwitchStorage) : TestSuite :=
     else if sc == .op .helmUpgrade then
       { cfg0 with operatorName := s!"flare-operator-{short}", nodeGuard := true }
     -- C1/C2: two copies, so minCopies 2 (the accepted risk of a 2-copy pair)
-    else if sc == .op .cordonMaster || sc == .op .cordonReplica then
+    else if sc == .op .cordonMaster || sc == .op .cordonReplica || sc == .cordonMasterNoreply then
       { cfg0 with nodeGuard := true, nodeReplacement := true, nodeReplacementMinCopies := 2 }
     else if sc == .cordonNoSuccessor || sc == .cordonOperatorRestart || sc == .cordonTwoNodes || sc == .cordonNoOperator || sc == .cordonRestartQuiet then
       { cfg0 with nodeGuard := true, nodeReplacement := true, nodeReplacementMinCopies := 2 }
@@ -1897,7 +1925,7 @@ private def scenarioSuite (sc : Scenario) (st : SwitchStorage) : TestSuite :=
       cleanupCluster cfg
     onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
     afterEach := fun i => saveFullLogs cfg.«namespace» s!"after-test-{i}"
-    tests := [{ name := sc.title, run := match sc with | .op o => switchTest c o | .gate => gateTest c | .sigtermHold => sigtermHoldTest c | .abortExhaust => abortExhaustTest c | .nodeGuard => nodeGuardTest c | .cordonBlocked => cordonBlockedTest c | .cordonCancel => cordonCancelTest c | .cordonNoSuccessor => cordonNoSuccessorTest c | .cordonOperatorRestart => cordonOperatorRestartTest c | .cordonTwoNodes => cordonTwoNodesTest c | .cordonNoOperator => cordonNoOperatorTest c | .cordonRestartQuiet => cordonRestartQuietTest c | .cordonStuck => cordonStuckTest c | .cordonPinned => cordonBlockedTest c pinnedCond (some "cannot leave the node") }] }
+    tests := [{ name := sc.title, run := match sc with | .op o => switchTest c o | .gate => gateTest c | .sigtermHold => sigtermHoldTest c | .abortExhaust => abortExhaustTest c | .nodeGuard => nodeGuardTest c | .cordonBlocked => cordonBlockedTest c | .cordonCancel => cordonCancelTest c | .cordonNoSuccessor => cordonNoSuccessorTest c | .cordonOperatorRestart => cordonOperatorRestartTest c | .cordonTwoNodes => cordonTwoNodesTest c | .cordonNoOperator => cordonNoOperatorTest c | .cordonRestartQuiet => cordonRestartQuietTest c | .cordonStuck => cordonStuckTest c | .cordonPinned => cordonBlockedTest c pinnedCond (some "cannot leave the node") | .cordonMasterNoreply => switchTest c .cordonMaster (noreplyDeletes := true) }] }
 
 /-- A4 (history continuation, flare-hc-e2e): S1 with three copies and the
     continuation on, under the same client-like load — 0 write errors, 0
@@ -1977,7 +2005,7 @@ def switchSuites : List TestSuite :=
   scenarios.map (fun sc => scenarioSuite sc .pvcLocal) ++ scenarios.map (fun sc => scenarioSuite sc .tmpfs)
     -- the cordon move needs storage that can leave its node: tmpfs, or a PVC
     -- on network storage; on a node-local PV it is not started (C11)
-    ++ [Scenario.op .cordonMaster, .op .cordonReplica, .cordonBlocked, .cordonCancel, .cordonNoSuccessor, .cordonOperatorRestart, .cordonTwoNodes, .cordonNoOperator, .cordonRestartQuiet, .cordonStuck].map (fun sc => scenarioSuite sc .tmpfs)
+    ++ [Scenario.op .cordonMaster, .op .cordonReplica, .cordonBlocked, .cordonCancel, .cordonNoSuccessor, .cordonOperatorRestart, .cordonTwoNodes, .cordonNoOperator, .cordonRestartQuiet, .cordonStuck, .cordonMasterNoreply].map (fun sc => scenarioSuite sc .tmpfs)
     ++ [Scenario.op .cordonMaster, .op .cordonReplica].map (fun sc => scenarioSuite sc .pvcNfs)
     ++ [scenarioSuite .cordonPinned .pvcLocal]
     ++ [continuationSwitchSuite, continuationCordonSuite]

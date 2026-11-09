@@ -46,8 +46,12 @@ def loadWriterScript : String := "import os, socket, sys, threading, time
 name, host, port, workers, prefix, rate = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), sys.argv[5], float(sys.argv[6])
 # per-request (default): a new connection for every request, closed after its
 # reply — the clients' model (user decision 2026-10-28: clients connect for
-# each use, a connection lasts seconds at most); keep: one kept-open connection
-per_request = (sys.argv[7] if len(sys.argv) > 7 else 'per-request') == 'per-request'
+# each use, a connection lasts seconds at most); keep: one kept-open connection;
+# set-delete-noreply: per-request, and every STORED key is then deleted with
+# noreply on the same connection (a client's fire-and-forget delete)
+mode = sys.argv[7] if len(sys.argv) > 7 else 'per-request'
+per_request = mode != 'keep'
+noreply_delete = mode == 'set-delete-noreply'
 stop = '/tmp/lw-stop-' + name
 
 def us():
@@ -115,6 +119,8 @@ def worker(w):
                 buf += d
             line, buf = buf.split(b'\\r\\n', 1)
             reply = line.decode(errors='replace').strip().replace(' ', '_') or 'EMPTY'
+            if noreply_delete and reply == 'STORED':
+                s.sendall(('delete %s noreply\\r\\n' % k).encode())
         except socket.gaierror:
             reply = 'NORESOLVE'
             broken = True
@@ -186,11 +192,15 @@ def Ctx.ensureLoadWriter (c : Ctx) : IO (Except String Unit) := do
 /-- Start `workers` writers against `host` (a DNS name, resolved on each
     connect) at `rate` requests/s each. `perRequest` (default): a new
     connection per request, closed after its reply (the clients' model, user
-    decision 2026-10-28); false: one kept-open connection per writer. -/
-def Ctx.startLoad (c : Ctx) (name host : String) (workers : Nat) (rate : Nat) (perRequest : Bool := true) : IO Bool := do
+    decision 2026-10-28); false: one kept-open connection per writer.
+    `noreplyDelete`: per-request, and each STORED key is then deleted with
+    `noreply` (its record is the set's; the key is gone afterwards, so such a
+    load is never checked for missing writes). -/
+def Ctx.startLoad (c : Ctx) (name host : String) (workers : Nat) (rate : Nat) (perRequest : Bool := true)
+    (noreplyDelete : Bool := false) : IO Bool := do
   let ns ← IO.monoNanosNow
   let pfx := s!"lw{name}{(← epochNow)}{ns % 1000000}"
-  let mode := if perRequest then "per-request" else "keep"
+  let mode := if noreplyDelete then "set-delete-noreply" else if perRequest then "per-request" else "keep"
   let cmd := s!"rm -f /tmp/lw-stop-{name} /tmp/lw-{name}-*.log; nohup python3 /tmp/lw.py {name} {host} {c.cfg.flarePort} {workers} {pfx} {rate} {mode} >/tmp/lw-{name}.out 2>&1 &"
   match ← kubectl ["exec", loadWriterPod c, "-n", c.cfg.«namespace», "--", "sh", "-c", cmd] with
   | .ok _ => c.event s!"load {name}: {workers} writer(s) x {rate}/s against {host}, {mode} connections (keys {pfx}_<w>_<n>)"; return true

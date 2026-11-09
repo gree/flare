@@ -349,6 +349,40 @@ namespace test_handler_cluster_replication {
 		cut_assert_equal_int(1, (int)stats_object->get_proxy_write_dropped());
 	}
 
+	// A client's noreply is not passed on to a replica either: the answer is
+	// read and a success counts as one (before, the forward went out with
+	// noreply, its result stayed none and it was counted as failed).
+	void test_replica_noreply_set_answer_is_read() {
+		shared_thread t = start_handler();
+		string line = forward_set(t, false, " key 0 0 5 3 noreply", "STORED");
+		cut_assert_equal_string("set key 0 0 5 3\n", line.c_str());
+		uint64_t failed = 0;
+		stats_object->get_proxy_write_failed(failed);
+		cut_assert_equal_int(0, (int)failed);
+		cut_assert_equal_int(0, (int)stats_object->get_proxy_write_dropped());
+	}
+
+	void test_replica_noreply_delete_answer_is_read() {
+		shared_thread t = start_handler();
+		storage::entry e = get_entry(" key 0 3 noreply", storage::parse_type_delete);
+		cut_assert_true((e.option & storage::option_noreply) != 0);
+		shared_queue_proxy_write q(new queue_proxy_write(NULL, NULL, vector<string>(), e, "delete"));
+		q->set_post_proxy(true);
+		q->sync_ref();
+		enqueue(t, q);
+		char* p;
+		cs[0]->readline(&p);
+		string line(p);
+		delete[] p;
+		cs[0]->writeline("DELETED");
+		q->sync();
+		cut_assert_equal_string("delete key 0 3\n", line.c_str());
+		cut_assert_equal_int(op::result_deleted, q->get_result());
+		uint64_t failed = 0;
+		stats_object->get_proxy_write_failed(failed);
+		cut_assert_equal_int(0, (int)failed);
+	}
+
 	// In-cluster forwards keep their behaviour (the answer is logged only).
 	void test_in_cluster_server_error_unchanged() {
 		shared_thread t = start_handler();

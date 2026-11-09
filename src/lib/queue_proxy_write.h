@@ -126,7 +126,20 @@ public:
 	virtual int run(shared_connection c);
 	op::result get_result();
 	string get_result_message();
-	int set_post_proxy(bool post_proxy) { this->_post_proxy = post_proxy; return 0; };
+	// A forward to a replica always READS the answer: a client's noreply is
+	// not passed on (as for a foreign forward). A noreply forward was never
+	// answered, its result stayed none and every one was counted as
+	// proxy_write_failed for that replica — the counter the cordon move's
+	// successor choice and the handover's drain check read (pf-dev
+	// 2026-11-09: ~1200 noreply deletes a day) — and a lost one could not
+	// be seen at all.
+	int set_post_proxy(bool post_proxy) {
+		this->_post_proxy = post_proxy;
+		if (post_proxy) {
+			this->_entry.option &= ~storage::option_noreply;
+		}
+		return 0;
+	};
 	bool is_post_proxy() { return this->_post_proxy; };
 	void set_skipped(bool b) { this->_skipped = b; };
 	bool is_skipped() { return this->_skipped; };

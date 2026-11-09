@@ -60,6 +60,55 @@ time, with graceful deletes ([node guard](#node-guard)). With `replicas: 1`
 (no replica) a master has nobody to hand over to: rolling waits on it and
 the master is not replaced.
 
+**Under ArgoCD server-side apply (`ServerSideApply=true`), own
+`updateStrategy` first.** A StatefulSet created by an rc68-or-older chart
+holds `updateStrategy.rollingUpdate.partition: 0`, a default the API server
+filled in that no field manager owns. Server-side apply removes only fields
+its manager owns, so applying the new chart (`type: OnDelete`, no
+`rollingUpdate`) keeps `rollingUpdate` and the StatefulSet is refused:
+`spec.updateStrategy.rollingUpdate: Invalid value: …: only allowed for
+updateStrategy 'RollingUpdate'` (the ArgoCD diff shows it as an error). Do it
+in two syncs:
+
+1. Read the live value first and copy it exactly (it is not always 0):
+
+   ```bash
+   kubectl -n <ns> get sts <cluster>-nodes -o jsonpath-as-json='{.spec.updateStrategy}'
+   # [
+   #     {
+   #         "rollingUpdate": {
+   #             "partition": 0
+   #         },
+   #         "type": "RollingUpdate"
+   #     }
+   # ]
+   ```
+
+   (`jsonpath-as-json` prints JSON, wrapped in a list; the output above is
+   from kubectl 1.36.3. Plain `jsonpath` prints this map as JSON or as
+   `map[…]` depending on the kubectl version.) pf-dev had `partition: 0`.
+
+   Patch the flared StatefulSet in the overlay with that value
+   (`updateStrategy: {type: RollingUpdate, rollingUpdate: {partition: <live
+   value>}}`) and nothing else: keep the chart version, the images and every
+   other value as they are, so this sync carries no other change. Before
+   syncing, the diff (ArgoCD diff, or a server dry-run) must show no change
+   to the StatefulSet's `spec` — in particular none to `updateStrategy` and
+   none to the pod `template`. **If it shows any, stop and find out why**: the
+   strategy is still `RollingUpdate`, and with `partition: 0` every ordinal is
+   up for update, so a template change synced now replaces the pods by the
+   StatefulSet controller (no handover, the master included) before the move
+   to `OnDelete`. After the sync, check that `metadata.generation` did not
+   change, that no pod was replaced, and that `managedFields` shows ArgoCD's
+   manager owning `updateStrategy.type` and `rollingUpdate.partition`.
+2. Remove that patch together with the chart upgrade and sync. ArgoCD drops
+   the `rollingUpdate` it owns and the strategy becomes `OnDelete`; check
+   `spec.updateStrategy` is `{"type":"OnDelete"}` before the operator starts
+   replacing pods (`ROLLING:` in its log).
+
+pf-dev did this for rc70 (moc2-k8s #10343, then #10332). helm's three-way
+merge does not need it.
+
 **First upgrade from rc68 or older: `legacyMasterSwitch`.** A master running
 an rc68-or-older flared cannot be handed over without possible loss, so by
 default the operator does not replace it: rolling waits with

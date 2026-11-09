@@ -792,6 +792,12 @@ def enableSuite : TestSuite := {
             return .fail s!"value mismatch after enablement: {bad}"
           let drops1 := (← c.statNat mIp "proxy_write_dropped").getD 0
           IO.eprintln s!"# while following: stored {w2}/100; items {← c.currItems mIp}; master proxy_write_dropped {drops0}→{drops1}"
+          -- the master's mounted ConfigMap must reach "follow on" before it is
+          -- switched off: each pod's volume is refreshed on its own, and a
+          -- master still on the old file skipped "on" entirely (reloads 0 -> 0
+          -- only), so the "1 -> 0" below never came (CI 42595764031, 49b529a)
+          if !(← waitForCondition "both nodes reload repl_follow_enabled 0 -> 1" 240 do bothReloaded c "repl_follow_enabled: 0 -> 1") then
+            return .fail "following was not switched on on both nodes"
           -- rollback, reverse order
           match ← kubectlPatch "flarecluster" enableCfg.name enableCfg.«namespace» (enablePatch true false) with
           | .error e => return .fail s!"patch (follow off) failed: {e}"

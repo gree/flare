@@ -289,6 +289,18 @@ def autoAssign (state : FlareClusterState) (crd : FlareClusterView) (nodeKey : S
         -- put in P0's master slot every pass, the commit aborted every pass,
         -- and the returning ex-master with the data was never re-seated.
         (state, node)
+      else if pIdx != 0 && cleanState.nodeMap.any (fun (k, n) =>
+          k != nodeKey && n.role == FlareRole.Master && n.state == FlareState.Prepare) then
+        -- ONE NEW PARTITION AT A TIME: flared keeps a single prepare
+        -- partition ("more than 1 partition prepare map -> something is
+        -- seriously going wrong", cluster.cc) and neither Prepare master then
+        -- reconstructs, so both partitions stay masterless for ever. A second
+        -- Prepare master reached the nodes in one map when the send of the
+        -- first one was skipped for a concurrent registration (CI 42569844590
+        -- failover-order, a174c3e: p1 seated at 07:05:41, its send SKIPPED at
+        -- :43, p2 seated at :50, both sent at :53). The proxy waits until the
+        -- preparing master is Active.
+        (state, node)
       else
       -- Mimic C++ flarei state assignment logic (cluster.cc:1010):
       -- Partition 0: always Active (special case, no reconstruction needed)

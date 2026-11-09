@@ -1430,6 +1430,20 @@ def checkExMasterReturn (ctx : Ctx) : IO Unit := do
   let (sa, _) := Reconciler.reconcileStep act activationCrd (.NodeState "m" 12121 .Active)
   check ctx "a slave that activates under an Active master drops its lastMasterOf marker"
     ((sa.lookupNode "m:12121").map (·.lastMasterOf) == some (-1))
+  -- CI 42569844590 failover-order (a174c3e): a second Prepare master reached
+  -- flared in the same map as the first; flared keeps one prepare partition
+  -- and neither reconstructed
+  let crd3 : FlareClusterView := { activationCrd with spec := { partitions := 3, replicas := 3 } }
+  let prep : FlareClusterState :=
+    ({ nodeMap := [("a:12121", holdNode .Master .Active 0 "a"), ("b:12121", holdNode .Master .Prepare 1 "b"),
+                   ("c:12121", holdNode .Proxy .Active (-1) "c")], nodeMapVersion := 7 } : FlareClusterState).rebuildPartitionMap
+  let (pd, _) := Reconciler.autoAssign prep crd3 "c:12121" (holdNode .Proxy .Active (-1) "c") ["a:12121", "b:12121", "c:12121"]
+  check ctx "no second new partition master while another partition's master is still Prepare"
+    ((pd.lookupNode "c:12121").map (·.role) == some FlareRole.Proxy && pd.nodeMap == prep.nodeMap)
+  let prepDone := prep.addNode "b:12121" (holdNode .Master .Active 1 "b")
+  let (pe, _) := Reconciler.autoAssign prepDone crd3 "c:12121" (holdNode .Proxy .Active (-1) "c") ["a:12121", "b:12121", "c:12121"]
+  check ctx "… once it is Active the next partition gets its (Prepare) master"
+    ((pe.lookupNode "c:12121").map (fun n => (n.role, n.state, n.partition)) == some (FlareRole.Master, FlareState.Prepare, 2))
 
 /-- Helpers for checkAttributedRejoin, NOT inlined: as local lambdas the
     classifier and the refill were inlined at every use (1.17M lines of C, a

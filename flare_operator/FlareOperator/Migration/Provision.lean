@@ -265,6 +265,10 @@ spec:
           env:
             - name: MALLOC_ARENA_MAX
               value: \"2\"
+            - name: FLARE_POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
           command: [\"sh\", \"-c\", \"if [ -f /data/flare/RESTORE ]; then SRC=$(cat /data/flare/RESTORE) && rm -rf /data/flare/flare.rocksdb && cp -a $SRC /data/flare/flare.rocksdb && touch /data/flare/flare.rocksdb/RESTORED && rm -f /data/flare/RESTORE; fi; mkdir -p /data/flare; rm -f /data/flare/flared.pid; exec flared --config=/etc/flared/extra.conf --data-dir /data/flare --server-port {p.flarePort} --index-server-name {operatorSvc} --index-server-port {p.operatorPort} --storage-type=rocksdb --metrics-server-port 9150 --stderr\"]
           lifecycle:
             preStop:

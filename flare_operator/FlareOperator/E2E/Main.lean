@@ -106,6 +106,7 @@ def main (args : List String) : IO UInt32 :=
     Tests.ContinuousReplicationLimits.multiHoldSuite,
     Tests.ContinuousReplicationLimits.rebuildTmpfsSuite,
     Tests.ContinuousReplicationLimits.parkedSlotSuite,
+    Tests.ContinuousReplicationLimits.redundantDiscardSuite,
     Tests.HistoryContinuation.walPinRestartSuite,
     Tests.HistoryContinuation.handoverSuite,
     Tests.HistoryContinuation.handoverFollowOffSuite,

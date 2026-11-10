@@ -362,6 +362,10 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 			_send_stat("rocksdb_quarantined"                , rdb->is_quarantined() ? 1 : 0);
 			// decision 2026-10-08: changed part-way by a merging dump (durable)
 			_send_stat("rocksdb_copy_partial"               , rdb->is_copy_partial() ? 1 : 0);
+			// docs/spec.md "redundant copy": copy.discarded exists (wiped on the
+			// operator's word / an approval, no verified copy switched in yet)
+			_send_stat("rocksdb_copy_discarded"             , rdb->is_copy_discarded() ? 1 : 0);
+			_send_stat("rebuild_redundant_discards"         , static_cast<long long>(rdb->get_redundant_discards()));
 			// restore provenance: the partition / routing layout this copy's
 			// data belongs to ("-" = not bound yet) and whether it is a
 			// restored copy not yet accepted as that partition's master

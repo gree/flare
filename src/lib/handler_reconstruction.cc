@@ -39,6 +39,8 @@
 #include "copy_protection.h"
 #include "op_repl_snapshot.h"
 #include "copy_capacity.h"
+#include "copy_discard_grant.h"
+#include "op_rebuild_resume.h"
 
 #ifdef HAVE_LIBROCKSDB
 #include "storage_rocksdb.h"
@@ -1292,8 +1294,38 @@ int handler_reconstruction::_staged_rebuild(bool snapshot_ok, const string& peer
 	{
 		uint64_t need = 0;
 		string why;
-		const capacity_verdict v = decide_rebuild_capacity(rdb->get_rebuild_reserve_bytes(), src.size_known, src.copy_bytes,
+		capacity_verdict v = decide_rebuild_capacity(rdb->get_rebuild_reserve_bytes(), src.size_known, src.copy_bytes,
 			rdb->rebuild_space_available(), need, why);
+		// The operator's word that this copy is redundant (docs/spec.md): only
+		// here, only for "no room", and only if it then fits. A grant is used
+		// once and re-checked against every binding right before the discard.
+		discard_grant grant;
+		const bool granted = rdb->take_discard_grant(grant);
+		if (v == capacity_insufficient && granted) {
+			const discard_grant_facts facts = op_rebuild_resume::gather_facts(this->_cluster, this->_storage);
+			const string refused = check_discard_grant(grant, facts, false);
+			if (!refused.empty()) {
+				log_warning("redundant-copy discard grant NOT used (%s): the live copy is KEPT", refused.c_str());
+			} else if (!discard_makes_room(need, rdb->rebuild_space_available(), rdb->local_copy_bytes())) {
+				log_warning("redundant-copy discard grant NOT used: discarding the live copy (%llu bytes) would still leave no room (%s); the live copy is KEPT",
+					(unsigned long long)rdb->local_copy_bytes(), why.c_str());
+			} else {
+				char rid[256];
+				snprintf(rid, sizeof(rid), "redundant:%s:%llu", grant.copy_id.c_str(), (unsigned long long)grant.map_version);
+				string result;
+				const uint64_t freed = rdb->local_copy_bytes();
+				rdb->discard_copy(rid, "discard-before-copy", grant.copy_id, true, result);
+				if (result == "applied") {
+					rdb->note_redundant_discard();
+					log_warning("REDUNDANT COPY DISCARDED on the operator's word: copy %s (%llu bytes, map version %llu, request %s); the rebuild starts into the room it freed",
+						grant.copy_id.c_str(), (unsigned long long)freed, (unsigned long long)grant.map_version, rid);
+					v = decide_rebuild_capacity(rdb->get_rebuild_reserve_bytes(), src.size_known, src.copy_bytes,
+						rdb->rebuild_space_available(), need, why);
+				} else {
+					log_warning("redundant-copy discard %s did not apply (%s): the live copy is KEPT unless it was already wiped", rid, result.c_str());
+				}
+			}
+		}
 		if (v != capacity_ok) {
 			return blocker::stop(rdb, capacity_verdict_name(v), why);
 		}

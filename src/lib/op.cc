@@ -35,6 +35,8 @@ namespace gree {
 namespace flare {
 
 // {{{ ctor/dtor
+const char* const op::rebuild_pending_message = "rebuild pending";
+
 /**
  *	ctor for op
  */

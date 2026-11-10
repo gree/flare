@@ -31,6 +31,7 @@
 #include "server.h"
 #include "storage.h"
 #include "cluster.h"
+#include "mock_cluster.h"
 #include "cluster_replication.h"
 #include "op_set.h"
 #include "mock_storage.h"
@@ -97,7 +98,16 @@ namespace test_handler_cluster_replication {
 		queue_proxy_write::hold_window_ms = 0;
 		queue_proxy_write::clear_held_given_up();
 
-		if (sigaction(SIGUSR1, &prev_sigusr1_action, NULL) < 0) {
+		// A thread's shutdown() wakes it with pthread_kill(SIGUSR1), and a
+		// signal sent late can land after this point: with the default action
+		// restored it ends the whole cutter process ("User defined signal 1",
+		// reported as 'Crash' with no assertion, seen once in a local run and
+		// like nix-linux 42735649461). Never go back to the default action.
+		struct sigaction restore = prev_sigusr1_action;
+		if (restore.sa_handler == SIG_DFL) {
+			restore.sa_handler = SIG_IGN;
+		}
+		if (sigaction(SIGUSR1, &restore, NULL) < 0) {
 			log_err("sigaction for %d failed: %s (%d)", SIGUSR1, util::strerror(errno), errno);
 			return;
 		}
@@ -114,13 +124,31 @@ namespace test_handler_cluster_replication {
 		return e;
 	}
 
+	// server::listen() reports a failed bind (the port is rand()) with -1 and
+	// server::wait() returns an EMPTY list when interrupted (the SIGUSR1
+	// handler above has no SA_RESTART): neither may go unseen, or the test
+	// indexes cs[0] of an empty vector and crashes instead of failing
+	// (nix-linux 42735649461: test_foreign_server_error_is_counted, 'Crash').
+	void listen_or_fail() {
+		cut_assert_equal_int(0, s->listen(port), cut_message("bind/listen on port %d failed", port));
+	}
+
+	vector<shared_connection_tcp> wait_connections() {
+		vector<shared_connection_tcp> got;
+		for (int i = 0; i < 50 && got.empty(); i++) {  // EINTR -> wait again
+			got = s->wait();
+		}
+		cut_assert_false(got.empty(), cut_message("no connection accepted (wait() kept returning empty, port %d)", port));
+		return got;
+	}
+
 	shared_thread start_handler(bool listen = true) {
 		shared_thread t = tp->get(thread_pool::thread_type_cluster_replication);
 		handler_cluster_replication* h = new handler_cluster_replication(t, "localhost", port);
 		t->trigger(h, true, false);
 		if (listen) {
-			s->listen(port);
-			cs = s->wait();
+			listen_or_fail();
+			cs = wait_connections();
 		}
 		return t;
 	}
@@ -251,13 +279,13 @@ namespace test_handler_cluster_replication {
 		cut_assert_equal_boolean(false, q->is_success());
 		cut_assert_equal_int(1, (int)stats_object->get_proxy_write_dropped());
 
-		s->listen(port);
+		listen_or_fail();
 		storage::entry e2 = get_entry(" key2 0 0 5 3", storage::parse_type_set, "VALUE");
 		shared_queue_proxy_write q2(new queue_proxy_write(NULL, NULL, proxy, e2, "set"));
 		q2->set_post_proxy(true);
 		q2->sync_ref();
 		enqueue(t, q2);
-		cs = s->wait();
+		cs = wait_connections();
 		cut_assert_equal_int(1, (int)cs.size());
 		char *p, *v;
 		cs[0]->readline(&p);
@@ -447,8 +475,8 @@ namespace test_handler_cluster_replication {
 		// handler's own first open); listen well after the first attempt
 		// (nix-linux 38120332346: listening at 1.5 s let it in at once)
 		usleep(4000 * 1000);
-		s->listen(port);
-		cs = s->wait();
+		listen_or_fail();
+		cs = wait_connections();
 		char *p, *v;
 		cs[0]->readline(&p);
 		cs[0]->readline(&v);
@@ -487,9 +515,9 @@ namespace test_handler_cluster_replication {
 		cut_assert_equal_int(1, (int)crepl("forward_dropped_down"));
 		cut_assert(ms < 1500, cut_message("a given-up destination still held the forward %ld ms", ms));
 
-		s->listen(port);
+		listen_or_fail();
 		shared_queue_proxy_write q3 = enqueue_foreign_set(t, "key3");
-		cs = s->wait();
+		cs = wait_connections();
 		char *p, *v;
 		cs[0]->readline(&p);
 		cs[0]->readline(&v);
@@ -536,8 +564,8 @@ namespace test_handler_cluster_replication {
 		// well after the first attempts (one open = 2 connects, see
 		// test_foreign_rides_out_a_late_destination)
 		usleep(4000 * 1000);
-		s->listen(port);
-		cs = s->wait();
+		listen_or_fail();
+		cs = wait_connections();
 		char *p, *v;
 		cs[0]->readline(&p);
 		cs[0]->readline(&v);
@@ -573,9 +601,9 @@ namespace test_handler_cluster_replication {
 		cut_assert_equal_int(2, (int)stats_object->get_proxy_write_dropped());
 		cut_assert(ms < 1500, cut_message("a given-up replica still held the forward %ld ms", ms));
 
-		s->listen(port);
+		listen_or_fail();
 		shared_queue_proxy_write q3 = enqueue_replica_set(t, "key3");
-		cs = s->wait();
+		cs = wait_connections();
 		char *p, *v;
 		cs[0]->readline(&p);
 		cs[0]->readline(&v);
@@ -681,7 +709,7 @@ namespace test_handler_cluster_replication {
 		shared_thread b = start_handler(false);
 		vector<shared_connection_tcp> bcs;
 		for (int i = 0; i < 50 && bcs.size() == 0; i++) {
-			bcs = s->wait();
+			bcs = wait_connections();
 		}
 		cut_assert_true(bcs.size() > 0);
 		struct timespec t0;
@@ -717,15 +745,101 @@ namespace test_handler_cluster_replication {
 		}
 	}
 
+	// flare-parked-slave-forward-noise: a replica whose copy holds another
+	// history and is being rebuilt answers SERVER_ERROR "rebuild pending". While
+	// the master's map shows it not Active that is EXPECTED (the rebuild's
+	// catch-up carries the change): one attempt, no hold, not failed, not
+	// dropped, not given up — counted in refused_rebuilding.
+	shared_queue_proxy_write enqueue_replica_set_with(shared_thread t, mock_cluster* cl, const string& key) {
+		storage::entry e = get_entry(" " + key + " 0 0 5 3", storage::parse_type_set, "VALUE");
+		vector<string> proxy;
+		shared_queue_proxy_write q(new queue_proxy_write(cl, NULL, proxy, e, "set"));
+		q->set_post_proxy(true);
+		q->sync_ref();
+		enqueue(t, q);
+		return q;
+	}
+
+	void test_in_cluster_rebuild_pending_is_not_a_failure() {
+		queue_proxy_write::hold_window_ms = 1500;
+		mock_cluster cl("localhost", 1);
+		cl.set_node("localhost", port, cluster::role_slave, cluster::state_prepare, 0, 0);
+		shared_thread t = start_handler();
+		struct timespec t0;
+		clock_gettime(CLOCK_MONOTONIC, &t0);
+		shared_queue_proxy_write q1 = enqueue_replica_set_with(t, &cl, "key1");
+		answer_one(cs[0], "SERVER_ERROR rebuild pending");
+		q1->sync();
+		const long ms = elapsed_ms(t0);
+		cut_assert(ms < 500, cut_message("a rebuild-pending refusal was held %ld ms", ms));
+		uint64_t failed = 0, refused = 0, held = 0;
+		stats_object->get_proxy_write_failed(failed);
+		stats_object->get_proxy_write_refused_rebuilding(refused);
+		stats_object->get_proxy_write_held(held);
+		cut_assert_equal_int(0, (int)failed);
+		cut_assert_equal_int(1, (int)refused);
+		cut_assert_equal_int(0, (int)held);
+		cut_assert_equal_int(0, (int)stats_object->get_proxy_write_dropped());
+
+		// not given up: the next STORED is not delayed, and nothing is retried
+		clock_gettime(CLOCK_MONOTONIC, &t0);
+		shared_queue_proxy_write q2 = enqueue_replica_set_with(t, &cl, "key2");
+		answer_one(cs[0], "STORED");
+		q2->sync();
+		cut_assert(elapsed_ms(t0) < 500, cut_message("the forward after a rebuild-pending one was delayed"));
+		cut_assert_equal_int(op::result_stored, q2->get_result());
+		stats_object->get_proxy_write_failed(failed);
+		cut_assert_equal_int(0, (int)failed);
+	}
+
+	// The same reply from a destination the master's map still calls Active is
+	// a real refusal: held through the window and counted failed (loud).
+	void test_in_cluster_rebuild_pending_from_an_active_replica_is_failed() {
+		queue_proxy_write::hold_window_ms = 1000;
+		mock_cluster cl("localhost", 1);
+		cl.set_node("localhost", port, cluster::role_slave, cluster::state_active, 0, 1);
+		shared_thread t = start_handler();
+		shared_queue_proxy_write q1 = enqueue_replica_set_with(t, &cl, "key1");
+		const int n = answer_all(cs[0], "SERVER_ERROR rebuild pending", 2000);
+		q1->sync();
+		cut_assert(n >= 2, cut_message("an Active replica's refusal was tried %d time(s)", n));
+		uint64_t failed = 0, refused = 0;
+		stats_object->get_proxy_write_failed(failed);
+		stats_object->get_proxy_write_refused_rebuilding(refused);
+		cut_assert_equal_int(1, (int)failed);
+		cut_assert_equal_int(0, (int)refused);
+	}
+
+	// Any other SERVER_ERROR (here a replica that has no role yet) is still
+	// held and resent, even towards a non-Active destination.
+	void test_in_cluster_other_server_error_is_still_held_for_a_preparing_replica() {
+		queue_proxy_write::hold_window_ms = 8000;
+		mock_cluster cl("localhost", 1);
+		cl.set_node("localhost", port, cluster::role_slave, cluster::state_prepare, 0, 0);
+		shared_thread t = start_handler();
+		shared_queue_proxy_write q = enqueue_replica_set_with(t, &cl, "key");
+		answer_one(cs[0], "SERVER_ERROR no partition available");
+		answer_one(cs[0], "STORED");
+		q->sync();
+		cut_assert_equal_int(op::result_stored, q->get_result());
+		uint64_t failed = 0, refused = 0, held = 0;
+		stats_object->get_proxy_write_failed(failed);
+		stats_object->get_proxy_write_refused_rebuilding(refused);
+		stats_object->get_proxy_write_held(held);
+		cut_assert_equal_int(0, (int)failed);
+		cut_assert_equal_int(0, (int)refused);
+		cut_assert_equal_int(1, (int)held);
+	}
+
 	// The window is a hard bound on the whole send. A replica that accepts
 	// the connection and never answers: every try's read is cut at the time
 	// left, so the forward ends (dropped, counted) close to the window and
 	// not a read timeout later (review of cf27570).
 	void test_in_cluster_hold_is_bounded_by_a_silent_replica() {
 		queue_proxy_write::hold_window_ms = 1500;
-		s->listen(port);
+		listen_or_fail();
 		shared_thread t = start_handler(false);
-		cs = s->wait();
+		cs = wait_connections();
 		struct timespec t0;
 		clock_gettime(CLOCK_MONOTONIC, &t0);
 		shared_queue_proxy_write q = enqueue_replica_set(t, "key");

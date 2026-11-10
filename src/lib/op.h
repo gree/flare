@@ -73,6 +73,11 @@ public:
 		binary,
 	};
 
+	// Reply text of a replica whose copy holds another history and is being
+	// rebuilt (storage::identified_refused_history). The master matches the
+	// PREFIX of the reply (queue_proxy_write::refused_rebuilding).
+	static const char* const				rebuild_pending_message;
+
 protected:
 	shared_connection						_connection;
 	protocol										_protocol;

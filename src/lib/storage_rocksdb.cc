@@ -5573,9 +5573,18 @@ int storage_rocksdb::apply_identified_change(const string& tag, entry& e, bool i
 			// one, so the source is not ahead of us and must not count a
 			// drop — that would request a repair for nothing.
 			return identified_skipped;
-		case apply_refused_session:
+		case apply_refused_session: {
+			// Another history on an ordinary key is the signature of a copy
+			// being rebuilt (see identified_refused_history). An unavailable
+			// local epoch or a reserved key is not.
+			const string local_epoch = this->get_source_epoch();
+			if (!is_reserved_key(e.key) && !local_epoch.empty() && local_epoch != epoch) {
+				return identified_refused_history;
+			}
+			return identified_refused;
+		}
 		case apply_refused_incarnation:
-			// We are not following this history. The source must hear about
+			// We are not following this copy. The source must hear about
 			// it: its retry and drop accounting are what surface the
 			// divergence to the controller.
 			return identified_refused;

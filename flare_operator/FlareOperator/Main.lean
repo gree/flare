@@ -53,6 +53,7 @@ import FlareOperator.Health.HealthCheck
 import FlareOperator.StateMachine.SourceEligibility
 import FlareOperator.StateMachine.RebuildConcurrency
 import FlareOperator.StateMachine.CopyDiscardApproval
+import FlareOperator.StateMachine.RedundantCopy
 import FlareOperator.StateMachine.PromotionEvidence
 import FlareOperator.StateMachine.AuthoritativeHistory
 
@@ -824,12 +825,110 @@ private def rebuildObservations (st : FlareClusterState) (ns : String) : IO (Lis
     IO.eprintln s!"[flare-operator] rebuild concurrency: {unk} could not be read — counted as running (a rebuild there cannot be ruled out)"
   return obs
 
+/-- A person's choice of the copy to keep for a partition held with no master
+    (`flare.gree.net/history-adopt-holder` = `<uid>/<partition>/<node key or
+    pod>`, for THIS cluster's uid only): (partition, node key or pod). -/
+initialize historyChosenRef : IO.Ref (Option (Nat × String)) ← IO.mkRef none
+
+/-- docs/spec.md "A redundant copy is discarded on the operator's word":
+    `FLARE_OPERATOR_REDUNDANT_COPY_DISCARD=off` (also 0 / false) turns it off;
+    default on. -/
+private def redundantCopyDiscardOn : IO Bool := do
+  let v := (← IO.getEnv "FLARE_OPERATOR_REDUNDANT_COPY_DISCARD").map (·.trim.toLower)
+  return !(v == some "off" || v == some "0" || v == some "false")
+
+/-- The last reason a parked copy was KEPT, per node (logged when it changes). -/
+initialize redundantKeptRef : IO.Ref (List (String × String)) ← IO.mkRef []
+/-- Grants sent: (node key, copy id). A node that becomes grantable skips the
+    5 min backoff once per copy. -/
+initialize redundantGrantedRef : IO.Ref (List (String × String)) ← IO.mkRef []
+/-- When a backed-off parked node's condition was last read (mono ms). -/
+initialize redundantCheckedAtRef : IO.Ref (List (String × Nat)) ← IO.mkRef []
+
+/-- The facts `RedundantCopy.decide` reads about the parked node `key`: read
+    fresh now — its stats (the pod UID is read before and after them and must
+    not change), the master's and each other copy's stats, the pods, the
+    repair ledger (`none` = unavailable = every other copy counts as under
+    repair), and the promotion candidates. The other copies are judged as the
+    node move judges them (same history, no new drop) plus the survivor
+    verdict of the delete gate for a WAL follower. -/
+private def gatherRedundantFacts (st : FlareClusterState) (pods : List Bridge.PodInfo)
+    (repairKeys : Option (List String)) (ns key : String) : IO RedundantCopy.Facts := do
+  let podName := extractPodName key
+  let uidBefore ← Bridge.podUid podName ns
+  let out ← match ← Bridge.queryPodStats podName ns "stats" with
+    | .ok o => pure (if statsReplyComplete o then o else "")
+    | .error _ => pure ""
+  let uidAfter ← Bridge.podUid podName ns
+  let podUid := match uidBefore, uidAfter with
+    | some a, some b => if a == b then a else ""
+    | _, _ => ""
+  let part : Int := ((st.lookupNode key).map (·.partition)).getD (-1)
+  let masterKey := RedundantCopy.masterOf st part
+  let mStats ← match masterKey with
+    | some mk => podStatsOf mk ns
+    | none => pure none
+  let bounds ← followBoundsFromEnv
+  let mut others : List RedundantCopy.Other := []
+  for (ck, cn) in st.nodeMap do
+    if ck == key || cn.partition != part || cn.role != FlareRole.Slave then continue
+    let cp := pods.find? (·.toNodeKey == ck)
+    let active := cn.state == FlareState.Active && (cp.any fun x => x.ready && !x.terminating)
+    let cStats ← if active then podStatsOf ck ns else pure none
+    let sameHistory := match mStats, cStats with
+      | some mo, some co =>
+        NodeMove.sameHistoryOf (statStr mo "rocksdb_master_id") (statStr mo "rocksdb_source_epoch")
+          (statStr co "rocksdb_master_id") (statStr co "rocksdb_source_epoch")
+          (statNat co "rocksdb_copy_identity_consistent") (statNat co "rocksdb_quarantined")
+      | _, _ => false
+    let repairOpen := match repairKeys with | some ks => ks.contains ck | none => true
+    let dropIncreased ← match mStats, masterKey with
+      | some mo, some mk =>
+        let d := (statDest mo "proxy_write_dropped" ck).getD 0
+        let f := (statDest mo "proxy_write_failed" ck).getD 0
+        let bk := s!"{mk}|{ck}"
+        match (← nodeMoveBaseRef.get).lookup bk with
+        | some (d0, f0) => pure (d > d0 || f > f0)
+        | none =>
+          nodeMoveBaseRef.modify fun l => (bk, (d, f)) :: l
+          pure false
+      | _, _ => pure false
+    let followOk := match mStats, cStats with
+      | some mo, some co =>
+        match FollowEvidence.judge .survive bounds (followReadingFrom co) (masterReadingFrom mo) with
+        | .notInMode _ | .eligible _ => true
+        | _ => false
+      | _, _ => false
+    others := others ++ [{ key := ck, podUid := (cp.map (·.uid)).getD "", active, sameHistory, repairOpen,
+                           dropIncreased, followOk }]
+  -- nodes that may be promoted: a handover's successor, a pinned successor,
+  -- the copy a person chose to keep, a node move's successor
+  let nameOrKey := fun (x : String) => x == key || x == podName
+  let hled ← handoverRef.get
+  let pins ← pinnedSuccessorRef.get
+  let moves := (← nodeMoveLedgerCacheRef.get).moves.filter (!·.finished)
+  let chosen ← historyChosenRef.get
+  let isCandidate :=
+    hled.entries.any (fun e => nameOrKey e.successor)
+    || pins.any (fun (k, _, _) => nameOrKey k)
+    || (match chosen with | some (cp, who) => (cp : Int) == part && nameOrKey who | none => false)
+    || moves.any (fun m => nameOrKey m.successor)
+  return { key, podUid, copyId := (statStr out "rocksdb_copy_id").getD "",
+           flaredMapVersion := statNat out "node_map_version",
+           consistent := statNat out "rocksdb_copy_identity_consistent",
+           quarantined := statNat out "rocksdb_quarantined",
+           others, candidates := if isCandidate then [key] else [] }
+
 /-- Copy retention §10: read the rebuilding nodes' park state, and resume
     ONE parked rebuild when its slots are free. A node counts as parked-idle
     only on a complete stats reply saying parked=1, in_flight=0 and no
     snapshot being served; anything else (unreadable included) counts as
-    running. -/
-private def refreshParkedRebuilds (stateRef : IO.Ref FlareClusterState) (ns : String) : IO Unit := do
+    running. The resume carries the operator's word that the copy may be
+    discarded (`RedundantCopy.decide`) when the partition has a master and
+    another Active slave of its history on another pod; otherwise it is the
+    plain resume and the old copy is kept. -/
+private def refreshParkedRebuilds (stateRef : IO.Ref FlareClusterState) (crName ns : String)
+    (repairKeys : Option (List String)) : IO Unit := do
   let st ← stateRef.get
   let mut parked : List String := []
   for (key, n) in st.nodeMap do
@@ -848,7 +947,25 @@ private def refreshParkedRebuilds (stateRef : IO.Ref FlareClusterState) (ns : St
   let nowMs ← IO.monoMsNow
   let recent := (← resumedAtRef.get).filter fun (_, t) => nowMs < t + 300000
   resumedAtRef.set recent
-  let eligibleToResume := parked.filter fun k => !(recent.any (·.1 == k))
+  let discardOn ← redundantCopyDiscardOn
+  -- a parked node still in its backoff whose copy has become redundant is
+  -- resumed once (with the grant) without waiting out the 5 min; read at most
+  -- every 15 s a node
+  let mut bypass : List String := []
+  if discardOn && !parked.isEmpty && parked.any (fun k => recent.any (·.1 == k)) then
+    let checked := (← redundantCheckedAtRef.get).filter fun (_, t) => nowMs < t + 15000
+    redundantCheckedAtRef.set checked
+    match ← Bridge.listFlaredPodsE crName ns with
+    | .ok pods =>
+      for k in parked do
+        if recent.any (·.1 == k) && !(checked.any (·.1 == k)) then
+          redundantCheckedAtRef.modify (· ++ [(k, nowMs)])
+          let f ← gatherRedundantFacts st pods repairKeys ns k
+          if RedundantCopy.decide st f matches .grant .. then
+            if !((← redundantGrantedRef.get).any fun (gk, gc) => gk == k && gc == f.copyId) then
+              bypass := bypass ++ [k]
+    | .error _ => pure ()
+  let eligibleToResume := parked.filter fun k => !(recent.any (·.1 == k)) || bypass.contains k
   -- nodes in their backoff stay parked (not counted) but are not resumed now
   let ordered := eligibleToResume ++ parked.filter (!eligibleToResume.contains ·)
   let (running, parkedNow) ← if eligibleToResume.isEmpty then pure ([], parked)
@@ -857,19 +974,44 @@ private def refreshParkedRebuilds (stateRef : IO.Ref FlareClusterState) (ns : St
   | none => pure ()
   | some k =>
     resumedAtRef.modify (· ++ [(k, nowMs)])
-    match ← Bridge.queryPodStats (extractPodName k) ns "rebuild_resume" with
+    -- the condition is decided again, from fresh reads, before every grant
+    let mut verdict : RedundantCopy.Verdict := .keep "the operator's redundant-copy discard is off"
+    let mut facts : Option RedundantCopy.Facts := none
+    if discardOn then
+      match ← Bridge.listFlaredPodsE crName ns with
+      | .ok pods =>
+        let f ← gatherRedundantFacts st pods repairKeys ns k
+        facts := some f
+        verdict := RedundantCopy.decide st f
+      | .error e => verdict := .keep s!"the pods could not be read ({e})"
+    let cmd := match verdict with
+      | .grant u c v => s!"rebuild_resume discard {u} {c} {v}"
+      | .keep _ => "rebuild_resume"
+    match verdict with
+    | .keep why =>
+      if discardOn && (← redundantKeptRef.get).lookup k != some why then
+        redundantKeptRef.modify fun l => (k, why) :: l.filter (·.1 != k)
+        IO.eprintln s!"[flare-operator] REDUNDANT COPY KEPT: {k} — {why}; its rebuild is resumed without a discard"
+    | .grant u c v =>
+      redundantKeptRef.modify (·.filter (·.1 != k))
+      let others := (facts.map (·.others.filter (·.active) |>.map (·.key))).getD []
+      IO.eprintln s!"[flare-operator] REDUNDANT COPY DISCARD GRANTED: {k} (pod UID {u}, copy {c}, node map version {v}); the partition has a master and other Active slave(s) of its history: {others}"
+    match ← Bridge.queryPodStats (extractPodName k) ns cmd with
     | .ok out =>
+      if cmd != "rebuild_resume" then
+        match statStr out "rebuild_discard_grant" with
+        | some "accepted" =>
+          redundantGrantedRef.modify (· ++ [(k, (facts.map (·.copyId)).getD "")])
+        | other =>
+          IO.eprintln s!"[flare-operator] REDUNDANT COPY DISCARD for {k} was REFUSED by the node ({other}); it stays parked and the copy is kept; decided again next pass"
+          resumedAtRef.modify (·.filter (·.1 != k))
       if statNat out "rebuild_resumed" == some 1 then
         IO.eprintln s!"[flare-operator] REBUILD RESUMED: {k} takes the rebuild slot again (it re-checks capacity, source and copy identity)"
         parkedIdleRef.set (parked.filter (· != k))
-    | .error e => IO.eprintln s!"[flare-operator] rebuild_resume to {k} failed ({e}); it stays parked"
+    | .error e => IO.eprintln s!"[flare-operator] {cmd} to {k} failed ({e}); it stays parked"
 
 initialize historyRvRef : IO.Ref String ← IO.mkRef ""
 initialize historyApprovedRef : IO.Ref Bool ← IO.mkRef false
-/-- A person's choice of the copy to keep for a partition held with no master
-    (`flare.gree.net/history-adopt-holder` = `<uid>/<partition>/<node key or
-    pod>`, for THIS cluster's uid only): (partition, node key or pod). -/
-initialize historyChosenRef : IO.Ref (Option (Nat × String)) ← IO.mkRef none
 /-- The last masterless-hold reason logged per partition (CRITICAL on change
     and every 15 s, not every pass). -/
 initialize historyHeldLoggedRef : IO.Ref (List (Nat × String)) ← IO.mkRef []
@@ -4241,7 +4383,7 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
   -- 5-. Copy retention §7: explicit approvals to discard one named copy
   processCopyDiscardApprovals crName ns
   -- §10: parked rebuilds give back their cluster slot; resume one when free
-  refreshParkedRebuilds stateRef ns
+  refreshParkedRebuilds stateRef crName ns (← repairKeysIfAvailable ledgerAvailableRef ledgerRef stateRef)
   -- the partitions' authoritative history: observed, transitions only
   timedHistory "observeHistory" (observeHistory stateRef crName ns crd.spec.partitions)
   handleClusterReplication crd (← stateRef.get) migrationRef pendingConfRef masterSnapshotRef driftTickRef metrics crName ns

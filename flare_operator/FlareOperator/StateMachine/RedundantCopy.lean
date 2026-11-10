@@ -25,13 +25,22 @@ structure Other where
   podUid : String
   /-- Active in the map and its pod Ready, not Terminating -/
   active : Bool
-  /-- same `rocksdb_master_id` and `rocksdb_source_epoch` as the master, copy
-      identity consistent and not quarantined (NodeMove.sameHistoryOf) -/
+  /-- same `rocksdb_master_id` and `rocksdb_source_epoch` as the master
+      (NodeMove.sameHistoryOf) -/
   sameHistory : Bool
   /-- a replica repair is open for it -/
   repairOpen : Bool
-  /-- the master dropped / failed writes to it since the ledger started -/
-  dropIncreased : Bool
+  /-- its own `rocksdb_copy_identity_consistent` / `rocksdb_quarantined`
+      (none = not reported: fail closed) -/
+  consistent : Option Nat
+  quarantined : Option Nat
+  /-- the master's `proxy_write_dropped[<it>]` / `proxy_write_failed[<it>]`,
+      counted since the master's flared started (none = not reported: fail
+      closed). Absolute, not an increase over a baseline: a baseline taken
+      when the operator first looks (or after it restarts) would hide drops
+      that happened before. -/
+  dropped : Option Nat
+  failed : Option Nat
   /-- not a continuous-replication follower, or proven current (the delete
       gate's survivor verdict); unknown = false -/
   followOk : Bool
@@ -69,12 +78,18 @@ def validToken (s : String) : Bool :=
 def masterOf (st : FlareClusterState) (p : Int) : Option String :=
   (st.nodeMap.find? fun (_, n) => n.role == FlareRole.Master && n.partition == p && n.state == FlareState.Active).map (·.1)
 
+/-- The other copy's own evidence, all of it reported: identity consistent,
+    not quarantined, and the master never dropped or failed a write to it
+    since the master's flared started. Anything missing keeps the copy. -/
+def evidenceOk (o : Other) : Bool :=
+  o.consistent == some 1 && o.quarantined == some 0 && o.dropped == some 0 && o.failed == some 0
+
 /-- `o` keeps the data of partition `p` while the key's copy is away: another
     node than the key and the master, a slave of `p` Active in the map, same
-    history, no open repair, no new drop, a pod of its own, current if it
-    follows. -/
+    history, no open repair, its evidence reported and clean (`evidenceOk`),
+    a pod of its own, current if it follows. -/
 def qualifies (st : FlareClusterState) (p : Int) (master : String) (f : Facts) (o : Other) : Bool :=
-  o.key != f.key && o.key != master && o.active && o.sameHistory && !o.repairOpen && !o.dropIncreased
+  o.key != f.key && o.key != master && o.active && o.sameHistory && !o.repairOpen && evidenceOk o
     && o.followOk && !o.podUid.isEmpty && o.podUid != f.podUid
     && (match st.lookupNode o.key with
         | some n => n.role == FlareRole.Slave && n.state == FlareState.Active && n.partition == p
@@ -112,7 +127,9 @@ def why (st : FlareClusterState) (f : Facts) : String :=
         else if f.quarantined != some 0 then "its copy is quarantined or not reported"
         else if f.flaredMapVersion != some st.nodeMapVersion then "the node's map version differs from the operator's"
         else if !(f.others.any (qualifies st n.partition mk f)) then
-          "no other Active slave of the master's history on another pod holds the data"
+          if f.others.any (fun o => o.key != f.key && o.key != mk && o.active && o.sameHistory && !evidenceOk o) then
+            "the other Active slave's copy identity, quarantine state or the master's dropped/failed counters for it are not reported, or not zero"
+          else "no other Active slave of the master's history on another pod holds the data"
         else "kept"
 
 def decide (st : FlareClusterState) (f : Facts) : Verdict :=

@@ -882,17 +882,15 @@ private def gatherRedundantFacts (st : FlareClusterState) (pods : List Bridge.Po
           (statNat co "rocksdb_copy_identity_consistent") (statNat co "rocksdb_quarantined")
       | _, _ => false
     let repairOpen := match repairKeys with | some ks => ks.contains ck | none => true
-    let dropIncreased ← match mStats, masterKey with
-      | some mo, some mk =>
-        let d := (statDest mo "proxy_write_dropped" ck).getD 0
-        let f := (statDest mo "proxy_write_failed" ck).getD 0
-        let bk := s!"{mk}|{ck}"
-        match (← nodeMoveBaseRef.get).lookup bk with
-        | some (d0, f0) => pure (d > d0 || f > f0)
-        | none =>
-          nodeMoveBaseRef.modify fun l => (bk, (d, f)) :: l
-          pure false
-      | _, _ => pure false
+    -- fail closed: the copy's own identity / quarantine values and the
+    -- master's per-destination counters are passed as read (none = not
+    -- reported); RedundantCopy.evidenceOk requires them reported, and the
+    -- counters 0 since the master's flared started (no baseline: one taken
+    -- now, or after an operator restart, would hide earlier drops)
+    let consistent := cStats.bind (statNat · "rocksdb_copy_identity_consistent")
+    let quarantined := cStats.bind (statNat · "rocksdb_quarantined")
+    let dropped := mStats.bind (statDest · "proxy_write_dropped" ck)
+    let failed := mStats.bind (statDest · "proxy_write_failed" ck)
     let followOk := match mStats, cStats with
       | some mo, some co =>
         match FollowEvidence.judge .survive bounds (followReadingFrom co) (masterReadingFrom mo) with
@@ -900,7 +898,7 @@ private def gatherRedundantFacts (st : FlareClusterState) (pods : List Bridge.Po
         | _ => false
       | _, _ => false
     others := others ++ [{ key := ck, podUid := (cp.map (·.uid)).getD "", active, sameHistory, repairOpen,
-                           dropIncreased, followOk }]
+                           consistent, quarantined, dropped, failed, followOk }]
   -- nodes that may be promoted: a handover's successor, a pinned successor,
   -- the copy a person chose to keep, a node move's successor
   let nameOrKey := fun (x : String) => x == key || x == podName

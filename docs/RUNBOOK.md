@@ -886,9 +886,19 @@ signs:
 - **Only the master is left, or no Active master:** the copy may be the last
   data. A masterless partition takes its new master from a node that holds
   data.
-- **The other slave is not yet a real copy:** another history, a replica repair
-  open, writes dropped to it since the ledger started, or not proven current
-  (continuous replication).
+- **The other slave is not yet a real copy.** Any one of these keeps the copy:
+  - it has another history;
+  - a replica repair is open for it;
+  - it is not proven current (continuous replication);
+  - its copy identity or quarantine state is not reported;
+  - the master's `proxy_write_dropped[<it>]` or `proxy_write_failed[<it>]` is
+    not reported or is not 0. These counters are counted since the master's
+    flared started, not since the operator looked, so drops from before an
+    operator restart still count.
+
+  When a slave has old drops or failures, the operator never grants. Use the
+  manual delete below while the partition still has its master and another
+  Active slave.
 - **The node is a promotion candidate:** a handover or node-move successor, a
   pinned successor, or the copy a person chose to keep.
 - **The copy is quarantined or its identity is inconsistent:** those need a

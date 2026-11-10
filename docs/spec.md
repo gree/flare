@@ -87,7 +87,35 @@ SAFETY-TODO.md.
 - **Promotion.** The successor is the reachable slave with the newest data
   (requirement 4). An empty copy or one being rebuilt is never promoted.
 - **Copies are kept until replaced.** A copy is not removed before a copy
-  that replaces it exists (copy retention / copy protection).
+  that replaces it exists (copy retention / copy protection). flared sees only
+  its own copy, so on its own it never discards one: a rebuild receives the
+  new copy beside the old one and switches when it is complete. That needs
+  room for two copies; without it the rebuild parks
+  (`rebuild_blocked=no_space`) and keeps the old copy.
+- **A redundant copy is discarded on the operator's word** (user decision,
+  2026-11-10). A copy that serves nothing — a proxy's, or that of a slave
+  waiting for or parked in a rebuild — is useless while its partition has a
+  master and at least one Active slave of the master's current history on
+  another Pod. Then the operator tells that node it may discard its copy, and
+  the node discards it before it rebuilds, so the rebuild needs room for one
+  copy.
+  - **Kept otherwise.** When only the master is left, or the partition has
+    no master, a proxy's copy can be the last data: a masterless partition
+    gets its new master from a node that holds data, a proxy included,
+    before an empty one.
+  - **Never discarded by this rule.** The master's copy, a promotion
+    candidate, and quarantined or retained copies (those need a
+    `FlareCopyDiscardApproval`).
+  - **Bound to what was checked.** The permission names the Pod (UID), its
+    copy and the node_map version it was judged under. The node refuses it
+    if any of them changed, and the operator checks the condition again
+    before each grant.
+  - Background: on pf-dev (2026-11-05 and 2026-11-10, rc70 and rc71 rolls)
+    a replica rebuilt from the master that was about to hand over kept a
+    5 GB copy of the old history in an 8 GiB tmpfs. Its rebuild needed
+    7.4 GB, parked on `no_space`, and stayed parked until the Pod was
+    deleted by hand, while the master and another slave held all the data.
+  - Status: not implemented (flare-redundant-copy-discard).
 - **Planned master switches are ordered handovers.** Any switch the operator
   starts on a reachable master (Pod delete, rolling update, drain, cordon)
   loses no acknowledged write and returns no error; a write that arrives

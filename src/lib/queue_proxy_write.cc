@@ -417,6 +417,8 @@ int queue_proxy_write::run(shared_connection c) {
 			const string dest = ctp->get_host() + ":" + boost::lexical_cast<string>(ctp->get_port());
 			if (r == op::result_not_stored) {
 				stats_object->increment_proxy_write_skipped(dest);
+			} else if (this->_refused_rebuilding(p, ctp)) {
+				stats_object->increment_proxy_write_refused_rebuilding(dest);
 			} else if (r != op::result_stored && r != op::result_deleted
 					&& r != op::result_touched && r != op::result_ok
 					&& r != op::result_not_found) {
@@ -426,7 +428,8 @@ int queue_proxy_write::run(shared_connection c) {
 	}
 	if (r != op::result_stored && r != op::result_deleted
 			&& r != op::result_touched && r != op::result_ok
-			&& r != op::result_not_found) {
+			&& r != op::result_not_found
+			&& !this->_refused_rebuilding(p, dynamic_cast<const connection_tcp*>(c.get()))) {
 		static AtomicCounter unexpected_logged(0);
 		if (unexpected_logged.incr() % 100 == 1) {
 			const connection_tcp* ctp = dynamic_cast<const connection_tcp*>(c.get());
@@ -540,6 +543,18 @@ void queue_proxy_write::clear_held_given_up() {
  *	classified by the caller: a SERVER_ERROR at the end of the window counts
  *	as failed); false when the forward is dropped (counted here).
  */
+bool queue_proxy_write::_refused_rebuilding(op_proxy_write* p, const connection_tcp* ctp) {
+	if (ctp == NULL || this->_cluster == NULL || p->get_result() != op::result_server_error) {
+		return false;
+	}
+	const string m = p->get_result_message();
+	const string prefix = op::rebuild_pending_message;
+	if (m.compare(0, prefix.size(), prefix) != 0) {
+		return false;
+	}
+	return this->_cluster->get_node(ctp->get_host(), ctp->get_port()).node_state != cluster::state_active;
+}
+
 bool queue_proxy_write::_send_held(shared_connection c, op_proxy_write* p) {
 	connection_tcp* ctp = dynamic_cast<connection_tcp*>(c.get());
 	const string dest = ctp ? ctp->get_host() + ":" + boost::lexical_cast<string>(ctp->get_port()) : "";
@@ -552,6 +567,7 @@ bool queue_proxy_write::_send_held(shared_connection c, op_proxy_write* p) {
 	int wait_ms = 200;
 	int attempts = 0;
 	bool answered = false;
+	bool rebuilding = false;
 	const char* why = "its hold window ended";
 	for (;;) {
 		const uint64_t elapsed = foreign_now_ms() - started;
@@ -575,6 +591,12 @@ bool queue_proxy_write::_send_held(shared_connection c, op_proxy_write* p) {
 			ctp->clear_deadlines();
 		}
 		if (answered && p->get_result() != op::result_server_error) {
+			break;
+		}
+		if (answered && this->_refused_rebuilding(p, ctp)) {
+			// the replica is being rebuilt: no hold, no given-up (the caller
+			// counts it apart from failed)
+			rebuilding = true;
 			break;
 		}
 		if (!answered) {
@@ -616,7 +638,7 @@ bool queue_proxy_write::_send_held(shared_connection c, op_proxy_write* p) {
 	// SERVER_ERROR is a refusal, not a delivery (review of 09624ee): it never
 	// lifts the given-up mark, and a refusal that lasted the whole window
 	// gives the replica up like no answer (the caller counts it as failed)
-	const bool refused = answered && p->get_result() == op::result_server_error;
+	const bool refused = answered && !rebuilding && p->get_result() == op::result_server_error;
 	if (refused) {
 		if (!given_up && !dest.empty() && !this->_owner_stopping() && took >= window) {
 			held_set_given_up(dest, true);
@@ -628,6 +650,10 @@ bool queue_proxy_write::_send_held(shared_connection c, op_proxy_write* p) {
 				this->_op_ident.c_str(), this->_entry.key.c_str(), this->_entry.version,
 				given_up ? "the replica was already given up" : "SERVER_ERROR through its hold window");
 		}
+		return true;
+	}
+	if (rebuilding) {
+		// not a delivery, not a failure: leaves the given-up mark as it was
 		return true;
 	}
 	if (answered) {

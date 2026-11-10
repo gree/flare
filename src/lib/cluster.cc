@@ -27,6 +27,9 @@
  *	$Id$
  */
 #include "cluster.h"
+#ifdef HAVE_LIBROCKSDB
+#include "storage_rocksdb.h"
+#endif
 #include "connection_tcp.h"
 #include "handler_monitor.h"
 #include "handler_proxy.h"
@@ -2302,6 +2305,23 @@ bool cluster::get_own_assignment(role& r, state& st, int& partition) {
 	}
 	pthread_rwlock_unlock(&this->_mutex_node_map);
 	return found;
+}
+
+bool cluster::is_rebuild_pending_here(storage* st) {
+	role r;
+	state s;
+	int partition = -1;
+	if (this->get_own_assignment(r, s, partition) && r == role_slave && s == state_prepare) {
+		return true;
+	}
+#ifdef HAVE_LIBROCKSDB
+	if (storage_rocksdb* rdb = dynamic_cast<storage_rocksdb*>(st)) {
+		return rdb->is_rebuild_parked() || rdb->is_rebuild_in_flight();
+	}
+#else
+	(void)st;
+#endif
+	return false;
 }
 
 /**

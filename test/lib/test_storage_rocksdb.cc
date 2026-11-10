@@ -5348,8 +5348,16 @@ void test_identified_change_maps_outcomes_for_the_source() {
 	// Another history: the source must hear about it.
 	storage::entry e4;
 	fill_entry(e4, "k", "foreign");
-	cut_assert_equal_int(storage::identified_refused,
+	// (an ordinary key of another history = a copy being rebuilt)
+	cut_assert_equal_int(storage::identified_refused_history,
 		s->apply_identified_change("9:another-history/11", e4, false));
+	cut_assert_equal_int(storage::identified_refused_history,
+		s->apply_identified_change("9:another-history/11", e4, true));
+	// ... but a reserved key of another history stays a plain refusal
+	storage::entry e4r;
+	fill_entry(e4r, storage_rocksdb::kReplLastLsnKey, "foreign");
+	cut_assert_equal_int(storage::identified_refused,
+		s->apply_identified_change("9:another-history/11", e4r, false));
 
 	// Malformed tags are refused, never guessed.
 	storage::entry e5;

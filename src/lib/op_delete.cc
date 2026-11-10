@@ -126,6 +126,15 @@ int op_delete::_run_server() {
 				return this->_send_result(result_deleted);
 			case storage::identified_skipped:
 				return this->_send_result(result_deleted);
+			case storage::identified_refused_history:
+				// A copy being rebuilt follows another history until the
+				// switch: the change comes back through the rebuild's
+				// catch-up. An Active replica of another history really
+				// diverged, so it keeps the loud answer.
+				if (this->_cluster->is_rebuild_pending_here(this->_storage)) {
+					return this->_send_result(result_server_error, op::rebuild_pending_message);
+				}
+				return this->_send_result(result_server_error, "replication identity refused");
 			case storage::identified_refused:
 				return this->_send_result(result_server_error, "replication identity refused");
 			case storage::identified_error:

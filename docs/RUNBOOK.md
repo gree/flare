@@ -835,7 +835,16 @@ to the old history therefore rebuilds from the master once.
 
 ## A replica's rebuild parked on `no_space` (tmpfs) {#rebuild-no-space}
 
-**What you see.** There is no alert for this. You notice it from these signs:
+**What you see.** The operator now handles the usual case itself. You see:
+
+- **The operator log:** `REDUNDANT COPY DISCARD GRANTED: <pod key> (pod UID …, copy …, node map version …)`.
+- **Its flared log:** `REDUNDANT COPY DISCARDED on the operator's word: copy <id> …; the rebuild starts into the room it freed`.
+- **Then** the pod rebuilds from the master and becomes `1/1`. Stats
+  `rebuild_redundant_discards` is 1 on that pod. `rocksdb_copy_discarded` is 1
+  from the wipe until the new copy is switched in, then 0.
+
+**When it stays parked.** Only when the operator keeps the copy. These are the
+signs:
 
 - **A pod stays not Ready** (`0/1`), and the map shows it as Slave P<n> (Prepare).
 - **Its flared log:**
@@ -847,7 +856,10 @@ to the old history therefore rebuilds from the master once.
   ```
 
 - **Its metrics:** `flare_node_rebuild_parked 1` and `flare_node_rebuild_blocked_info{reason="no_space"} 1`.
-- **The operator log:** `parked rebuilds (blocked, nothing in flight; their cluster and partition slots are free): [<pod>]`, and from time to time `REBUILD RESUMED: <pod>`, which parks again.
+- **The operator log:** `parked rebuilds (blocked, nothing in flight; their cluster and partition slots are free): [<pod>]`, and from time to time `REBUILD RESUMED: <pod>`, which parks again. It also says why the copy is kept:
+  `REDUNDANT COPY KEPT: <pod key> — <why>; its rebuild is resumed without a discard`
+  (logged when the reason changes). A node that refuses a grant is logged as
+  `REDUNDANT COPY DISCARD for <pod key> was REFUSED by the node (<reason>)`.
 - **The master's `flare_node_proxy_write_failed` keeps rising.** Its log has
   `proxy write REFUSED by the replica … dest=<that pod>`: the master forwards
   writes to the parked slave, and the slave refuses them.
@@ -862,22 +874,48 @@ to the old history therefore rebuilds from the master once.
   the copy and the reserve. On tmpfs that is memory, and room for two copies is
   usually not there. On pf-dev, 2026-11-10: it needed 7.43 GB (copy 5.02 GB +
   reserve 2.42 GB) with 3.38 GB free in an 8 GiB tmpfs.
-- flared never discards a copy on its own (it sees only itself), so the
+- flared never discards a copy on its own (it sees only itself). The operator
+  tells it when the copy is redundant: the partition has a master and at least
+  one other Active slave of the master's history on another Pod
+  ([spec](spec.md)). If that is not so, or the operator's switch is off, the
   rebuild parks and stays parked. A resume checks the space again and parks
   again.
+
+**Why the operator keeps it (`KEPT: <why>`).**
+
+- **Only the master is left, or no Active master:** the copy may be the last
+  data. A masterless partition takes its new master from a node that holds
+  data.
+- **The other slave is not yet a real copy:** another history, a replica repair
+  open, writes dropped to it since the ledger started, or not proven current
+  (continuous replication).
+- **The node is a promotion candidate:** a handover or node-move successor, a
+  pinned successor, or the copy a person chose to keep.
+- **The copy is quarantined or its identity is inconsistent:** those need a
+  `FlareCopyDiscardApproval`.
+- **A binding does not match:** the Pod UID changed during the read, or flared's
+  node map version differs from the operator's. The operator decides again on
+  the next pass; it does not wait out the 5 minute resume backoff once the
+  copy becomes grantable.
+- **The switch is off:** `FLARE_OPERATOR_REDUNDANT_COPY_DISCARD=off`.
+- **The pod has no `FLARE_POD_UID`** (a chart older than this change): flared
+  refuses with `refused:pod_uid_unknown`.
 
 **Effect.**
 
 - No data is lost.
-- The partition has one usable copy fewer.
-- The master's `proxy_write_failed` rises for that slave, which hides real
-  failures in the same counter.
+- The partition has one usable copy fewer until the rebuild finishes.
+- The master's `proxy_write_failed` rises for that slave while it is parked,
+  which hides real failures in the same counter.
 
-**Do.**
+**Do.** Look at the operator log first: `GRANTED` means wait (a rebuild of 5 GB
+took about 1 to 2 minutes on pf-dev); `KEPT` says why.
 
-1. Check that the partition still has its master and at least one other
-   Active slave of the current history. The other slave's `curr_items` should
-   match the master's, and its pod should be `1/1`.
+1. If the log says `KEPT` and the partition still has its master and at least
+   one other Active slave of the current history (the other slave's
+   `curr_items` matches the master's, its pod is `1/1`), the reason is one of
+   the transient ones above. Wait one or two passes; if it stays, or the
+   operator's switch is off, delete the parked pod by hand (step 2).
 2. Delete the parked pod gracefully: `kubectl delete pod <pod> -n <ns>`, with
    no `--force`.
    - It is a proxy before it stops ([what that
@@ -893,10 +931,12 @@ partition takes its new master from a node that holds data. Wait instead, or
 give the pod more room (`tmpfs.sizeLimit` together with the memory limit, see
 [#sizing](#sizing)).
 
-**Later.** `docs/spec.md` (2026-11-10) decides that the operator will allow
-the discard itself when the partition has a master and another Active slave
-of the current history, so this no longer needs a person. Status: not
-implemented (flare-redundant-copy-discard). Turning on history continuation
+**A crash during the discard.** flared writes `copy.discarded` before it wipes
+the copy. After a crash it finishes the wipe when it starts, and the emptied
+copy is not promotable (`promotion_forbidden`) until a verified copy has been
+switched in. Do not remove the file by hand.
+
+**Later.** Turning on history continuation
 (`FLARE_OPERATOR_HISTORY_CONTINUATION=on`, with WAL follow on) removes the
 usual cause: the replicas keep their copies across a planned master switch.
 

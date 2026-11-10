@@ -115,7 +115,11 @@ SAFETY-TODO.md.
     5 GB copy of the old history in an 8 GiB tmpfs. Its rebuild needed
     7.4 GB, parked on `no_space`, and stayed parked until the Pod was
     deleted by hand, while the master and another slave held all the data.
-  - Status: not implemented (flare-redundant-copy-discard).
+  - Status: implemented (flare-redundant-copy-discard). The operator decides
+    it for a rebuild parked on `no_space` (`FLARE_OPERATOR_REDUNDANT_COPY_DISCARD=off`
+    turns it off); flared writes `copy.discarded` before it wipes, so a crash
+    finishes the wipe and the emptied copy is never promotable until a
+    verified copy is switched in.
 - **Planned master switches are ordered handovers.** Any switch the operator
   starts on a reachable master (Pod delete, rolling update, drain, cordon)
   loses no acknowledged write and returns no error; a write that arrives

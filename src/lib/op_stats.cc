@@ -245,6 +245,14 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 			_send_stat(key, it->second);
 		}
 		_send_stat("proxy_write_skipped", skipped);
+		uint64_t refused_rebuilding = 0;
+		map<string, uint64_t> rr = stats_object->get_proxy_write_refused_rebuilding(refused_rebuilding);
+		for (map<string, uint64_t>::const_iterator it = rr.begin(); it != rr.end(); it++) {
+			char key[BUFSIZ];
+			snprintf(key, sizeof(key), "proxy_write_refused_rebuilding[%s]", it->first.c_str());
+			_send_stat(key, it->second);
+		}
+		_send_stat("proxy_write_refused_rebuilding", refused_rebuilding);
 		uint64_t held = 0;
 		map<string, uint64_t> hd = stats_object->get_proxy_write_held(held);
 		for (map<string, uint64_t>::const_iterator it = hd.begin(); it != hd.end(); it++) {

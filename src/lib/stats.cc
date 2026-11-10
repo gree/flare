@@ -457,6 +457,12 @@ void stats::increment_proxy_write_skipped(const string& dest) {
 	pthread_mutex_unlock(&this->_mutex_repl_in_flight);
 }
 
+void stats::increment_proxy_write_refused_rebuilding(const string& dest) {
+	pthread_mutex_lock(&this->_mutex_repl_in_flight);
+	this->_proxy_write_refused_rebuilding[dest]++;
+	pthread_mutex_unlock(&this->_mutex_repl_in_flight);
+}
+
 static map<string, uint64_t> snapshot_with_total(pthread_mutex_t* m, const map<string, uint64_t>& src, uint64_t& total) {
 	pthread_mutex_lock(m);
 	map<string, uint64_t> r = src;
@@ -501,6 +507,10 @@ map<string, uint64_t> stats::get_proxy_write_held_ms_max(uint64_t& max_all) {
 
 map<string, uint64_t> stats::get_proxy_write_skipped(uint64_t& total) {
 	return snapshot_with_total(&this->_mutex_repl_in_flight, this->_proxy_write_skipped, total);
+}
+
+map<string, uint64_t> stats::get_proxy_write_refused_rebuilding(uint64_t& total) {
+	return snapshot_with_total(&this->_mutex_repl_in_flight, this->_proxy_write_refused_rebuilding, total);
 }
 
 map<string, uint64_t> stats::get_crepl_snapshot(uint64_t& in_flight) {

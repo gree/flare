@@ -31,6 +31,7 @@
 #include "server.h"
 #include "storage.h"
 #include "cluster.h"
+#include "mock_cluster.h"
 #include "cluster_replication.h"
 #include "op_set.h"
 #include "mock_storage.h"
@@ -742,6 +743,92 @@ namespace test_handler_cluster_replication {
 		for (size_t i = 0; i < bcs.size(); i++) {
 			bcs[i]->close();
 		}
+	}
+
+	// flare-parked-slave-forward-noise: a replica whose copy holds another
+	// history and is being rebuilt answers SERVER_ERROR "rebuild pending". While
+	// the master's map shows it not Active that is EXPECTED (the rebuild's
+	// catch-up carries the change): one attempt, no hold, not failed, not
+	// dropped, not given up — counted in refused_rebuilding.
+	shared_queue_proxy_write enqueue_replica_set_with(shared_thread t, mock_cluster* cl, const string& key) {
+		storage::entry e = get_entry(" " + key + " 0 0 5 3", storage::parse_type_set, "VALUE");
+		vector<string> proxy;
+		shared_queue_proxy_write q(new queue_proxy_write(cl, NULL, proxy, e, "set"));
+		q->set_post_proxy(true);
+		q->sync_ref();
+		enqueue(t, q);
+		return q;
+	}
+
+	void test_in_cluster_rebuild_pending_is_not_a_failure() {
+		queue_proxy_write::hold_window_ms = 1500;
+		mock_cluster cl("localhost", 1);
+		cl.set_node("localhost", port, cluster::role_slave, cluster::state_prepare, 0, 0);
+		shared_thread t = start_handler();
+		struct timespec t0;
+		clock_gettime(CLOCK_MONOTONIC, &t0);
+		shared_queue_proxy_write q1 = enqueue_replica_set_with(t, &cl, "key1");
+		answer_one(cs[0], "SERVER_ERROR rebuild pending");
+		q1->sync();
+		const long ms = elapsed_ms(t0);
+		cut_assert(ms < 500, cut_message("a rebuild-pending refusal was held %ld ms", ms));
+		uint64_t failed = 0, refused = 0, held = 0;
+		stats_object->get_proxy_write_failed(failed);
+		stats_object->get_proxy_write_refused_rebuilding(refused);
+		stats_object->get_proxy_write_held(held);
+		cut_assert_equal_int(0, (int)failed);
+		cut_assert_equal_int(1, (int)refused);
+		cut_assert_equal_int(0, (int)held);
+		cut_assert_equal_int(0, (int)stats_object->get_proxy_write_dropped());
+
+		// not given up: the next STORED is not delayed, and nothing is retried
+		clock_gettime(CLOCK_MONOTONIC, &t0);
+		shared_queue_proxy_write q2 = enqueue_replica_set_with(t, &cl, "key2");
+		answer_one(cs[0], "STORED");
+		q2->sync();
+		cut_assert(elapsed_ms(t0) < 500, cut_message("the forward after a rebuild-pending one was delayed"));
+		cut_assert_equal_int(op::result_stored, q2->get_result());
+		stats_object->get_proxy_write_failed(failed);
+		cut_assert_equal_int(0, (int)failed);
+	}
+
+	// The same reply from a destination the master's map still calls Active is
+	// a real refusal: held through the window and counted failed (loud).
+	void test_in_cluster_rebuild_pending_from_an_active_replica_is_failed() {
+		queue_proxy_write::hold_window_ms = 1000;
+		mock_cluster cl("localhost", 1);
+		cl.set_node("localhost", port, cluster::role_slave, cluster::state_active, 0, 1);
+		shared_thread t = start_handler();
+		shared_queue_proxy_write q1 = enqueue_replica_set_with(t, &cl, "key1");
+		const int n = answer_all(cs[0], "SERVER_ERROR rebuild pending", 2000);
+		q1->sync();
+		cut_assert(n >= 2, cut_message("an Active replica's refusal was tried %d time(s)", n));
+		uint64_t failed = 0, refused = 0;
+		stats_object->get_proxy_write_failed(failed);
+		stats_object->get_proxy_write_refused_rebuilding(refused);
+		cut_assert_equal_int(1, (int)failed);
+		cut_assert_equal_int(0, (int)refused);
+	}
+
+	// Any other SERVER_ERROR (here a replica that has no role yet) is still
+	// held and resent, even towards a non-Active destination.
+	void test_in_cluster_other_server_error_is_still_held_for_a_preparing_replica() {
+		queue_proxy_write::hold_window_ms = 8000;
+		mock_cluster cl("localhost", 1);
+		cl.set_node("localhost", port, cluster::role_slave, cluster::state_prepare, 0, 0);
+		shared_thread t = start_handler();
+		shared_queue_proxy_write q = enqueue_replica_set_with(t, &cl, "key");
+		answer_one(cs[0], "SERVER_ERROR no partition available");
+		answer_one(cs[0], "STORED");
+		q->sync();
+		cut_assert_equal_int(op::result_stored, q->get_result());
+		uint64_t failed = 0, refused = 0, held = 0;
+		stats_object->get_proxy_write_failed(failed);
+		stats_object->get_proxy_write_refused_rebuilding(refused);
+		stats_object->get_proxy_write_held(held);
+		cut_assert_equal_int(0, (int)failed);
+		cut_assert_equal_int(0, (int)refused);
+		cut_assert_equal_int(1, (int)held);
 	}
 
 	// The window is a hard bound on the whole send. A replica that accepts

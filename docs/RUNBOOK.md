@@ -860,9 +860,15 @@ signs:
   `REDUNDANT COPY KEPT: <pod key> — <why>; its rebuild is resumed without a discard`
   (logged when the reason changes). A node that refuses a grant is logged as
   `REDUNDANT COPY DISCARD for <pod key> was REFUSED by the node (<reason>)`.
-- **The master's `flare_node_proxy_write_failed` keeps rising.** Its log has
-  `proxy write REFUSED by the replica … dest=<that pod>`: the master forwards
-  writes to the parked slave, and the slave refuses them.
+- **The master's `proxy_write_refused_rebuilding[<pod>]` rises** (metric
+  `flare_node_proxy_write_refused_rebuilding`). The master forwards writes to the
+  parked slave and the slave refuses them with `SERVER_ERROR rebuild pending`,
+  because its copy holds another history. This is expected and nothing is
+  lost: each refused change comes back through the rebuild's catch-up. It is
+  not counted in `proxy_write_failed`, not held, and not dropped. If
+  `proxy_write_failed[<pod>]` rises instead, the forward was refused for
+  another reason, or the master's map still shows the pod Active (an older
+  flared on either side counts it as failed): treat that as a real failure.
 
 **Why.**
 
@@ -915,8 +921,9 @@ signs:
 
 - No data is lost.
 - The partition has one usable copy fewer until the rebuild finishes.
-- The master's `proxy_write_failed` rises for that slave while it is parked,
-  which hides real failures in the same counter.
+- The master's `proxy_write_refused_rebuilding[<pod>]` rises for that slave
+  while it is parked (expected). `proxy_write_failed[<pod>]` no longer rises for
+  it, so a rise there is a real failure.
 
 **Do.** Look at the operator log first: `GRANTED` means wait (a rebuild of 5 GB
 took about 1 to 2 minutes on pf-dev); `KEPT` says why.
@@ -933,7 +940,7 @@ took about 1 to 2 minutes on pf-dev); `KEPT` says why.
    - Its tmpfs is freed, and the new pod rebuilds from the master. This
      took about 1 to 2 minutes for 5 GB on pf-dev.
 3. Check that it becomes `1/1` with the master's `curr_items`, and that the
-   master's `proxy_write_failed` stops rising.
+   master's `proxy_write_refused_rebuilding[<pod>]` stops rising.
 
 If the master is the only usable copy left, do **not** delete the parked pod.
 Its old copy may be the last data besides the master's, because a masterless

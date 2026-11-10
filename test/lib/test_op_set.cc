@@ -32,6 +32,7 @@
 
 #include <app.h>
 #include <op_set.h>
+#include "mock_cluster.h"
 #include <binary_request_header.h>
 
 #include <boost/predef/other/endian.h>
@@ -147,6 +148,23 @@ namespace test_op_set
 		cut_assert_equal_memory("value", 5, op._entry.data.get(), 5);
 		char* dummy;
 		cut_assert_equal_int(-1, c->readsize(1, &dummy));
+	}
+
+	// flare-parked-slave-forward-noise: op_set / op_delete answer a forwarded
+	// change from another history with "rebuild pending" only when this node's
+	// copy is being rebuilt (a slave in Prepare); an Active replica keeps
+	// "replication identity refused" (it really diverged).
+	void test_rebuild_pending_only_for_a_preparing_slave()
+	{
+		mock_cluster cl("localhost", 12121);
+		cut_assert_equal_boolean(false, cl.is_rebuild_pending_here(NULL));
+		cl.set_node("localhost", 12121, cluster::role_slave, cluster::state_prepare, 0, 0);
+		cut_assert_equal_boolean(true, cl.is_rebuild_pending_here(NULL));
+		cl.set_node("localhost", 12121, cluster::role_slave, cluster::state_active, 0, 1);
+		cut_assert_equal_boolean(false, cl.is_rebuild_pending_here(NULL));
+		cl.set_node("localhost", 12121, cluster::role_master, cluster::state_prepare, 0, 1);
+		cut_assert_equal_boolean(false, cl.is_rebuild_pending_here(NULL));
+		cut_assert_equal_string("rebuild pending", op::rebuild_pending_message);
 	}
 
 	void teardown()

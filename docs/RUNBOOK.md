@@ -833,6 +833,73 @@ to the old history therefore rebuilds from the master once.
 - **Avoid it**: restart flared pods through the node guard
   ([#node-guard](#node-guard)), which hands the master over first.
 
+## A replica's rebuild parked on `no_space` (tmpfs) {#rebuild-no-space}
+
+**What you see.** There is no alert for this. You notice it from these signs:
+
+- **A pod stays not Ready** (`0/1`), and the map shows it as Slave P<n> (Prepare).
+- **Its flared log:**
+
+  ```
+  source is serving a different history (epoch_mismatch …)
+  CRITICAL: rebuild_blocked=no_space — need <N> bytes (source copy <C> + reserve <R>), available <A>; the live copy is KEPT …
+  reconstruction PARKED (rebuild_blocked=no_space)
+  ```
+
+- **Its metrics:** `flare_node_rebuild_parked 1` and `flare_node_rebuild_blocked_info{reason="no_space"} 1`.
+- **The operator log:** `parked rebuilds (blocked, nothing in flight; their cluster and partition slots are free): [<pod>]`, and from time to time `REBUILD RESUMED: <pod>`, which parks again.
+- **The master's `flare_node_proxy_write_failed` keeps rising.** Its log has
+  `proxy write REFUSED by the replica … dest=<that pod>`: the master forwards
+  writes to the parked slave, and the slave refuses them.
+
+**Why.**
+
+- The replica holds a full copy of an old history. This happens when it was
+  rebuilt from a master that then handed over, for example the replica the
+  rolling update replaced first. History continuation is off, so the new
+  master's history starts anew and the replica cannot follow it.
+- A rebuild receives the new copy beside the old one, so it needs room for
+  the copy and the reserve. On tmpfs that is memory, and room for two copies is
+  usually not there. On pf-dev, 2026-11-10: it needed 7.43 GB (copy 5.02 GB +
+  reserve 2.42 GB) with 3.38 GB free in an 8 GiB tmpfs.
+- flared never discards a copy on its own (it sees only itself), so the
+  rebuild parks and stays parked. A resume checks the space again and parks
+  again.
+
+**Effect.**
+
+- No data is lost.
+- The partition has one usable copy fewer.
+- The master's `proxy_write_failed` rises for that slave, which hides real
+  failures in the same counter.
+
+**Do.**
+
+1. Check that the partition still has its master and at least one other
+   Active slave of the current history. The other slave's `curr_items` should
+   match the master's, and its pod should be `1/1`.
+2. Delete the parked pod gracefully: `kubectl delete pod <pod> -n <ns>`, with
+   no `--force`.
+   - It is a proxy before it stops ([what that
+     does](#graceful-delete-proxy-first)).
+   - Its tmpfs is freed, and the new pod rebuilds from the master. This
+     took about 1 to 2 minutes for 5 GB on pf-dev.
+3. Check that it becomes `1/1` with the master's `curr_items`, and that the
+   master's `proxy_write_failed` stops rising.
+
+If the master is the only usable copy left, do **not** delete the parked pod.
+Its old copy may be the last data besides the master's, because a masterless
+partition takes its new master from a node that holds data. Wait instead, or
+give the pod more room (`tmpfs.sizeLimit` together with the memory limit, see
+[#sizing](#sizing)).
+
+**Later.** `docs/spec.md` (2026-11-10) decides that the operator will allow
+the discard itself when the partition has a master and another Active slave
+of the current history, so this no longer needs a person. Status: not
+implemented (flare-redundant-copy-discard). Turning on history continuation
+(`FLARE_OPERATOR_HISTORY_CONTINUATION=on`, with WAL follow on) removes the
+usual cause: the replicas keep their copies across a planned master switch.
+
 ## Operator will not start: node map missing, invalid or unreadable {#node-map-lost}
 
 At startup the operator reads `<cluster>-node-map` (ConfigMap) and decides
@@ -1202,7 +1269,9 @@ Pod replacement is lossless when it goes through the operator:
   `HANDOVER p<N> done`, normally seconds; writes wait briefly, none fail).
   Run the same delete again once it is done — the pod is then a proxy and
   the delete is allowed. The delete never comes before the switch (a delete
-  cannot be undone, and the replica could change in between).
+  cannot be undone, and the replica could change in between). Each delete
+  takes the pod out of service first:
+  [the pod becomes a proxy first](#graceful-delete-proxy-first).
 
 **Upgrading from rc68 or older.** A master whose flared predates the
 ordered handover (it reports no `proxy_write_in_flight` / `proxy_write_failed`)
@@ -1258,6 +1327,59 @@ namespace:
 
 A third webhook judges UPDATE / DELETE of StatefulSets in the namespace
 (only `<name>-nodes` is gated).
+
+### What a graceful delete does: the pod becomes a proxy first {#graceful-delete-proxy-first}
+
+A `kubectl delete pod <pod>` without `--force` already takes a flared pod out
+of service before it stops. There is no separate "demote to proxy" step to
+run by hand. A pod with a problem (a stuck rebuild, a copy of an old history,
+a slow or suspect host) is replaced this way:
+
+1. **The node guard judges the delete.**
+   - A replica or a proxy is allowed. The operator log shows `NODE GUARD: allowed DELETE pods
+     <pod> … a graceful delete of a replica (slave): its partition keeps its
+     master`.
+   - A master is refused once and handed over first (above).
+2. **The operator demotes the Terminating pod to a proxy.** It sends a node_map
+   without the pod's role, and the operator log shows `graceful drain: demoting Terminating
+   node(s) to live proxy`. Reads go to the master and the other slaves. The
+   pod keeps forwarding what still reaches it.
+3. **The preStop hook waits**, at most `cluster.drainSeconds` (default 60 s), until:
+   - the pod itself reports `own_role` proxy;
+   - none of its forwards to replicas is in flight (`proxy_write_in_flight 0`);
+   - no new client connection has arrived for 3 s.
+
+   The pod log then says `flare preStop: proxy and every forward delivered`.
+   If it says `... forward drain NOT LOSSLESS (dropped …, refused …)`, a
+   forward was dropped or refused during the drain; see
+   [#proxy-write-dropped](#proxy-write-dropped).
+4. **flared stops, and the StatefulSet recreates the pod.**
+   - On tmpfs the new pod starts empty.
+   - The operator seats it as a Slave (Prepare). It rebuilds from the master,
+     then becomes Active and Ready.
+   - With 3 copies, the master and one Active slave serve meanwhile.
+
+Watch it with `kubectl get pod <pod> -w` and the operator log (`REBUILD`,
+`NodeAdd … Slave P<n> (Prepare)`). It is done when the pod is `1/1` and its
+`curr_items` matches the master's.
+
+When the pod has a problem:
+
+- **flared does not answer.** It cannot apply the proxy map. The preStop
+  waits the whole `drainSeconds` and then lets the pod stop.
+  - For a replica nothing is lost: the master holds the data.
+  - For a master the handover cannot complete, so the delete stays refused.
+    See [#drain-no-successor](#drain-no-successor).
+- **Do not use `--force --grace-period=0`.** It skips the proxy step and the
+  preStop, and the guard refuses it. If you must, use
+  [break-glass](#node-guard-break-glass) and accept that unreplicated writes
+  can be lost.
+- **A master without a caught-up replica** is refused (table above). On tmpfs
+  its copy may be the last data.
+
+There is no operation that makes a pod a proxy and keeps it running (for
+example to inspect it). Only the [cordon move](#cordon-move) holds a pod as a
+proxy, and it too ends with the pod's delete.
 
 ### Tearing the whole cluster down
 

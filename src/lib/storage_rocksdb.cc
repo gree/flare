@@ -95,6 +95,7 @@ const char* const storage_rocksdb::kPartitionBindingKey = "__flare_partition_bin
 const char* const storage_rocksdb::kRestoredUnverifiedKey = "__flare_restored_unverified";
 const char* const storage_rocksdb::kQuarantineMarkerFile = "quarantine.marker";
 const char* const storage_rocksdb::kApprovalsFile = "approvals.log";
+const char* const storage_rocksdb::kDiscardedMarkerFile = "copy.discarded";
 // Name of the replication-metadata column family (design §3.7).
 const char* const storage_rocksdb::kReplMetaCfName = "flare_repl_meta";
 
@@ -924,6 +925,16 @@ int storage_rocksdb::switch_to_staging(const string& attempt, const string& expe
 		if (copy_fs::remove_intent(this->_data_dir) < 0) {
 			break;
 		}
+		{
+			// a verified staged copy is live: the emptied copy the marker
+			// described is gone (the marker is cleared HERE only)
+			const string mp = this->_data_dir + "/" + kDiscardedMarkerFile;
+			if (unlink(mp.c_str()) != 0 && errno != ENOENT) {
+				log_err("could not remove the discarded-copy marker [%s]: %s (the copy stays not promotable)", mp.c_str(), strerror(errno));
+			} else {
+				copy_fs::fsync_dir(this->_data_dir);
+			}
+		}
 		log_notice("copy switch DONE: live is copy %s; the old copy %s is retained as %s%s", v.c_str(), in.old_id.c_str(),
 			copy_fs::kRetainedPrefix, attempt.c_str());
 		r = 0;
@@ -974,11 +985,48 @@ bool storage_rocksdb::resume_rebuild() {
 	pthread_mutex_lock(&this->_mutex_rebuild_status);
 	const bool was = this->_rebuild_parked;
 	this->_rebuild_parked = false;
+	this->_discard_grant = discard_grant();		// a plain resume carries no discard
 	pthread_mutex_unlock(&this->_mutex_rebuild_status);
 	if (was) {
 		log_notice("staged rebuild RESUMED by the operator (a slot is free); the next attempt re-checks capacity, source and copy identity", 0);
 	}
 	return was;
+}
+
+void storage_rocksdb::set_discard_grant(const discard_grant& g) {
+	pthread_mutex_lock(&this->_mutex_rebuild_status);
+	this->_discard_grant = g;
+	this->_rebuild_parked = false;
+	pthread_mutex_unlock(&this->_mutex_rebuild_status);
+	log_notice("staged rebuild RESUMED by the operator WITH a discard grant for copy %s (map version %llu): the live copy is discarded only if the rebuild still does not fit and every binding still holds",
+		g.copy_id.c_str(), (unsigned long long)g.map_version);
+}
+
+bool storage_rocksdb::take_discard_grant(discard_grant& g) {
+	pthread_mutex_lock(&this->_mutex_rebuild_status);
+	g = this->_discard_grant;
+	this->_discard_grant = discard_grant();
+	pthread_mutex_unlock(&this->_mutex_rebuild_status);
+	return !g.empty();
+}
+
+void storage_rocksdb::clear_discard_grant() {
+	pthread_mutex_lock(&this->_mutex_rebuild_status);
+	this->_discard_grant = discard_grant();
+	pthread_mutex_unlock(&this->_mutex_rebuild_status);
+}
+
+uint64_t storage_rocksdb::get_redundant_discards() {
+	pthread_mutex_lock(&this->_mutex_rebuild_status);
+	const uint64_t n = this->_redundant_discards;
+	pthread_mutex_unlock(&this->_mutex_rebuild_status);
+	return n;
+}
+
+void storage_rocksdb::note_redundant_discard() {
+	pthread_mutex_lock(&this->_mutex_rebuild_status);
+	this->_redundant_discards++;
+	pthread_mutex_unlock(&this->_mutex_rebuild_status);
 }
 
 void storage_rocksdb::set_rebuild_in_flight(bool b) {
@@ -1582,6 +1630,13 @@ int storage_rocksdb::open() {
 		// receive areas are removed (design §5)
 		copy_fs::remove_prefixed(this->_data_dir, "snapshot.serve.");
 		copy_fs::remove_prefixed(this->_data_dir, "snapshot.recv.");
+	}
+
+	// A wipe on the operator's word (or an approval) that a crash interrupted
+	// is finished before anything is served (spec: the discard is crash-safe)
+	if (!this->_staging && this->_finish_interrupted_discard() < 0) {
+		log_err("storage open refused: an interrupted copy discard could not be finished", 0);
+		return -1;
 	}
 
 	// Never expose a half-restored copy (design §3.9(D)).
@@ -4727,6 +4782,20 @@ int storage_rocksdb::discard_copy(const string& request_id, const string& operat
 	}
 	int r = -1;
 	if (operation == "discard-before-copy") {
+		// the marker BEFORE the wipe: a crash in between finishes the wipe at
+		// open, and the emptied copy is never promotable until a verified copy
+		// is switched in
+		if (this->is_switch_unresolved()) {
+			result = "refused:switch_unresolved";
+			append_durable(ledger, request_id + " " + result + "\n");
+			return 0;
+		}
+		if (copy_fs::write_file_durable(this->_data_dir, kDiscardedMarkerFile, "old=" + copy_id + "\n") < 0) {
+			result = "failed";
+			append_durable(ledger, request_id + " " + result + "\n");
+			log_err("copy discard %s: the discarded-copy marker could not be written; nothing was deleted", request_id.c_str());
+			return 0;
+		}
 		r = this->hard_reset();
 	} else {
 		r = copy_fs::remove_tree_path(target);
@@ -4772,9 +4841,56 @@ bool storage_rocksdb::is_copy_partial() {
 	return st == copy_fs::file_present;
 }
 
+bool storage_rocksdb::is_copy_discarded() {
+	string err;
+	const copy_fs::file_status st = copy_fs::stat_path_status(this->_data_dir + "/" + kDiscardedMarkerFile, &err);
+	if (st == copy_fs::file_error) {
+		log_err("copy.discarded could not be checked (%s): the copy is treated as discarded", err.c_str());
+		return true;
+	}
+	return st == copy_fs::file_present;
+}
+
+int storage_rocksdb::_finish_interrupted_discard() {
+	string text;
+	string err;
+	const copy_fs::file_status ms = copy_fs::read_small_file_status(this->_data_dir + "/" + kDiscardedMarkerFile, text, &err);
+	if (ms == copy_fs::file_absent) {
+		return 0;
+	}
+	if (ms == copy_fs::file_error) {
+		log_err("copy.discarded could not be read (%s): the live copy is neither wiped nor served", err.c_str());
+		return -1;
+	}
+	string old_id;
+	const string::size_type e = text.find("old=");
+	if (e != string::npos) {
+		old_id = text.substr(e + 4);
+		const string::size_type nl = old_id.find('\n');
+		if (nl != string::npos) old_id.erase(nl);
+	}
+	if (!copy_fs::dir_exists(this->_data_path)) {
+		return 0;		// already wiped; the marker stays until a verified copy is switched in
+	}
+	string cur;
+	const copy_fs::file_status cs = copy_fs::read_small_file_status(this->_data_path + "/" + copy_fs::kCopyIdFile, cur, &err);
+	if (cs == copy_fs::file_present && !cur.empty() && !old_id.empty() && cur != old_id) {
+		return 0;		// the wipe finished: what is here is the empty copy opened after it
+	}
+	log_warning("copy discard INTERRUPTED (copy.discarded names %s, live COPY_ID [%s]): finishing the wipe before opening", old_id.c_str(), cs == copy_fs::file_present ? cur.c_str() : "(none)");
+	if (remove_tree(this->_data_path) != 0 || copy_fs::dir_exists(this->_data_path)) {
+		log_err("copy discard: the live directory [%s] could not be removed", this->_data_path.c_str());
+		return -1;
+	}
+	copy_fs::fsync_dir(this->_data_dir);
+	return 0;
+}
+
 bool storage_rocksdb::promotion_forbidden(string& why) {
 	string sw;
-	if (this->switch_unresolved_snapshot(sw)) {
+	if (this->is_copy_discarded()) {
+		why = "the copy was discarded and no verified copy has replaced it yet (copy.discarded)";
+	} else if (this->switch_unresolved_snapshot(sw)) {
 		why = "a copy switch is unresolved (" + sw + ")";
 	} else if (this->is_rebuild_in_flight()) {
 		why = "a copy is being rebuilt (transfer or switch in flight)";

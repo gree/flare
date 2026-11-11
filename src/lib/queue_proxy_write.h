@@ -37,6 +37,8 @@ using namespace std;
 namespace gree {
 namespace flare {
 
+class connection_tcp;
+
 typedef class queue_proxy_write queue_proxy_write;
 typedef boost::shared_ptr<queue_proxy_write> shared_queue_proxy_write;
 
@@ -160,6 +162,11 @@ protected:
 	op_proxy_write* _get_op(string op_ident, shared_connection c);
 	int _run_foreign(shared_connection c);
 	bool _send_held(shared_connection c, op_proxy_write* p);
+	// The destination answered SERVER_ERROR "rebuild pending" (its copy holds
+	// another history and is being rebuilt) and the master's map shows it not
+	// Active: expected, nothing is lost (the rebuild's catch-up carries the
+	// change). A destination the map still calls Active is NOT excused.
+	bool _refused_rebuilding(op_proxy_write* p, const connection_tcp* ctp);
 	bool _owner_stopping();
 	void _publish_result(op::result r, const string& msg);
 };

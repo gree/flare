@@ -316,6 +316,15 @@ public:
 		identified_applied = 0,			// written
 		identified_skipped,				// already has this change or a newer one
 		identified_refused,				// not following this history / not this copy
+		// the copy follows ANOTHER history (its epoch differs) and the change
+		// is an ordinary key: the copy is being rebuilt. INVARIANT that makes
+		// refusing it safe: a copy accepts an epoch only through adopt_history
+		// followed by a WAL catch-up (or a WAL reconstruction), so a change
+		// refused here that is not in the snapshot/dump comes back from the
+		// master's WAL (purged WAL -> needs_rebuild). Malformed tags, reserved
+		// keys, incarnation refusals and an unavailable epoch stay
+		// identified_refused.
+		identified_refused_history,
 		identified_error,				// storage failure; nothing written
 	};
 	virtual int apply_identified_change(const string& tag, entry& e, bool is_delete) {

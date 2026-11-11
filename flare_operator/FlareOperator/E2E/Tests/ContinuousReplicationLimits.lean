@@ -1347,6 +1347,26 @@ def rebuildTmpfsSuite : TestSuite := {
           let line := match ← kubectl ["logs", "-n", rebuildTmpfsCfg.«namespace», sPod, "--tail=5000"] with
             | .ok o => (o.splitOn "\n").find? (containsSubstr · "rebuild_blocked=no_space")
             | .error _ => none
+          -- flare-parked-slave-forward-noise: writes while the replica is
+          -- parked must not raise the master's proxy_write_failed (a signal of
+          -- real failures) nor drop. Here the replica kept its copy of the
+          -- master's history (its flared restarted, same pod), so it applies
+          -- the forwards; a copy of ANOTHER history would answer "rebuild
+          -- pending" and be counted in proxy_write_refused_rebuilding, which is
+          -- shown, not required (CI 42768302400: 0→0, failed 0→0).
+          let failedP0 := (← c.statNat mIp "proxy_write_failed").getD 0
+          let droppedP0 := (← c.statNat mIp "proxy_write_dropped").getD 0
+          let refusedP0 := (← c.statNat mIp "proxy_write_refused_rebuilding").getD 0
+          let wP ← writeKeys rebuildTmpfsCfg.debugPod rebuildTmpfsCfg.«namespace» mIp rebuildTmpfsCfg.flarePort "parked" 50
+          let _ ← waitForCondition "the master has no forward in flight after the parked writes" 30 do
+            return (← c.statNat mIp "proxy_write_in_flight").getD 1 == 0
+          let failedP1 := (← c.statNat mIp "proxy_write_failed").getD 0
+          let droppedP1 := (← c.statNat mIp "proxy_write_dropped").getD 0
+          let refusedP1 := (← c.statNat mIp "proxy_write_refused_rebuilding").getD 0
+          IO.eprintln s!"# parked writes: stored {wP}/50; master proxy_write_failed {failedP0}→{failedP1}, dropped {droppedP0}→{droppedP1}, refused_rebuilding {refusedP0}→{refusedP1}"
+          if wP != 50 then return .fail s!"writes while the replica was parked: stored {wP}/50"
+          if failedP1 != failedP0 then return .fail s!"the master's proxy_write_failed rose while the replica was parked ({failedP0}→{failedP1}): a rebuilding replica's refusal is counted as a failure"
+          if droppedP1 != droppedP0 then return .fail s!"the master dropped forwards while the replica was parked ({droppedP0}→{droppedP1})"
           IO.sleep 60000
           let rc1 ← c.restartCount sPod
           let items1 ← c.currItems sIp
@@ -1535,6 +1555,15 @@ def redundantDiscardSuite : TestSuite := {
         -- cannot fit next to the old copy and parks — unless the operator
         -- grants the discard first (it can: s2 is a real copy)
         if let .error e ← c.killFlaredIn s1 then return .fail s!"precondition: could not restart flared in {s1}: {e}"
+        -- flare-parked-slave-forward-noise: write while {s1} is rebuilding. Its
+        -- copy refuses these forwards (another history); they must not count
+        -- as failed (the operator's grant needs failed = 0 for the replica) and
+        -- must come back through the rebuild: every key ends up on {s1}.
+        let _ ← waitForCondition s!"{s1} has restarted and refuses or rebuilds (parked, or already granted)" 300 do
+          let some ip ← getPodIp s1 ns | return false
+          return (← c.statStr ip "rebuild_blocked") == some "no_space" || (← c.statNat ip "rebuild_redundant_discards") == some 1
+        let wParked ← writeKeys redundantDiscardCfg.debugPod ns mIp redundantDiscardCfg.flarePort "parked" 50
+        if wParked != 50 then return .fail s!"writes while {s1} was rebuilding: stored {wParked}/50"
         let granted ← waitForCondition s!"the operator grants {s1} the discard of its redundant copy" 600 do
           return ((← c.opLogSince t0).splitOn "\n").any fun l =>
             containsSubstr l "REDUNDANT COPY DISCARD GRANTED" && containsSubstr l s1
@@ -1543,6 +1572,24 @@ def redundantDiscardSuite : TestSuite := {
           | .ok o => return (o.splitOn "\n").any (containsSubstr · "REDUNDANT COPY DISCARDED on the operator's word")
           | .error _ => return false
         let discarded ← waitForCondition s!"{s1} logs REDUNDANT COPY DISCARDED" 300 discardedLog
+        -- flare-parked-slave-forward-noise: the discarded copy restarts with a
+        -- history of its own, so while it rebuilds it refuses the master's
+        -- forwards ("rebuild pending"). They are expected: counted in
+        -- proxy_write_refused_rebuilding, never in proxy_write_failed nor
+        -- dropped, and they come back through the rebuild (checked below).
+        let failedD0 := (← c.statNat mIp "proxy_write_failed").getD 0
+        let droppedD0 := (← c.statNat mIp "proxy_write_dropped").getD 0
+        let refusedD0 := (← c.statNat mIp "proxy_write_refused_rebuilding").getD 0
+        let wDisc ← writeKeys redundantDiscardCfg.debugPod ns mIp redundantDiscardCfg.flarePort "discarded" 50
+        let _ ← waitForCondition "the master has no forward in flight after the writes during the rebuild" 30 do
+          return (← c.statNat mIp "proxy_write_in_flight").getD 1 == 0
+        let failedD1 := (← c.statNat mIp "proxy_write_failed").getD 0
+        let droppedD1 := (← c.statNat mIp "proxy_write_dropped").getD 0
+        let refusedD1 := (← c.statNat mIp "proxy_write_refused_rebuilding").getD 0
+        IO.eprintln s!"# writes after the discard: stored {wDisc}/50; master proxy_write_failed {failedD0}→{failedD1}, dropped {droppedD0}→{droppedD1}, refused_rebuilding {refusedD0}→{refusedD1}"
+        if wDisc != 50 then return .fail s!"writes while {s1} rebuilt after the discard: stored {wDisc}/50"
+        if failedD1 != failedD0 then return .fail s!"the master's proxy_write_failed rose while {s1} rebuilt after the discard ({failedD0}→{failedD1}): a rebuilding replica's refusal is counted as a failure"
+        if droppedD1 != droppedD0 then return .fail s!"the master dropped forwards while {s1} rebuilt after the discard ({droppedD0}→{droppedD1})"
         -- no long park: the replica is Ready, Slave/Active, with the master's items
         let active ← waitForCondition s!"{s1} rebuilds into the freed room: Ready, Slave/Active, the master's items" 900 do
           if !(← c.ready s1) then return false
@@ -1566,6 +1613,13 @@ def redundantDiscardSuite : TestSuite := {
         if discards != some 1 then return .fail s!"rebuild_redundant_discards is {discards}, not 1"
         if marker != some 0 || leftover != 0 then return .fail s!"the discarded-copy marker is still there after the switch (stat {marker}, files {leftover})"
         if (← c.currItems s2Ip) < s2Items0 then return .fail s!"the other slave {s2} lost items"
+        for i in [0:50] do
+          let sv ← memcachedGet c.cfg.debugPod ns s1IpNow c.cfg.flarePort s!"parked_{i}"
+          if sv != some s!"val_{i}" then
+            return .fail s!"parked_{i} (written while {s1} was rebuilding) is {sv} on {s1} afterwards: the refused forward did not come back through the rebuild"
+          let dv ← memcachedGet c.cfg.debugPod ns s1IpNow c.cfg.flarePort s!"discarded_{i}"
+          if dv != some s!"val_{i}" then
+            return .fail s!"discarded_{i} (written while {s1} rebuilt after the discard) is {dv} on {s1} afterwards: the refused forward did not come back through the rebuild"
         if (← masterPodOf c) != some mPod then return .fail "the master moved"
         return .pass }
   ]

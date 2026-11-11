@@ -1595,8 +1595,9 @@ def cordonStuckTest (c : Ctx) : IO TestResult := do
     return .fail (notSetUp "the proxy-path load did not start")
   -- the held client connection: curr_connections of A never drops to 0. It
   -- sends `version` every 5 s: flared closes a client connection idle for
-  -- its read timeout (30 s in the k8s build), and an idle one was closed
-  -- before the 60 s deadline, so the move was released (41352662024)
+  -- its client idle timeout (net_read_timeout, 600 s; it was 30 s in the k8s
+  -- build when an idle one was closed before the 60 s deadline and the move
+  -- was released, 41352662024)
   let holdTag := "flare-e2e-hold-3607"
   let closeHold : IO Unit := do
     discard <| execInDebugPod c.cfg.debugPod ns s!"pkill -f '{holdTag}' ; pkill -f 'nc {ra.ip} {c.cfg.flarePort}' ; true"

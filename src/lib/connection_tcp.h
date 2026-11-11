@@ -99,18 +99,29 @@ protected:
 	bool								_sender_given_up;
 
 public:
-	static int read_timeout;												// msec
+	static int read_timeout;												// msec, connections this process opens
+	static int accepted_read_timeout;								// msec, connections it accepts
 	static const int k8s_default_read_timeout_ms = 30 * 1000;
-	// The read timeout flared applies, at startup AND on every reload: an
-	// explicitly configured net-read-timeout wins; otherwise the k8s build uses
-	// 30 s and the classic build the option's default. (A reload used to set
-	// net_read_timeout unconditionally: in the k8s build a SIGHUP turned 30 s
-	// into 600 s.)
+	// The read timeout flared applies to the connections it OPENS (to other
+	// nodes), at startup AND on every reload: an explicitly configured
+	// net-read-timeout wins; otherwise the k8s build uses 30 s (a silent peer
+	// is detected sooner) and the classic build the option's default. (A
+	// reload used to set net_read_timeout unconditionally: in the k8s build a
+	// SIGHUP turned 30 s into 600 s.)
 	static int effective_read_timeout_ms(bool k8s_build, bool explicitly_set, int net_read_timeout_sec) {
 		if (explicitly_set || !k8s_build) {
 			return net_read_timeout_sec * 1000;
 		}
 		return k8s_default_read_timeout_ms;
+	};
+	// The read timeout of the connections flared ACCEPTS (clients, and other
+	// nodes' forwards): net_read_timeout (600 s unless configured) in every
+	// build. It is how long an idle client connection stays open: the k8s
+	// build's 30 s closed idle clients, and behind a stateful middlebox that
+	// forgets the half-closed flow (the Tencent CLB) a libmemcached client's
+	// close() then hung for its SO_LINGER (1000 s).
+	static int effective_accepted_read_timeout_ms(int net_read_timeout_sec) {
+		return net_read_timeout_sec * 1000;
 	};
 	static const int connect_retry_limit = 8;
 	static const int connect_retry_wait = 500*1000;	// usec

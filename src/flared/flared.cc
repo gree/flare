@@ -218,10 +218,13 @@ int flared::startup(int argc, char **argv) {
 	}
 
 	// application objects
-	// In K8s operator mode the read timeout is 30 s unless net-read-timeout is
-	// set explicitly (faster failover detection); the same rule on reload.
+	// In K8s operator mode the read timeout of the connections flared opens is
+	// 30 s unless net-read-timeout is set explicitly (faster failover
+	// detection); accepted connections (clients) use net_read_timeout. The
+	// same rule on reload.
 	connection_tcp::read_timeout = connection_tcp::effective_read_timeout_ms(flared_k8s_build(),
 		ini_option_object().is_net_read_timeout_set(), ini_option_object().get_net_read_timeout());
+	connection_tcp::accepted_read_timeout = connection_tcp::effective_accepted_read_timeout_ms(ini_option_object().get_net_read_timeout());
 	this->_server = new server();
 	this->_server->set_back_log(ini_option_object().get_back_log());
 #ifndef ENABLE_K8S_OPERATOR
@@ -552,7 +555,9 @@ int flared::reload() {
 	// 30 s read timeout into 600 s)
 	connection_tcp::read_timeout = connection_tcp::effective_read_timeout_ms(flared_k8s_build(),
 		ini_option_object().is_net_read_timeout_set(), ini_option_object().get_net_read_timeout());
+	connection_tcp::accepted_read_timeout = connection_tcp::effective_accepted_read_timeout_ms(ini_option_object().get_net_read_timeout());
 	log_notice("  read timeout:           %d ms", connection_tcp::read_timeout);
+	log_notice("  client idle timeout:    %d ms", connection_tcp::accepted_read_timeout);
 
 	//  index_servers
 	this->_cluster->set_index_servers(ini_option_object().get_index_servers());

@@ -118,7 +118,7 @@ public:
 	// nodes' forwards): net_read_timeout (600 s unless configured) in every
 	// build. It is how long an idle client connection stays open: the k8s
 	// build's 30 s closed idle clients, and behind a stateful middlebox that
-	// forgets the half-closed flow (the Tencent CLB) a libmemcached client's
+	// forgets the half-closed flow (a load balancer) a libmemcached client's
 	// close() then hung for its SO_LINGER (1000 s).
 	static int effective_accepted_read_timeout_ms(int net_read_timeout_sec) {
 		return net_read_timeout_sec * 1000;

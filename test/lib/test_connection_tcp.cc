@@ -414,8 +414,9 @@ namespace test_connection_tcp
 	}
 
 	// accepted connections (clients) keep net_read_timeout in every build: the
-	// k8s build's 30 s closed idle clients, and behind the Tencent CLB a
-	// libmemcached close() then hung for its SO_LINGER (pf-dev, 2026-11-10)
+	// k8s build's 30 s closed idle clients, and behind a load balancer that
+	// forgets the half-closed flow a libmemcached close() then hung for its
+	// SO_LINGER
 	void test_accepted_connections_use_net_read_timeout_in_every_build()
 	{
 		cut_assert_equal_int(600000, connection_tcp::effective_accepted_read_timeout_ms(600));

@@ -8,8 +8,9 @@
   reload(). Before that fix reload() applied net_read_timeout
   unconditionally, so a SIGHUP (the operator sends one on every extra.conf
   change) turned 30 s into 600 s. Until 2026-11-11 the k8s build's 30 s also
-  closed idle CLIENT connections, and behind the Tencent CLB a libmemcached
-  close() then hung for its SO_LINGER (pf-dev): accepted connections are
+  closed idle CLIENT connections, and behind a load balancer that forgets the
+  half-closed flow a libmemcached close() then hung for its SO_LINGER:
+  accepted connections are
   back at net_read_timeout. The rules have unit checks
   (test_connection_tcp.cc); these tests exercise reload() through the log
   lines and through behaviour: a client that sends half a command is

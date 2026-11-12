@@ -213,7 +213,15 @@ def suite : TestSuite := {
           match ← sh edit with
           | .error e => return .fail s!"could not add net-read-timeout to {cm}: {e}"
           | .ok _ => pure ()
+          -- the previous test's last spec change (spec.rocksdb emptied) may
+          -- reach the operator after this edit: while spec.rocksdb was still
+          -- set it rewrites the file and drops the hand-added line (E2E
+          -- 43180140120). Once spec.rocksdb is empty it leaves the file, so
+          -- the line is added again while it is missing.
           let mounted ← waitForCondition "the mounted extra.conf carries net-read-timeout" 180 do
+            let inMap ← sh s!"kubectl get configmap {cm} -n {cfg.«namespace»} -o jsonpath='\{.data.extra\\.conf}'"
+            if !(match inMap with | .ok t => containsSubstr t s!"net-read-timeout = {explicitSec}" | .error _ => true) then
+              discard <| sh edit
             return containsSubstr (← mountedConf) s!"net-read-timeout = {explicitSec}"
           if !mounted then return .fail "the ConfigMap change never reached the pod's extra.conf"
           match ← reloadAndRead with

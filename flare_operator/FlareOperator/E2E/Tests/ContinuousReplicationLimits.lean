@@ -5937,7 +5937,9 @@ def historyTrackingSuite : TestSuite := {
           -- started, then read the new process (items 0) — which the operator
           -- had registered as Slave (Prepare) in between, never master. Its
           -- own_role, curr_items and boot id come from ONE stats reply (one
-          -- sample of one process), so no transition falls between them.
+          -- sample of one process), so no transition falls between them, and
+          -- the map is read again after it: it counts only when the map
+          -- names the pod master both before and after that sample.
           let mut emptyMaster := false
           let mut seated := false
           for i in [0:60] do
@@ -5948,8 +5950,10 @@ def historyTrackingSuite : TestSuite := {
                 let items := sample.bind (statVal · "curr_items") |>.bind (·.toNat?)
                 let boot := sample.bind (statVal · "reconstruction_boot_id")
                 let role := sample.bind (statVal · "own_role")
-                IO.eprintln s!"# sample {i}: map master {m}; its process boot {boot} (before the kill {boot0}), curr_items {items}, own_role {role}"
-                if items == some 0 && boot.isSome && boot != some boot0 && role == some "master" then emptyMaster := true
+                let after ← masterPodOf c
+                IO.eprintln s!"# sample {i}: map master {m} (after the sample: {after}); its process boot {boot} (before the kill {boot0}), curr_items {items}, own_role {role}"
+                if after == some mPod && items == some 0 && boot.isSome && boot != some boot0 && role == some "master" then
+                  emptyMaster := true
               if m == sPod then seated := true
             if seated then break
             IO.sleep 5000

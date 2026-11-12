@@ -28,11 +28,21 @@
  */
 
 #include "op_dump.h"
+#ifdef HAVE_LIBROCKSDB
+#include "storage_rocksdb.h"
+#endif
 #include "connection_tcp.h"
 #include <inttypes.h>
 
 namespace gree {
 namespace flare {
+
+// 120 s without one byte accepted: a dump receiver reads continuously
+// (op_dump::_run_client stores each entry as it arrives), so only a receiver
+// that stopped holds the source's iterator this long; see op_repl_snapshot's
+// reseed_progress_timeout_ms for the same rule.
+int op_dump::serve_progress_timeout_ms = 120 * 1000;
+void (*op_dump::before_final_frame_hook)() = NULL;
 
 // {{{ ctor/dtor
 /**
@@ -45,7 +55,10 @@ op_dump::op_dump(shared_connection c, cluster* cl, storage* st):
 		_wait(0),
 		_partition(-1),
 		_partition_size(0),
-		_bwlimitter() {
+		_bwlimitter(),
+		_strict(false),
+		_completed(false),
+		_items(0) {
 }
 
 /**
@@ -183,23 +196,66 @@ int op_dump::_run_server() {
 	if (!this->_thread) {
 		return this->_send_result(result_server_error, "thread not set");
 	}
+#ifdef HAVE_LIBROCKSDB
+	// restore provenance: an unverified RESTORED copy is not a replication source (a rebuild by dump would carry its data into a copy bound to the map)
+	if (storage_rocksdb* prov = dynamic_cast<storage_rocksdb*>(this->_storage)) {
+		if (prov->is_restored_unverified()) {
+			log_warning("dump refused: this copy is an unverified RESTORED copy", 0);
+			return this->_send_result(result_server_error, "restored_unverified");
+		}
+	}
+#endif
 
 	if (this->_storage->iter_begin() < 0) {
 		return this->_send_result(result_server_error, "database busy");
 	}
 
 	bool nodelay_saved = false;
-	if (connection_tcp* ctp = dynamic_cast<connection_tcp*>(this->_connection.get())) {
-		ctp->get_tcp_nodelay(nodelay_saved);
-		ctp->set_tcp_nodelay(false);
+	connection_tcp* bounded = dynamic_cast<connection_tcp*>(this->_connection.get());
+	// The bound stays on until the FINAL frame is sent or failed, and is
+	// taken off (nodelay restored) on every return from here: review
+	// 2026-10-13 — 76ed011 took it off before END/SERVER_ERROR was written,
+	// so a peer that stopped reading after the last data left that one
+	// write waiting without a bound (the handler and connection held).
+	struct serve_bound_guard {
+		connection_tcp* c;
+		bool nodelay;
+		~serve_bound_guard() {
+			if (c != NULL) {
+				c->set_write_progress_timeout_ms(0);	// the connection serves further requests
+				c->set_tcp_nodelay(nodelay);
+			}
+		}
+	} guard = { NULL, false };
+	if (bounded != NULL) {
+		bounded->get_tcp_nodelay(nodelay_saved);
+		guard.c = bounded;
+		guard.nodelay = nodelay_saved;
+		bounded->set_tcp_nodelay(false);
+		// a receiver that stays connected but stops reading used to hold the
+		// iterator for as long as the connection lived (review 2026-10-12,
+		// round 8): the progress bound ends the dump instead
+		bounded->set_write_progress_timeout_ms(op_dump::serve_progress_timeout_ms);
+	} else {
+		log_notice("dump serve on a non-TCP connection: its writes are not bounded", 0);
 	}
+	bool write_failed = false;
 
 	key_resolver* kr = this->_cluster->get_key_resolver();
+#ifdef HAVE_LIBROCKSDB
+	// measured peaks on the SOURCE while it serves a dump (reserve sizing)
+	storage_rocksdb* peak_rdb = dynamic_cast<storage_rocksdb*>(this->_storage);
+	if (peak_rdb != NULL) peak_rdb->peaks_begin(true);
+	uint64_t served = 0;
+#endif
 
 	storage::entry e;
 	storage::iteration i;
 	while ((i = this->_storage->iter_next(e.key)) == storage::iteration_continue
 			&& this->_thread && !this->_thread->is_shutdown_request()) {
+#ifdef HAVE_LIBROCKSDB
+		if (peak_rdb != NULL && (++served % 1024) == 0) peak_rdb->peaks_sample(true);
+#endif
 		if (this->_partition >= 0) {
 			int key_hash_value = e.get_key_hash_value(this->_cluster->get_key_hash_algorithm());
 			int p = kr->resolve(key_hash_value, this->_partition_size);
@@ -224,6 +280,7 @@ int op_dump::_run_server() {
 		int n = this->_connection->write(response, response_len);
 		delete[] response;
 		if (n < 0) {
+			write_failed = true;
 			break;
 		}
 
@@ -235,10 +292,24 @@ int op_dump::_run_server() {
 		}
 	}
 
+#ifdef HAVE_LIBROCKSDB
+	if (peak_rdb != NULL) peak_rdb->peaks_sample(true, true);
+#endif
 	this->_storage->iter_end();
 
-	if (connection_tcp* ctp = dynamic_cast<connection_tcp*>(this->_connection.get())) {
-		ctp->set_tcp_nodelay(nodelay_saved);
+	if (write_failed) {
+		// the stream is torn: no final frame (the receiver needs END and
+		// treats the dump as incomplete either way)
+		const int e = bounded != NULL ? bounded->get_errno() : 0;
+		log_warning("dump serve ended early (%s): the iterator is released; the receiver's dump is incomplete (no END) and is not accepted as complete",
+			e == -4 ? "no_progress" : "write");
+		return -1;
+	}
+	if (bounded != NULL) {
+		bounded->set_tcp_nodelay(nodelay_saved);	// the final frame goes out at once
+	}
+	if (op_dump::before_final_frame_hook != NULL) {
+		op_dump::before_final_frame_hook();
 	}
 
 	if (!this->_thread) {
@@ -284,6 +355,7 @@ int op_dump::_parse_text_client_parameters() {
 		if (strcmp(p, "END\n") == 0) {
 			delete[] p;
 			log_notice("found delimiter, dump completed (items=%d)", items);
+			this->_completed = true;
 			break;
 		}
 
@@ -319,12 +391,28 @@ int op_dump::_parse_text_client_parameters() {
 
 		storage::result r;
 		if (this->_storage->set(e, r, storage::behavior_dump) < 0) {
+			if (this->_strict) {
+				log_err("storing a dumped key failed (key=%s, items=%d) -> the copy is incomplete; dump FAILED", e.key.c_str(), items);
+				return -1;
+			}
 			log_warning("something is going wrong while storing data -> continue processing", 0);
 			// nop
 		}
 		items++;
+		this->_items = items;
+		if (this->_space_watch && (static_cast<uint64_t>(items) % kSpaceWatchItems) == 0) {
+			string why;
+			if (!this->_space_watch(why)) {
+				log_err("dump stopped by the space watch after %d item(s): %s", items, why.c_str());
+				return -1;
+			}
+		}
 	}
 
+	if (this->_strict && !this->_completed) {
+		log_err("dump ended without the source's END marker (items=%d) -> incomplete", items);
+		return -1;
+	}
 	return 0;
 }
 // }}}

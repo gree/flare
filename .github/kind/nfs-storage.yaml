@@ -1,0 +1,77 @@
+# Network storage for the PVC cordon-move legs (node-ops-cordon-pvc): an NFS
+# server on the control-plane (never cordoned by the tests) and the
+# `flare-nfs` StorageClass of csi-driver-nfs (installed by the workflow).
+# A PVC on it is not pinned to a node, so the recreated pod takes its data to
+# another worker. Not the default class: every other suite keeps local-path.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nfs-server
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nfs-server
+  namespace: nfs-server
+spec:
+  selector:
+    app: nfs-server
+  ports:
+    - name: tcp-2049
+      port: 2049
+      protocol: TCP
+    - name: udp-111
+      port: 111
+      protocol: UDP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nfs-server
+  namespace: nfs-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nfs-server
+  template:
+    metadata:
+      labels:
+        app: nfs-server
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: nfs-server
+          image: itsthenetwork/nfs-server-alpine:12
+          env:
+            - name: SHARED_DIRECTORY
+              value: /exports
+          ports:
+            - name: nfs
+              containerPort: 2049
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - mountPath: /exports
+              name: nfs-vol
+      volumes:
+        - name: nfs-vol
+          emptyDir: {}
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: flare-nfs
+provisioner: nfs.csi.k8s.io
+parameters:
+  server: nfs-server.nfs-server.svc.cluster.local
+  share: /
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+mountOptions:
+  - nfsvers=4.1

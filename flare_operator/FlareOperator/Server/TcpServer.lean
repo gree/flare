@@ -20,6 +20,7 @@ import Std.Net.Addr
 import FlareOperator.K8s.FlareCluster
 import FlareOperator.Flare.Protocol
 import FlareOperator.StateMachine.Reconciler
+import FlareOperator.Server.PublicationGate
 
 namespace FlareOperator.Server
 
@@ -32,6 +33,23 @@ open Std.Net (SocketAddress SocketAddressV4 IPv4Addr)
 -- ===========================================================================
 -- Server State
 -- ===========================================================================
+
+/-- Registration gate (docs/design-authoritative-history.md): `some why` while a
+    FIRST BUILD's history record is not written yet — `node add` is then
+    answered with an error (no role, no map handed out) and flared retries.
+    `none` = open (set by Main once the record exists). -/
+initialize registrationGateRef : IO.Ref (Option String) ← IO.mkRef none
+/-- Node keys whose state went Active -> Prepare through this server since the
+    reconcile loop last drained it (a lost Active membership: the NotReady
+    streak of the old membership ends; CI 37908698742). -/
+initialize leftActiveRef : IO.Ref (List String) ← IO.mkRef []
+
+/-- TEST SEAM (flare-bug-first-build-node-add-timeout). Unset in production.
+    With FLARE_TEST_DROP_FIRST_NODE_ADD set, the first `node add` of this
+    process is applied but answered by closing the connection: flared gives
+    up on its registration and restarts, as when it read nothing within 1 s
+    (41211110343). Once per process. -/
+initialize firstNodeAddDroppedRef : IO.Ref Bool ← IO.mkRef false
 
 /-- Encapsulates the shared mutable state for the TCP server.
     All fields are IO.Ref for thread-safe access from concurrent handlers.
@@ -121,9 +139,10 @@ private def sendResponse (sock : Socket) (response : String) : IO Unit := do
     Topology broadcast is handled by Main.lean's reconcile loop, which
     actively pushes updates to all flared nodes' port 12121.
     No K8s I/O happens here — strict separation from kubectl bridge. -/
-def handleConnection (sock : Socket) (state : ServerState) : IO Unit := do
+def handleConnection (sock : Socket) (state : ServerState) (acceptedAtMs : Nat := 0) : IO Unit := do
   let bufRef ← IO.mkRef ByteArray.empty
   let mut running := true
+  let mut first := true
   while running do
     match ← readLine sock bufRef with
     | none =>
@@ -131,6 +150,12 @@ def handleConnection (sock : Socket) (state : ServerState) : IO Unit := do
     | some line =>
       -- Parse: pure (String → FlareEvent)
       IO.eprintln s!"[DEBUG] Received command: {line.take 100}"
+      -- flare-bug-first-build-node-add-timeout: where a registration's wait
+      -- goes (accept -> handler start -> first line read); flared gives up
+      -- after 1 s
+      if first && acceptedAtMs != 0 && line.startsWith "node add" then
+        IO.eprintln s!"[TcpServer] node add read {(← IO.monoMsNow) - acceptedAtMs} ms after its connection was accepted"
+      first := false
       let event := parseFlareCommand line
       IO.eprintln s!"[DEBUG] Parsed to: {toString (repr event) |>.take 150}"
       -- Atomic read-modify-write: modifyGet uses Ref.take (destructive read)
@@ -154,11 +179,54 @@ def handleConnection (sock : Socket) (state : ServerState) : IO Unit := do
             else pure false
           | none => pure false
         | _ => pure false
-      let (newState, response) ← if dropForTest then do
+      let gate ← registrationGateRef.get
+      let gated := match event, gate with
+        | .NodeAdd .., some _ => true
+        | _, _ => false
+      let (newState, response) ← if gated then do
+          IO.eprintln s!"[flare-operator] node add REFUSED (no role, no map): {gate.getD ""}"
+          pure ((← state.clusterState.get), (FlareResponse.ServerError s!"registration closed: {gate.getD ""}" : FlareResponse))
+        else if dropForTest then do
           pure ((← state.clusterState.get), (FlareResponse.OK : FlareResponse))
-        else state.clusterState.modifyGet fun cs =>
-          let (newState, resp) := reconcileStep cs crd event
-          ((newState, resp), newState)
+        else do
+          -- a registration is never answered while a node-map send is out
+          -- (PublicationGate): the new node holds its reply as version 0 and
+          -- would accept that older map. Only `node add` waits — flared sends
+          -- `node state` from inside its sync handler, so holding it would
+          -- stall the send it waits for.
+          let registering := match event with | .NodeAdd .. => true | _ => false
+          if registering then
+            let who := match event with
+              | .NodeAdd n p => FlareClusterState.toNodeKey n p
+              | _ => ""
+            beginRegistrationWaiting who
+          let r ← try
+              let r ← state.clusterState.modifyGet fun cs =>
+                let (newState, resp) := reconcileStep cs crd event
+                -- a node whose state went Active -> Prepare here lost its Active
+                -- membership (a re-registration demotes it; it must rebuild)
+                let demoted := Reconciler.leftActive cs newState
+                ((newState, resp, demoted, cs), newState)
+              -- name what moved the live map (read by the DURING-the-send
+              -- warning); recorded while the gate still says whether a send
+              -- is out
+              let (newState, _, _, before) := r
+              if newState.nodeMapVersion != before.nodeMapVersion then
+                let what := match event with
+                  | .NodeAdd n p => s!"node add {FlareClusterState.toNodeKey n p} (registration)"
+                  | .NodeState n p st =>
+                    let k := FlareClusterState.toNodeKey n p
+                    let was := (before.lookupNode k).map (fun x => repr x.state |>.pretty) |>.getD "?"
+                    let now := (newState.lookupNode k).map (fun x => repr x.state |>.pretty) |>.getD "?"
+                    s!"node state {k} {repr st |>.pretty}: {was} → {now} (activation)"
+                  | _ => "a TCP report"
+                recordTcpMapMove newState.nodeMapVersion what
+              pure r
+            finally
+              if registering then endRegistrationGate
+          let (newState, resp, demoted, _) := r
+          if !demoted.isEmpty then leftActiveRef.modify fun l => l ++ demoted.filter (!l.contains ·)
+          pure (newState, resp)
       -- Trace logging + register socket after first NodeAdd
       match event with
       | .Meta =>
@@ -183,18 +251,33 @@ def handleConnection (sock : Socket) (state : ServerState) : IO Unit := do
         | _ => pure ()
       | _ => pure ()
       -- Respond to the originating client
-      match response with
-      | .CloseConnection =>
+      let isAdd := match event with
+        | .NodeAdd .. => true
+        | _ => false
+      let dropAdd ← if !isAdd then pure false else do
+        match ← IO.getEnv "FLARE_TEST_DROP_FIRST_NODE_ADD" with
+        | some v =>
+          if v != "" && v != "0" then
+            let already ← firstNodeAddDroppedRef.modifyGet fun d => (d, true)
+            pure !already
+          else pure false
+        | none => pure false
+      if dropAdd then
+        IO.eprintln "[flare-operator] TEST SEAM: the first node add was applied and its connection closed unanswered (FLARE_TEST_DROP_FIRST_NODE_ADD)"
         running := false
-      | _ =>
-        let payload := serializeResponse response
-        -- Log node list payloads to debug partition=-1 issue
-        match event with
-        | .NodeAdd .. | .NodeSync .. =>
-          let preview := payload.take 500 |>.replace "\r\n" " | "
-          IO.eprintln s!"[DEBUG] Sending response: {preview}"
-        | _ => pure ()
-        sendResponse sock payload
+      else
+        match response with
+        | .CloseConnection =>
+          running := false
+        | _ =>
+          let payload := serializeResponse response
+          -- Log node list payloads to debug partition=-1 issue
+          match event with
+          | .NodeAdd .. | .NodeSync .. =>
+            let preview := payload.take 500 |>.replace "\r\n" " | "
+            IO.eprintln s!"[DEBUG] Sending response: {preview}"
+          | _ => pure ()
+          sendResponse sock payload
 
 -- ===========================================================================
 -- Server Entry Point
@@ -220,10 +303,19 @@ def startServer (port : UInt16) (state : ServerState) : IO Unit := do
         IO.eprintln s!"[flare-operator] accept error: {e}"
         acceptLoop fuel
       | .ok clientSocket =>
-        -- Spawn handler as async task
-        let _ ← IO.asTask (prio := .default) do
+        let acceptedAt ← IO.monoMsNow
+        -- Spawn handler on its own thread (.dedicated): on the shared task
+        -- pool (~one worker per CPU) the accept loops of this, the health and
+        -- the metrics servers block workers for good, and a `node add` sat
+        -- unread ~1 s during the first pass after start — past flared's 1 s
+        -- read timeout, so flared restarted and the first build lost its
+        -- master (CI 41186795576, flare-bug-first-build-node-add-timeout)
+        let _ ← IO.asTask (prio := .dedicated) do
           try
-            handleConnection clientSocket state
+            let started ← IO.monoMsNow
+            if started - acceptedAt ≥ 100 then
+              IO.eprintln s!"[TcpServer] connection handler started {started - acceptedAt} ms after the accept"
+            handleConnection clientSocket state acceptedAt
           catch e =>
             IO.eprintln s!"[flare-operator] connection error: {e}"
           -- handleConnection already unregisters on exit; no extra cleanup needed

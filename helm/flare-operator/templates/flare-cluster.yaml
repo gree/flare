@@ -8,12 +8,23 @@
 {{- end }}
 {{- $c := .Values.cluster }}
 {{- $ns := .Values.namespace }}
+{{- $memWarn := include "flare-operator.memoryBudgetWarning" . }}
+{{- if $memWarn }}
+# {{ $memWarn | replace "\n" "\n# " }}
+{{- end }}
 {{- /* Graceful-drain window. Computed via hasKey (NOT `| default`) so an
        explicit drainSeconds: 0 disables the hook — sprig's `default` treats 0
        as empty and would wrongly re-enable it. Absent (e.g. helm --reuse-values
        from a release predating this key) falls back to 60. */}}
 {{- $drain := 60 }}
 {{- if hasKey $c "drainSeconds" }}{{- $drain = $c.drainSeconds }}{{- end }}
+{{- /* drainSeconds 0 = no preStop: a Terminating master is stopped before
+       the ordered handover can move it, so a planned switch of it is NOT
+       lossless. Allowed only with the explicit allowAbruptStop (review of
+       f1cd7aa). */}}
+{{- if and (le (int $drain) 0) (not $c.allowAbruptStop) }}
+{{- fail (printf "cluster %s: drainSeconds 0 disables the preStop drain, so a planned master switch is not lossless; set allowAbruptStop: true to accept that" $c.name) }}
+{{- end }}
 {{- /* Storage mode: PVC (persistence.enabled) | tmpfs (memory emptyDir) |
        ephemeral (node disk /tmp). tmpfs guarded for values without the key. */}}
 {{- $tmpfsEnabled := false }}
@@ -88,7 +99,20 @@ metadata:
     "helm.sh/hook": pre-install
     "helm.sh/hook-weight": "-5"
 data:
-  extra.conf: ""
+  # Seed startup-only options before the first pod opens its DB. Waiting for
+  # operator reconciliation would boot once with the larger built-in defaults.
+  extra.conf: |-
+    {{- with $c.rocksdb }}
+    {{- if hasKey . "blockCacheSizeMb" }}
+    rocksdb-block-cache-size-mb = {{ .blockCacheSizeMb }}
+    {{- end }}
+    {{- if hasKey . "writeBufferSizeMb" }}
+    rocksdb-write-buffer-size-mb = {{ .writeBufferSizeMb }}
+    {{- end }}
+    {{- if hasKey . "maxWriteBufferNumber" }}
+    rocksdb-max-write-buffer-number = {{ .maxWriteBufferNumber }}
+    {{- end }}
+    {{- end }}
 {{- if $bbProvision }}
 ---
 {{- /* Runtime flags: values that must be togglable WITHOUT touching the pod
@@ -203,6 +227,13 @@ metadata:
 spec:
   serviceName: {{ $c.name }}-nodes
   replicas: {{ mul $c.partitions $c.replicas }}
+  # OnDelete (A0): a template change (helm upgrade, rollout restart) replaces
+  # no pod by itself. The operator replaces the pods not on the update
+  # revision one at a time, a master last through the ordered handover, and
+  # only while every replica is caught up. With RollingUpdate the controller
+  # deleted the master as soon as the restarted replica was Ready.
+  updateStrategy:
+    type: OnDelete
   selector:
     matchLabels:
       app: flare
@@ -240,11 +271,13 @@ spec:
               cluster: {{ $c.name }}
         {{- end }}
       {{- end }}
-      {{- if gt (int $drain) 0 }}
       # Room for the preStop drain (below) + flared's own graceful shutdown after
-      # SIGTERM. Must exceed drainSeconds or K8s SIGKILLs mid-drain.
-      terminationGracePeriodSeconds: {{ add (int $drain) 30 }}
-      {{- end }}
+      # SIGTERM: its budget is max(shutdown-forward-drain-msec 30 s, the
+      # forward hold 60 s + 5 s) = 65 s for client requests still executing and
+      # the forwards still queued, + 10 s headroom. Less, and K8s SIGKILLs a
+      # client write that waits on a held forward (review of 09624ee). Set with
+      # drainSeconds 0 too: the stop budget does not depend on the preStop.
+      terminationGracePeriodSeconds: {{ add (max (int $drain) 0) 75 }}
       {{- /* ALWAYS render serviceAccountName (falling back to "default"):
              `kubectl apply` / ArgoCD cannot UNSET a field that the desired
              manifest merely omits, so gating this line left a live STS
@@ -321,6 +354,9 @@ spec:
                 echo "backup-bootstrap: CURRENT names missing $M -> backup mirror is torn, refusing"
                 exit 1
               fi
+              # a restored copy is a DIFFERENT copy: flared gives it a new
+              # identity at open (copy retention §2)
+              touch "$DATA/flare.rocksdb.restore/RESTORED"
               mv "$DATA/flare.rocksdb.restore" "$DATA/flare.rocksdb"
               echo "backup-bootstrap: seeded from $SRC (age ${AGE}s)"
           env:
@@ -369,14 +405,14 @@ spec:
             - |
               {{- if $c.persistence.enabled }}
               # Restore hook: if /data/flare/RESTORE names a checkpoint dir
-              # (created by the flared `backup` op), swap it in before start.
+              # (created by the flared `backup` op), swap it in before start —
+              # only after the restore provenance check (the backup's partition
+              # binding against the live copy's, BEFORE anything is removed); a
+              # refused restore keeps the live copy (RESTORE.refused). The same
+              # script (in the flared image) runs in the E2E harness.
               # See docs/BACKUP_RESTORE.md.
-              if [ -f /data/flare/RESTORE ]; then
-                SRC=$(cat /data/flare/RESTORE)
-                rm -rf /data/flare/flare.rocksdb
-                cp -a "$SRC" /data/flare/flare.rocksdb
-                rm -f /data/flare/RESTORE
-              fi
+              # (only with a marker: an image without the hook still starts)
+              if [ -f /data/flare/RESTORE ]; then flare-restore-hook /data/flare || exit 1; fi
               mkdir -p /data/flare
               # A stale flared.pid survives unclean container death on a persistent
               # data dir and used to wedge restarts (pid-1 self-check; fixed in
@@ -460,13 +496,59 @@ spec:
           lifecycle:
             preStop:
               exec:
-                # Graceful drain: once the pod is Terminating it is already out
-                # of the Service/CLB endpoints (no new connections) and the
-                # operator promotes a slave for any partition this pod mastered
-                # (TerminatingPodHandling). flared stays up for this window,
-                # continuing to serve/forward the connections it still holds, so
-                # clients drain or reconnect before SIGTERM. See cluster.drainSeconds.
-                command: ["sh", "-c", "sleep {{ int $drain }}"]
+                # Graceful drain: once the pod is Terminating the operator takes
+                # its role away (TerminatingPodHandling: a master is demoted to
+                # proxy with a slave promoted). flared stays up, serving and
+                # forwarding the connections it still holds. SIGTERM waits until
+                # this node's OWN view says it is a proxy AND none of its
+                # in-cluster forwards to replicas is still in flight (they carry
+                # writes a client was told STORED: NODE-OPS-LOSSLESS-PLAN L2),
+                # then until no new client connection arrives for 3 s; at most
+                # drainSeconds. A flared that does not
+                # report proxy_write_in_flight (older build) waits the whole
+                # window, as the plain sleep did. See cluster.drainSeconds.
+                command:
+                  - /bin/bash
+                  - -c
+                  - |
+                    end=$(( $(date +%s) + {{ int $drain }} ))
+                    rd() { { exec 3<>/dev/tcp/127.0.0.1/{{ $c.flarePort }} && printf 'stats\r\nquit\r\n' >&3 && timeout 5 tr -d '\r' <&3; } 2>/dev/null; }
+                    st() { printf '%s\n' "$1" | sed -n "s/^STAT $2 //p"; }
+                    out=$(rd); d0=$(st "$out" proxy_write_dropped); f0=$(st "$out" proxy_write_failed)
+                    while [ "$(date +%s)" -lt "$end" ]; do
+                      out=$(rd)
+                      role=$(st "$out" own_role); inflight=$(st "$out" proxy_write_in_flight)
+                      d=$(st "$out" proxy_write_dropped); f=$(st "$out" proxy_write_failed)
+                      if [ "$role" = proxy ] && [ "$inflight" = 0 ]; then
+                        if [ -n "$d0" ] && [ -n "$f0" ] && [ "$d" = "$d0" ] && [ "$f" = "$f0" ]; then
+                          echo "flare preStop: proxy and every forward delivered (dropped $d, refused $f unchanged)" > /proc/1/fd/1
+                        else
+                          echo "flare preStop: proxy and nothing in flight, but forward drain NOT LOSSLESS (dropped $d0 -> $d, refused $f0 -> $f)" > /proc/1/fd/1
+                        fi
+                        # then until no new client connection has arrived for
+                        # 3 s: the operator moved the partition Service to the
+                        # new master and kube-proxy applied it, so no client
+                        # is still sent here (each read below is one
+                        # connection of its own: +1 per read is quiet)
+                        c0=$(st "$out" total_connections); q=0
+                        while [ "$(date +%s)" -lt "$end" ] && [ "$q" -lt 15 ]; do
+                          sleep 0.2
+                          out=$(rd); c=$(st "$out" total_connections); busy=$(st "$out" requests_in_progress)
+                          # quiet = no new client connection (each read is one
+                          # of its own: +1) AND no client request still
+                          # executing besides this read's own stats (a write
+                          # waiting for a master or on a forward can outlast
+                          # the 3 s: review of 7450ce3)
+                          if [ -n "$c" ] && [ -n "$c0" ] && [ "$c" -le $((c0 + 1)) ] && [ -n "$busy" ] && [ "$busy" -le 1 ]; then q=$((q + 1)); else q=0; fi
+                          c0=$c
+                        done
+                        echo "flare preStop: no new client connection and no request executing for $((q / 5)) s (requests in progress $busy)" > /proc/1/fd/1
+                        exit 0
+                      fi
+                      sleep 0.2
+                    done
+                    echo "flare preStop: forward drain NOT CONFIRMED within {{ int $drain }} s (role '$role', in flight '$inflight')" > /proc/1/fd/1
+                    exit 0
           {{- end }}
       volumes:
         - name: flared-config
@@ -541,6 +623,11 @@ spec:
   selector:
     app: flare
     cluster: {{ $c.name }}
+    {{- if .Values.nodeReplacement.enabled }}
+    # the operator puts this label on a pod that can serve and takes it off
+    # before a cordon move empties the pod (nodeReplacement)
+    flare.gree.net/serving: "true"
+    {{- end }}
   ports:
     - port: {{ $c.externalAccess.port }}
       targetPort: {{ $c.flarePort }}

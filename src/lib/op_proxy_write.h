@@ -44,6 +44,9 @@ protected:
 	cluster*					_cluster;
 	storage*					_storage;
 	storage::entry		_entry;
+	// in the cluster's write section (L1): set by pre_proxy_write for a local
+	// apply, released by post_proxy_write, or at the latest when the op ends
+	bool							_in_write_section;
 
 public:
 	op_proxy_write(shared_connection c, string ident, binary_header::opcode opcode, cluster* cl, storage* st);
@@ -52,6 +55,8 @@ public:
 	virtual int run_client(storage::entry& e);
 
 	storage::entry& get_entry() { return this->_entry; };
+	void set_in_write_section(bool b) { this->_in_write_section = b; };
+	void leave_write_section();
 
 protected:
 	virtual int _parse_text_server_parameters();

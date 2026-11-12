@@ -53,6 +53,14 @@ protected:
 	bool								_skip_proxy;
 
 public:
+	// connect deadline and retries of a forwarding connection (bounded: a
+	// connect that never answers must not hold every queued forward)
+	static const int proxy_connect_timeout_ms = 3000;
+	static const int proxy_connect_retry_limit = 1;
+	// a sender whose connection failed to open this recently drops (counted)
+	// at once instead of queueing behind another connect attempt
+	static const int proxy_fail_fast_window_ms = 2000;
+
 	handler_proxy(shared_thread t, cluster* cl, string node_server_name, int node_server_port);
 	virtual ~handler_proxy();
 

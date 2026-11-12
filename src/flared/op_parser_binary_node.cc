@@ -28,6 +28,7 @@
  */
 #include "flared.h"
 #include "op_parser_binary_node.h"
+#include "ini_option.h"
 #include "op_stats_node.h"
 #include "op_show_node.h"
 
@@ -129,10 +130,17 @@ op* op_parser_binary_node::_determine_op(const binary_request_header& header) {
 		r = new op_quitq(this->_connection); 
 		break;
 	case binary_header::opcode_flush:
-		r = new op_flush_all(this->_connection, singleton<flared>::instance().get_storage());
-		break;
 	case binary_header::opcode_flushq:
-		r = new op_flush_allq(this->_connection, singleton<flared>::instance().get_storage());
+		{
+			op_flush_all* fa = (header.get_opcode() == binary_header::opcode_flushq)
+				? new op_flush_allq(this->_connection, singleton<flared>::instance().get_storage())
+				: new op_flush_all(this->_connection, singleton<flared>::instance().get_storage());
+			// the same gates as the text protocol (the binary parser applied
+			// neither the flush-all-enabled option nor any role check)
+			fa->set_flush_all_enabled(ini_option_object().is_flush_all_enabled());
+			fa->set_cluster(singleton<flared>::instance().get_cluster());
+			r = fa;
+		}
 		break;
 	case binary_header::opcode_version:
 		r = new op_version(this->_connection); 

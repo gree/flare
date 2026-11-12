@@ -1,0 +1,57 @@
+# === Suite: continuous-replication-outage-tmpfs ===
+# Deploying cluster 'cont-repl-outage-tmpfs' in namespace 'flare-cont-repl-outage-tmpfs'
+# Waiting for: namespace flare-cont-repl-outage-tmpfs not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-cont-repl-outage-tmpfs (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap cont-repl-outage-tmpfs-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting 50s grace period for operator reconciliation...
+# Waiting for: replica following (timeout: 120s)
+#   OK after 0s
+# before the cut: WAL live=0kB archive=4kB sst=1 data=4188kB RSS=33556kB; applied=4
+# fault: rejecting 10.244.0.9 ⇄ 10.244.0.10:12121 on flare-e2e-control-plane (both directions)
+# under the cut, after 50 MB: WAL live=72092kB archive=4kB sst=1 data=76280kB RSS=135912kB; master latest=1004
+# under the cut, after 100 MB: WAL live=72092kB archive=62396kB sst=2 data=201084kB RSS=176204kB; master latest=2004
+# under the cut, after 150 MB: WAL live=72092kB archive=124788kB sst=3 data=325888kB RSS=239832kB; master latest=3004
+# phase A written: 3000 keys (~150 MB); master latest=3004; replica applied=(some 4) state=disconnected; high-water: WAL live=72092kB archive=124788kB sst=3 data=325888kB RSS=239832kB
+# fault cleared: 10.244.0.9 ⇄ 10.244.0.10 forwards again
+# Waiting for: follower catches up FROM ITS CURSOR to the master's head with equal items (timeout: 900s)
+#   OK after 10s
+# phase A heal: caught up=true in 11s; state=following reason=; applied 4→3004 (head 3004); items master=3000 replica=3000; reconstruction_started 1→1; wal_applied=(some 16) wal_skipped=(some 3041); master after: WAL live=72092kB archive=124788kB sst=3 data=325892kB RSS=240588kB; master restarts 0→0
+# Waiting for: no repair entry pending (timeout: 180s)
+#   OK after 0s
+# fault: rejecting 10.244.0.9 ⇄ 10.244.0.10:12121 on flare-e2e-control-plane (both directions)
+# under the cut, after 50 MB: WAL live=72092kB archive=187180kB sst=4 data=450700kB RSS=241396kB; master latest=4004
+# under the cut, after 100 MB: WAL live=72092kB archive=187180kB sst=4 data=450700kB RSS=242256kB; master latest=5004
+# under the cut, after 150 MB: WAL live=72092kB archive=249572kB sst=5 data=575504kB RSS=242956kB; master latest=6004
+# under the cut, after 200 MB: WAL live=72092kB archive=311964kB sst=2 data=700280kB RSS=281164kB; master latest=7004
+# under the cut, after 250 MB: WAL live=72092kB archive=374356kB sst=3 data=825084kB RSS=351084kB; master latest=8004
+# under the cut, after 300 MB: WAL live=72092kB archive=436748kB sst=4 data=949888kB RSS=415060kB; master latest=9004
+# under the cut, after 350 MB: WAL live=72092kB archive=436748kB sst=4 data=949888kB RSS=452460kB; master latest=10004
+# under the cut, after 400 MB: WAL live=72092kB archive=499140kB sst=5 data=1074700kB RSS=490724kB; master latest=11004
+# phase B written: 8000 keys (~400 MB); master latest=11004; replica applied=3004; high-water: WAL live=72092kB archive=499140kB sst=5 data=1074700kB RSS=490724kB
+# purge watch (+0 MB after the cap crossing, 0s): archive=499140kB sst=5 data=1074700kB RSS=490724kB; master latest=11004
+# purge watch (+50 MB after the cap crossing, 172s): archive=249568kB sst=2 data=887512kB RSS=542504kB; master latest=12004
+# purge watch ended after 172s and 50 MB more: under cap=true; archive now=249568kB (high-water 499140kB, cap 262144kB); data high-water 1074700kB; RSS high-water 542504kB; master latest=12004
+# fault cleared: 10.244.0.9 ⇄ 10.244.0.10 forwards again
+# Waiting for: follower declares needs_rebuild with reason lsn_purged (timeout: 300s)
+#   OK after 20s
+# phase B heal: declared lsn_purged=true; state=needs_rebuild reason=lsn_purged; applied=(some 3004) (head 12004); archive now=249568kB
+# Waiting for: follower rebuilt (reconstruction ran) and following at the head with equal items (timeout: 1500s)
+#   OK after 55s
+# phase B rebuild: rebuilt=true in 59s; reconstruction_started 1→2; snapshot_bootstrap=(some 2) wal_fallback_to_dump=(some 1); items master=12000 replica=12000; pod uid 55f16eeb-a0e4-4da8-89cf-0b993d418ae5→55f16eeb-a0e4-4da8-89cf-0b993d418ae5; master after: WAL live=0kB archive=274800kB sst=3 data=865900kB RSS=542056kB; master restarts 0→0
+# Waiting for: ledger empty (timeout: 300s)
+#   OK after 0s
+# Cleaning up cluster 'cont-repl-outage-tmpfs'
+# Tests: 2, Failures: 0
+# RESULT: PASS
+1..2
+ok 1 - outage phase A: ~150 MB written while cut under a 256 MB WAL cap — several flushes, WAL retained; on healing the follower catches up from its cursor (no rebuild); disk/RSS high-water recorded
+ok 2 - outage phase B: ~400 MB written while cut, past the 256 MB WAL cap — archived WAL purged; the follower declares needs_rebuild/lsn_purged, is rebuilt and converges; disk/RSS high-water recorded

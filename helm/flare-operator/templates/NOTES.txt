@@ -43,3 +43,9 @@ To check health status:
 
 For more information, see the documentation at:
 https://github.com/gree/flare
+
+{{- $memWarn := include "flare-operator.memoryBudgetWarning" . }}
+{{- if $memWarn }}
+
+{{ $memWarn }}
+{{- end }}

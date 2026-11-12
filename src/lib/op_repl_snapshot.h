@@ -37,11 +37,30 @@
  *	  nfiles × ( "FILE <name> <size>\r\n" + <size> raw bytes )
  *	  "END\r\n"
  *	Errors: "SERVER_ERROR <msg>\r\n" at any line boundary.
+ *
+ *	VERIFICATION CAPTURE mode (CI-only kind driver, scripts/
+ *	flare_v_capture_kind.py; never used by a reseed):
+ *	  "repl_snapshot <bwlimit> capture [<deadline_sec>]\r\n"
+ *	Before the checkpoint the server refuses ("SERVER_ERROR capture_refused
+ *	<reason>") when a rebuild is in flight on this node, when the reserve,
+ *	this copy's size or the free space (on tmpfs: cgroup memory headroom)
+ *	is unknown, or when free < copy + reserve (the worst-case pin). While
+ *	streaming: a write that makes no progress for kCaptureProgressMs or
+ *	passes the total deadline (min(requested, kCaptureMaxDeadlineSec)) ends
+ *	the serve, and a free-space drop below the reserve aborts it; every exit
+ *	removes the checkpoint and releases the slot. The header carries a 5th
+ *	token "capture" so the driver can refuse a server that ignored the mode.
+ *
+ *	A RESEED serve (no "capture" token) has the progress bound only
+ *	(reseed_progress_timeout_ms, 120 s): a receiver that stays connected
+ *	but stops reading ends the serve and releases the checkpoint, the pin
+ *	and the slot; there is no total deadline and no capacity refusal.
  */
 #ifndef	OP_REPL_SNAPSHOT_H
 #define	OP_REPL_SNAPSHOT_H
 
 #include "op.h"
+#include <boost/function.hpp>
 #include "storage.h"
 
 using namespace std;
@@ -54,12 +73,42 @@ protected:
 	storage*			_storage;
 	uint64_t			_bwlimit;					// KB/s: client's requested cap, sent with the request (0 = no preference)
 	uint64_t			_peer_bwlimit_request;		// KB/s: server side — what the client asked for
+	// R3-D: evaluated right before the swap replaces the local copy; false
+	// refuses the swap (the staged copy is removed, the local copy is kept)
+	boost::function<bool (string&)>	_pre_swap_gate;
+	// COPY RETENTION (design §3.1): receive into this EXISTING empty
+	// directory (data_dir/staging-<attempt>) and stop there — no gate, no
+	// swap; the caller verifies and switches. "" = the legacy swap.
+	string				_receive_dir;
+	uint64_t			_received_seq;
+	bool				_busy;		// the source answered busy (one serve at a time)
+	string				_received_master_id;
+	// checked between files and every kSpaceWatchBytes; false stops the transfer
+	boost::function<bool (string&)>	_space_watch;
+	// server side: the request asked for capture mode (see the header)
+	bool				_capture;
+	uint64_t			_capture_deadline_sec;
 
 public:
 	op_repl_snapshot(shared_connection c, storage* st);
 	virtual ~op_repl_snapshot();
 
 	void set_bwlimit(uint64_t bwlimit) { this->_bwlimit = bwlimit; };
+	void set_pre_swap_gate(boost::function<bool (string&)> g) { this->_pre_swap_gate = g; };
+	void set_receive_dir(const string& d) { this->_receive_dir = d; };
+	void set_space_watch(boost::function<bool (string&)> w) { this->_space_watch = w; };
+	uint64_t get_received_seq() const { return this->_received_seq; };
+	bool is_busy() const { return this->_busy; };
+	string get_received_master_id() const { return this->_received_master_id; };
+	static const uint64_t kSpaceWatchBytes = 64ULL << 20;
+	static const int kCaptureProgressMs = 30 * 1000;
+	static const uint64_t kCaptureMaxDeadlineSec = 600;
+	// RESEED serve (no capture): a write that makes no progress for this
+	// long ends the serve — checkpoint removed, deletions re-enabled, slot
+	// released — instead of pinning them for as long as a receiver stays
+	// connected without reading. NO total deadline: a reseed throttled by
+	// bwlimit takes as long as its size needs. Tests shorten it.
+	static int reseed_progress_timeout_ms;
 
 	// Pull the snapshot from the connected source and swap it in as the
 	// local live DB (rocksdb only). Returns 0 on success; on any failure the

@@ -1,0 +1,53 @@
+# === Suite: continuous-replication-sustained ===
+# Deploying cluster 'cont-repl-sustained' in namespace 'flare-cont-repl-sustained'
+# Waiting for: namespace flare-cont-repl-sustained not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-cont-repl-sustained (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap cont-repl-sustained-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting 50s grace period for operator reconciliation...
+# Waiting for: replica following (timeout: 120s)
+#   OK after 0s
+# sustain 300/s window 0: state=following lag=0 (head 9004, applied 9004) items master=9000 replica=9000 master RSS=50248kB WAL=72092kB data=76288kB replica RSS=47768kB tombstones=0 wal_skipped=9148
+# sustain 300/s window 1: state=following lag=0 (head 18004, applied 18004) items master=18000 replica=18000 master RSS=50888kB WAL=72092kB data=76300kB replica RSS=49816kB tombstones=0 wal_skipped=18296
+# sustain 300/s window 2: state=following lag=0 (head 27004, applied 27004) items master=27000 replica=27000 master RSS=53448kB WAL=72092kB data=76316kB replica RSS=51480kB tombstones=0 wal_skipped=27442
+# sustain 300/s window 3: state=following lag=0 (head 36004, applied 36004) items master=36000 replica=36000 master RSS=54472kB WAL=72092kB data=76324kB replica RSS=53528kB tombstones=0 wal_skipped=36589
+# sustain 300/s window 4: state=following lag=0 (head 45004, applied 45004) items master=45000 replica=45000 master RSS=55112kB WAL=72092kB data=76336kB replica RSS=55320kB tombstones=0 wal_skipped=45732
+# sustain 300/s window 5: state=following lag=0 (head 54004, applied 54004) items master=54000 replica=54000 master RSS=57416kB WAL=72092kB data=76348kB replica RSS=57112kB tombstones=0 wal_skipped=54876
+# sustain 300/s window 6: state=following lag=0 (head 63004, applied 63004) items master=63000 replica=63000 master RSS=58056kB WAL=72092kB data=76356kB replica RSS=58904kB tombstones=0 wal_skipped=64017
+# sustain 300/s window 7: state=following lag=0 (head 72004, applied 72004) items master=72000 replica=72000 master RSS=58952kB WAL=72092kB data=76368kB replica RSS=60952kB tombstones=0 wal_skipped=73159
+# sustain 300/s: 300/s: lag first-minute max 0, last-minute max 0 → KEPT UP (bounded)
+# sustain 900/s window 0: state=following lag=0 (head 99004, applied 99004) items master=99000 replica=99000 master RSS=66376kB WAL=72092kB data=76380kB replica RSS=66328kB tombstones=0 wal_skipped=100291
+# sustain 900/s window 1: state=following lag=0 (head 126004, applied 126004) items master=126000 replica=126000 master RSS=71880kB WAL=72092kB data=76388kB replica RSS=71960kB tombstones=0 wal_skipped=127419
+# sustain 900/s window 2: state=following lag=0 (head 153004, applied 153004) items master=153000 replica=153000 master RSS=75720kB WAL=72092kB data=76396kB replica RSS=77080kB tombstones=0 wal_skipped=154546
+# sustain 900/s window 3: state=following lag=0 (head 180004, applied 180004) items master=180000 replica=180000 master RSS=82248kB WAL=72092kB data=76404kB replica RSS=82456kB tombstones=0 wal_skipped=181669
+# sustain 900/s window 4: state=following lag=0 (head 207004, applied 207004) items master=207000 replica=207000 master RSS=84424kB WAL=72092kB data=76416kB replica RSS=88600kB tombstones=0 wal_skipped=208788
+# sustain 900/s window 5: state=following lag=0 (head 234004, applied 234004) items master=234000 replica=234000 master RSS=85704kB WAL=72092kB data=76424kB replica RSS=93976kB tombstones=0 wal_skipped=235906
+# sustain 900/s window 6: state=following lag=0 (head 261004, applied 261004) items master=261000 replica=261000 master RSS=87624kB WAL=72092kB data=76432kB replica RSS=99096kB tombstones=0 wal_skipped=263020
+# sustain 900/s window 7: state=following lag=0 (head 288004, applied 288004) items master=288000 replica=288000 master RSS=88904kB WAL=72092kB data=76440kB replica RSS=104728kB tombstones=0 wal_skipped=290132
+# sustain 900/s: 900/s: lag first-minute max 0, last-minute max 0 → KEPT UP (bounded)
+# sustain 2000/s window 0: state=following lag=35265 (head 348004, applied 312739) items master=348000 replica=348000 master RSS=102884kB WAL=72092kB data=76448kB replica RSS=115224kB tombstones=0 wal_skipped=316245
+# sustain 2000/s window 1: state=following lag=70020 (head 408004, applied 337984) items master=408000 replica=408000 master RSS=115688kB WAL=72092kB data=76460kB replica RSS=125720kB tombstones=0 wal_skipped=341589
+# sustain 2000/s window 2: state=following lag=105540 (head 468004, applied 362464) items master=468000 replica=468000 master RSS=129768kB WAL=72092kB data=76468kB replica RSS=135960kB tombstones=0 wal_skipped=366165
+# sustain 2000/s window 3: state=following lag=142590 (head 528004, applied 385414) items master=528000 replica=528000 master RSS=134760kB WAL=72092kB data=76476kB replica RSS=146328kB tombstones=0 wal_skipped=389205
+# sustain 2000/s window 4: state=following lag=180405 (head 588004, applied 407599) items master=588000 replica=588000 master RSS=141672kB WAL=72092kB data=76480kB replica RSS=95360kB tombstones=0 wal_skipped=411477
+# sustain 2000/s window 5: state=following lag=217710 (head 648004, applied 430294) items master=648000 replica=648000 master RSS=145640kB WAL=72092kB data=76488kB replica RSS=106240kB tombstones=0 wal_skipped=434261
+# sustain 2000/s window 6: state=following lag=256290 (head 708004, applied 451714) items master=708000 replica=708000 master RSS=149096kB WAL=72092kB data=76492kB replica RSS=116608kB tombstones=0 wal_skipped=456277
+# sustain 2000/s window 7: state=following lag=294615 (head 768004, applied 473389) items master=768000 replica=768000 master RSS=158056kB WAL=72092kB data=76500kB replica RSS=85672kB tombstones=0 wal_skipped=478805
+# sustain 2000/s: 2000/s: lag first-minute max 70020, last-minute max 294615 → FELL BEHIND (growing)
+# Waiting for: follow stream drains the backlog after the load stops (timeout: 1200s)
+#   OK after 315s
+# sustained summary: 300/s: lag first-minute max 0, last-minute max 0 → KEPT UP (bounded) | 900/s: lag first-minute max 0, last-minute max 0 → KEPT UP (bounded) | 2000/s: lag first-minute max 70020, last-minute max 294615 → FELL BEHIND (growing); drained after the load stopped=true in 442s; master RSS 46664→158056 kB; WAL 72092 kB; data 76592 kB; items master=768000 replica=768000; master restarts 0→0; reconstruction_started 1→1; wal_applied=(some 0) wal_skipped=(some 772031) forward_applied=(some 768000)
+# Cleaning up cluster 'cont-repl-sustained'
+# Tests: 1, Failures: 0
+# RESULT: PASS
+1..1
+ok 1 - sustained load: does the follow stream keep up at a steady write rate, and do WAL/RSS/disk stay bounded until it does? (evaluation)
+EXIT=0

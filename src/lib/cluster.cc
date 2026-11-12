@@ -31,6 +31,9 @@
 #include "handler_monitor.h"
 #include "handler_proxy.h"
 #include "handler_reconstruction.h"
+#include "handler_wal_follower.h"
+#include "handler_source_validator.h"
+#include "app.h"
 #include "key_resolver_modular.h"
 #include "op_meta.h"
 #include "op_node_add.h"
@@ -70,6 +73,8 @@ cluster::cluster(thread_pool* req_tp, thread_pool* other_tp, string server_name,
 		_type(type_node),
 		_master_reconstruction(0),
 		_boot_shift_pending(false),
+		_master_epoch_advanced(false),
+		_applying_map_version(0),
 		_reannounce_active(false),
 		_activation_pending(false),
 		_node_map_version(0),
@@ -88,15 +93,52 @@ cluster::cluster(thread_pool* req_tp, thread_pool* other_tp, string server_name,
 		_proxy_concurrency(0),
 		_reconstruction_interval(0),
 		_reconstruction_bwlimit(0),
+		_repl_identity_forward(false),
+		_wal_follow_enabled(false),
+		_wal_follow_max_batches(256),
+		_wal_follow_max_bytes(4 * 1024 * 1024),
+		_wal_follow_poll_interval_usec(200 * 1000),
+		_wal_follow_batch_delay_usec(0),
 		_replication_type(replication_async),
 		_proxy_prior_netmask(0), 
-		_max_total_thread_queue(0) {
+		_max_total_thread_queue(0),
+		_read_unavailable_error(false) {
 	this->_node_key = this->to_node_key(server_name, server_port);
 	pthread_mutex_init(&this->_mutex_serialization, NULL);
 	pthread_mutex_init(&this->_mutex_master_reconstruction, NULL);
 	pthread_mutex_init(&this->_mutex_node_map_version, NULL);
 	pthread_rwlock_init(&this->_mutex_node_map, NULL);
 	pthread_rwlock_init(&this->_mutex_node_partition_map, NULL);
+	{
+		// writer preference, so a map swap is not starved by a steady write load.
+		// On glibc PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP is an enum
+		// constant, not a macro: test the C library, not the name (review of
+		// 8d64aaf). Other C libraries keep their default policy; the
+		// sustained-reader test (test_cluster) shows whether a swap gets the
+		// lock under continuous writes on the platform it runs on.
+		pthread_rwlockattr_t a;
+		pthread_rwlockattr_init(&a);
+#if defined(__GLIBC__)
+		pthread_rwlockattr_setkind_np(&a, PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP);
+#endif
+		pthread_rwlock_init(&this->_mutex_write_section, &a);
+		pthread_rwlockattr_destroy(&a);
+	}
+	pthread_mutex_init(&this->_mutex_read_source, NULL);
+	pthread_cond_init(&this->_cond_read_source, NULL);
+	this->_read_source_wake = false;
+	pthread_mutex_init(&this->_mutex_map_generation, NULL);
+	{
+		// timed waits on the monotonic clock (the deadline is monotonic)
+		pthread_condattr_t ca;
+		pthread_condattr_init(&ca);
+		pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
+		pthread_cond_init(&this->_cond_map_generation, &ca);
+		pthread_condattr_destroy(&ca);
+	}
+	this->_map_generation = 0;
+	this->_master_wait_ms = 0;
+	this->_source_check_interval_ms = 2000;
 }
 
 /**
@@ -1100,8 +1142,151 @@ int cluster::request_up_node(string node_server_name, int node_server_port) {
  *	reconstruct all node map
  */
 int cluster::reconstruct_node(vector<node> v, uint64_t node_map_version) {
+	// waits for the writes in their write section (applied, forwards not yet
+	// queued) and keeps new ones out while the map is swapped
+	pthread_rwlock_wrlock(&this->_mutex_write_section);
+	int r = this->_reconstruct_node(v, node_map_version);
+	pthread_rwlock_unlock(&this->_mutex_write_section);
+	// W: writes waiting for a master look at the new map
+	pthread_mutex_lock(&this->_mutex_map_generation);
+	this->_map_generation++;
+	pthread_cond_broadcast(&this->_cond_map_generation);
+	pthread_mutex_unlock(&this->_mutex_map_generation);
+	return r;
+}
+
+uint64_t cluster::get_map_generation() {
+	pthread_mutex_lock(&this->_mutex_map_generation);
+	const uint64_t g = this->_map_generation;
+	pthread_mutex_unlock(&this->_mutex_map_generation);
+	return g;
+}
+
+namespace {
+	uint64_t monotonic_ms() {
+		struct timespec ts;
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+	}
+}
+
+/**
+ *	a read that has no master to go to: wait (once per read, up to
+ *	_master_wait_ms in all) for the next map; true = decide the read again
+ */
+bool cluster::_read_wait_for_master(uint64_t generation, bool& waiting, uint64_t& deadline, int n, const string& key) {
+	if (this->_master_wait_ms <= 0) {
+		return false;
+	}
+	const uint64_t now = monotonic_ms();
+	if (!waiting) {
+		waiting = true;
+		deadline = now + (uint64_t)this->_master_wait_ms;
+		stats_object->increment_reads_waited_for_master();
+	}
+	if (now >= deadline || !this->wait_map_change(generation, deadline)) {
+		log_warning("read: no master for partition %d within %d msec (key=%s) -> error", n, this->_master_wait_ms, key.c_str());
+		return false;
+	}
+	return true;
+}
+
+bool cluster::wait_map_change(uint64_t seen, uint64_t deadline_ms) {
+	struct timespec ts;
+	ts.tv_sec = deadline_ms / 1000;
+	ts.tv_nsec = (deadline_ms % 1000) * 1000000;
+	pthread_mutex_lock(&this->_mutex_map_generation);
+	while (this->_map_generation == seen && monotonic_ms() < deadline_ms) {
+		pthread_cond_timedwait(&this->_cond_map_generation, &this->_mutex_map_generation, &ts);
+	}
+	const bool moved = this->_map_generation != seen;
+	pthread_mutex_unlock(&this->_mutex_map_generation);
+	return moved;
+}
+
+namespace {
+	// the write-section depth of THIS thread, per cluster instance: a nested
+	// entry into the same cluster's section does not lock again; an entry
+	// into another instance's section takes that instance's lock (review of
+	// 8d64aaf: one shared counter let a nested call on a second instance skip
+	// its lock). A thread is inside the sections of at most a few instances.
+	const int write_section_slots = 8;
+	__thread const void* write_section_owner[write_section_slots];
+	__thread int write_section_depth[write_section_slots];
+	// entries taken without a slot (more instances than slots); released by
+	// the matching leave that finds no slot
+	__thread int write_section_overflow = 0;
+
+	int write_section_slot(const void* c, bool create) {
+		int free_slot = -1;
+		for (int i = 0; i < write_section_slots; i++) {
+			if (write_section_depth[i] > 0 && write_section_owner[i] == c) {
+				return i;
+			}
+			if (free_slot < 0 && write_section_depth[i] == 0) {
+				free_slot = i;
+			}
+		}
+		if (!create) {
+			return -1;
+		}
+		if (free_slot >= 0) {
+			write_section_owner[free_slot] = c;
+		}
+		return free_slot;
+	}
+}
+
+void cluster::write_section_enter() {
+	int i = write_section_slot(this, true);
+	if (i < 0) {
+		// more instances at once than slots: take the lock without counting
+		// (fail safe: the swap still waits; a nested entry would deadlock, so
+		// this is logged as an error to be noticed)
+		log_err("write section: more than %d cluster instances entered by one thread", write_section_slots);
+		write_section_overflow++;
+		pthread_rwlock_rdlock(&this->_mutex_write_section);
+		return;
+	}
+	if (write_section_depth[i]++ == 0) {
+		pthread_rwlock_rdlock(&this->_mutex_write_section);
+	}
+}
+
+bool cluster::write_section_try_enter() {
+	int i = write_section_slot(this, true);
+	if (i < 0) {
+		return false;
+	}
+	if (write_section_depth[i] > 0) {
+		write_section_depth[i]++;
+		return true;
+	}
+	if (pthread_rwlock_tryrdlock(&this->_mutex_write_section) != 0) {
+		write_section_owner[i] = NULL;
+		return false;
+	}
+	write_section_depth[i] = 1;
+	return true;
+}
+
+void cluster::write_section_leave() {
+	int i = write_section_slot(this, false);
+	if (i >= 0) {
+		if (--write_section_depth[i] == 0) {
+			write_section_owner[i] = NULL;
+			pthread_rwlock_unlock(&this->_mutex_write_section);
+		}
+	} else if (write_section_overflow > 0) {
+		write_section_overflow--;
+		pthread_rwlock_unlock(&this->_mutex_write_section);
+	}
+}
+
+int cluster::_reconstruct_node(vector<node> v, uint64_t node_map_version) {
 	stack<node_shift_state> shift_state_stack;
 	stack<node_shift_role> shift_role_stack;
+	this->_applying_map_version = node_map_version;
 
 	pthread_rwlock_wrlock(&this->_mutex_node_map);
 	pthread_rwlock_wrlock(&this->_mutex_node_partition_map);
@@ -1162,6 +1347,21 @@ int cluster::reconstruct_node(vector<node> v, uint64_t node_map_version) {
 						log_notice("index map says prepare but local state is active (role/partition unchanged) — keeping active and re-announcing activation", 0);
 						it->node_state = state_active;
 						this->_reannounce_active = true;
+					} else if (node_key == this->_node_key
+							&& it->node_state == state_active
+							&& this->_node_map[node_key].node_state == state_prepare
+							&& !this->_activation_pending
+							&& stats_object != NULL
+							&& stats_object->get_reconstruction_current_state() == "running") {
+						// This node is still building its copy and its own
+						// activation was never acknowledged: a map that says
+						// active is a stale view of this node (e.g. from before
+						// a restart, CI 37572870090), not the echo of an
+						// activation. Becoming active here would also make the
+						// re-announce above report a copy that is not complete.
+						// Stay prepare; the activation decides.
+						log_warning("index map says active but this node's reconstruction is still running and its activation was not acknowledged — staying prepare (the map is a stale view of this node)", 0);
+						it->node_state = state_prepare;
 					} else {
 						node_shift_state tmp = { node_key, this->_node_map[node_key].node_state, it->node_state};
 						shift_state_stack.push(tmp);
@@ -1208,6 +1408,10 @@ int cluster::reconstruct_node(vector<node> v, uint64_t node_map_version) {
 		shift_role_stack.pop();
 	}
 
+	// CONTINUOUS REPLICATION (SAF-10c): the maps are final for this
+	// broadcast, so decide whether this node should be following, and whom.
+	this->_reconcile_wal_follower_locked();
+
 	// retry a deferred/failed boot role shift now that this broadcast may
 	// have brought the missing reconstruction source (storage NULL = still
 	// inside startup_node; flared runs the first attempt via run_boot_shift
@@ -1238,6 +1442,63 @@ int cluster::reconstruct_node(vector<node> v, uint64_t node_map_version) {
 	}
 
 	this->_set_node_map_version(node_map_version);
+
+	// R3: under the same write locks that installed the map — a read decided
+	// under this map can never see the previous source's eligibility.
+	this->_check_read_source_locked(node_map_version);
+
+	// restore provenance: an ACTIVE slave records the map's binding (a live
+	// copy is re-bound to where the map puts it). A RESTORED copy of another
+	// partition is logged (its reads stay gated by R3; it is not a master).
+	{
+		node_map::iterator me = this->_node_map.find(this->_node_key);
+		if (me != this->_node_map.end() && me->second.node_role == role_slave
+				&& me->second.node_state == state_active && me->second.node_partition >= 0 && this->_storage != NULL) {
+			string why;
+			const string want = this->_partition_binding_for(me->second.node_partition);
+			if (this->_storage->check_partition_binding(want, false, why) != 0) {
+				log_err("CRITICAL: this Active slave's copy does not match the map's partition binding: %s", why.c_str());
+			}
+		}
+	}
+
+	// History continuation: a prepared replica commits once the map names
+	// the prepared successor as its partition's master (the operator sends
+	// this map to the prepared replicas BEFORE the successor), and drops the
+	// pending history when the map names another master (rollback).
+	{
+		node_map::iterator me = this->_node_map.find(this->_node_key);
+		if (me != this->_node_map.end() && me->second.node_partition >= 0 && me->second.node_role != role_master
+				&& this->_storage != NULL) {
+			string master_key;
+			for (node_map::iterator it = this->_node_map.begin(); it != this->_node_map.end(); it++) {
+				if (it->second.node_role == role_master && it->second.node_partition == me->second.node_partition
+						&& it->second.node_state == state_active) {
+					master_key = it->first;
+				}
+			}
+			this->_storage->history_on_map(me->second.node_partition, master_key, this->_node_key, node_map_version);
+		}
+	}
+
+	// One line per accepted map: when this process took which master, so a
+	// decision (activation, read) can be placed before or after a switch.
+	{
+		ostringstream masters;
+		for (node_map::iterator it = this->_node_map.begin(); it != this->_node_map.end(); it++) {
+			if (it->second.node_role == role_master) {
+				masters << " " << it->second.node_partition << "=" << it->first << "/" << state_cast(it->second.node_state);
+			}
+		}
+		node_map::iterator me = this->_node_map.find(this->_node_key);
+		log_notice("node map accepted (version %llu, %d entries); own role=%s state=%s balance=%d partition=%d; masters:%s",
+			(unsigned long long)node_map_version, (int)this->_node_map.size(),
+			me != this->_node_map.end() ? role_cast(me->second.node_role).c_str() : "absent",
+			me != this->_node_map.end() ? state_cast(me->second.node_state).c_str() : "absent",
+			me != this->_node_map.end() ? me->second.node_balance : -1,
+			me != this->_node_map.end() ? me->second.node_partition : -1,
+			masters.str().c_str());
+	}
 
 	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
 	pthread_rwlock_unlock(&this->_mutex_node_map);
@@ -1439,13 +1700,124 @@ int cluster::add_proxy_event_listener(shared_proxy_event_listener listener) {
  *
  *	@todo fix performance issue
  */
+namespace {
+// Read once per process; "" disables the trace.
+const string& read_trace_prefix() {
+	static const string prefix = getenv("FLARE_TEST_READ_TRACE_PREFIX") != NULL ? getenv("FLARE_TEST_READ_TRACE_PREFIX") : "";
+	return prefix;
+}
+
+// Process-wide order of trace lines (log order can interleave threads).
+uint64_t read_trace_next_seq() {
+	static AtomicCounter seq(0);
+	return seq.incr();
+}
+
+// Peer ip:port of the client connection an op arrived on ("" if unknown).
+string connection_peer(op* o) {
+	connection_tcp* ct = dynamic_cast<connection_tcp*>(o->get_connection().get());
+	return ct != NULL ? ct->get_peer() : "";
+}
+
+// Which input of the local read guard refused (or "allowed").
+string follow_guard_reason(const stats::follow_record& r, time_t now) {
+	if (!r.enabled) return "mode_off";
+	if (r.state != "following") return "state=" + r.state;
+	if (r.source_epoch.empty()) return "no_source_epoch";
+	if (r.source_lsn == 0) return "no_source_position";
+	if (r.applied_lsn < r.source_lsn) return "behind";
+	if (r.source_lsn_observed_at <= 0 || now < r.source_lsn_observed_at) return "no_observation_time";
+	if (now - r.source_lsn_observed_at > 5) return "observation_stale";
+	return "allowed";
+}
+
+// R3: the read-source binding the decision used.
+string describe_source(const source_binding& b) {
+	return string(" source_state=") + source_binding::state_name(b.st) + " source=" + (b.source.empty() ? string("-") : b.source)
+		+ " source_epoch=" + (b.source_epoch.empty() ? string("-") : b.source_epoch);
+}
+
+// The follow record the guard read, or "follow=unread" when it read none.
+string describe_follow(const stats::follow_record* r) {
+	if (r == NULL) return "follow=unread";
+	time_t now = stats_object != NULL ? stats_object->get_timestamp() : 0;
+	ostringstream s;
+	s << "follow_enabled=" << (r->enabled ? 1 : 0)
+		<< " follow_state=" << r->state
+		<< " follow_source=" << r->source
+		<< " follow_epoch=" << r->source_epoch
+		<< " applied_lsn=" << r->applied_lsn
+		<< " source_lsn=" << r->source_lsn
+		<< " observed_at=" << r->source_lsn_observed_at
+		<< " now=" << now
+		<< " guard=" << follow_guard_reason(*r, now);
+	return s.str();
+}
+}
+
+/**
+ *	TEST SEAM: see cluster.h. The map version and this node's own entry are
+ *	read after the decision under their own locks, so a map installed in
+ *	between can show here; the partition fields (master, own slave balance)
+ *	are the ones the decision used.
+ */
+void cluster::_trace_read(const string& key, const string& conn, const string& via, const char* decision, const string& reason, const partition& p, int partition_index, const string& target, const string& follow) {
+	const string& prefix = read_trace_prefix();
+	if (prefix.empty() || key.compare(0, prefix.size(), prefix) != 0) {
+		return;
+	}
+	node self = this->get_node(this->_node_key);
+	int own_slave_balance = -1;
+	for (vector<partition_node>::const_iterator it = p.slave.begin(); it != p.slave.end(); it++) {
+		if (it->node_key == this->_node_key) own_slave_balance = it->node_balance;
+	}
+	log_notice("read-trace seq=%llu conn=%s key=%s via=%s decision=%s reason=%s target=%s partition=%d partition_master=%s own_slave_balance=%d own_role=%s own_state=%s own_balance=%d own_partition=%d map_version=%llu boot_id=%llu %s",
+		(unsigned long long)read_trace_next_seq(), conn.empty() ? "-" : conn.c_str(), key.c_str(), via.empty() ? "client" : via.c_str(), decision, reason.c_str(), target.c_str(), partition_index, p.master.node_key.c_str(), own_slave_balance,
+		role_cast(self.node_role).c_str(), state_cast(self.node_state).c_str(), self.node_balance, self.node_partition,
+		(unsigned long long)this->get_node_map_version(),
+		(unsigned long long)(stats_object != NULL ? stats_object->get_reconstruction_boot_id() : 0),
+		follow.c_str());
+}
+
+bool cluster::is_read_traced(const string& key) {
+	const string& prefix = read_trace_prefix();
+	return !prefix.empty() && key.compare(0, prefix.size(), prefix) == 0;
+}
+
+void cluster::trace_read_result(op_proxy_read* o, const string& key, const char* result, const char* reason) {
+	if (!is_read_traced(key)) {
+		return;
+	}
+	vector<string> chain = o->get_proxy();
+	string via;
+	for (vector<string>::iterator it = chain.begin(); it != chain.end(); it++) {
+		via += (via.empty() ? "" : ",") + *it;
+	}
+	const string conn = connection_peer(o);
+	log_notice("read-trace-result seq=%llu conn=%s key=%s via=%s result=%s reason=%s",
+		(unsigned long long)read_trace_next_seq(), conn.empty() ? "-" : conn.c_str(), key.c_str(),
+		via.empty() ? "client" : via.c_str(), result, reason);
+}
+
 cluster::proxy_request cluster::pre_proxy_read(op_proxy_read* op, storage::entry& e, void* parameter, shared_queue_proxy_read& q_result) {
+	// TEST SEAM (see _trace_read): the proxy chain that delivered this read,
+	// so a trace of a client read is not confused with a forwarded one.
+	string via;
+	string conn;
+	if (!read_trace_prefix().empty()) {
+		conn = connection_peer(op);
+		vector<string> chain = op->get_proxy();
+		for (vector<string>::iterator it = chain.begin(); it != chain.end(); it++) {
+			via += (via.empty() ? "" : ",") + *it;
+		}
+	}
 	for (vector<shared_proxy_event_listener>::iterator it = this->_fixed_proxy_event_listeners.begin();
 			it != this->_fixed_proxy_event_listeners.end(); it++) {
 		shared_queue_proxy_read q_proxy_result;
 		proxy_request r = (*it)->on_pre_proxy_read(op, e, parameter, q_proxy_result);
 		if (r == proxy_request_complete) {
 			q_result = q_proxy_result;
+			if (!read_trace_prefix().empty()) this->_trace_read(e.key, conn, via, "listener", "proxy_event_listener", partition(), -1, "", describe_follow(NULL));
 			return proxy_request_complete;
 		} else if (r == proxy_request_continue) {
 			continue;
@@ -1454,40 +1826,118 @@ cluster::proxy_request cluster::pre_proxy_read(op_proxy_read* op, storage::entry
 		}
 	}
 
+	// W for reads (plan: "writes to a partition with no master, and reads
+	// sent to its master, wait for a map that names one"): a read that would
+	// fail only because the partition has no master in the map (a planned
+	// handover between its demote and promote maps) waits for the next map,
+	// up to _master_wait_ms, and is decided again from the start. Answered as
+	// a miss instead, a key that exists looked absent for the whole handover
+	// (998dc30 copy-identity 11: ~4.5 s of misses on both slaves).
+	uint64_t read_wait_deadline = 0;
+	bool read_waiting = false;
+read_retry:
+	const uint64_t read_generation = this->get_map_generation();
 	partition p;
 	bool dummy;
 	int n = this->_determine_partition(e, p, false, dummy);
 	if (n < 0) {
 		// perhaps no partition available
+		if (!read_trace_prefix().empty()) this->_trace_read(e.key, conn, via, "error", "no_partition", p, n, "", describe_follow(NULL));
 		return proxy_request_error_partition;
 	}
 
+	if (p.master.node_key == this->_node_key && this->_promotion_refused) {
+		if (!read_trace_prefix().empty()) this->_trace_read(e.key, conn, via, "error", "promotion_refused", p, n, "", describe_follow(NULL));
+		return proxy_request_error_partition;
+	}
 	if (p.master.node_key == this->_node_key) {
+		if (!read_trace_prefix().empty()) this->_trace_read(e.key, conn, via, "local", "master", p, n, this->_node_key, describe_follow(NULL));
 		return proxy_request_continue;
 	}
+	bool follow_proxy_to_master = false;
+	bool own_slave = false;
+	// R3: this node's copy answers only while it is eligible for the source it
+	// was validated against. Read AFTER the partition copy above: a map that
+	// withdrew the eligibility was installed together with that change, so a
+	// read decided under it cannot see the old eligibility.
+	bool source_gated = false;
+	source_binding read_source;
+	stats::follow_record follow_seen;
+	bool follow_read = false;
 	for (vector<partition_node>::iterator it = p.slave.begin(); it != p.slave.end(); it++) {
-		if (it->node_balance > 0 && it->node_key == this->_node_key) {
-			return proxy_request_continue;
+		if (it->node_key == this->_node_key) {
+			own_slave = true;
+			read_source = this->get_read_source();
+			source_gated = !read_source.is_eligible();
+			if (stats_object != NULL) {
+				const stats::follow_record follow = stats_object->get_follow_record();
+				follow_seen = follow;
+				follow_read = true;
+				// TEST SEAM (visibility-bench only, never set in production):
+				// FLARE_TEST_FOLLOW_LOCAL_READS answers every read locally, so a
+				// benchmark measures when a write lands in this replica's own
+				// copy instead of the master answering for a follower behind it
+				static const bool follow_local_reads = getenv("FLARE_TEST_FOLLOW_LOCAL_READS") != NULL;
+				follow_proxy_to_master = !follow_local_reads && follow.enabled
+					&& (!stats::follow_allows_local_read(follow, stats_object->get_timestamp())
+						|| follow.source != p.master.node_key);
+			}
+			if (it->node_balance > 0 && !follow_proxy_to_master && !source_gated) {
+				if (!read_trace_prefix().empty()) this->_trace_read(e.key, conn, via, "local", "slave_guard_allowed", p, n, this->_node_key, describe_follow(follow_read ? &follow_seen : NULL) + describe_source(read_source));
+				return proxy_request_continue;
+			}
 		}
 	}
 
 	// select one (rand() will do)
-	if (p.balance.size() == 0) {
+	if (p.balance.size() == 0 && !follow_proxy_to_master && !source_gated) {
+		if (p.master.node_key.empty() && this->_read_wait_for_master(read_generation, read_waiting, read_wait_deadline, n, e.key)) {
+			goto read_retry;
+		}
 		log_err("no node is available for this partition (all balances are set to 0)", 0);
+		if (!read_trace_prefix().empty()) this->_trace_read(e.key, conn, via, "error", "no_balance", p, n, "", describe_follow(follow_read ? &follow_seen : NULL));
 		return proxy_request_error_partition;
 	}
 
 	string node_key;
-	if (p.prior_balance.size() > 0) {
+	if (source_gated) {
+		// the partition's master NOW (not the copy of the map this read
+		// started with), never another replica
+		node_key = this->get_partition_master_key(n);
+		if (node_key.empty() || node_key == this->_node_key) {
+			if (this->_read_wait_for_master(read_generation, read_waiting, read_wait_deadline, n, e.key)) {
+				goto read_retry;
+			}
+			if (!read_trace_prefix().empty()) this->_trace_read(e.key, conn, via, "error", "source_unverified_no_master", p, n, "", describe_follow(follow_read ? &follow_seen : NULL) + describe_source(read_source));
+			return proxy_request_error_partition;
+		}
+	} else if (follow_proxy_to_master) {
+		// Do not select this stale replica again from an old balance map.
+		// Keep its Slave role so the follower can continue catching up.
+		if (p.master.node_key.empty()) {
+			if (this->_read_wait_for_master(read_generation, read_waiting, read_wait_deadline, n, e.key)) {
+				goto read_retry;
+			}
+			if (!read_trace_prefix().empty()) this->_trace_read(e.key, conn, via, "error", "follow_guard_no_master", p, n, "", describe_follow(follow_read ? &follow_seen : NULL));
+			return proxy_request_error_partition;
+		}
+		node_key = p.master.node_key;
+	} else if (p.prior_balance.size() > 0) {
 		node_key = p.prior_balance[rand() % p.prior_balance.size()];
 	} else {
 		node_key = p.balance[rand() % p.balance.size()];
 	}
 	log_debug("selected proxy node (node_key=%s)", node_key.c_str());
+	if (!read_trace_prefix().empty()) {
+		const char* why = source_gated ? "source_unverified" : follow_proxy_to_master ? "follow_guard"
+			: own_slave ? "own_slave_balance_0" : "not_in_partition";
+		this->_trace_read(e.key, conn, via, "proxy", why, p, n, node_key, describe_follow(follow_read ? &follow_seen : NULL) + (own_slave ? describe_source(read_source) : string("")));
+	}
 
 	vector<string> proxy = op->get_proxy();
 	proxy.push_back(this->_node_key);
 	shared_queue_proxy_read q(new queue_proxy_read(this, this->_storage, proxy, e, parameter, op->get_ident()));
+	q->set_strict(source_gated);
 	if (this->_enqueue(boost::static_pointer_cast<thread_queue, queue_proxy_read>(q), node_key, e.get_key_hash_value(this->_proxy_hash_algorithm), true) < 0) {
 		return proxy_request_error_enqueue;
 	}
@@ -1516,11 +1966,29 @@ cluster::proxy_request cluster::pre_proxy_write(op_proxy_write* op, shared_queue
 		}
 	}
 
+	// W: a write whose partition has no master in the map (master/down: a
+	// planned handover's demote step) waits for a map with one, up to
+	// _master_wait_ms, then decides again from the start
+	uint64_t wait_deadline = 0;
+	bool waiting = false;
 	partition p, p_prepare;
 	bool is_prepare;
+	// a forward to the master that was never sent (its destination turned
+	// proxy while it was queued: a handover's promote map) is routed again
+	int reroutes = 0;
+reroute:
+	for (;;) {
+	const uint64_t generation = this->get_map_generation();
+	// the role decision and, for a local apply, everything up to queueing the
+	// forwards in post_proxy_write, is one write section (L1)
+	this->write_section_enter();
 	int n = this->_determine_partition(e, p, false, is_prepare);
 	if (n < 0) {
 		// perhaps no partition available
+		this->write_section_leave();
+		if (waiting) {
+			stats_object->master_wait_end(false);
+		}
 		return proxy_request_error_partition;
 	}
 	this->_determine_partition(e, p_prepare, true, is_prepare);
@@ -1536,16 +2004,68 @@ cluster::proxy_request cluster::pre_proxy_write(op_proxy_write* op, shared_queue
 	// like fresh client writes instead.
 	bool local_proxy_request = this->_is_local_proxy_request(op);
 
+	if (p.master.node_key == this->_node_key && this->_promotion_refused) {
+		// decision 2026-10-08: a master over a forbidden copy accepts nothing
+		this->write_section_leave();
+		if (waiting) {
+			stats_object->master_wait_end(false);
+		}
+		return proxy_request_error_partition;
+	}
 	if (p.master.node_key == this->_node_key || (local_proxy_request && is_prepare && p_prepare.master.node_key == this->_node_key)) {
 		// should be write at this node
+		if (waiting) {
+			stats_object->master_wait_end(true);
+		}
+		op->set_in_write_section(true);
 		return proxy_request_continue;
 	}
 
 	if (local_proxy_request) {
-		if (p.index.count(this->_node_key) > 0 || (is_prepare && p_prepare.index.count(this->_node_key) > 0)) {
+		// L4: a change is applied as a replica only when it comes from a
+		// master of this partition in OUR map (the current master, or the
+		// master/down placeholder of a handover whose forwards are still
+		// being drained). A forward from a node that is no longer a master
+		// here (a late one of an old map) is routed like a client write
+		// instead, so it never overwrites the copy of the current master.
+		if ((p.index.count(this->_node_key) > 0 || (is_prepare && p_prepare.index.count(this->_node_key) > 0))
+				&& this->_is_partition_master_sender(op, n, is_prepare ? p_prepare.master.node_key : string(""))) {
+			// a change applied because this node is a replica of the partition
+			if (waiting) {
+				stats_object->master_wait_end(true);
+			}
+			op->set_in_write_section(true);
 			return proxy_request_continue;
 		}
 	}
+
+	if (p.master.node_key.empty()) {
+		this->write_section_leave();
+		if (this->_master_wait_ms <= 0) {
+			return proxy_request_error_partition;
+		}
+		const uint64_t now = monotonic_ms();
+		if (!waiting) {
+			waiting = true;
+			wait_deadline = now + (uint64_t)this->_master_wait_ms;
+			stats_object->master_wait_begin();
+		}
+		if (now >= wait_deadline || !this->wait_map_change(generation, wait_deadline)) {
+			stats_object->master_wait_end(false);
+			log_warning("no master for partition %d within %d msec (key=%s) -> error", n, this->_master_wait_ms, e.key.c_str());
+			return proxy_request_error_partition;
+		}
+		continue;
+	}
+	if (waiting) {
+		stats_object->master_wait_end(true);
+	}
+	break;
+	}
+
+	// not applied here: the forward to the master is a network round trip and
+	// must not hold the section (a map swap would wait for it)
+	this->write_section_leave();
 
 	// proxy request to master
 	bool sync = (e.option & storage::option_noreply) ? false : true;
@@ -1558,6 +2078,16 @@ cluster::proxy_request cluster::pre_proxy_write(op_proxy_write* op, shared_queue
 	}
 	if (sync) {
 		q->sync();
+		// never sent (local kind 2026-10-28: a write queued to the old master
+		// 9 ms before the demote map waited behind writes held at the old
+		// master, and when the promote map made it a proxy the forwarding
+		// thread skipped it: "SERVER_ERROR proxy error" although this node
+		// was the new master). Nothing was applied anywhere: decide again.
+		if (q->is_skipped() && reroutes < 5) {
+			reroutes++;
+			log_notice("forward to %s was not sent (it is a proxy now) -> routing the write again by the map in force (key=%s, attempt %d)", p.master.node_key.c_str(), e.key.c_str(), reroutes);
+			goto reroute;
+		}
 		q_result = q;
 	}
 	
@@ -1568,6 +2098,13 @@ cluster::proxy_request cluster::pre_proxy_write(op_proxy_write* op, shared_queue
  *	[node] post proxy for writing ops
  */
 cluster::proxy_request cluster::post_proxy_write(op_proxy_write* op, bool sync) {
+	proxy_request r = this->_post_proxy_write(op, sync);
+	// the forwards are queued (or this node had none to make): the map may change now
+	op->leave_write_section();
+	return r;
+}
+
+cluster::proxy_request cluster::_post_proxy_write(op_proxy_write* op, bool sync) {
 	for (vector<shared_proxy_event_listener>::iterator it = this->_fixed_proxy_event_listeners.begin();
 			   it != this->_fixed_proxy_event_listeners.end(); it++) {
 		proxy_request r = (*it)->on_post_proxy_write(op, this->get_node(this->_node_key));
@@ -1615,9 +2152,22 @@ cluster::proxy_request cluster::post_proxy_write(op_proxy_write* op, bool sync) 
 	for (vector<partition_node>::iterator it = p_tmp.slave.begin(); it != p_tmp.slave.end(); it++) {
 		// proxy request to slave
 		log_debug("proxy request to slave (node_key=%s, ident=%s)", it->node_key.c_str(), op->get_ident().c_str());
+		q->track_repl_in_flight(it->node_key);
 		if (this->_enqueue(q, it->node_key, key_hash_value, sync) < 0) {
-			log_warning("enqueue failed (node_key=%s) -> continue processing", it->node_key.c_str());
+			// The forward was not queued (max-total-thread-queue reached, or the
+			// proxy thread is exiting): the replica will miss this write. Count
+			// it as a dropped forward to that replica so the repair path sees it
+			// (with continuous replication the follower fills it from the WAL).
+			// Rate-limited: at the cap this fires for every write.
+			stats_object->increment_proxy_write_dropped(it->node_key);
+			static AtomicCounter dropped_logged(0);
+			if (dropped_logged.incr() % 1000 == 1) {
+				log_warning("enqueue failed (node_key=%s) -> forward dropped (logged every 1000th)", it->node_key.c_str());
+			}
 			continue;
+		}
+		if (stats_object->diag_enabled()) {
+			stats_object->diag_incr("fwd_enqueued:" + it->node_key);
 		}
 	}
 #ifdef ENABLE_MYSQL_REPLICATION
@@ -1642,6 +2192,18 @@ cluster::proxy_request cluster::post_proxy_write(op_proxy_write* op, bool sync) 
 	return proxy_request_complete;
 }
 
+string cluster::get_partition_master_key(int partition) {
+	string key = "";
+	pthread_rwlock_rdlock(&this->_mutex_node_partition_map);
+	if (this->_node_partition_map.count(partition) > 0) {
+		key = this->_node_partition_map[partition].master.node_key;
+	} else if (this->_node_partition_prepare_map.count(partition) > 0) {
+		key = this->_node_partition_prepare_map[partition].master.node_key;
+	}
+	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
+	return key;
+}
+
 int cluster::get_node_partition_map_size() {
 	pthread_rwlock_rdlock(&this->_mutex_node_partition_map);
 	int partition_size = this->_node_partition_map.size();
@@ -1656,6 +2218,341 @@ int cluster::get_node_partition_map_size() {
  *
  *	assumes that node_map and node_partition_map is alreadby write locked
  */
+int cluster::set_wal_follow_enabled(bool b) {
+	pthread_rwlock_wrlock(&this->_mutex_node_map);
+	pthread_rwlock_wrlock(&this->_mutex_node_partition_map);
+	this->_wal_follow_enabled = b;
+	if (stats_object != NULL) {
+		stats_object->follow_set_enabled(b);
+	}
+	this->_reconcile_wal_follower_locked();
+	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
+	pthread_rwlock_unlock(&this->_mutex_node_map);
+	return 0;
+}
+
+
+// {{{ R3: source eligibility of this node's copy
+source_binding cluster::get_read_source() {
+	pthread_mutex_lock(&this->_mutex_read_source);
+	source_binding b = this->_read_source;
+	pthread_mutex_unlock(&this->_mutex_read_source);
+	return b;
+}
+
+/**
+ *	Bind under the map READ locks: a map that names another master cannot be
+ *	installed in between (installation takes the write locks), so the copy is
+ *	eligible only if `source` is the partition's master in the map in force
+ *	now; otherwise it is bound as revalidating (the copy is kept, reads stay
+ *	proxied) and the validator is woken.
+ */
+void cluster::bind_read_source(const string& source, const string& master_id, const string& source_epoch, const string& reason) {
+	pthread_rwlock_rdlock(&this->_mutex_node_map);
+	pthread_rwlock_rdlock(&this->_mutex_node_partition_map);
+	string current;
+	node_map::iterator me = this->_node_map.find(this->_node_key);
+	if (me != this->_node_map.end() && me->second.node_role == role_slave && me->second.node_partition >= 0) {
+		node_partition_map::iterator p = this->_node_partition_map.find(me->second.node_partition);
+		if (p != this->_node_partition_map.end()) {
+			current = p->second.master.node_key;
+		}
+	}
+	const bool still_master = !current.empty() && current == source;
+	pthread_mutex_lock(&this->_mutex_read_source);
+	this->_read_source.st = still_master ? source_binding::eligible : source_binding::revalidating;
+	this->_read_source.source = source;
+	this->_read_source.master_id = master_id;
+	this->_read_source.source_epoch = source_epoch;
+	this->_read_source.reason = still_master ? reason
+		: reason + "; but the map in force names " + (current.empty() ? string("no master") : current) + ", so it is re-validated first";
+	this->_read_source.generation++;
+	if (!still_master) {
+		this->_read_source_wake = true;
+		pthread_cond_signal(&this->_cond_read_source);
+	}
+	pthread_mutex_unlock(&this->_mutex_read_source);
+	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
+	pthread_rwlock_unlock(&this->_mutex_node_map);
+	log_notice("read source %s: %s (master_id %s, source epoch %s): %s", still_master ? "BOUND" : "BOUND FOR RE-VALIDATION",
+		source.c_str(), master_id.c_str(), source_epoch.empty() ? "(legacy, lineage only)" : source_epoch.c_str(), reason.c_str());
+}
+
+void cluster::reset_read_source(const string& reason) {
+	pthread_mutex_lock(&this->_mutex_read_source);
+	const bool changed = this->_read_source.st != source_binding::none;
+	this->_read_source.st = source_binding::none;
+	this->_read_source.reason = reason;
+	this->_read_source.generation++;
+	pthread_mutex_unlock(&this->_mutex_read_source);
+	if (changed) {
+		log_notice("read source RESET: %s", reason.c_str());
+	}
+}
+
+bool cluster::get_own_assignment(role& r, state& st, int& partition) {
+	bool found = false;
+	pthread_rwlock_rdlock(&this->_mutex_node_map);
+	node_map::iterator me = this->_node_map.find(this->_node_key);
+	if (me != this->_node_map.end()) {
+		r = me->second.node_role;
+		st = me->second.node_state;
+		partition = me->second.node_partition;
+		found = true;
+	}
+	pthread_rwlock_unlock(&this->_mutex_node_map);
+	return found;
+}
+
+/**
+ *	With the map write locks held, right after a map is installed. A slave
+ *	whose partition master is no longer the source its copy was validated
+ *	against loses its eligibility HERE, atomically with the map: reads are
+ *	proxied from now on, and the validator is woken to re-validate. A node
+ *	that is no longer a slave has no copy to bind.
+ */
+void cluster::_check_read_source_locked(uint64_t node_map_version) {
+	node_map::iterator me = this->_node_map.find(this->_node_key);
+	const bool slave = me != this->_node_map.end() && me->second.node_role == role_slave && me->second.node_partition >= 0;
+	string current;
+	if (slave) {
+		node_partition_map::iterator p = this->_node_partition_map.find(me->second.node_partition);
+		if (p != this->_node_partition_map.end()) {
+			current = p->second.master.node_key;
+		}
+	}
+	bool wake = false;
+	string invalidated;
+	pthread_mutex_lock(&this->_mutex_read_source);
+	if (!slave) {
+		if (this->_read_source.st != source_binding::none) {
+			this->_read_source.st = source_binding::none;
+			this->_read_source.reason = "no longer a slave";
+			this->_read_source.generation++;
+			invalidated = "no longer a slave";
+		}
+	} else if (this->_read_source.st == source_binding::eligible && current != this->_read_source.source) {
+		ostringstream why;
+		why << "map v" << node_map_version << " names " << (current.empty() ? string("no master") : current)
+			<< " for partition " << me->second.node_partition << "; the copy was validated against " << this->_read_source.source;
+		this->_read_source.st = source_binding::revalidating;
+		this->_read_source.reason = why.str();
+		this->_read_source.generation++;
+		invalidated = why.str();
+		wake = true;
+	} else if (this->_read_source.st == source_binding::revalidating) {
+		wake = true;		// a newer map: re-check against its master now
+	}
+	if (wake) {
+		this->_read_source_wake = true;
+		pthread_cond_signal(&this->_cond_read_source);
+	}
+	pthread_mutex_unlock(&this->_mutex_read_source);
+	if (!invalidated.empty()) {
+		log_notice("read source INVALIDATED (local reads and promotion eligibility withdrawn until re-validated): %s", invalidated.c_str());
+	}
+}
+
+bool cluster::apply_source_decision(unsigned long long generation, const string& current, source_decision d, const string& reason) {
+	if (d == decision_keep) {
+		return true;
+	}
+	bool applied = false;
+	string log_line;
+	// map read lock FIRST (lock order), so `current` cannot change under us
+	pthread_rwlock_rdlock(&this->_mutex_node_map);
+	pthread_rwlock_rdlock(&this->_mutex_node_partition_map);
+	string now_master;
+	node_map::iterator me = this->_node_map.find(this->_node_key);
+	if (me != this->_node_map.end() && me->second.node_role == role_slave && me->second.node_partition >= 0) {
+		node_partition_map::iterator p = this->_node_partition_map.find(me->second.node_partition);
+		if (p != this->_node_partition_map.end()) {
+			now_master = p->second.master.node_key;
+		}
+	}
+	pthread_mutex_lock(&this->_mutex_read_source);
+	if (this->_read_source.generation == generation && now_master == current && !current.empty()) {
+		switch (d) {
+		case decision_rebind:
+			this->_read_source.st = source_binding::eligible;
+			this->_read_source.source = current;
+			this->_read_source.reason = reason;
+			log_line = "read source RE-VALIDATED against " + current + ": " + reason;
+			break;
+		case decision_wait_unknown:
+			if (this->_read_source.st == source_binding::eligible) {
+				this->_read_source.st = source_binding::revalidating;
+			}
+			this->_read_source.reason = reason;
+			log_line = "read source re-validation deferred (copy kept, reads proxied): " + reason;
+			break;
+		case decision_needs_rebuild:
+			this->_read_source.st = source_binding::needs_rebuild;
+			this->_read_source.reason = reason;
+			log_line = "read source NEEDS REBUILD (reads proxied; rebuild requested through the controller): " + reason;
+			break;
+		default:
+			break;
+		}
+		this->_read_source.generation++;
+		applied = true;
+	}
+	pthread_mutex_unlock(&this->_mutex_read_source);
+	pthread_rwlock_unlock(&this->_mutex_node_partition_map);
+	pthread_rwlock_unlock(&this->_mutex_node_map);
+	if (!log_line.empty()) {
+		if (d == decision_wait_unknown) log_warning("%s", log_line.c_str());
+		else log_notice("%s", log_line.c_str());
+	}
+	return applied;
+}
+
+void cluster::wait_source_check(int timeout_ms) {
+	struct timespec ts;
+	clock_gettime(CLOCK_REALTIME, &ts);
+	ts.tv_sec += timeout_ms / 1000;
+	ts.tv_nsec += (long)(timeout_ms % 1000) * 1000000L;
+	if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+	pthread_mutex_lock(&this->_mutex_read_source);
+	if (!this->_read_source_wake) {
+		pthread_cond_timedwait(&this->_cond_read_source, &this->_mutex_read_source, &ts);
+	}
+	this->_read_source_wake = false;
+	pthread_mutex_unlock(&this->_mutex_read_source);
+}
+
+void cluster::wake_source_validator() {
+	pthread_mutex_lock(&this->_mutex_read_source);
+	this->_read_source_wake = true;
+	pthread_cond_signal(&this->_cond_read_source);
+	pthread_mutex_unlock(&this->_mutex_read_source);
+}
+
+int cluster::start_source_validator() {
+	if (this->_source_validator_thread) {
+		return 0;
+	}
+	shared_thread t = this->_other_thread_pool->get(thread_pool::thread_type_source_validator);
+	handler_source_validator* h = new handler_source_validator(t, this);
+	this->_source_validator_thread = t;
+	log_notice("starting read source validator (interval=%dms)", this->_source_check_interval_ms);
+	t->trigger(h);
+	return 0;
+}
+// }}}
+
+int cluster::stop_wal_follower() {
+	if (this->_wal_follower_thread) {
+		log_notice("stopping continuous replication follower (source=%s)", this->_wal_follower_source.c_str());
+		// The handler parks instead of returning, so the thread is ours until
+		// this shutdown. Never shut down a thread that is no longer running a
+		// handler: a graceful request delivered to a POOLED thread makes it
+		// exit while its object stays in the pool, and the next get() hands
+		// out a dead thread (observed: the rebuild of this node never ran).
+		if (this->_wal_follower_thread->is_running()) {
+			this->_wal_follower_thread->shutdown(true, true);
+		} else {
+			log_warning("continuous replication follower thread is not running a handler; releasing the reference without a shutdown request", 0);
+		}
+		this->_wal_follower_thread.reset();
+		this->_wal_follower_source.clear();
+		// D7: the stopped handler may still finish a slice (async stop); a new
+		// generation makes its applies refused under the apply lock.
+		this->_storage->bump_follow_generation();
+		if (stats_object != NULL) {
+			stats_object->follow_set_state(stats::follow_idle, "stopped");
+		}
+	}
+	return 0;
+}
+
+/**
+ *	Decide from the CURRENT maps whether this node follows, and whom:
+ *	an active slave on a WAL-capable backend follows its partition's master.
+ *	Anything else — a master, a proxy, a preparing slave, a partition without
+ *	a master — does not. A follower that declared needs_rebuild is NOT
+ *	restarted on the same source: the rebuild path (demote -> hold -> reseat)
+ *	cycles this node's role, and that cycle is what produces a fresh start.
+ */
+int cluster::_reconcile_wal_follower_locked() {
+	bool desired = this->_wal_follow_enabled
+		&& this->_storage != NULL
+		&& this->_storage->get_type() == storage::type_rocksdb;
+	string source_key;
+	if (desired) {
+		node_map::iterator me = this->_node_map.find(this->_node_key);
+		if (me == this->_node_map.end()
+				|| me->second.node_role != role_slave
+				|| me->second.node_state != state_active
+				|| me->second.node_partition < 0) {
+			desired = false;
+		} else {
+			node_partition_map::iterator p = this->_node_partition_map.find(me->second.node_partition);
+			if (p != this->_node_partition_map.end() && p->second.master.node_key.empty()
+					&& this->_wal_follower_thread && !this->_wal_follower_source.empty()) {
+				// An ordered handover's master/down placeholder (the partition
+				// keeps no master key): the master this follower ALREADY
+				// follows was demoted and writes nothing more, but its last
+				// writes may not be applied here yet. Keep that follower so
+				// it drains the finite tail up to the old master's last
+				// sequence (history continuation: the cursor must reach L;
+				// 42163241045 stopped it a few sequences short under load).
+				// Never started toward a down node, only kept.
+				node_map::iterator src = this->_node_map.find(this->_wal_follower_source);
+				if (src != this->_node_map.end() && src->second.node_role == role_master
+						&& src->second.node_state == state_down
+						&& src->second.node_partition == me->second.node_partition) {
+					source_key = this->_wal_follower_source;
+				} else {
+					desired = false;
+				}
+			} else if (p == this->_node_partition_map.end() || p->second.master.node_key.empty()
+					|| p->second.master.node_key == this->_node_key) {
+				desired = false;
+			} else {
+				source_key = p->second.master.node_key;
+			}
+		}
+	}
+
+	if (!desired) {
+		this->stop_wal_follower();
+		return 0;
+	}
+
+	const bool running = this->_wal_follower_thread
+		&& this->_wal_follower_thread->is_shutdown_request() == thread::shutdown_request_none
+		&& this->_wal_follower_source == source_key;
+	if (running) {
+		// Same source, still ours. If it has declared needs_rebuild it stays
+		// stopped until the role cycles; nothing to do here either way.
+		return 0;
+	}
+	if (this->_wal_follower_thread && this->_wal_follower_source == source_key && stats_object != NULL
+			&& stats_object->get_follow_record().state == "needs_rebuild") {
+		return 0;
+	}
+
+	this->stop_wal_follower();
+
+	string host;
+	int port = 0;
+	this->from_node_key(source_key, host, port);
+	shared_thread t = this->_other_thread_pool->get(thread_pool::thread_type_wal_follower);
+	const uint64_t follow_generation = this->_storage->bump_follow_generation();
+	handler_wal_follower* h = new handler_wal_follower(t, this, this->_storage, host, port,
+		this->_wal_follow_max_batches, this->_wal_follow_max_bytes, this->_wal_follow_poll_interval_usec,
+		this->_wal_follow_batch_delay_usec, follow_generation);
+	this->_wal_follower_thread = t;
+	this->_wal_follower_source = source_key;
+	log_notice("starting continuous replication follower (source=%s, max_batches=%llu, max_bytes=%llu, poll=%dus, batch_delay=%dus)",
+		source_key.c_str(), (unsigned long long)this->_wal_follow_max_batches,
+		(unsigned long long)this->_wal_follow_max_bytes, this->_wal_follow_poll_interval_usec,
+		this->_wal_follow_batch_delay_usec);
+	t->trigger(h);
+	return 0;
+}
+
 int cluster::_shift_node_state(string node_key, state old_state, state new_state) {
 	log_notice("shifting node_state (node_key=%s, old_state=%s, new_state=%s)", node_key.c_str(), cluster::state_cast(old_state).c_str(), cluster::state_cast(new_state).c_str());
 
@@ -1673,12 +2570,71 @@ int cluster::_shift_node_state(string node_key, state old_state, state new_state
  *
  *	assumes that node_map and node_partition_map is already write locked
  */
+string cluster::_partition_binding_for(int partition) {
+	int hint = 0;
+	int virt = 0;
+	string resolver = "unknown";
+	if (this->_key_resolver != NULL) {
+		resolver = key_resolver::type_cast(this->_key_resolver->get_type());
+		key_resolver_modular* m = dynamic_cast<key_resolver_modular*>(this->_key_resolver);
+		if (m != NULL) {
+			hint = m->get_hint();
+			virt = m->get_virtual();
+		}
+	}
+	ostringstream b;
+	b << "v1 partition=" << partition << " partitions=" << this->_node_partition_map.size()
+		<< " size=" << this->_partition_size << " hash=" << storage::hash_algorithm_cast(this->_key_hash_algorithm)
+		<< " resolver=" << resolver << " hint=" << hint << " virtual=" << virt;
+	return b.str();
+}
+
 int cluster::_shift_node_role(string node_key, role old_role, int old_partition, role new_role, int new_partition) {
 	log_notice("shifting node_role (node_key=%s, old_role=%s, old_partition=%d, new_role=%s, new_partition=%d)", node_key.c_str(), cluster::role_cast(old_role).c_str(), old_partition, cluster::role_cast(new_role).c_str(), new_partition);
 
 	if (node_key != this->_node_key) {
 		// we do not have to care about other nodes (maybe?)
 		return 0;
+	}
+	// D1: only the partition master deletes an expired entry when a read
+	// finds it; a replica only hides it (its own clock must not change its
+	// data outside the replication history).
+	this->_storage->set_lazy_expiry_delete(new_role == role_master);
+	if (new_role != role_master) {
+		this->_master_epoch_advanced = false;
+	}
+	if (new_role != role_master && this->_promotion_refused) {
+		log_notice("promotion refusal lifted: no longer a master (new_role=%s)", cluster::role_cast(new_role).c_str());
+		this->_promotion_refused = false;
+	}
+	// decision 2026-10-08: flared refuses, on its own, to act as a master
+	// over a copy it knows is not fit (the operator classifies by reason and
+	// aborts such a commit; this is the last line if the state changed after
+	// that check). No new source epoch is started over it; reads and writes
+	// for its partitions fail (pre_proxy_read / pre_proxy_write).
+	if (new_role == role_master && old_role != role_master && this->_storage != NULL) {
+		string why;
+		if (this->_storage->promotion_forbidden(why)) {
+			this->_promotion_refused_why = why;
+			this->_promotion_refused = true;
+			log_err("CRITICAL: PROMOTION REFUSED by this node: %s — it serves no reads or writes as master until the map takes the role away", why.c_str());
+			return 0;
+		}
+	}
+	// restore provenance (restore-isolated 5): a RESTORED copy of another
+	// partition or routing layout — or one that cannot show which — never
+	// serves as this partition's master; also when a master is moved to
+	// another partition (a live copy is only re-bound)
+	if (new_role == role_master && (old_role != role_master || old_partition != new_partition) && this->_storage != NULL) {
+		string why;
+		const string want = this->_partition_binding_for(new_partition);
+		const int b = this->_storage->check_partition_binding(want, true, why);
+		if (b != 0) {
+			this->_promotion_refused_why = (b < 0 ? string("the partition binding could not be checked: ") : string("")) + why;
+			this->_promotion_refused = true;
+			log_err("CRITICAL: PROMOTION REFUSED by this node: %s — it serves no reads or writes as master until the map takes the role away", this->_promotion_refused_why.c_str());
+			return 0;
+		}
 	}
 	if (new_role == role_proxy) {
 		// we do not have to care about anything in this case, too (maybe?)
@@ -1731,6 +2687,37 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
 	// return 0, so the guard is a no-op there); we deliberately avoid pulling
 	// the RocksDB headers into cluster.cc.
 	if (new_role == role_master && old_role != role_master && this->_storage != NULL) {
+		// SOURCE EPOCH (SAF-10, design §3.1): this node's history stops being
+		// a continuation of the one its followers were reading — its sequence
+		// space is its own DB's, unrelated to the previous master's. Advance
+		// the epoch UNCONDITIONALLY here, before the narrower cursor check
+		// below: master_id alone cannot carry this, because the check below
+		// only fires when the cursor exceeds our own sequence, so a
+		// snapshot-rebuilt replica (cursor == checkpoint sequence) would keep
+		// the old token over an unrelated sequence space.
+		// Once per master tenure: the diff shift (slave -> master) and a
+		// still-pending boot shift (proxy -> master) of the SAME map, or a
+		// boot shift retried on every broadcast while no reconstruction
+		// source exists, each advanced it (rc68: epoch 7, 8 in one map
+		// application). One tenure is one history; a second token only
+		// forces the followers of the first to rebuild again.
+		const int continued = this->_master_epoch_advanced ? 0
+			: this->_storage->history_on_promotion(new_partition, this->_node_key, this->_applying_map_version);
+		if (this->_master_epoch_advanced) {
+			log_notice("promotion: the source epoch was already advanced for this master tenure — not advanced again", 0);
+		} else if (continued == 1) {
+			// ordered handover with history continuation: the epoch, master_id
+			// and cursor prepared before this map were committed together
+			log_notice("promotion: the prepared history of the ordered handover was committed (the remaining replicas continue it)", 0);
+			this->_master_epoch_advanced = true;
+		} else if (this->_storage->advance_source_epoch("promotion") < 0) {
+			// Fail closed: the storage marks its generations unavailable and
+			// every replication path refuses on that, rather than this node
+			// serving a new history under the previous identity.
+			log_err("promotion: could not advance the source epoch -> replication is UNAVAILABLE on this node until it can be persisted", 0);
+		} else {
+			this->_master_epoch_advanced = true;
+		}
 		uint64_t cursor = this->_storage->get_repl_last_lsn();
 		uint64_t seq = this->_storage->get_latest_sequence_number();
 		if (cursor > seq) {
@@ -1850,6 +2837,25 @@ int cluster::_shift_node_role(string node_key, role old_role, int old_partition,
  *	the SOURCE cluster's hop list attached) must not get final-delivery
  *	treatment here: its marks describe a foreign topology.
  */
+bool cluster::_is_partition_master_sender(op_proxy_write* op, int partition, const string& prepare_master) {
+	vector<string> proxy = op->get_proxy();
+	if (proxy.empty()) {
+		return false;
+	}
+	const string sender = proxy.back();
+	if (!prepare_master.empty() && sender == prepare_master) {
+		return true;
+	}
+	bool r = false;
+	pthread_rwlock_rdlock(&this->_mutex_node_map);
+	node_map::iterator it = this->_node_map.find(sender);
+	if (it != this->_node_map.end() && it->second.node_role == role_master && it->second.node_partition == partition) {
+		r = true;
+	}
+	pthread_rwlock_unlock(&this->_mutex_node_map);
+	return r;
+}
+
 bool cluster::_is_local_proxy_request(op_proxy_write* op) {
 	if (!op->is_proxy_request()) {
 		return false;
@@ -1867,26 +2873,82 @@ bool cluster::_is_local_proxy_request(op_proxy_write* op) {
 	return known;
 }
 
+int cluster::enqueue_retry_ms = 2000;
+
+int cluster::reroute_skipped_noreply_write(shared_queue_proxy_write q) {
+	storage::entry& e = q->get_entry();
+	const int attempt = q->incr_reroutes();
+	if (attempt > 5) {
+		log_err("noreply write LOST: routed again 5 times, its master kept turning proxy (key=%s)", e.key.c_str());
+		return -1;
+	}
+	q->set_skipped(false);
+	const uint64_t deadline = monotonic_ms() + (this->_master_wait_ms > 0 ? (uint64_t)this->_master_wait_ms : 0);
+	for (;;) {
+		const uint64_t generation = this->get_map_generation();
+		partition p;
+		bool is_prepare;
+		if (this->_determine_partition(e, p, false, is_prepare) < 0) {
+			log_err("noreply write LOST: no partition for it when routed again (key=%s)", e.key.c_str());
+			return -1;
+		}
+		if (!p.master.node_key.empty()) {
+			// to the master in force — this node itself included (its own
+			// port: applied there as a write from a node of this cluster)
+			log_notice("noreply forward was not sent (its destination is a proxy now) -> queued to %s (key=%s, attempt %d)", p.master.node_key.c_str(), e.key.c_str(), attempt);
+			if (this->_enqueue(q, p.master.node_key, e.get_key_hash_value(this->_proxy_hash_algorithm), false) < 0) {
+				log_err("noreply write LOST: could not be queued to %s (key=%s)", p.master.node_key.c_str(), e.key.c_str());
+				return -1;
+			}
+			return 0;
+		}
+		// no master (a handover's demote step): wait for a map with one (W)
+		if (monotonic_ms() >= deadline || !this->wait_map_change(generation, deadline)) {
+			log_err("noreply write LOST: no master for its partition within %d msec (key=%s)", this->_master_wait_ms, e.key.c_str());
+			return -1;
+		}
+	}
+}
+
 int cluster::_enqueue(shared_thread_queue q, string node_key, int key_hash, bool sync) {
 	log_debug("enqueue (ident=%s, node_key=%s, key_hash=%d)", q->get_ident().c_str(), node_key.c_str(), key_hash);
 
-	shared_thread t;
-	if (this->_get_proxy_thread(node_key, key_hash, t) < 0) {
-		return -1;
-	}
+	// A forwarding thread found in the active map may be ending (its handler
+	// returned: the queue is closed) or already reused for another handler.
+	// It does not take the forward (review 2026-10-13, finding 2), but the
+	// destination is still there: look the thread up again — the ended one
+	// leaves the map when it is cleaned and a new one is started for the
+	// destination — for a bounded time instead of dropping the forward
+	// (local kind 2026-10-28: one forward lost this way at load start sent
+	// the replica to a full rebuild).
+	const int retry_ms = 10;
+	const int retry_limit = cluster::enqueue_retry_ms / retry_ms;
+	for (int attempt = 0; ; attempt++) {
+		shared_thread t;
+		unsigned int t_id = 0;		// the id the thread had in the map copy it was found in
+		if (this->_get_proxy_thread(node_key, key_hash, t, t_id) < 0) {
+			return -1;
+		}
 
-	if (sync) {
-		q->sync_ref();
-	}
-	if (t->enqueue(q, this->_max_total_thread_queue) < 0) {
-		log_warning("enqueue failed (perhaps thread is now exiting?)", 0);
+		if (sync) {
+			q->sync_ref();
+		}
+		const int r = t->enqueue(q, this->_max_total_thread_queue, t_id);
+		if (r == 0) {
+			if (attempt > 0) {
+				log_notice("enqueue to %s succeeded after %d retr%s (the thread found first was ending or reused)", node_key.c_str(), attempt, attempt == 1 ? "y" : "ies");
+			}
+			return 0;
+		}
 		if (sync) {
 			q->sync_unref();
 		}
-		return -1;
+		if (r != -2 || attempt >= retry_limit) {
+			log_warning("enqueue failed (%s) [node_key=%s, attempts=%d]", r == -2 ? "the thread is exiting or was reused" : "the total queue limit", node_key.c_str(), attempt + 1);
+			return -1;
+		}
+		usleep(retry_ms * 1000);
 	}
-
-	return 0;
 }
 
 int cluster::_enqueue(shared_thread_queue q, thread_pool::thread_type type, bool sync) {
@@ -1899,12 +2961,13 @@ int cluster::_enqueue(shared_thread_queue q, thread_pool::thread_type type, bool
 		return -1;
 	}
 	t = it->second;
+	const unsigned int t_id = it->first;
 
 	if (sync) {
 		q->sync_ref();
 	}
-	if (t->enqueue(q) < 0) {
-		log_warning("enqueue failed (perhaps thread is now exiting?)", 0);
+	if (t->enqueue(q, 0, t_id) < 0) {
+		log_warning("enqueue failed (the thread is exiting or was reused)", 0);
 		if (sync) {
 			q->sync_unref();
 		}
@@ -1943,8 +3006,8 @@ int cluster::_broadcast(shared_thread_queue q, bool sync, vector<string> prior_n
 					continue;
 				}
 				q->sync_ref();
-				if (it_local->second->enqueue(q) < 0) {
-					log_warning("enqueue failed (perhaps thread is now exiting?)", 0);
+				if (it_local->second->enqueue(q, 0, it_local->first) < 0) {
+					log_warning("enqueue failed (the thread is exiting or was reused)", 0);
 					q->sync_unref();
 					continue;
 				}
@@ -1976,8 +3039,8 @@ int cluster::_broadcast(shared_thread_queue q, bool sync, vector<string> prior_n
 			if (sync) {
 				q->sync_ref();
 			}
-			if (it_local->second->enqueue(q) < 0) {
-				log_warning("enqueue failed (perhaps thread is now exiting?)", 0);
+			if (it_local->second->enqueue(q, 0, it_local->first) < 0) {
+				log_warning("enqueue failed (the thread is exiting or was reused)", 0);
 				if (sync) {
 					q->sync_unref();
 				}
@@ -2489,7 +3552,7 @@ string cluster::_get_partition_key(string key) {
 	return s;
 }
 
-int cluster::_get_proxy_thread(string node_key, int key_hash, shared_thread& t) {
+int cluster::_get_proxy_thread(string node_key, int key_hash, shared_thread& t, unsigned int& t_id) {
 	int thread_type = 0;
 	pthread_rwlock_rdlock(&this->_mutex_node_map);
 	if (this->_node_map.count(node_key) == 0) {
@@ -2519,6 +3582,7 @@ int cluster::_get_proxy_thread(string node_key, int key_hash, shared_thread& t) 
 	for (thread_pool::local_map::iterator it = m.begin(); it != m.end(); it++) {
 		if (i == index) {
 			t = it->second;
+			t_id = it->first;
 			return 0;
 		}
 		i++;

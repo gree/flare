@@ -1,0 +1,344 @@
+{{- if and .Values.operator.enabled .Values.nodeGuard.enabled }}
+{{- /*
+  Node guard (A0 stage 6b, flare-ci-inputs/decisions/A0-DESIGN-rc68.md): the
+  leader operator judges deletes of this cluster's flared pods, and UPDATEs
+  and DELETEs of its StatefulSet (and the scale subresource). The pod DELETE
+  rule selects every pod but the operator's own (41211321783 C8: with the
+  operator away, failurePolicy Fail, the kubelet could not remove the
+  operator's exited pod). It does not select on the flared pods' label:
+  removing that label from a live master hid its delete from the guard
+  (41275671570 G1). Evictions have their own rule with no selector (an
+  Eviction carries none of the pod's labels); there the operator tells the
+  cluster's flared pods apart by their immutable spec.subdomain and allows
+  every other pod of the namespace (review of 62dddf9). It writes nothing
+  (sideEffects: None). failurePolicy Fail: with no operator answering, these
+  operations are refused — the escape hatches are the delete-override
+  annotation or nodeGuard.enabled=false.
+  The certificate comes from nodeGuard.tls.mode (docs/RUNBOOK.md#node-guard-tls):
+  helm generates it per render (as the SAF-10 eviction webhook), so the Secret
+  and the caBundle always change together; that suits one render per helm
+  upgrade, not ArgoCD, which re-renders on every refresh (never in sync) and
+  rotates the CA on every sync while the sidecar still serves the old
+  certificate for up to a minute (every guarded operation refused). operator
+  and certManager render NO caBundle: the operator's container or
+  cert-manager's cainjector owns the field, and a server-side apply that
+  never sets it leaves their value in place.
+*/}}
+{{- $mode := include "flare-operator.nodeGuardTlsMode" . }}
+{{- $fullname := include "flare-operator.fullname" . }}
+{{- $svc := printf "%s-webhook" $fullname }}
+{{- $ns := .Values.namespace }}
+{{- $tls := .Values.nodeGuard.tls | default dict }}
+{{- $caBundle := "" }}
+{{- $certName := printf "%s-node-guard" $fullname }}
+{{- if eq $mode "helm" }}
+{{- $ca := genCA "flare-node-guard-ca" 3650 }}
+{{- $cert := genSignedCert (printf "%s.%s.svc" $svc $ns) nil (list (printf "%s.%s.svc" $svc $ns) (printf "%s.%s.svc.cluster.local" $svc $ns)) 3650 $ca }}
+{{- $caBundle = $ca.Cert | b64enc }}
+apiVersion: v1
+kind: Secret
+type: kubernetes.io/tls
+metadata:
+  name: {{ include "flare-operator.fullname" . }}-webhook-tls
+  namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.labels" . | nindent 4 }}
+data:
+  tls.crt: {{ $cert.Cert | b64enc }}
+  tls.key: {{ $cert.Key | b64enc }}
+{{- else if eq $mode "secret" }}
+{{- $_ := include "flare-operator.nodeGuardTlsSecret" . }}
+{{- $caBundle = required "nodeGuard.tls.mode=secret needs nodeGuard.tls.caBundle (base64 of the PEM CA that signed nodeGuard.tls.secretName)" $tls.caBundle }}
+{{- else if eq $mode "operator" }}
+{{- if .Values.rbac.create }}
+{{- /* The operator pod's webhook-cert container reads and creates its
+       Secret. Namespaced, not in the ClusterRole: the operator needs no
+       Secret anywhere else. create cannot be limited by name (the object
+       does not exist yet when it is authorized); get can. */}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $fullname }}-webhook-cert
+  namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ include "flare-operator.nodeGuardTlsSecret" . | quote }}]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $fullname }}-webhook-cert
+  namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "flare-operator.serviceAccountName" . }}
+    namespace: {{ $ns }}
+roleRef:
+  kind: Role
+  name: {{ $fullname }}-webhook-cert
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}
+{{- else if eq $mode "certManager" }}
+{{- $issuerRef := $tls.certManager | default dict }}
+{{- $issuerRef = $issuerRef.issuerRef | default dict }}
+{{- if not $issuerRef }}
+{{- /* a self-signed serving certificate: it is its own CA (ca.crt), which
+       the cainjector puts into every webhook's caBundle */}}
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ $fullname }}-webhook-selfsigned
+  namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+---
+{{- end }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $certName }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.labels" . | nindent 4 }}
+spec:
+  secretName: {{ include "flare-operator.nodeGuardTlsSecret" . }}
+  # openssl and some issuers refuse a CN over 64 characters; the names are
+  # in dnsNames
+  commonName: flare-node-guard
+  dnsNames:
+    - {{ printf "%s.%s.svc" $svc $ns }}
+    - {{ printf "%s.%s.svc.cluster.local" $svc $ns }}
+  issuerRef:
+    {{- if $issuerRef }}
+    {{- toYaml $issuerRef | nindent 4 }}
+    {{- else }}
+    name: {{ $fullname }}-webhook-selfsigned
+    kind: Issuer
+    {{- end }}
+{{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $svc }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.labels" . | nindent 4 }}
+spec:
+  ports:
+    - port: 443
+      targetPort: webhook
+      protocol: TCP
+      name: webhook
+  selector:
+    {{- include "flare-operator.selectorLabels" . | nindent 4 }}
+    flare.gree.net/role: leader
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: {{ include "flare-operator.fullname" . }}-node-guard-{{ $ns }}
+  labels:
+    {{- include "flare-operator.labels" . | nindent 4 }}
+  {{- if eq $mode "certManager" }}
+  annotations:
+    # cert-manager's cainjector writes the Certificate's CA into every
+    # webhook's caBundle (the chart renders none)
+    cert-manager.io/inject-ca-from: {{ $ns }}/{{ $certName }}
+  {{- end }}
+webhooks:
+  - name: pods.node-guard.flare.gree.net
+    admissionReviewVersions: ["v1"]
+    # a released cordon move records `admitted` (never on a dry run)
+    sideEffects: NoneOnDryRun
+    failurePolicy: Fail
+    timeoutSeconds: {{ .Values.nodeGuard.timeoutSeconds }}
+    matchPolicy: Equivalent
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ $ns }}
+    # every pod but the operator's own: with the operator away (failurePolicy
+    # Fail) the kubelet could not remove the operator's exited pod, and it
+    # never went away (41211321783 C8). NOT a selector on the flared pods'
+    # label: a label removed from a live master hid its delete from the
+    # guard (41275671570 G1). NotIn also matches a pod without the key; the
+    # operator tells the flared pods apart by spec.subdomain.
+    objectSelector:
+      matchExpressions:
+        - key: app.kubernetes.io/name
+          operator: NotIn
+          values: [{{ include "flare-operator.name" . | quote }}]
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["DELETE"]
+        resources: ["pods"]
+        scope: Namespaced
+    clientConfig:
+      {{- with $caBundle }}
+      caBundle: {{ . }}
+      {{- end }}
+      service:
+        name: {{ $svc }}
+        namespace: {{ $ns }}
+        path: /pods
+        port: 443
+  # an eviction (kubectl drain, the autoscaler) deletes the pod without the
+  # DELETE webhook: judged as that pod's delete, refused with 429. No
+  # objectSelector: the Eviction object carries none of the pod's labels.
+  - name: evictions.node-guard.flare.gree.net
+    admissionReviewVersions: ["v1"]
+    sideEffects: NoneOnDryRun
+    failurePolicy: Fail
+    timeoutSeconds: {{ .Values.nodeGuard.timeoutSeconds }}
+    matchPolicy: Equivalent
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ $ns }}
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods/eviction"]
+        scope: Namespaced
+    clientConfig:
+      {{- with $caBundle }}
+      caBundle: {{ . }}
+      {{- end }}
+      service:
+        name: {{ $svc }}
+        namespace: {{ $ns }}
+        path: /pods
+        port: 443
+  - name: statefulsets.node-guard.flare.gree.net
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Fail
+    timeoutSeconds: {{ .Values.nodeGuard.timeoutSeconds }}
+    matchPolicy: Equivalent
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ $ns }}
+    rules:
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["UPDATE", "DELETE"]
+        resources: ["statefulsets", "statefulsets/scale"]
+        scope: Namespaced
+    clientConfig:
+      {{- with $caBundle }}
+      caBundle: {{ . }}
+      {{- end }}
+      service:
+        name: {{ $svc }}
+        namespace: {{ $ns }}
+        path: /statefulsets
+        port: 443
+---
+{{- /*
+  The break-glass of a halted history-continuation handover
+  (docs/design-handover-history-continuation.md addenda 6–10): a FlareCluster
+  UPDATE that adds or changes the flare.gree.net/handover-fenced annotation
+  gets a receipt (HMAC) in the same update, only after a SubjectAccessReview
+  allows the requester verb break-glass on flareclusters/handover-fence.
+  failurePolicy Ignore: with no operator answering, FlareCluster updates go
+  through but an annotation then has no receipt and is never used (fail
+  closed where it matters, never blocks a helm upgrade of the CR).
+*/}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: {{ include "flare-operator.fullname" . }}-handover-fence-{{ $ns }}
+  labels:
+    {{- include "flare-operator.labels" . | nindent 4 }}
+  {{- if eq $mode "certManager" }}
+  annotations:
+    cert-manager.io/inject-ca-from: {{ $ns }}/{{ $certName }}
+  {{- end }}
+webhooks:
+  - name: handover-fence.node-guard.flare.gree.net
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Ignore
+    reinvocationPolicy: Never
+    timeoutSeconds: {{ .Values.nodeGuard.timeoutSeconds }}
+    matchPolicy: Equivalent
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ $ns }}
+    rules:
+      - apiGroups: ["flare.gree.net"]
+        apiVersions: ["*"]
+        operations: ["UPDATE"]
+        resources: ["flareclusters"]
+        scope: Namespaced
+    clientConfig:
+      {{- with $caBundle }}
+      caBundle: {{ . }}
+      {{- end }}
+      service:
+        name: {{ $svc }}
+        namespace: {{ $ns }}
+        path: /flareclusters
+        port: 443
+{{- if .Values.rbac.create }}
+---
+# the receipt key Secret: created once by the operator, read back (never replaced)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $fullname }}-receipt-key
+  namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["{{ $fullname }}-receipt-key"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $fullname }}-receipt-key
+  namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "flare-operator.serviceAccountName" . }}
+    namespace: {{ $ns }}
+roleRef:
+  kind: Role
+  name: {{ $fullname }}-receipt-key
+  apiGroup: rbac.authorization.k8s.io
+---
+# who may break-glass a halted handover: bind this Role to the people who
+# may declare a silent successor stopped (no binding by default; addendum 9)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $fullname }}-handover-fence
+  namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["flare.gree.net"]
+    resources: ["flareclusters/handover-fence"]
+    verbs: ["break-glass"]
+{{- end }}
+{{- end }}

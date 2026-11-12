@@ -31,6 +31,18 @@ structure TestSuite where
       end-of-run log dump finds nothing; this is the only point where the
       failing suite's operator/flared logs still exist. -/
   onFailure : IO Unit := pure ()
+  /-- Runs after EVERY test with its TAP index (pass or fail): e.g. a log
+      snapshot, so a pod replaced by a later test does not take the logs of
+      an earlier failure with it (manual run 37900698596). -/
+  afterEach : Nat → IO Unit := fun _ => pure ()
+
+/-- A TAP result line, flushed at once and echoed to stderr (CI 37731207056:
+    stdout was buffered and every result of a run killed by its time limit
+    was lost; e2e.log carries stderr). -/
+def emitResult (line : String) : IO Unit := do
+  IO.println line
+  (← IO.getStdout).flush
+  IO.eprintln s!"# RESULT {line}"
 
 /-- Run a single suite, TAP output to stderr, return (total, failures) -/
 def runSuite (suite : TestSuite) (startIndex : Nat) : IO (Nat × Nat) := do
@@ -43,7 +55,7 @@ def runSuite (suite : TestSuite) (startIndex : Nat) : IO (Nat × Nat) := do
     let mut idx := startIndex
     for tc in suite.tests do
       idx := idx + 1
-      IO.println s!"not ok {idx} - {tc.name} # setup failed"
+      emitResult s!"not ok {idx} - {tc.name} # setup failed"
     try suite.teardown catch _ => pure ()
     return (suite.tests.length, suite.tests.length)
 
@@ -57,17 +69,18 @@ def runSuite (suite : TestSuite) (startIndex : Nat) : IO (Nat × Nat) := do
       let result ← tc.run
       match result with
       | .pass =>
-        IO.println s!"ok {idx} - {tc.name}"
+        emitResult s!"ok {idx} - {tc.name}"
       | .fail reason =>
-        IO.println s!"not ok {idx} - {tc.name}"
+        emitResult s!"not ok {idx} - {tc.name}"
         IO.eprintln s!"#   reason: {reason}"
         failures := failures + 1
       | .skip reason =>
-        IO.println s!"ok {idx} - {tc.name} # SKIP {reason}"
+        emitResult s!"ok {idx} - {tc.name} # SKIP {reason}"
     catch e =>
-      IO.println s!"not ok {idx} - {tc.name}"
+      emitResult s!"not ok {idx} - {tc.name}"
       IO.eprintln s!"#   exception: {e}"
       failures := failures + 1
+    try suite.afterEach idx catch e => IO.eprintln s!"# afterEach hook failed: {e}"
 
   if failures > 0 then
     try
@@ -90,13 +103,23 @@ def totalTests (suites : List TestSuite) : Nat :=
 /-- Run multiple suites. Supports --filter <names> to run a subset —
     a comma-separated list of suite names, so CI can shard the (serial,
     multi-hour) run across parallel matrix jobs with explicitly balanced
-    groups. A single name behaves as before. -/
+    groups. A single name behaves as before. Every name must be a suite:
+    an unknown one fails the run before anything runs (it was dropped
+    silently, and a run reported PASS without the suite asked for). -/
 def runAll (suites : List TestSuite) (filter : Option String) : IO UInt32 := do
+  let wanted : List String := match filter with
+    | none => []
+    | some f => (f.splitOn ",").map (·.trim) |>.filter (· ≠ "")
+  let unknown := wanted.filter (fun w => !suites.any (·.name == w))
+  if !unknown.isEmpty then
+    IO.eprintln s!"# Error: no suite named {unknown}"
+    IO.eprintln "# Available suites:"
+    for s in suites do
+      IO.eprintln s!"#   {s.name}"
+    return 1
   let filtered := match filter with
     | none => suites
-    | some f =>
-      let wanted := (f.splitOn ",").map (·.trim) |>.filter (· ≠ "")
-      suites.filter (fun s => wanted.contains s.name)
+    | some _ => suites.filter (fun s => wanted.contains s.name)
   if filtered.isEmpty then
     match filter with
     | some f =>

@@ -17,6 +17,10 @@ import FlareOperator.K8s.Retry
 import FlareOperator.Kubectl
 import Lean.Data.Json
 import FlareOperator.StateMachine.ReplicaRepair
+import FlareOperator.StateMachine.Handover
+import FlareOperator.StateMachine.HandoverDrive
+import FlareOperator.StateMachine.NodeMove
+import FlareOperator.StateMachine.LeaseFence
 
 namespace FlareOperator.K8s.Bridge
 
@@ -44,6 +48,16 @@ structure PodInfo where
       detection won't fire — but the operator must drain it (promote a
       replacement, demote it to a live proxy) BEFORE it exits. -/
   terminating : Bool := false
+  /-- SAF-08 incarnation: the pod UID and the flared container's restart
+      count (a restarted flared is a container restart). "" / none when not
+      observed. -/
+  uid : String := ""
+  restarts : Option Nat := none
+  /-- the StatefulSet revision the pod was created from
+      (controller-revision-hash); "" when not labelled -/
+  revision : String := ""
+  /-- carries the `flare.gree.net/serving` label (the client Service selects it) -/
+  serving : Bool := false
   deriving Repr, BEq
 
 /-- Convert a PodInfo to a node key matching the FQDN used by flared for registration.
@@ -64,6 +78,27 @@ def getFlareClusterCRD (crName ns : String) : IO (Except String FlareClusterView
   retry s!"fetch CRD {crName}" do
     getFlareCluster crName ns
 
+/-- Parse the single-response pod list (see listFlaredPodsE). A row whose
+    column count is wrong is dropped rather than guessed. -/
+def parsePodRows (ns output : String) : List PodInfo :=
+  (output.splitOn "\n").filterMap fun line =>
+    let row := fun (name ip ready hostname subdomain nodeName uid rc ts rev serving : String) =>
+      if name.trim.isEmpty then none
+      else some ({
+        name := name.trim, ip := ip.trim, port := 12121,
+        hostname := hostname.trim, subdomain := subdomain.trim, «namespace» := ns,
+        ready := ready.trim == "True", nodeName := nodeName.trim,
+        terminating := !ts.trim.isEmpty, uid := uid.trim, restarts := rc.trim.toNat?,
+        revision := rev.trim, serving := serving.trim == "true" } : PodInfo)
+    match line.trim.splitOn "|" with
+    | [name, ip, ready, hostname, subdomain, nodeName, uid, rc, ts, rev, serving] =>
+      row name ip ready hostname subdomain nodeName uid rc ts rev serving
+    | [name, ip, ready, hostname, subdomain, nodeName, uid, rc, ts, rev] =>
+      row name ip ready hostname subdomain nodeName uid rc ts rev ""
+    | [name, ip, ready, hostname, subdomain, nodeName, uid, rc, ts] =>
+      row name ip ready hostname subdomain nodeName uid rc ts "" ""
+    | _ => none
+
 /-- List flared pods matching the cluster label selector.
     Returns typed PodInfo list instead of raw tuples.
     Uses retry logic for resilience against transient API failures.
@@ -71,84 +106,29 @@ def getFlareClusterCRD (crName ns : String) : IO (Except String FlareClusterView
     kubectl get pods -n <ns> -l app=flare,cluster=<crName>
     -o jsonpath='{range .items[*]}{.metadata.name} {.status.podIP} 12121 {.status.conditions[?(.type=="Ready")].status}{\n}{end}' -/
 def listFlaredPodsE (crName ns : String) : IO (Except String (List PodInfo)) := do
+  -- ONE response for every field (SAF-08, review 2026-10-05): Ready, UID,
+  -- container restart count and deletionTimestamp used to come from two
+  -- list calls joined by pod name, so a pod replaced under the same name
+  -- between them combined the OLD pod's Ready with the NEW pod's UID. One
+  -- jsonpath over the same items is one consistent snapshot per pod.
+  -- '|'-separated so an empty field (no IP while Pending, no restartCount,
+  -- no deletionTimestamp) keeps every column in place.
   let result ← retryConservative s!"list pods for {crName}" do
     kubectl ["get", "pods", "-n", ns, "-l", s!"app=flare,cluster={crName}",
-             "-o", "jsonpath={range .items[*]}{.metadata.name} {.status.podIP} 12121 {.status.conditions[?(.type==\"Ready\")].status} {.spec.hostname} {.spec.subdomain} {.spec.nodeName}{\"\\n\"}{end}"]
+             "-o", "jsonpath={range .items[*]}{.metadata.name}|{.status.podIP}|{.status.conditions[?(.type==\"Ready\")].status}|{.spec.hostname}|{.spec.subdomain}|{.spec.nodeName}|{.metadata.uid}|{.status.containerStatuses[0].restartCount}|{.metadata.deletionTimestamp}|{.metadata.labels.controller-revision-hash}|{.metadata.labels.flare\\.gree\\.net/serving}{\"\\n\"}{end}"]
   match result with
   | .error e => return .error e
-  | .ok output =>
-    let lines := output.splitOn "\n" |>.filter (· != "")
-    let pods := lines.filterMap fun line =>
-      let parts := line.splitOn " "
-      match parts with
-      | [podName, ip, portStr, readyStr, hostname, subdomain, nodeName] =>
-        match portStr.trim.toNat? with
-        | some port => some {
-            name := podName.trim
-            ip := ip.trim
-            port := port
-            hostname := hostname.trim
-            subdomain := subdomain.trim
-            «namespace» := ns
-            ready := readyStr.trim == "True"
-            nodeName := nodeName.trim
-          }
-        | none => none
-      | [podName, ip, portStr, readyStr, hostname, subdomain] =>
-        match portStr.trim.toNat? with
-        | some port => some {
-            name := podName.trim
-            ip := ip.trim
-            port := port
-            hostname := hostname.trim
-            subdomain := subdomain.trim
-            «namespace» := ns
-            ready := readyStr.trim == "True"
-          }
-        | none => none
-      | [podName, ip, portStr, readyStr] =>
-        match portStr.trim.toNat? with
-        | some port => some {
-            name := podName.trim
-            ip := ip.trim
-            port := port
-            «namespace» := ns
-            ready := readyStr.trim == "True"
-          }
-        | none => none
-      | [podName, ip, portStr] =>
-        match portStr.trim.toNat? with
-        | some port => some {
-            name := podName.trim
-            ip := ip.trim
-            port := port
-            «namespace» := ns
-            ready := true
-          }
-        | none => none
-      | _ => none
-    -- Second, lightweight query for Terminating pods (those with a
-    -- deletionTimestamp). Kept SEPARATE from the positional space-split parse
-    -- above: an empty deletionTimestamp emitted inline would collapse adjacent
-    -- spaces and shift every field. Best-effort — on error, no pod is marked
-    -- terminating (falls back to the pre-drain behaviour, never a false drain).
-    -- List name + deletionTimestamp for EVERY pod and decide in code: a pod is
-    -- Terminating iff its deletionTimestamp is non-empty. (kubectl jsonpath
-    -- existence filters like [?(@.metadata.deletionTimestamp)] are unreliable, so
-    -- we don't filter server-side.) A non-terminating pod emits just its name
-    -- (empty timestamp collapses on trim) → one token → not terminating.
-    let termResult ← retryConservative s!"list terminating pods for {crName}" do
-      kubectl ["get", "pods", "-n", ns, "-l", s!"app=flare,cluster={crName}",
-               "-o", "jsonpath={range .items[*]}{.metadata.name} {.metadata.deletionTimestamp}{\"\\n\"}{end}"]
-    let termNames : List String := match termResult with
-      | .ok out => out.splitOn "\n" |>.filterMap fun line =>
-          match line.trim.splitOn " " |>.filter (· != "") with
-          | [_name]      => none            -- name only, no timestamp → alive
-          | name :: _ :: _ => some name     -- name + timestamp token → Terminating
-          | []           => none
-      | .error _ => []
-    return .ok <| pods.map fun p =>
-      if termNames.contains p.name then { p with terminating := true } else p
+  | .ok output => return .ok (parsePodRows ns output)
+
+/-- The StatefulSet's update revision (status.updateRevision): the revision
+    every pod must be created from. With updateStrategy OnDelete the
+    operator replaces the pods that are not on it (A0). -/
+def statefulSetUpdateRevision (stsName ns : String) : IO (Except String String) := do
+  match ← kubectl ["get", "statefulset", stsName, "-n", ns, "-o", "jsonpath={.status.updateRevision}"] with
+  | .ok out =>
+    if out.trim.isEmpty then return .error s!"statefulset {stsName} has no updateRevision yet"
+    else return .ok out.trim
+  | .error e => return .error e
 
 /-- Node keys of pods that are Terminating (have a deletionTimestamp). -/
 def terminatingPodKeys (pods : List PodInfo) : List String :=
@@ -187,6 +167,59 @@ def podUid (podName ns : String) : IO (Option String) := do
   match ← kubectl ["get", "pod", podName, "-n", ns, "-o", "jsonpath={.metadata.uid}"] with
   | .ok out => let u := out.trim; return (if u.isEmpty then none else some u)
   | .error _ => return none
+
+/-- Short-budget, read-only API calls for the round-robin topology audit.
+    Do not inherit the generic kubectl 30-second budget three times per pass. -/
+private def topologyProbeCommand (seconds : Nat) (args : Array String) : IO (Option String) := do
+  try
+    let r ← IO.Process.output {
+      cmd := "timeout"
+      args := #["-k", "1", toString seconds, "kubectl"] ++ args }
+    return if r.exitCode == 0 then some r.stdout else none
+  catch _ => return none
+
+/-- TEST SEAM (SAF-08 / CHECK-01-observation E2E). Unset in production, this
+    is one getEnv per probe. When `FLARE_TEST_PROBE_BARRIER` names a
+    directory and `<dir>/probe-arm-<pod>` exists, the probe of THAT pod stops
+    after its first UID read: it writes the UID it read to
+    `<dir>/probe-reached`, removes the arm file, and waits for
+    `<dir>/probe-release` (at most 30 s, so a stale arm file cannot wedge the
+    loop that also renews the lease). The E2E replaces the pod under the same
+    name while the probe is held, which is the race the UID bracket exists
+    for. -/
+private def probeBarrier (podName uid : String) : IO Unit := do
+  match ← IO.getEnv "FLARE_TEST_PROBE_BARRIER" with
+  | none => pure ()
+  | some dir =>
+    let arm : System.FilePath := dir ++ s!"/probe-arm-{podName}"
+    if !(← arm.pathExists) then pure ()
+    else
+      let reached : System.FilePath := dir ++ "/probe-reached"
+      let release : System.FilePath := dir ++ "/probe-release"
+      IO.eprintln s!"[flare-operator] TEST SEAM: topology probe of {podName} held after the first UID read (uid={uid})"
+      try IO.FS.writeFile reached s!"{uid}\n" catch _ => pure ()
+      try IO.FS.removeFile arm catch _ => pure ()
+      let mut released := false
+      for _ in [0:300] do        -- 300 x 100ms = 30s ceiling
+        if (← release.pathExists) then
+          released := true
+          break
+        IO.sleep 100
+      IO.eprintln s!"[flare-operator] TEST SEAM: topology probe of {podName} {if released then "released" else "timed out after 30s"}"
+      try IO.FS.removeFile release catch _ => pure ()
+      try IO.FS.removeFile reached catch _ => pure ()
+
+/-- Bracket a stats reply with Pod UID reads. No cached result is reused.
+    Command payload is fixed; pod/namespace are separate argv elements. -/
+def topologyProbe (podName ns : String) : IO (Option String × Option String × Option String) := do
+  let args := #["get", "pod", podName, "-n", ns, "-o", "jsonpath={.metadata.uid}"]
+  let before := (← topologyProbeCommand 2 args).map String.trim
+  if before.isNone || before == some "" then return (none, none, none)
+  probeBarrier podName (before.getD "")
+  let reply ← topologyProbeCommand 3 #["exec", "-n", ns, podName, "--", "bash", "-c",
+    "exec 3<>/dev/tcp/localhost/12121; printf 'stats\\r\\n' >&3; while IFS= read -r line; do printf '%s\\n' \"$line\"; case \"$line\" in END*) break;; esac; done <&3; exec 3>&-"]
+  let after := (← topologyProbeCommand 2 args).map String.trim
+  return (before, after, reply)
 
 /-- The shell command that deletes a pod with the observed UID as an API-side
     PRECONDITION (DeleteOptions.preconditions.uid), so the apiserver itself
@@ -298,7 +331,7 @@ def confLandedOnAllPods (crName ns needle : String) : IO Bool := do
     the file stays readable. Returns the empty string when neither section has
     anything to emit. -/
 def renderFlaredExtraConf (rocksdb : RocksdbConfigSpec)
-    (repl : Option ClusterReplicationSpec) : String :=
+    (repl : Option ClusterReplicationSpec) (offSnapshotPush : Bool := true) : String :=
   let rocksdbBlock := rocksdb.toExtraConf
   let replBlock := match repl with
     | some r =>
@@ -309,7 +342,7 @@ def renderFlaredExtraConf (rocksdb : RocksdbConfigSpec)
         s!"cluster-replication-server-port = {r.port}",
         s!"cluster-replication-mode = {r.mode}",
         s!"cluster-replication-concurrency = {r.concurrency}"
-      ]
+      ] ++ (if r.snapshotPush then "" else "\ncluster-replication-snapshot-push = false")
     | none =>
       -- ALWAYS an explicit false, never omission: flared's SIGHUP reload
       -- only updates keys PRESENT in the file (ini_option::reload guards
@@ -319,7 +352,11 @@ def renderFlaredExtraConf (rocksdb : RocksdbConfigSpec)
       -- procedure was two-step ("= false" + reload, THEN remove + reload)
       -- for exactly this reason; an always-present explicit value collapses
       -- it into one declarative line.
-      "cluster-replication = false"
+      -- With replication off the snapshot-push switch is still rendered
+      -- when the CR sets it false: flared then REFUSES an incoming push
+      -- (destination side, user decision 2026-10-13 item 1). Default true
+      -- renders nothing (file unchanged).
+      "cluster-replication = false" ++ (if offSnapshotPush then "" else "\ncluster-replication-snapshot-push = false")
   match rocksdbBlock, replBlock with
   | "", r  => r
   | a,  b  => a ++ "\n\n" ++ b
@@ -372,10 +409,11 @@ def updateFlaredReplicationConfig (crName ns : String) (repl : ClusterReplicatio
     overwrite a ConfigMap that may already contain other hand-edited keys
     when the user has not asked for any rocksdb tuning. -/
 def updateFlaredRocksdbConfig (crName ns : String) (rocksdb : RocksdbConfigSpec)
+    (offSnapshotPush : Bool := true)
     : IO (Except String Unit) := do
-  if !rocksdb.hasAny then
+  if !rocksdb.hasAny && offSnapshotPush then
     return .ok ()
-  let content := renderFlaredExtraConf rocksdb none
+  let content := renderFlaredExtraConf rocksdb none offSnapshotPush
   applyExtraConfConfigMap crName ns content
 
 /-- Rewrite {cr}-config with the replication block DISABLED (rocksdb
@@ -385,8 +423,9 @@ def updateFlaredRocksdbConfig (crName ns : String) (rocksdb : RocksdbConfigSpec)
     stops a running replication (reload ignores ABSENT keys, so plain
     removal would leave flared replicating on its stale in-memory true). -/
 def clearFlaredReplicationConfig (crName ns : String) (rocksdb : RocksdbConfigSpec := {})
+    (offSnapshotPush : Bool := true)
     : IO (Except String Unit) :=
-  applyExtraConfConfigMap crName ns (renderFlaredExtraConf rocksdb none)
+  applyExtraConfConfigMap crName ns (renderFlaredExtraConf rocksdb none offSnapshotPush)
 
 /-- Read status.migrationPhase from the FlareCluster CR (None when unset
     or unreadable — safe default: a fresh cluster has no migration). -/
@@ -444,31 +483,123 @@ def writeRepairLedger (crName ns : String) (l : ReplicaRepair.Ledger) : IO (Exce
   | .error e => return .error e
   | .ok _ => return .ok ()
 
-/-- Query flared stats via kubectl exec and bash /dev/tcp. -/
-def queryPodStats (podName ns : String) (statsCmd : String) : IO (Except String String) :=
-  execInPod podName ns ["bash", "-c", s!"exec 3<>/dev/tcp/localhost/12121; printf '{statsCmd}\\r\\n' >&3; timeout 3 cat <&3; exec 3>&-"]
+/-- The handover ledger persisted in `status.handovers` (flare-lossless-
+    handover): an operator restart resumes a handover where it was (a map V1
+    already sent is always finished by a promote or a rollback). Same three
+    outcomes as the repair ledger: absent, restored, or an error that must
+    not be taken for absence. -/
+def readHandovers (crName ns : String) : IO (Except String (Option Handover.Ledger)) := do
+  match ← kubectl ["get", "flarecluster", crName, "-n", ns, "-o", "json"] with
+  | .error e => return .error s!"handover read failed: {e}"
+  | .ok out =>
+    match Lean.Json.parse out with
+    | .error e => return .error s!"handover read: CR JSON did not parse: {e}"
+    | .ok j =>
+      match j.getObjVal? "status" >>= (·.getObjVal? "handovers") with
+      | .error _ => return .ok none
+      | .ok r =>
+        match Handover.Ledger.fromJson? r with
+        | some l => return .ok (some l)
+        | none => return .error "handover read: status.handovers is present but does not parse (corrupt)"
 
-/-- Node keys of pods whose flared reports curr_items > 0 (a bounded stats
-    probe per pod: `timeout 3` inside the exec). Feeds the masterless
-    refill's empty-master guard — an ex-master that came back EMPTY must not
-    be crowned over a data-bearing copy. Best-effort: a pod whose probe
-    fails is simply not listed (the guard treats "no data-bearing nodes" as
-    "no information" and falls back to the old behavior), so a stats hiccup
-    can never brick the refill. -/
-def dataBearingPodKeys (pods : List PodInfo) (ns : String) : IO (List String) := do
+def writeHandovers (crName ns : String) (l : Handover.Ledger) : IO (Except String Unit) := do
+  let patch := (Lean.Json.mkObj [("status", Lean.Json.mkObj [("handovers", l.toJson)])]).compress
+  match ← kubectl ["patch", "flarecluster", crName, "-n", ns,
+      "--subresource=status", "--type=merge", "-p", patch] with
+  | .error e => return .error e
+  | .ok _ => return .ok ()
+
+/-- Compare-and-swap of `status.handovers` before a history-continuation send
+    (design addendum 3 §1): reads the stored record, refuses when it was
+    written by a newer leader or is a phase ahead of `x`
+    (HandoverDrive.casAllowed), then a JSON patch whose `test` holds exactly
+    what was read and whose `add` writes `new`. Both calls are bounded by
+    `boundSec` together; a timeout is "outcome unknown" (the caller sends
+    nothing this tick and reads again next tick). -/
+def casHandovers (crName ns : String) (x : Handover.Entry) (new : Handover.Ledger) (epoch : Nat)
+    (boundSec : Nat) : IO (Except String Unit) := do
+  let t0 ← IO.monoMsNow
+  let rd := max 1 (boundSec / 2)
+  let got ← IO.Process.output { cmd := "timeout", args := #["-k", "1", toString rd, "kubectl", "get", "flarecluster", crName, "-n", ns, "-o", "json"] }
+  if got.exitCode != 0 then
+    return .error s!"handover CAS: the record could not be read (exit {got.exitCode}); nothing was written"
+  let some j := (Lean.Json.parse got.stdout).toOption
+    | return .error "handover CAS: the record did not parse; nothing was written"
+  let raw := (j.getObjVal? "status" >>= (·.getObjVal? "handovers")).toOption
+  let stored ← match raw with
+    | none => pure (some ({} : Handover.Ledger))
+    | some r => pure (Handover.Ledger.fromJson? r)
+  let some stored := stored
+    | return .error "handover CAS: status.handovers is present but does not parse; nothing was written"
+  match HandoverDrive.casAllowed stored x epoch with
+  | .error e => return .error s!"handover CAS refused: {e}"
+  | .ok _ =>
+    let spent := (← IO.monoMsNow) - t0
+    if spent + 1000 > boundSec * 1000 then
+      return .error "handover CAS: no time left after the read; nothing was written"
+    let left := (boundSec * 1000 - spent) / 1000
+    let ops : List Lean.Json :=
+      (match raw with
+       | some o => [Lean.Json.mkObj [("op", "test"), ("path", "/status/handovers"), ("value", o)]]
+       | none => []) ++
+      [Lean.Json.mkObj [("op", "add"), ("path", "/status/handovers"), ("value", new.toJson)]]
+    let patch := (Lean.Json.arr ops.toArray).compress
+    let args := ["patch", "flarecluster", crName, "-n", ns, "--subresource=status", "--type=json", "-p", patch]
+    let out ← IO.Process.output { cmd := "timeout", args := #["-k", "1", toString (max 1 left), "kubectl"] ++ args.toArray }
+    if out.exitCode == 0 then return .ok ()
+    else if out.exitCode == 124 then return .error s!"handover CAS timed out after {boundSec}s (outcome unknown; re-read)"
+    else return .error s!"handover CAS refused: {out.stderr.trim}"
+
+/-- How many stats connections the operator opened to each pod (every
+    `queryPodStats` is one connection to flared, and flared counts it in
+    `total_connections`). The cordon move subtracts them: it asks whether
+    CLIENTS still connect, not whether the operator did. -/
+initialize statsProbeCount : IO.Ref (List (String × Nat)) ← IO.mkRef []
+
+def probesTo (pod : String) : IO Nat := do
+  return ((← statsProbeCount.get).lookup pod).getD 0
+
+/-- Query flared stats via kubectl exec and bash /dev/tcp. -/
+def queryPodStats (podName ns : String) (statsCmd : String) : IO (Except String String) := do
+  statsProbeCount.modify fun l => (podName, (l.lookup podName).getD 0 + 1) :: l.filter (·.1 != podName)
+  -- Read until the END line and return at once; the connection would stay
+  -- open (memcached protocol), so a plain `cat` always ran into its 3 s
+  -- timeout and every stats probe cost ≥3 s of reconcile time. The overall
+  -- deadline stays (timeout 3), so a hung or silent flared still bounds it.
+  execInPod podName ns ["bash", "-c", s!"exec 3<>/dev/tcp/localhost/12121; printf '{statsCmd}\\r\\n' >&3; timeout 3 bash -c 'while IFS= read -r line; do printf \"%s\\n\" \"$line\"; case \"$line\" in END*) break;; esac; done' <&3; exec 3>&-"]
+
+/-- What a bounded stats probe (`timeout 3` inside the exec) says about a
+    pod's data: `(hasData, knownEmpty)`. A pod lands in `knownEmpty` ONLY when
+    the reply was complete (ended with END) and carried a well-formed
+    `curr_items 0`. A pod that could not be read — no IP yet, exec or stats
+    failure, truncated or malformed reply, or listed in `blocked` (test seam)
+    — is in NEITHER list: Unknown is never emptiness (CI 37296281060). The
+    caller binds `knownEmpty` to the pod incarnation it listed. -/
+def dataPresencePodKeys (pods : List PodInfo) (ns : String) (alsoProbe : List String := [])
+    (blocked : List String := []) : IO (List String × List String) := do
   let mut keys : List String := []
+  let mut empty : List String := []
   for pod in pods do
-    if pod.ready || pod.terminating then
+    -- `alsoProbe`: node keys read even while NotReady. A returning ex-master
+    -- stays NotReady in Prepare (sync-gated readiness) although its PVC
+    -- holds the partition's newest copy; without reading it the refill took
+    -- it for empty (failover-lag hold, 2026-10-03).
+    if (pod.ready || pod.terminating || alsoProbe.contains pod.toNodeKey) && !blocked.contains pod.name then
       match ← queryPodStats pod.name ns "stats" with
       | .ok out =>
-        let hasData := out.splitOn "\n" |>.any fun line =>
-          match (line.trim.splitOn " ").filter (· != "") with
-          | ["STAT", "curr_items", v] => (v.trim.toNat?.getD 0) > 0
-          | _ => false
-        if hasData then
-          keys := keys ++ [pod.toNodeKey]
+        let lines := out.splitOn "\n" |>.map (fun l => l.trim.replace "\r" "")
+        let complete := lines.any (· == "END")
+        let items : Option Nat := lines.findSome? fun line =>
+          match (line.splitOn " ").filter (· != "") with
+          | ["STAT", "curr_items", v] => v.toNat?
+          | _ => none
+        match items with
+        | some n =>
+          if n > 0 then keys := keys ++ [pod.toNodeKey]
+          else if complete then empty := empty ++ [pod.toNodeKey]
+        | none => pure ()
       | .error _ => pure ()
-  return keys
+  return (keys, empty)
 
 /-- LEVEL-TRIGGERED replication reconciliation: for every flared pod whose
     MOUNTED extra.conf already carries `needle` but whose RUNTIME state
@@ -554,6 +685,184 @@ def podZones (pods : List PodInfo) (nodeZones : List (String × String))
     if p.nodeName.isEmpty then none
     else (nodeZones.lookup p.nodeName).map fun z => (p.toNodeKey, z)
 
+-- ===========================================================================
+-- Cordon move (StateMachine/NodeMove.lean)
+-- ===========================================================================
+
+/-- Names of the Nodes with spec.unschedulable=true (cordoned). An error is
+    NOT an empty list: nothing is decided from an unreadable node list. -/
+def listCordonedNodes : IO (Except String (List String)) := do
+  match ← kubectl ["get", "nodes", "-o",
+      "jsonpath={range .items[?(@.spec.unschedulable==true)]}{.metadata.name}{\"\\n\"}{end}"] with
+  | .error e => return .error s!"list cordoned nodes: {e}"
+  | .ok out => return .ok ((out.splitOn "\n").map (·.trim) |>.filter (· != ""))
+
+/-- Why a pod's data cannot follow it to another node, from its claims'
+    PersistentVolumes: a `local` or `hostPath` volume, or one whose
+    `nodeAffinity` pins it to nodes (local-path and other node-local
+    provisioners). none = every claim's volume can be attached elsewhere
+    (network storage), or the pod has no claim (tmpfs). An unreadable pod,
+    claim or volume is a reason too: a move is not started on a volume
+    nobody could read (the recreated pod would stay Pending). -/
+def pinnedVolumeOf (pod ns : String) : IO (Option String) := do
+  match ← kubectl ["get", "pod", pod, "-n", ns, "-o",
+      "jsonpath={range .spec.volumes[*]}{.persistentVolumeClaim.claimName}{\"\\n\"}{end}"] with
+  | .error e => return some s!"its volumes could not be read ({e})"
+  | .ok out =>
+    let claims := (out.splitOn "\n").map (·.trim) |>.filter (· != "")
+    for c in claims do
+      let pv ← match ← kubectl ["get", "pvc", c, "-n", ns, "-o", "jsonpath={.spec.volumeName}"] with
+        | .error e => return some s!"its claim {c} could not be read ({e})"
+        | .ok v => pure v.trim
+      if pv.isEmpty then return some s!"its claim {c} is not bound to a volume"
+      match ← kubectl ["get", "pv", pv, "-o", "json"] with
+      | .error e => return some s!"the volume {pv} of its claim {c} could not be read ({e})"
+      | .ok j =>
+        match Lean.Json.parse j with
+        | .error _ => return some s!"the volume {pv} of its claim {c} did not parse"
+        | .ok v =>
+          let spec := (v.getObjVal? "spec").toOption.getD Lean.Json.null
+          let has (f : String) := (spec.getObjVal? f).isOk
+          if has "local" || has "hostPath" then
+            return some s!"its claim {c} is on node-local volume {pv}"
+          if ((spec.getObjVal? "nodeAffinity") >>= (·.getObjVal? "required")).isOk then
+            return some s!"its claim {c} is on volume {pv}, pinned to its node (nodeAffinity)"
+    return none
+
+/-- Wall clock in ms (the move's persisted times must survive a restart). -/
+def wallMs : IO Nat := do
+  let out ← IO.Process.output { cmd := "date", args := #["+%s%3N"] }
+  return (out.stdout.trim.toNat?).getD 0
+
+/-- `status.nodeMoves` as stored: the parsed ledger and the raw JSON (none =
+    absent). The raw value is the CAS precondition of the next write. -/
+def readNodeMoves (crName ns : String) : IO (Except String (NodeMove.Ledger × Option Lean.Json)) := do
+  match ← kubectl ["get", "flarecluster", crName, "-n", ns, "-o", "json"] with
+  | .error e => return .error s!"node moves read failed: {e}"
+  | .ok out =>
+    match Lean.Json.parse out with
+    | .error e => return .error s!"node moves read: CR JSON did not parse: {e}"
+    | .ok j =>
+      match j.getObjVal? "status" >>= (·.getObjVal? "nodeMoves") with
+      | .error _ => return .ok ({}, none)
+      | .ok r =>
+        match NodeMove.Ledger.fromJson? r with
+        | some l => return .ok (l, some r)
+        | none => return .error "node moves read: status.nodeMoves is present but does not parse (corrupt); refusing to start from an empty record"
+
+/-- Compare-and-swap of `status.nodeMoves`: a JSON patch whose `test` holds
+    the value this writer read (the stored value must still be exactly it) and
+    whose `add` writes the new one. The operator's phase writes and the node
+    guard's `admitted` write all go through here, so of two writers that read
+    the same record at most one commits. A resourceVersion test would fail on
+    every unrelated status write (handovers, repairs): this one only on a
+    change of the nodeMoves record itself. -/
+def casNodeMoves (crName ns : String) (old : Option Lean.Json) (new : NodeMove.Ledger)
+    (timeoutSec : Nat := 30) : IO (Except String Unit) := do
+  let ops : List Lean.Json :=
+    (match old with
+     | some o => [Lean.Json.mkObj [("op", "test"), ("path", "/status/nodeMoves"), ("value", o)]]
+     | none => []) ++
+    [Lean.Json.mkObj [("op", "add"), ("path", "/status/nodeMoves"), ("value", new.toJson)]]
+  let patch := (Lean.Json.arr ops.toArray).compress
+  let args := ["patch", "flarecluster", crName, "-n", ns, "--subresource=status", "--type=json", "-p", patch]
+  -- bounded: a hung call must not outlast the caller's lease margin
+  let out ← IO.Process.output { cmd := "timeout", args := #["-k", "1", toString timeoutSec, "kubectl"] ++ args.toArray }
+  if out.exitCode == 0 then return .ok ()
+  else if out.exitCode == 124 then return .error s!"node moves CAS timed out after {timeoutSec}s (outcome unknown; re-read)"
+  else return .error s!"node moves CAS refused: {out.stderr.trim}"
+
+/-- The kubelet-confirmed stops of flared pods the node guard recorded
+    (design addendum 5 §1): `status.handoverStops` = [{key, uid, at}], the
+    newest last. A field of its own: the handover loop rewrites
+    `status.handovers` from its own copy and would drop a field the webhook
+    wrote there. `none` = absent. -/
+def readHandoverStops (crName ns : String) : IO (Except String (Option Lean.Json × List (String × String))) := do
+  match ← kubectl ["get", "flarecluster", crName, "-n", ns, "-o", "json"] with
+  | .error e => return .error e
+  | .ok out =>
+    match Lean.Json.parse out with
+    | .error e => return .error s!"the FlareCluster did not parse: {e}"
+    | .ok j =>
+      match (j.getObjVal? "status" >>= (·.getObjVal? "handoverStops")).toOption with
+      | none => return .ok (none, [])
+      | some raw@(Lean.Json.arr a) =>
+        return .ok (some raw, a.toList.filterMap fun x =>
+          match (x.getObjValAs? String "key").toOption, (x.getObjValAs? String "uid").toOption with
+          | some k, some u => some (k, u)
+          | _, _ => none)
+      | some _ => return .error "status.handoverStops is not a list"
+
+/-- Append one kubelet-confirmed stop (CAS on the list read: a concurrent
+    append makes this one fail and the caller holds the delete, so the
+    kubelet retries). The newest 16 are kept. Bounded by `timeoutSec`. -/
+def addHandoverStop (crName ns key uid at_ : String) (timeoutSec : Nat := 4) : IO (Except String Unit) := do
+  match ← readHandoverStops crName ns with
+  | .error e => return .error e
+  | .ok (raw, cur) =>
+    if cur.contains (key, uid) then return .ok ()
+    let olds : List Lean.Json := match raw with
+      | some (Lean.Json.arr a) => a.toList
+      | _ => []
+    let entry := Lean.Json.mkObj [("key", Lean.Json.str key), ("uid", Lean.Json.str uid), ("at", Lean.Json.str at_)]
+    let new := (olds ++ [entry]).drop ((olds.length + 1) - 16)
+    let ops : List Lean.Json :=
+      (match raw with
+       | some o => [Lean.Json.mkObj [("op", "test"), ("path", "/status/handoverStops"), ("value", o)]]
+       | none => []) ++
+      [Lean.Json.mkObj [("op", "add"), ("path", "/status/handoverStops"), ("value", Lean.Json.arr new.toArray)]]
+    let args := ["patch", "flarecluster", crName, "-n", ns, "--subresource=status", "--type=json", "-p", (Lean.Json.arr ops.toArray).compress]
+    let out ← IO.Process.output { cmd := "timeout", args := #["-k", "1", toString timeoutSec, "kubectl"] ++ args.toArray }
+    if out.exitCode == 0 then return .ok ()
+    else if out.exitCode == 124 then return .error s!"the stop record timed out after {timeoutSec}s (outcome unknown)"
+    else return .error s!"the stop record was refused: {out.stderr.trim}"
+
+/-- Put the serving label on / take it off a pod, only if it is still the
+    pod with `uid`. Adding refuses a terminating pod: such a pod never gets
+    the label back. -/
+def setServingLabel (pod ns uid : String) (on : Bool) : IO (Except String Unit) := do
+  if on then
+    match ← kubectl ["get", "pod", pod, "-n", ns, "-o", "jsonpath={.metadata.deletionTimestamp}"] with
+    | .error e => return .error e
+    | .ok ts =>
+      if !ts.trim.isEmpty then return .error s!"{pod} is terminating: the serving label is not put back"
+  let key := "/metadata/labels/flare.gree.net~1serving"
+  let ops : List Lean.Json :=
+    [Lean.Json.mkObj [("op", "test"), ("path", "/metadata/uid"), ("value", Lean.Json.str uid)],
+     if on then Lean.Json.mkObj [("op", "add"), ("path", key), ("value", "true")]
+     else Lean.Json.mkObj [("op", "remove"), ("path", key)]]
+  match ← kubectl ["patch", "pod", pod, "-n", ns, "--type=json", "-p", (Lean.Json.arr ops.toArray).compress] with
+  | .ok _ => return .ok ()
+  | .error e => return .error e
+
+/-- Names of the pods the EndpointSlices of Service `svc` list (ready or
+    not: any listing means the Service can still send to them). -/
+def serviceEndpointPods (svc ns : String) : IO (Except String (List String)) := do
+  match ← kubectl ["get", "endpointslices", "-n", ns, "-l", s!"kubernetes.io/service-name={svc}",
+      "-o", "jsonpath={range .items[*].endpoints[*]}{.targetRef.name}{\"\\n\"}{end}"] with
+  | .error e => return .error s!"endpointslices of {svc}: {e}"
+  | .ok out => return .ok ((out.splitOn "\n").map (·.trim) |>.filter (· != ""))
+
+/-- A Kubernetes Event on the FlareCluster (operator actions the user must
+    see: a cordon move blocked below minCopies, held, released). -/
+def emitEvent (crName ns reason message : String) (warning : Bool := false) : IO Unit := do
+  let ms ← wallMs
+  let name := s!"{crName}.{reason.toLower}.{ms}"
+  let ev := Lean.Json.mkObj [
+    ("apiVersion", "v1"), ("kind", "Event"),
+    ("metadata", Lean.Json.mkObj [("name", Lean.Json.str name), ("namespace", Lean.Json.str ns)]),
+    ("involvedObject", Lean.Json.mkObj [("apiVersion", "flare.gree.net/v1alpha1"), ("kind", "FlareCluster"),
+      ("name", Lean.Json.str crName), ("namespace", Lean.Json.str ns)]),
+    ("reason", Lean.Json.str reason), ("message", Lean.Json.str message),
+    ("type", Lean.Json.str (if warning then "Warning" else "Normal")),
+    ("source", Lean.Json.mkObj [("component", "flare-operator")])]
+  -- create, not apply: the name is new every time, and apply first GETs the
+  -- object, which the role does not grant on events (41165977319 C3: every
+  -- cordon Event was refused, Forbidden "cannot get resource events")
+  match ← kubectlApplyManifest ev.compress "create" with
+  | .ok _ => pure ()
+  | .error e => IO.eprintln s!"[flare-operator] warning: Event {reason} not recorded: {e}"
+
 /-- Read the nodeMap data from a ConfigMap.
     kubectl get configmap <name> -n <ns> -o jsonpath='{.data.nodeMap}' -/
 def readFlaredConfigMap (cmName ns : String) : IO (Except String String) :=
@@ -574,6 +883,8 @@ structure LeaseInfo where
   /-- spec.leaseTransitions: the leadership GENERATION. Incremented by
       every takeover; the fencing token (see Main's version composition). -/
   transitions : Nat := 0
+  /-- seconds since the last renewal, at the read -/
+  ageSeconds : Nat := 0
   deriving Repr, BEq
 
 /-- Get lease info including expiry check.
@@ -599,7 +910,7 @@ def getLease (leaseName ns : String) : IO (Except String LeaseInfo) := do
       let age := ageStr.trim.toNat?.getD 0
       return .ok { holderIdentity := holder.trim, leaseDurationSeconds := dur,
                    expired := age ≥ dur, resourceVersion := rv.trim,
-                   transitions := transStr.trim.toNat?.getD 0 }
+                   transitions := transStr.trim.toNat?.getD 0, ageSeconds := age }
     | _ => return .error s!"unexpected getLease output: {result.stdout}"
   catch e =>
     return .error s!"getLease error: {e}"
@@ -635,6 +946,42 @@ def renewLease (leaseName ns identity : String) : IO (Except String Unit) := do
     | .ok _ => return .ok ()
   catch e =>
     return .error s!"renewLease error: {e}"
+
+/-- The mid-pass lease fence: true when this pod is the holder and a renew
+    sent now succeeded with a margin of the lease left (StateMachine/
+    LeaseFence). A pass may outlast the 15 s lease that the loop renews at
+    its top; with no other holder that lapse is not a loss, and judging it
+    one fenced every broadcast of every (equally slow) pass after it, for
+    good (41258283045). The renew tests the holder, so it and a standby's
+    takeover (which tests the resourceVersion) cannot both succeed. A failed
+    or late renew is NOT held (review of fac7410, P1): the read before it is
+    no evidence once the call has taken longer than the lease.
+    TEST SEAM (FLARE_TEST_LEASE_RENEW_DELAY_FILE, unset in production):
+    while the named file exists, the renew is sent after the number of ms it
+    holds (an API answering late). -/
+def holdLeaseNow (leaseName ns identity : String) : IO (Except String Bool) := do
+  match ← getLease leaseName ns with
+  | .error e => return .error e
+  | .ok lease =>
+    if lease.holderIdentity != identity then return .ok false
+    let t0 ← IO.monoMsNow
+    match ← IO.getEnv "FLARE_TEST_LEASE_RENEW_DELAY_FILE" with
+    | some f =>
+      if ← System.FilePath.pathExists f then
+        let ms := ((← IO.FS.readFile f).trim.toNat?).getD 0
+        IO.eprintln s!"[flare-operator] TEST SEAM: lease renew delayed {ms}ms (FLARE_TEST_LEASE_RENEW_DELAY_FILE)"
+        IO.sleep ms.toUInt32
+    | none => pure ()
+    let renewed ← renewLease leaseName ns identity
+    let elapsed := (← IO.monoMsNow) - t0
+    let ok := match renewed with | .ok () => true | .error _ => false
+    let held := FlareOperator.LeaseFence.held true ok elapsed (lease.leaseDurationSeconds * 1000)
+    if !held then
+      let why := match renewed with
+        | .ok () => s!"the renew took {elapsed}ms, less than {FlareOperator.LeaseFence.marginMs}ms of the {lease.leaseDurationSeconds}s lease left"
+        | .error e => s!"the renew failed after {elapsed}ms ({e})"
+      IO.eprintln s!"[flare-operator] LEASE CHECK: authority NOT confirmed — {why}; the gated action is skipped"
+    return .ok held
 
 /-- Acquire an expired lease using JSON Patch with test-and-set.
 

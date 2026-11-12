@@ -35,7 +35,9 @@
 #include "thread_handler.h"
 #include "cluster.h"
 #include "storage.h"
+#include "copy_protection.h"
 
+#include <map>
 using namespace std;
 
 namespace gree {
@@ -49,27 +51,132 @@ protected:
 	cluster*						_cluster;
 	storage*						_storage;
 	shared_connection		_connection;
-	const string				_node_server_name;
-	const int						_node_server_port;
+	// The SOURCE: re-selected at the start of every attempt from the current
+	// map (a slave's source is its partition's master).
+	string							_node_server_name;
+	int									_node_server_port;
+	// This handler modified the local copy (truncate or a started dump) and
+	// has not activated: the copy is partial or belongs to the previous
+	// source's history.
+	bool								_copy_dirty;
+	// The next attempt must start from a clean copy (source changed after
+	// the copy was modified): never merge two histories.
+	bool								_force_clean;
+	// The source's lineage as probed at the start of this attempt (with
+	// _probe_source_epoch): what the copy was taken from.
+	string							_attempt_master_id;
+	// The copy-time identity probe was COMPLETE (answered, RocksDB WAL
+	// features, master_id present); only then can the copy be validated.
+	bool								_identity_known;
+	// The copy-time reply carried a source_epoch token. Absent from a
+	// complete reply = an older flared (lineage-only compatibility).
+	bool								_epoch_supported;
+	// A slave copy is COMPLETE and awaits validation + activation. While the
+	// source is Unknown the retries only re-validate; they never return to a
+	// transfer (WAL, snapshot, dump).
+	bool								_pending_activation;
+
 	int									_partition;
 	int									_partition_size;
 	cluster::role				_role;
 	int									_reconstruction_interval;
 	int									_reconstruction_bwlimit;
+	// Source epoch the master advertised in the pre-dump features probe.
+	string									_probe_source_epoch;
 	// The id this handler was given by stats::reconstruction_begin(); every
 	// completion notification carries it, so a late notification from an
 	// older handler cannot be attributed to a newer reconstruction.
 	uint64_t						_reconstruction_id;
 
 public:
+	// R3-D / T24: the source's identity and size by name, a fresh lookup on
+	// each of up to probe_attempts tries (public for the cutter test)
+	static void probe_source_identity(const string& host, int port, copy_identity& out, shared_thread owner = shared_thread());
+	static int probe_attempts;
+	static int probe_retry_wait_ms;
+	// What a slave reads from its source before it takes a catch-up target
+	// (public for the cutter test): the source's node_map_version and its own
+	// node map (`stats` + `stats nodes`).
+	struct source_map_view {
+		bool version_found;
+		uint64_t version;
+		map<string, string> role, state, partition;
+		source_map_view(): version_found(false), version(0) {}
+	};
+	// 1 = both replies complete, 0 = not readable now; the whole probe
+	// (connect, writes, reads) ends within budget_ms
+	static int probe_source_map(const string& host, int port, source_map_view& out, int budget_ms = 8000);
+	// The source forwards its writes for `partition` to `self`: its map is not
+	// older than this node's (`mine`), names `self` a slave (prepare/active)
+	// of `partition` and `src` that partition's master. Anything unknown is
+	// not proof. `why` describes what was seen.
+	static bool source_forwards_here(const source_map_view& v, const string& self, const string& src, int partition, uint64_t mine, string& why);
+	// Polls the source until it proves source_forwards_here, against one
+	// monotonic deadline of budget_ms for the whole wait (each probe capped
+	// by the time left). `cl` gives this node's map version, re-read every
+	// round (NULL: 0, for the cutter test). `last` = what was seen last.
+	static bool wait_source_forwards_here(const string& host, int port, const string& self, const string& src,
+		int partition, cluster* cl, int budget_ms, shared_thread owner, string& last);
+	static int source_proof_wait_ms;
+	// the probe the wait runs (the cutter test replaces it with one that
+	// blocks, as a name lookup can: the wait must still end on time)
+	typedef int (*source_map_probe_fn)(const string& host, int port, source_map_view& out, int budget_ms);
+	static source_map_probe_fn source_map_probe;
+	// probe workers not finished yet (some may be stuck in a name lookup the
+	// waiters gave up on): at most one per source, and at most
+	// max_probe_workers in all — no new worker beyond that (cutter test)
+	static int outstanding_probe_workers();
+	static int max_probe_workers;
 	handler_reconstruction(shared_thread t, cluster* cl, storage* st, string node_server_name, int node_server_port, int partition, int partition_size, cluster::role r, int reconstruction_interval, int reconstruction_bwlimit);
 	virtual ~handler_reconstruction();
 
 	virtual int run();
 
 protected:
+	// a slave that is a proxy in its own map: abandoned (logged, stats
+	// "aborted"); checked at each attempt and every second while parked
+	bool _abandoned_as_proxy(int attempt);
 	int _run_once();
 	int _activate_with_retry(bool skip_ready_state);
+	// R3-D: the protection rule (copy_protection.h) evaluated NOW, right
+	// before a destructive step on this slave's copy. Logs the decision.
+	// strict: a discard BEFORE the replacement is copied also needs a source
+	// that holds keys (the empty-source exceptions do not apply)
+	copy_gate _copy_gate(const char* step, string& why, bool strict = false);
+	// COPY RETENTION (docs/design-copy-retention.md §3): build the replacement
+	// in data_dir/staging-<attempt> (snapshot, else full dump) next to the
+	// live copy, bring it to the fixed target L1 by a WAL catch-up bound to
+	// the source's history, verify it, switch it in (the old copy is
+	// RETAINED), record it and catch up. 0 = the verified copy is live;
+	// -1 = stopped or failed with the live copy unchanged, or switched but
+	// not yet caught up (the next attempt resumes from its cursor).
+	int _staged_rebuild(bool snapshot_ok, const string& peer_master_id, uint64_t l0, bool peer_wal_supported);
+	// the space watch while a staging copy grows (false = stop the copy)
+	bool _space_watch(string& why);
+	// TEST SEAMS: hold while the file named by `env` exists (false =
+	// shutdown requested while held)
+	bool _test_hold(const char* env, const char* where);
+	// a bounded `stats` read of the source: items and identity
+	// Is the copy's source still valid for activation? THREE outcomes:
+	//   source_valid    — same node is the partition's master in the current
+	//                     map, and a fresh probe shows the same lineage and
+	//                     source epoch;
+	//   source_changed  — CONFIRMED otherwise: another master in the map, or
+	//                     the probe answered with another lineage/epoch (a
+	//                     same-name source re-promoted, restored or
+	//                     bulk-rewritten) -> the copy is rebuilt clean;
+	//   source_unknown  — the probe could not be completed (connect/read
+	//                     failure): NOT valid (no activation) and NOT a
+	//                     change (the copy is kept; check again).
+	//   source_copy_unverified — the copy-time identity was not established
+	//                     (incomplete probe): the copy can never be validated
+	//                     and is taken again (not a confirmed change).
+	enum source_check { source_valid, source_changed, source_unknown, source_copy_unverified };
+	// Validate and activate a completed copy: 0 = activated, -1 = still
+	// pending (Unknown, or activation refused), -2 = confirmed source change
+	// (copy dropped, clean rebuild), -3 = copy unverifiable (taken again).
+	int _activate_pending();
+	source_check _check_source(string& why);
 
 protected:
 	// Try to catch up from the master via incremental WAL sync instead of

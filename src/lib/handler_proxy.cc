@@ -26,6 +26,8 @@
  *
  *	$Id$
  */
+#include "app.h"
+#include <boost/lexical_cast.hpp>
 #include "handler_proxy.h"
 #include "connection_tcp.h"
 #include "queue_proxy_read.h"
@@ -65,7 +67,16 @@ int handler_proxy::run() {
 	this->_thread->set_peer(this->_node_server_name, this->_node_server_port);
 	this->_thread->set_state("connect");
 
-	shared_connection c(new connection_tcp(this->_node_server_name, this->_node_server_port));
+	connection_tcp* ctp = new connection_tcp(this->_node_server_name, this->_node_server_port);
+	// The live write path: a destination that does not answer SYNs (a
+	// replaced pod's old address, forward-window-steps 38048708017) blocked
+	// a blocking connect ~130 s per attempt x 8 retries, and every forward
+	// to it queued behind — not sent, not answered, not counted as dropped.
+	// Bounded like the other replication connections; the host is resolved
+	// again on every open.
+	ctp->set_connect_timeout_ms(proxy_connect_timeout_ms);
+	ctp->set_connect_retry_limit(proxy_connect_retry_limit);
+	shared_connection c(ctp);
 	this->_connection = c;
 	if (c->open() < 0) {
 		log_err("failed to connect to node server [name=%s, port=%d]", this->_node_server_name.c_str(), this->_node_server_port);
@@ -111,9 +122,29 @@ int handler_proxy::run() {
 				shared_queue_proxy_write r = boost::dynamic_pointer_cast<queue_proxy_write, thread_queue>(q);
 				if (r) {
 					key = r->get_entry().key;
+					// a forward to a replica that is not delivered because the
+					// destination became a proxy: a write the client was told
+					// STORED that this copy will not get — counted as a drop so
+					// the repair path takes it (it was only a notice before)
+					if (r->is_post_proxy()) {
+						stats_object->increment_proxy_write_dropped(this->_node_server_name + ":" + boost::lexical_cast<string>(this->_node_server_port));
+					} else if (r->get_entry().option & storage::option_noreply) {
+						// a noreply client write on its way to the master: its
+						// sender is not waiting for it, so it is routed again
+						// from here (review of 93f5cc3)
+						this->_cluster->reroute_skipped_noreply_write(r);
+					} else {
+						// a client write on its way to the master: never sent,
+						// so the sender (waiting for it) routes it again by the
+						// map in force (cluster::pre_proxy_write)
+						r->set_skipped(true);
+					}
 				}
 			}
 			log_notice("skipped proxy request is [ident=%s, key=%s]", q->get_ident().c_str(), key.c_str());
+			if (stats_object->diag_enabled()) {
+				stats_object->diag_incr("fwd_skipped_as_proxy:" + this->_node_server_name + ":" + boost::lexical_cast<string>(this->_node_server_port));
+			}
 		} else {
 			this->_process_queue(q);
 			if (this->_skip_proxy) {
@@ -125,6 +156,14 @@ int handler_proxy::run() {
 
 		// failover if we need
 
+		// this replica is done with the forward (the item is shared by every
+		// replica's thread): release its in-flight count now
+		if (q->get_ident() == "proxy_write") {
+			shared_queue_proxy_write w = boost::dynamic_pointer_cast<queue_proxy_write, thread_queue>(q);
+			if (w) {
+				w->release_repl_in_flight(this->_node_server_name + ":" + boost::lexical_cast<string>(this->_node_server_port));
+			}
+		}
 		q->sync_unref();
 	}
 
@@ -143,6 +182,9 @@ int handler_proxy::_process_queue(shared_thread_queue q) {
 		return r->run(this->_connection);
 	} else if (q->get_ident() == "proxy_write") {
 		shared_queue_proxy_write r = boost::dynamic_pointer_cast<queue_proxy_write, thread_queue>(q);
+		// a held forward (queue_proxy_write::hold_window_ms) stops waiting when
+		// this thread is asked to stop
+		r->set_owner(this->_thread);
 		int noreply_window_limit = this->_cluster->get_noreply_window_limit();
 		if (!r->is_post_proxy() || (r->get_entry().option & storage::option_noreply) || noreply_window_limit <= 0) {
 			return r->run(this->_connection);

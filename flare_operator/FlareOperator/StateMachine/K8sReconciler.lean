@@ -16,6 +16,7 @@
 import FlareOperator.K8s.FlareCluster
 import FlareOperator.Flare.Protocol
 import FlareOperator.StateMachine.Reconciler
+import FlareOperator.StateMachine.FailoverOrder
 
 namespace FlareOperator.K8sReconciler
 
@@ -81,7 +82,7 @@ inductive FlareReconcileStep where
 /-- Responses from the K8s API server. -/
 inductive K8sResponse where
   | CRDResponse (crd : Option FlareClusterView)
-  | PodListResponse (pods : List String) (zones : List (String × String)) (terminating : List String) (dataBearing : List String) (unhealthy : List String) (repairHeld : List String)
+  | PodListResponse (pods : List String) (zones : List (String × String)) (terminating : List String) (dataBearing : List String) (unhealthy : List String) (repairHeld : List String) (followUnfit : List String) (followUnproven : List String) (followRanked : List String) (knownEmpty : List String) (promotionBlocked : List String) (historyHolders : List (Nat × String))
   | PatchResponse (success : Bool)
   | NoResponse
   deriving Repr
@@ -160,11 +161,51 @@ structure FlareReconcileState where
       reconstruction — over a slave holding 15.8M keys). Empty list = no
       information (fresh cluster or stats unavailable): behaves as before. -/
   dataBearingKeys : List String := []
+  /-- Node keys whose flared was READ this tick and reported curr_items 0 in a
+      complete reply, with the pod incarnation (UID, restart count) unchanged
+      across the probe. Absence from `dataBearingKeys` is NOT emptiness: a pod
+      that could not be read (no IP yet, failed or truncated stats) is in
+      neither list (CI 37296281060: an unreadable returning ex-master was
+      taken as "back empty" and the far-behind follower was crowned). -/
+  knownEmptyKeys : List String := []
   /-- Node keys matched by spec.readBalance.standby this tick (by pod name or
       zone). Forced to balance 0 at commit; deprioritized for promotion. -/
   standbyNodeKeys : List String := []
+  /-- SAF-10c (StateMachine/FollowEvidence): continuous-replication followers
+      whose copy is KNOWN unusable (needs_rebuild, initial copy incomplete,
+      idle, another source epoch). Excluded from every promotion path this
+      tick. Empty = no information: behaves as before. -/
+  followUnfitKeys : List String := []
+  /-- Keys whose promotion evidence on this pass is NOT promotable (FORBIDDEN or
+      unknown, decision 2026-10-08): never chosen by the masterless refill, in
+      ANY tier (the commit would abort them; choosing them only starves the
+      partition of a promotable copy). Empty on a pass that read nothing. -/
+  promotionBlockedKeys : List String := []
+  /-- Each partition's RECORDED history holder (the authoritative history's
+      copy): among the candidates of one refill tier it is preferred — a
+      person's choice (RUNBOOK #history-held-masterless) or the adopted last
+      master must not lose to map order (history-masterless (c), 38040348416). -/
+  historyHolders : List (Nat × String) := []
+  /-- Partitions whose wait for a returning ex-master is OVER (masterless for
+      longer than FLARE_FOLLOW_FAILOVER_WAIT_SECONDS, set by Main). In every
+      other partition the refill's data-bearing last resort does not crown a
+      follower in `followUnfitKeys` while the ex-master is away; see
+      `promoteMasterlessPartition`'s `holdUnfit`. -/
+  followHoldExpiredParts : List Nat := []
+  /-- false = never hold (FLARE_FOLLOW_FAILOVER_WAIT_SECONDS=0): the refill
+      may crown an unfit follower at once, as before. -/
+  followHoldEnabled : Bool := false
+  /-- Followers (or nodes remembered in the mode) whose currency could NOT be
+      proven this tick — disconnected, stale, lagging, or unreadable. No
+      PLANNED promotion (drain) picks them; failover may, as a last resort,
+      and logs that promotion as not loss-free. -/
+  followUnprovenKeys : List String := []
+  /-- Followers proven current for promotion, best first (highest applied
+      position first). Placed first among a partition's candidates. -/
+  followRankedKeys : List String := []
   failoverTriggered : Bool := false
-  -- Grace period for startup: 24 cycles × 5s = 120s (see Main.lean)
+  -- Startup grace: remaining seconds + 1 while > 0, set by Main from the
+  -- wall clock before every pass (default 120 s; it was 24 cycles).
   graceCycles : Nat := 24
   /-- Whether the breaker was tripped at the END of the previous cycle
       (persisted via trippedRef in the IO shell — FSM state itself resets
@@ -228,7 +269,7 @@ def circuitBreakerDecision
         -- fraction can never fall below the reset threshold.
         (.RecoveryRefill,
          [.Log s!"[flare-operator] circuit breaker holding: {100 - deadPercent}% healthy < reset threshold {breakerCfg.resetThresholdPercent}% (masterless-refill-only recovery)"])
-    else if deadPercent >= breakerCfg.tripThresholdPercent then
+    else if deadPercent >= breakerCfg.tripThresholdPercent && deadCount >= breakerCfg.minUnavailableToTrip then
       (.RecoveryRefill,
        [.Log s!"[flare-operator] 🚨 CIRCUIT BREAKER TRIPPED: {deadCount}/{totalNodes} nodes dead ({deadPercent}% ≥ {breakerCfg.tripThresholdPercent}%)",
         .Log s!"[flare-operator] Suspected AZ failure - failover/reassignment PAUSED (masterless-refill-only recovery continues)",
@@ -241,13 +282,28 @@ def circuitBreakerDecision
     cluster, not already tripped). -/
 theorem circuitBreakerDecision_trips (deadCount totalNodes : Nat)
     (cfg : CircuitBreakerConfig) (hen : cfg.enabled = true) (htot : 0 < totalNodes)
-    (h : cfg.tripThresholdPercent ≤ (deadCount * 100) / totalNodes) :
+    (h : cfg.tripThresholdPercent ≤ (deadCount * 100) / totalNodes)
+    (hmin : cfg.minUnavailableToTrip ≤ deadCount) :
     (circuitBreakerDecision deadCount totalNodes cfg false).1 = .RecoveryRefill := by
   unfold circuitBreakerDecision
   simp only [hen, Bool.not_true, Bool.false_eq_true, if_false]
   have ht : (0 < totalNodes) = True := eq_true htot
   simp only [show (totalNodes > 0) = True from ht, if_true]
-  rw [if_pos h]
+  rw [if_pos (by simp [h, hmin])]
+
+/-- Fewer unavailable nodes than `minUnavailableToTrip` never trip a fresh
+    breaker, whatever fraction of the cluster they are (user decision
+    2026-10-02: one dead node in a 1-partition x 2-replica cluster must not
+    pause failover). -/
+theorem circuitBreakerDecision_below_min_no_trip (deadCount totalNodes : Nat)
+    (cfg : CircuitBreakerConfig) (hmin : deadCount < cfg.minUnavailableToTrip) :
+    (circuitBreakerDecision deadCount totalNodes cfg false).1 = .AfterHandleFailover := by
+  unfold circuitBreakerDecision
+  cases hen : cfg.enabled with
+  | false => simp
+  | true =>
+    have hm : ¬ (cfg.minUnavailableToTrip ≤ deadCount) := by omega
+    simp [hm]
 
 /-- Below the threshold a fresh (not-tripped) breaker NEVER trips:
     failover proceeds. -/
@@ -262,7 +318,7 @@ theorem circuitBreakerDecision_no_trip (deadCount totalNodes : Nat)
     simp only [Bool.not_true, Bool.false_eq_true, if_false]
     have ht : (0 < totalNodes) = True := eq_true htot
     simp only [show (totalNodes > 0) = True from ht, if_true]
-    rw [if_neg (by omega)]
+    rw [if_neg (by simp; omega)]
 
 /-- HYSTERESIS, holding side: a tripped breaker stays tripped while the
     healthy fraction is below the reset threshold — even when the dead
@@ -342,6 +398,18 @@ def flareReconcileTerminal (s : FlareReconcileState) : Prop :=
 -- Pure Failover Logic (extracted from Main.lean handleFailover)
 -- ===========================================================================
 
+/-- The persisted attribution a dead node keeps (decision 2026-10-16): an
+    ACTIVE slave of a partition records that partition; a Prepare slave keeps
+    what it had (a rejoined ex-slave not yet re-synced is still that copy;
+    a slave mid-reconstruction had none); a master records nothing here (its
+    lastMasterOf does). -/
+def deadSlaveOf (node : FlareNode) : Int :=
+  if node.role == FlareRole.Slave then
+    if node.state == FlareState.Active && node.partition ≥ 0 then node.partition
+    else node.formerSlaveOf
+  else if node.role == FlareRole.Proxy then node.formerSlaveOf
+  else -1
+
 /-- Process a single dead key: demote the node to Proxy/Down.
     Slave-to-Master promotion is modeled at the K8s reconciler FSM level
     (AfterHandleFailover → AfterPatchService) rather than inline. -/
@@ -352,7 +420,8 @@ def handleFailoverSingleKey (s : FlareClusterState) (key : String) : FlareCluste
     let demoted : FlareNode :=
       { node with state := FlareState.Down, role := FlareRole.Proxy, partition := -1,
                   lastMasterOf := if node.role == FlareRole.Master then node.partition
-                                  else node.lastMasterOf }
+                                  else node.lastMasterOf
+                  formerSlaveOf := deadSlaveOf node }
     s.addNode key demoted
 
 /-- Pure version of handleFailover (Main.lean:45-69).
@@ -387,7 +456,8 @@ def handleFailoverWithPromotionSingleKey (s : FlareClusterState) (key : String)
     let demoted : FlareNode :=
       { node with state := FlareState.Down, role := FlareRole.Proxy, partition := -1,
                   lastMasterOf := if node.role == FlareRole.Master then node.partition
-                                  else node.lastMasterOf }
+                                  else node.lastMasterOf
+                  formerSlaveOf := deadSlaveOf node }
     let s := s.addNode key demoted
     -- If it was a Master, promote a live slave of its partition.
     if node.role == FlareRole.Master then
@@ -467,7 +537,7 @@ def handleDrainWithPromotionSingleKey (s : FlareClusterState) (key : String)
                 && slaveNode.state == FlareState.Active then
               let demoted : FlareNode :=
                 { node with state := FlareState.Active, role := FlareRole.Proxy,
-                            partition := -1 }
+                            partition := -1, formerSlaveOf := -1 }
               let s := s.addNode key demoted
               let promoted := { slaveNode with role := FlareRole.Master,
                                                state := FlareState.Active, balance := 100 }
@@ -477,7 +547,7 @@ def handleDrainWithPromotionSingleKey (s : FlareClusterState) (key : String)
     else
       -- Slave (or already-proxy): demoting to a live proxy is always safe.
       s.addNode key
-        { node with state := FlareState.Active, role := FlareRole.Proxy, partition := -1 }
+        { node with state := FlareState.Active, role := FlareRole.Proxy, partition := -1, formerSlaveOf := -1 }
 
 /-- Drain every Terminating master/slave (see the single-key doc). -/
 def handleDrainWithPromotion (state : FlareClusterState) (drainKeys : List String)
@@ -498,38 +568,6 @@ def drainBlockedKeys (post : FlareClusterState) (drainKeys : List String)
     match post.lookupNode key with
     | some node => node.role == FlareRole.Master
     | none => false
-
-/-- Dead keys we deliberately DO NOT fail over: a master that is STILL
-    PRESENT (flagged by the unhealthy path — its pod exists — rather than by
-    a vanished pod) and has no promotable successor.
-
-    Demoting it achieves nothing: there is nobody to promote, so the only
-    effects are harmful — the partition is declared masterless sooner, the
-    node loses the partition assignment the rejoin path keys off
-    (`old.partition >= 0`), so the process that will most likely be back in
-    seconds takes the messier fresh-registration route, and the cluster pays
-    a topology churn for it. Keeping it master costs nothing either: it is
-    NotReady, so K8s has already pulled it out of the client LB.
-
-    This is exactly the decision the drain guard already makes for a
-    Terminating master (handleDrainWithPromotionSingleKey demotes ONLY
-    together with a successful promotion). A VANISHED pod is a different
-    case — nothing is coming back under that entry — and still fails over.
-
-    A successor counts only if it is an Active Slave of the same partition
-    whose own pod is live and not itself unhealthy. -/
-def unhealthyMastersKept (state : FlareClusterState)
-    (deadKeys unhealthyKeys livePodKeys : List String) : List String :=
-  deadKeys.filter fun key =>
-    unhealthyKeys.contains key &&
-    (match state.lookupNode key with
-     | none => false
-     | some node =>
-       node.role == FlareRole.Master &&
-       !(state.nodeMap.any (fun kv =>
-           kv.2.role == FlareRole.Slave && kv.2.state == FlareState.Active
-             && kv.2.partition == node.partition
-             && livePodKeys.contains kv.1 && !unhealthyKeys.contains kv.1)))
 
 /-- Demote every Master that duplicates an EARLIER Master of the same
     partition in the list (first Master for a partition wins; later ones are
@@ -556,7 +594,8 @@ def demoteDuplicateMastersGo (seen : List Int)
         let demoted := { node with role := FlareRole.Proxy,
                                    state := FlareState.Active,
                                    partition := -1,
-                                   balance := 100 }
+                                   balance := 100,
+                                   formerSlaveOf := -1 }
         (key, demoted) :: demoteDuplicateMastersGo seen rest
       else
         (key, node) :: demoteDuplicateMastersGo (node.partition :: seen) rest
@@ -998,6 +1037,202 @@ theorem deprioritizeStandbySlaves_nodeMap (sk : List String)
   unfold deprioritizeStandbySlaves
   split <;> rfl
 
+/-- SAF-10c (StateMachine/FollowEvidence): shape every partition's slave
+    list for the promotion paths, partitionMap ONLY (same device as
+    `deprioritizeStandbySlaves`, so no promotion function or proof changes):
+    `exclude` are removed from candidacy, `ranked` (proven-current
+    followers, best first) come first in that order, `unproven` come last,
+    everything else (nodes not in the mode) keeps its order in between. -/
+def shapeSlaves (exclude ranked unproven : List String) (part : FlarePartition)
+    : FlarePartition :=
+  let kept := part.slaves.filter (fun k => !exclude.contains k)
+  let first := ranked.filter (fun k => kept.contains k)
+  let middle := kept.filter (fun k => !ranked.contains k && !unproven.contains k)
+  let last := kept.filter (fun k => unproven.contains k && !ranked.contains k)
+  { part with slaves := first ++ middle ++ last }
+
+def shapePromotionCandidates (exclude ranked unproven : List String)
+    (s : FlareClusterState) : FlareClusterState :=
+  if exclude.isEmpty && ranked.isEmpty && unproven.isEmpty then s
+  else { s with partitionMap := s.partitionMap.map fun (idx, part) => (idx, shapeSlaves exclude ranked unproven part) }
+
+/-- The shaping never touches the node map. -/
+theorem shapePromotionCandidates_nodeMap (ex rk up : List String)
+    (s : FlareClusterState) :
+    (shapePromotionCandidates ex rk up s).nodeMap = s.nodeMap := by
+  unfold shapePromotionCandidates
+  split <;> rfl
+
+/-- What a failover pass knows, before its commit, about which slaves the
+    promotion gates refuse and in which order it tries the rest (the
+    PodListResponse fields of this pass). -/
+structure SuccessorGates where
+  /-- Pods present this pass; a slave without one is not a candidate. -/
+  livePodKeys : List String := []
+  /-- NotReady / operator-unreachable nodes (a slave among them is no successor). -/
+  unhealthyKeys : List String := []
+  /-- Nodes failed over in this same pass (a dead slave is no successor). -/
+  deadKeys : List String := []
+  /-- Replica repair held on the node (SC-03): stays Proxy, never promoted. -/
+  repairHeld : List String := []
+  /-- Followers known unusable: FollowEvidence unfit, R3 source-ineligible or
+      unreadable (`repl_read_source_eligible` 0 / unknown), a PromotionEvidence
+      class that is not normal (lagging / forbidden / unknown), an Active slave
+      whose pod is not Ready (Main, PodListResponse). -/
+  followUnfit : List String := []
+  /-- PromotionEvidence class not promotable this pass. -/
+  promotionBlocked : List String := []
+  /-- Proven-current followers, best first (tried first). -/
+  followRanked : List String := []
+  /-- In the mode but currency unproven (tried last; logged NOT LOSS-FREE). -/
+  followUnproven : List String := []
+  /-- Standby slaves (tried after every non-standby one). -/
+  standby : List String := []
+  /-- Nodes read holding data this pass (the refill's last-resort tier). -/
+  dataBearing : List String := []
+
+/-- Keys the failover never promotes this pass. -/
+def SuccessorGates.excluded (g : SuccessorGates) (state : FlareClusterState) : List String :=
+  g.repairHeld ++ g.followUnfit ++ g.promotionBlocked ++ g.unhealthyKeys ++ g.deadKeys
+    ++ (state.nodeMap.filter (fun kv => !g.livePodKeys.contains kv.1)).map Prod.fst
+
+/-- THE failover candidate state: every partition's slave list with the
+    refused slaves removed and the rest in the order the failover tries them
+    (ranked first, unproven last, standby after all non-standby). Both the
+    failover itself (`handleFailoverWithPromotion` in AfterHandleFailover and
+    RecoveryRefill) and `unhealthyMastersKept` run on this one value, so the
+    decision to fail a master over and the promotion that follows cannot
+    disagree about the successor. partitionMap only, like the two shapings it
+    composes (`deprioritizeStandbySlaves_nodeMap`,
+    `shapePromotionCandidates_nodeMap`): no promotion function or proof
+    changes. -/
+def failoverCandidates (g : SuccessorGates) (state : FlareClusterState) : FlareClusterState :=
+  deprioritizeStandbySlaves g.standby
+    (shapePromotionCandidates (g.excluded state) g.followRanked g.followUnproven state.rebuildPartitionMap)
+
+/-- This pass's gates, from the PodListResponse fields. -/
+def FlareReconcileState.successorGates (s : FlareReconcileState) : SuccessorGates :=
+  { livePodKeys := s.livePodKeys, unhealthyKeys := s.unhealthyKeys, deadKeys := s.deadNodeKeys,
+    repairHeld := s.repairHeldKeys, followUnfit := s.followUnfitKeys,
+    promotionBlocked := s.promotionBlockedKeys, followRanked := s.followRankedKeys,
+    followUnproven := s.followUnprovenKeys, standby := s.standbyNodeKeys,
+    dataBearing := s.dataBearingKeys }
+
+/-- Followers the masterless REFILL owns rather than the failover: excluded
+    from the failover only as unfit (FollowEvidence, R3 source eligibility,
+    a non-normal evidence class), but live, data-bearing, healthy, not dead
+    this pass, not repair-held and not promotion-blocked. The refill's
+    last-resort tier seats such a copy, at once when the lag hold is off and
+    otherwise after the ex-master's bounded wait
+    (FLARE_FOLLOW_FAILOVER_WAIT_SECONDS), logged NOT LOSS-FREE; meanwhile the
+    hold reports the partition masterless (RUNBOOK #failover-lag-hold). -/
+def SuccessorGates.lagHeld (g : SuccessorGates) : List String :=
+  g.followUnfit.filter fun k =>
+    g.livePodKeys.contains k && g.dataBearing.contains k
+      && !g.unhealthyKeys.contains k && !g.deadKeys.contains k
+      && !g.repairHeld.contains k && !g.promotionBlocked.contains k
+
+/-- The slave `handleFailoverWithPromotionSingleKey` promotes when it fails
+    `key` over on `candidates` (same partition lookup, same
+    `findActiveSuccessor`), `none` when it would leave the partition to the
+    masterless refill. Exact on a `failoverCandidates` state: the fold's
+    earlier keys only demote other dead keys (excluded there) or promote in
+    other partitions. -/
+def failoverSuccessor (candidates : FlareClusterState) (key : String) : Option String :=
+  match candidates.lookupNode key with
+  | none => none
+  | some node =>
+    if node.role == FlareRole.Master then
+      match candidates.partitionMap.find? (fun (idx, _) => Int.ofNat idx == node.partition) with
+      | none => none
+      | some (_, part) => findActiveSuccessor candidates part node.partition
+    else none
+
+/-- Dead keys we deliberately DO NOT fail over: a master that is STILL
+    PRESENT (flagged by the unhealthy path — its pod exists, NotReady or
+    unreachable from the operator — rather than by a vanished pod) for which
+    the failover would promote nobody.
+
+    Demoting it achieves nothing: there is nobody to promote, so the only
+    effects are harmful — the partition is declared masterless sooner, the
+    node loses the partition assignment the rejoin path keys off
+    (`old.partition >= 0`), so the process that will most likely be back in
+    seconds takes the messier fresh-registration route, and the cluster pays
+    a topology churn for it. Keeping it master costs nothing either: it is
+    NotReady, so K8s has already pulled it out of the client LB.
+
+    This is exactly the decision the drain guard already makes for a
+    Terminating master (handleDrainWithPromotionSingleKey demotes ONLY
+    together with a successful promotion). A VANISHED pod is a different
+    case — nothing is coming back under that entry — and still fails over.
+
+    The successor question is answered by the failover's OWN selection
+    (`failoverSuccessor` on the same `failoverCandidates` value the failover
+    runs on): an Active Slave of the partition, pod live, not unhealthy, not
+    dead this pass, no replica repair held, not a known-unfit follower (R3
+    source eligibility / unreadable, FollowEvidence, a non-normal
+    PromotionEvidence class, pod not Ready), not promotion-blocked. Counting a
+    slave a gate then refuses left the partition with NO master (review B9).
+    The masterless refill is deliberately NOT counted (except the lag hold's
+    followers, below): the refill seats its
+    choice in a LATER commit than the failover's demotion (Main commits after
+    AfterHandleFailover and again after AfterAssignRoles), so a refusal there
+    would leave the partition masterless; the failover's own promotion is in
+    the SAME commit as the demotion.
+
+    Remaining gap, NOT decidable here: refusals made only at the commit
+    boundary from fresh reads (Main.commitChecked: R3 Unknown at commit, the
+    pod / boot / copy identity changed since it was read, the commit-time
+    re-classification, the authoritative-history store re-read — partition
+    not KNOWN, HELD, an intent pending, an intent that cannot be persisted).
+    Each of them aborts the WHOLE pass ("nothing from this pass is
+    committed"), the demotion included, so the old master stays master and
+    the next pass decides again; it does not leave the partition masterless.
+    RUNBOOK #node-unreachable.
+
+    A follower the lag hold owns (`SuccessorGates.lagHeld`) is NOT a reason
+    to keep: the failover lag bound deliberately leaves such a partition
+    masterless, waits a bounded time for the ex-master and then seats the
+    follower NOT LOSS-FREE. Keeping the master instead never started that
+    wait, so a master that does not come back was never replaced (full
+    matrix 41399431858: cluster-init 9, breaker-migration 9). -/
+def unhealthyMastersKept (candidates : FlareClusterState)
+    (deadKeys unhealthyKeys : List String) (lagHeld : List String := []) : List String :=
+  deadKeys.filter fun key =>
+    unhealthyKeys.contains key &&
+    (match candidates.lookupNode key with
+     | none => false
+     | some node => node.role == FlareRole.Master && (failoverSuccessor candidates key).isNone
+         && !candidates.nodeMap.any (fun (k, n) =>
+              lagHeld.contains k && n.role == FlareRole.Slave
+                && n.partition == node.partition && n.state != FlareState.Down))
+
+/-- SAF-10c: a WAL-mode follower not proven eligible to serve reads is OUT of
+    the read set — balance 0 — whatever spec.readBalance.slave says. Applied
+    by the commit path after `mergeClusterState`'s normalization (balance is
+    a per-commit level-triggered policy, see normalizeBalanceEntry). Only
+    Slaves are touched; Down corpses stay byte-identical; masters, proxies
+    and nodes not listed are untouched. -/
+def withholdReads (keys : List String) (nodeMap : List (String × FlareNode))
+    : List (String × FlareNode) :=
+  if keys.isEmpty then nodeMap
+  else nodeMap.map fun kv =>
+    if keys.contains kv.1 && kv.2.role == FlareRole.Slave && kv.2.state != FlareState.Down
+    then (kv.1, { kv.2 with balance := 0 })
+    else kv
+
+/-- Withholding rewrites balance only: keys are preserved. -/
+theorem withholdReads_keys (keys : List String) (l : List (String × FlareNode)) :
+    (withholdReads keys l).map Prod.fst = l.map Prod.fst := by
+  unfold withholdReads
+  split
+  · rfl
+  · rw [List.map_map]
+    apply List.map_congr_left
+    intro kv _
+    simp only [Function.comp]
+    split <;> rfl
+
 /-- Pure dead-node detection (mirrors legacy `detectDeadNodes`, Main.lean:116-124).
     A node is dead only if its pod is gone AND it is a role/state that should be
     actively served. Excludes:
@@ -1014,6 +1249,82 @@ def detectDeadNodesPure (state : FlareClusterState) (livePodKeys : List String)
     && node.role != FlareRole.Proxy
     && node.state != FlareState.Down
     && node.state != FlareState.Prepare) |>.map Prod.fst
+
+/-- Nodes the circuit breaker counts as UNAVAILABLE now (SAF-11).
+
+    `detectDeadNodesPure` reports only nodes that became dead in THIS tick:
+    it skips nodes already Down (failover demotes a dead node to Proxy+Down)
+    and nodes in Prepare. Feeding that to the breaker made the 50% trip need
+    half the cluster to vanish inside one 5 s tick; a majority outage spread
+    over two ticks (25% + 25% on four nodes) never tripped and failover went
+    on one node at a time (5 CI occurrences). The breaker is about capacity
+    lost NOW, so it counts:
+      * the nodes dead this tick (`deadKeys`), plus
+      * nodes already Down, whatever their role, plus
+      * nodes in Prepare whose pod is not live (a pod-less Prepare node was
+        never counted at all).
+    Dead-node detection itself, and so failover, is unchanged. The trip and
+    reset thresholds and their hysteresis proofs apply to this count as
+    before. -/
+def breakerUnavailableKeys (state : FlareClusterState) (deadKeys livePodKeys : List String)
+    : List String :=
+  deadKeys ++ (state.nodeMap.filter (fun (key, node) =>
+    !deadKeys.contains key &&
+    (node.state == FlareState.Down ||
+     (node.state == FlareState.Prepare && !livePodKeys.contains key))) |>.map Prod.fst)
+
+/-- What the breaker counts: `breakerUnavailableKeys` without the placeholder
+    of a planned handover — the old master Master/Down while its pod is still
+    alive and Terminating (flare-lossless-handover). That is an ordered switch
+    in progress, not lost capacity. -/
+def breakerCountedKeys (state : FlareClusterState) (deadKeys livePodKeys terminatingKeys : List String)
+    : List String :=
+  (breakerUnavailableKeys state deadKeys livePodKeys).filter fun k =>
+    !(match state.lookupNode k with
+      | some n => n.role == FlareRole.Master && n.state == FlareState.Down
+                    && terminatingKeys.contains k && livePodKeys.contains k
+      | none => false)
+
+/-- The breaker never counts FEWER nodes than are dead this tick, so every
+    outage that tripped it before still trips it. -/
+theorem breakerUnavailable_ge_dead (state : FlareClusterState) (deadKeys livePodKeys : List String) :
+    deadKeys.length ≤ (breakerUnavailableKeys state deadKeys livePodKeys).length := by
+  simp [breakerUnavailableKeys]
+
+/-- The nodes whose NotReady window starts again: Down in the map committed at
+    the end of the LAST pass and no longer Down now — they rejoined (a new
+    membership; the streak that ended in Down is over). Evidence from the
+    committed map, not from a `node add` event (a duplicate add or a reconnect
+    without Down never resets; a crash-looping node is still declared dead on
+    every cycle; nothing carries over an operator restart). Review of 65427ae;
+    CI 37893780448: the re-registration fell between two passes, so no pass
+    saw the node Down at ListPods and its old streak 6 became 7 — dead again,
+    Down until the 60-tick stuck-Down restart (~7 min). -/
+def rejoinedAfterDown (downAtLastCommit : List String) (state : FlareClusterState) : List String :=
+  downAtLastCommit.filter fun k => match state.lookupNode k with
+    | some n => n.state != FlareState.Down
+    | none => false
+
+/-- NotReady streaks, counted only while the node is an Active master or
+    slave in the committed map. A node in Prepare is NotReady by design (the
+    readiness probe turns green only once flared's own map says it is
+    active), so its streak restarts at 0 instead of carrying over: before
+    this, a node accumulated a long streak during its reconstruction and was
+    declared dead in the very pass it became Active, before its pod could
+    observe the activation (CI 36914077401: PREPARE-REPAIR activated the
+    slave, the next pass failed it over). Nodes not in the map, proxies and
+    Down nodes are not counted either; dead detection ignores them. -/
+def unreadyStreaks (prev : List (String × Nat)) (notReady : List String)
+    (state : FlareClusterState) (fresh : List String := []) : List (String × Nat) :=
+  notReady.filterMap fun k =>
+    match state.lookupNode k with
+    | some n =>
+      -- a node that REJOINED after a committed Down starts its NotReady
+      -- window again (rejoinedAfterDown)
+      let before := if fresh.contains k then 0 else (prev.lookup k).getD 0
+      if n.state == FlareState.Active && (n.role == FlareRole.Master || n.role == FlareRole.Slave)
+      then some (k, before + 1) else none
+    | none => none
 
 /-- Pure draining-node detection: a node whose pod is Terminating
     (deletionTimestamp set) but STILL present+alive in the pod list, and still
@@ -1039,14 +1350,67 @@ def detectDrainingNodesPure (state : FlareClusterState) (terminatingKeys : List 
     never by the corpse of the node that just failed. -/
 def assignProxiesPure (state : FlareClusterState) (crd : FlareClusterView)
     (livePodKeys : List String) (zones : List (String × String) := [])
-    (terminatingKeys : List String := []) : FlareClusterState :=
+    (terminatingKeys : List String := []) (excludedKeys : List String := []) : FlareClusterState :=
   state.nodeMap.foldl (init := state) fun currentState (nodeKey, node) =>
     if node.role == FlareRole.Proxy && node.state != FlareState.Down
         && !terminatingKeys.contains nodeKey then
-      let (newState, _) := autoAssign currentState crd nodeKey node livePodKeys zones
+      let (newState, _) := autoAssign currentState crd nodeKey node livePodKeys zones excludedKeys
       newState
     else
       currentState
+
+/-- The partition's ex-master (`lastMasterOf` holder) is live again and was
+    READ as empty this tick (`knownEmptyKeys`): waiting longer for its copy
+    gains nothing. An ex-master that could not be read is NOT empty — the
+    hold continues (Unknown never releases it). -/
+def exMasterBackEmpty (state : FlareClusterState) (pIdx : Nat)
+    (livePodKeys knownEmptyKeys : List String) : Bool :=
+  state.nodeMap.any (fun (key, n) =>
+    n.lastMasterOf == Int.ofNat pIdx && n.state != FlareState.Down
+      && livePodKeys.contains key && knownEmptyKeys.contains key)
+
+/-- Copies attributed to partition `pIdx` that were NOT observed this tick
+    (decision 2026-10-16: "the only copy" is not "the only copy observed"):
+    a non-master member (partition, ex-master marker or a dead ex-slave's
+    persisted attribution) that is Down, or live but neither read with data
+    nor read empty. Such a copy may hold more than the candidate, so an
+    ex-master read empty does not end the wait while one exists (the wait's
+    own expiry still does, logged NOT LOSS-FREE); an unread copy is never
+    taken for an empty one. -/
+def unobservedCopies (state : FlareClusterState) (pIdx : Nat)
+    (livePodKeys dataBearingKeys knownEmptyKeys : List String) : List String :=
+  (state.nodeMap.filter fun (key, n) =>
+    n.role != FlareRole.Master
+      && (n.partition == Int.ofNat pIdx || n.lastMasterOf == Int.ofNat pIdx || n.formerSlaveOf == Int.ofNat pIdx)
+      && (n.state == FlareState.Down || !livePodKeys.contains key
+          || (!dataBearingKeys.contains key && !knownEmptyKeys.contains key))).map Prod.fst
+
+/-- Why a partition has NO master, in one line for the CRITICAL log
+    (decision 2026-10-16: emitted also when there is no candidate at all or
+    every candidate is forbidden). `classes` = this pass's evidence labels by
+    key (absent = not classified this pass). Stable for an unchanged
+    situation, so the caller can log it on CHANGE (plus a slow repeat). -/
+def masterlessSummary (state : FlareClusterState) (pIdx : Nat) (classes : List (String × String))
+    (livePodKeys dataBearingKeys knownEmptyKeys : List String) : String :=
+  let members := state.nodeMap.filter fun (_, n) =>
+    n.role != FlareRole.Master
+      && (n.partition == Int.ofNat pIdx || n.lastMasterOf == Int.ofNat pIdx || n.formerSlaveOf == Int.ofNat pIdx)
+  if members.isEmpty then "no copy of the partition is registered (none live, none attributed)"
+  else
+    let desc := members.map fun (k, n) =>
+      let seen := if n.state == FlareState.Down || !livePodKeys.contains k then "not live"
+        else if dataBearingKeys.contains k then "data"
+        else if knownEmptyKeys.contains k then "read empty"
+        else "not read"
+      s!"{k} ({seen}; {(classes.lookup k).getD "not classified"})"
+    s!"copies: {String.intercalate ", " desc}"
+
+/-- Log the masterless CRITICAL now? On a CHANGED summary, or when the same
+    one was last logged at least `intervalMs` ago; never every pass. -/
+def masterlessLogDue (last : Option (String × Nat)) (summary : String) (nowMs intervalMs : Nat) : Bool :=
+  match last with
+  | none => true
+  | some (prev, atMs) => prev != summary || nowMs ≥ atMs + intervalMs
 
 /-- Refill a partition that has lost EVERY master entry. Total-partition
     restart re-registers every replica as a syncing Slave/Prepare (never
@@ -1065,25 +1429,51 @@ def assignProxiesPure (state : FlareClusterState) (crd : FlareClusterView)
     serving. -/
 def promoteMasterlessPartition (state : FlareClusterState) (pIdx : Nat)
     (livePodKeys : List String) (standbyKeys : List String := [])
-    (dataBearingKeys : List String := []) : FlareClusterState :=
+    (dataBearingKeys : List String := []) (excludedKeys : List String := [])
+    (holdUnfit : Bool := false) (knownEmptyKeys : List String := [])
+    (blockedKeys : List String := []) (preferKey : Option String := none)
+    (rankedKeys : List String := []) : FlareClusterState :=
   if FlareOperator.Reconciler.hasMasterForPartition state pIdx then state
   else
+    -- within ONE tier (each still has to satisfy that tier's own condition):
+    -- first the PROVEN order (`rankedKeys`: the followers of the last
+    -- master's epoch by applied position, FailoverOrder, proven only — spec
+    -- 4: the largest applied sequence of that epoch is promoted, so a holder
+    -- behind it would discard acknowledged writes), then the recorded history
+    -- holder, then map order as before
+    let pick := fun (pred : String × FlareNode → Bool) =>
+      (FlareOperator.FailoverOrder.firstRanked rankedKeys state.nodeMap pred).orElse (fun _ =>
+        (match preferKey with
+          | some k => state.nodeMap.find? (fun (kv : String × FlareNode) => kv.1 == k && pred kv)
+          | none => none).orElse (fun _ => state.nodeMap.find? pred))
+    -- SAF-10c: `excludedKeys` are followers KNOWN to hold an unusable copy
+    -- (StateMachine/FollowEvidence); they are not "in sync" whatever their
+    -- map state says. The data-bearing last-resort tiers below are left as
+    -- they are: partial data still beats guaranteed emptiness.
     let isActiveSlave := fun ((key, n) : String × FlareNode) =>
       n.role == FlareRole.Slave && n.state == FlareState.Active
         && n.partition == Int.ofNat pIdx && livePodKeys.contains key
+        && !excludedKeys.contains key && !blockedKeys.contains key
     -- Data-bearing residents of THIS partition (slaves or the ex-master).
     -- Scoped per partition so another partition's data never vetoes here.
     let partitionHasData := state.nodeMap.any (fun (key, n) =>
       (n.partition == Int.ofNat pIdx || n.lastMasterOf == Int.ofNat pIdx)
         && dataBearingKeys.contains key && livePodKeys.contains key)
+    let holderFirst : Option (String × FlareNode) := match preferKey with
+      | some k => state.nodeMap.find? (fun (kv : String × FlareNode) =>
+          kv.1 == k && isActiveSlave kv && !standbyKeys.contains k)
+      | none => none
+    let activeFirst := (FlareOperator.FailoverOrder.firstRanked rankedKeys state.nodeMap isActiveSlave).orElse
+      (fun _ => holderFirst)
     let candidate :=
       -- standby slaves are the refill choice of LAST resort (availability
       -- still wins over locality when only standby copies survive).
-      ((state.nodeMap.find? (fun kv => isActiveSlave kv && !standbyKeys.contains kv.1)).orElse
-        (fun _ => state.nodeMap.find? isActiveSlave)).orElse
-      (fun _ => state.nodeMap.find? (fun (key, n) =>
+      -- A ranked follower (newest data) wins over the standby preference.
+      ((activeFirst.orElse (fun _ => pick (fun kv => isActiveSlave kv && !standbyKeys.contains kv.1))).orElse
+        (fun _ => pick isActiveSlave)).orElse
+      (fun _ => pick (fun (key, n) =>
         n.lastMasterOf == Int.ofNat pIdx && n.state != FlareState.Down
-          && livePodKeys.contains key
+          && livePodKeys.contains key && !blockedKeys.contains key
           -- EMPTY-MASTER GUARD: the lastMasterOf holder is only "the newest
           -- surviving copy" when it actually HAS data. A rolled-empty
           -- ex-master must not be crowned (Master/Active is authoritative
@@ -1094,23 +1484,72 @@ def promoteMasterlessPartition (state : FlareClusterState) (pIdx : Nat)
       -- itself, even mid-Prepare — partial data beats guaranteed emptiness,
       -- and without a master a Prepare slave can never finish reconstructing
       -- anyway (deadlock otherwise).
-      |>.orElse (fun _ => state.nodeMap.find? (fun (key, n) =>
+      --
+      -- FAILOVER LAG BOUND (`holdUnfit`): an excluded follower is not crowned
+      -- here while the partition's ex-master is away. It is unfit because it
+      -- is too far behind (or declared its copy unusable), and crowning it
+      -- discards everything it never received (scale evaluation 2026-10-02:
+      -- ~1.83M acknowledged writes); the ex-master returning on its PVC holds
+      -- them. Before this guard the bound only kept the follower out of
+      -- failover, and this tier crowned it in the same pass. The hold ends
+      -- when the ex-master is back WITHOUT data (nothing left to wait for)
+      -- or when Main's wait budget for the partition runs out
+      -- (`holdUnfit` false); either way the crowning is logged NOT LOSS-FREE.
+      |>.orElse (fun _ => pick (fun (key, n) =>
         (n.partition == Int.ofNat pIdx || n.lastMasterOf == Int.ofNat pIdx)
           && n.state != FlareState.Down && n.role != FlareRole.Master
-          && livePodKeys.contains key && dataBearingKeys.contains key))
+          && livePodKeys.contains key && dataBearingKeys.contains key
+          && !blockedKeys.contains key
+          && !(holdUnfit && excludedKeys.contains key
+                && !(exMasterBackEmpty state pIdx livePodKeys knownEmptyKeys
+                      && (unobservedCopies state pIdx livePodKeys dataBearingKeys knownEmptyKeys).isEmpty))))
+      -- An EMPTY partition: no copy holds data and the ex-master came back
+      -- READ empty — an Active slave KNOWN empty that the history evidence
+      -- does not block is seated: nothing can be lost. Without this tier the
+      -- partition stayed masterless for ever: the slave is "unfit" only
+      -- because it follows no one (there is no master), and the last resort
+      -- above needs a data-bearing copy (CI 37899958227, history (3b): a
+      -- partition emptied by a flush_all whose master died). Positive
+      -- evidence only (read empty, not blocked): an unread copy is not empty.
+      |>.orElse (fun _ =>
+        if partitionHasData || !exMasterBackEmpty state pIdx livePodKeys knownEmptyKeys
+            || !(unobservedCopies state pIdx livePodKeys dataBearingKeys knownEmptyKeys).isEmpty then none
+        else pick (fun (key, n) =>
+          n.role == FlareRole.Slave && n.state == FlareState.Active
+            && n.partition == Int.ofNat pIdx && livePodKeys.contains key
+            && knownEmptyKeys.contains key && !blockedKeys.contains key))
     match candidate with
     | some kv =>
       state.addNode kv.1 { kv.2 with
         role := FlareRole.Master, state := FlareState.Active,
-        partition := Int.ofNat pIdx, lastMasterOf := -1 }
+        partition := Int.ofNat pIdx, lastMasterOf := -1, formerSlaveOf := -1 }
     | none => state
 
 /-- Run the masterless-partition refill over every partition of the CRD. -/
 def promoteMasterlessPartitions (state : FlareClusterState) (crd : FlareClusterView)
     (livePodKeys : List String) (standbyKeys : List String := [])
-    (dataBearingKeys : List String := []) : FlareClusterState :=
+    (dataBearingKeys : List String := []) (excludedKeys : List String := [])
+    (holdEnabled : Bool := false) (holdExpiredParts : List Nat := [])
+    (knownEmptyKeys : List String := []) (blockedKeys : List String := [])
+    (holders : List (Nat × String) := []) (rankedKeys : List String := []) : FlareClusterState :=
   (List.range crd.spec.partitions).foldl
-    (fun s pIdx => promoteMasterlessPartition s pIdx livePodKeys standbyKeys dataBearingKeys) state
+    (fun s pIdx => promoteMasterlessPartition s pIdx livePodKeys standbyKeys dataBearingKeys excludedKeys
+      (holdEnabled && !holdExpiredParts.contains pIdx) knownEmptyKeys blockedKeys (holders.lookup pIdx)
+      rankedKeys) state
+
+/-- Partitions left masterless because the refill held an unfit follower
+    (see `promoteMasterlessPartition`): (partition, held follower keys). -/
+def heldForExMaster (state : FlareClusterState) (crd : FlareClusterView)
+    (livePodKeys dataBearingKeys excludedKeys : List String) : List (Nat × List String) :=
+  (List.range crd.spec.partitions).filterMap fun pIdx =>
+    if FlareOperator.Reconciler.hasMasterForPartition state pIdx then none
+    else
+      let held := (state.nodeMap.filter (fun (key, n) =>
+        (n.partition == Int.ofNat pIdx || n.lastMasterOf == Int.ofNat pIdx)
+          && n.state != FlareState.Down && n.role != FlareRole.Master
+          && livePodKeys.contains key && dataBearingKeys.contains key
+          && excludedKeys.contains key)).map Prod.fst
+      if held.isEmpty then none else some (pIdx, held)
 
 /-- Pure replication phase computation (Main.lean:212-272).
     Determines next migration phase based on current phase and CRD spec.
@@ -1170,6 +1609,37 @@ def servicePatchEffects (state : FlareClusterState) (crName : String)
 -- Core Transition Function
 -- ===========================================================================
 
+/-- Log lines for the refill's failover-lag hold: a partition kept
+    masterless while its only data-bearing copy is an unfit follower
+    (CRITICAL: writes to it fail until the ex-master returns), and an unfit
+    follower crowned after all (NOT LOSS-FREE, last resort). -/
+def refillHoldEffects (before after : FlareClusterState) (crd : FlareClusterView)
+    (s : FlareReconcileState) : List FlareEffect :=
+  -- An ex-master re-seated on its own partition is not a last resort: a
+  -- returning ex-master is probed as an idle follower and so counts as unfit,
+  -- but its copy is the newest (CI 37025254148 logged a false NOT LOSS-FREE
+  -- for exactly that).
+  let crowned := (after.nodeMap.filter (fun kv =>
+    kv.2.role == FlareRole.Master && s.followUnfitKeys.contains kv.1
+      && (match before.lookupNode kv.1 with
+          | some o => o.role != FlareRole.Master && o.lastMasterOf != kv.2.partition
+          | none => true))).map Prod.fst
+  let held := if s.followHoldEnabled
+    then heldForExMaster after crd s.livePodKeys s.dataBearingKeys s.followUnfitKeys
+    else []
+  held.map (fun (p, ks) =>
+    FlareEffect.Log s!"[flare-operator] CRITICAL: partition {p} has NO master: its only data-bearing copy {ks} is unfit (too far behind its source, its copy is unusable, or it cannot be proven current: a stale read-source binding with no master to follow), so it is NOT promoted while the ex-master is away or cannot be read; waiting for the ex-master to return with its data (FLARE_FOLLOW_FAILOVER_WAIT_SECONDS); if the ex-master is already back EMPTY, the copy is held by its promotion evidence instead (see the PROMOTION EVIDENCE lines; the wait expiring does not lift that). Writes to this partition fail meanwhile. See RUNBOOK #failover-lag-hold")
+  ++ crowned.map (fun k =>
+    let p : Nat := ((after.lookupNode k).map (·.partition.toNat)).getD 0
+    let why :=
+      if !s.followHoldEnabled then "the hold is disabled (FLARE_FOLLOW_FAILOVER_WAIT_SECONDS=0)"
+      else if s.followHoldExpiredParts.contains p then
+        "the wait for the ex-master EXPIRED (FLARE_FOLLOW_FAILOVER_WAIT_SECONDS): the accepted-loss policy, not evidence that nothing was lost"
+      else if exMasterBackEmpty before p s.livePodKeys s.knownEmptyKeys then
+        "the ex-master came back and was READ empty this tick (complete stats, pod unchanged)"
+      else "no recorded reason (unexpected: the hold should have kept it)"
+    FlareEffect.Log s!"[flare-operator] PROMOTION NOT LOSS-FREE: {k} was seated by the masterless refill as a LAST RESORT although it was judged unfit or not proven current (too far behind, an unusable copy, or a stale read-source binding with no master): {why}. A write it never received is not in its copy; whether any exists is NOT measured. See RUNBOOK #failover-lag-hold")
+
 /-- The core reconciler transition function.
     Each step processes a K8s API response and produces a new state,
     an optional next request, and a list of side effects.
@@ -1203,7 +1673,7 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
 
   | .AfterListPods =>
     match resp with
-    | .PodListResponse pods zones terminating dataBearing unhealthy repairHeld =>
+    | .PodListResponse pods zones terminating dataBearing unhealthy repairHeld followUnfit followUnproven followRanked knownEmpty promotionBlocked historyHolders =>
       -- CRITICAL: Check grace period (Main.lean:355-359)
       if s.graceCycles > 0 then
         -- Still in startup grace period - skip dead node detection AND drain
@@ -1211,29 +1681,45 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
                   livePodKeys := pods,
                   podZones := zones,
                   dataBearingKeys := dataBearing,
+                  knownEmptyKeys := knownEmpty,
                   unhealthyKeys := unhealthy,
                   deadNodeKeys := [],
                   terminatingKeys := terminating,
                   repairHeldKeys := repairHeld,
+                  followUnfitKeys := followUnfit,
+                  promotionBlockedKeys := promotionBlocked,
+                  historyHolders := historyHolders,
+                  followUnprovenKeys := followUnproven,
+                  followRankedKeys := followRanked,
                   drainNodeKeys := [],
                   standbyNodeKeys := match s.cachedCrd with
                     | some crd => resolveStandbyKeys crd.spec.readBalance pods zones
                     | none => [],
                   graceCycles := s.graceCycles - 1 }, none,
-         [.Log s!"[flare-operator] grace period: {s.graceCycles - 1} cycles remaining"])
+         [.Log s!"[flare-operator] grace period: {s.graceCycles - 1}s remaining"])
       else
         -- Grace period over - normal dead-node detection + graceful drain of
         -- any Terminating (deletionTimestamp) master/slave that is still alive.
         let deadKeys := detectDeadNodesPure clusterState pods unhealthy
-        let drainKeys := detectDrainingNodesPure clusterState terminating
+        -- a node held by a ledger (replica repair, or the old master of an
+        -- ordered handover in progress) is moved by that ledger, never by the
+        -- one-map drain (local kind 2026-10-28, S7: with the handover's phase
+        -- unsaved, the same pass drained its master in one map)
+        let drainKeys := detectDrainingNodesPure clusterState (terminating.filter (!repairHeld.contains ·))
         ({ s with reconcileStep := .AfterDetectDead,
                   livePodKeys := pods,
                   podZones := zones,
                   dataBearingKeys := dataBearing,
+                  knownEmptyKeys := knownEmpty,
                   unhealthyKeys := unhealthy,
                   deadNodeKeys := deadKeys,
                   terminatingKeys := terminating,
                   repairHeldKeys := repairHeld,
+                  followUnfitKeys := followUnfit,
+                  promotionBlockedKeys := promotionBlocked,
+                  historyHolders := historyHolders,
+                  followUnprovenKeys := followUnproven,
+                  followRankedKeys := followRanked,
                   drainNodeKeys := drainKeys,
                   standbyNodeKeys := match s.cachedCrd with
                     | some crd => resolveStandbyKeys crd.spec.readBalance pods zones
@@ -1244,7 +1730,10 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
   | .AfterDetectDead =>
     -- Blast Radius Circuit Breaker: Check if failure is too large (AZ-level)
     let totalNodes := clusterState.nodeMap.length
-    let deadCount := s.deadNodeKeys.length
+    -- SAF-11: the breaker counts capacity unavailable NOW (dead this tick +
+    -- already Down + pod-less Prepare), not only this tick's new deaths.
+    let unavailable := breakerCountedKeys clusterState s.deadNodeKeys s.livePodKeys s.terminatingKeys
+    let deadCount := unavailable.length
 
     -- Get circuit breaker config from CRD (default if not available)
     let breakerCfg := match s.cachedCrd with
@@ -1262,11 +1751,13 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
       -- Split the reason: a vanished pod is routine (rescheduling), a PRESENT
       -- pod that stopped being Ready means flared itself died or wedged.
       let unhealthyDead := s.deadNodeKeys.filter (fun k => s.unhealthyKeys.contains k)
+      let earlier := unavailable.filter (fun k => !s.deadNodeKeys.contains k)
       let allEffects :=
-        (if unhealthyDead.isEmpty then
-          [.Log s!"[flare-operator] detected {deadCount} dead nodes: {s.deadNodeKeys}"]
+        (if s.deadNodeKeys.isEmpty then []
+        else if unhealthyDead.isEmpty then
+          [.Log s!"[flare-operator] detected {s.deadNodeKeys.length} dead nodes: {s.deadNodeKeys} (breaker counts {deadCount}/{totalNodes} unavailable; earlier: {earlier})"]
         else
-          [.Log s!"[flare-operator] detected {deadCount} dead nodes: {s.deadNodeKeys}",
+          [.Log s!"[flare-operator] detected {s.deadNodeKeys.length} dead nodes: {s.deadNodeKeys} (breaker counts {deadCount}/{totalNodes} unavailable; earlier: {earlier})",
            .Log s!"[flare-operator] CRITICAL: {unhealthyDead.length} of them are LIVE PODS that stopped serving (flared crashed/wedged, pod still present): {unhealthyDead}"])
         ++ breakerEffects
       ({ s with reconcileStep := nextStep,
@@ -1283,13 +1774,17 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
     -- promotion sees an accurate master/slave grouping.
     -- Keep an unhealthy-but-present master that has no successor (see
     -- unhealthyMastersKept): failing it over would only strip the partition.
-    let keptMasters := unhealthyMastersKept clusterState s.deadNodeKeys s.unhealthyKeys s.livePodKeys
+    -- ONE candidate state for both the keep decision and the promotion
+    -- (failoverCandidates): SAF-10c known-unfit followers, R3-ineligible,
+    -- promotion-blocked, repair-held, dead / unhealthy / pod-less slaves out;
+    -- proven-current first; unproven last (availability still wins, logged
+    -- below); standby after the rest.
+    let candidates := failoverCandidates s.successorGates clusterState
+    let keptMasters := unhealthyMastersKept candidates s.deadNodeKeys s.unhealthyKeys s.successorGates.lagHeld
     let failoverKeys := s.deadNodeKeys.filter (fun k => !keptMasters.contains k)
     let afterFailover :=
       if s.failoverTriggered && !failoverKeys.isEmpty then
-        handleFailoverWithPromotion
-          (deprioritizeStandbySlaves s.standbyNodeKeys clusterState.rebuildPartitionMap)
-          failoverKeys
+        handleFailoverWithPromotion candidates failoverKeys
       else
         clusterState
     -- Graceful drain: demote Terminating masters/slaves to a LIVE proxy and
@@ -1300,7 +1795,13 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
     let newState :=
       if s.drainNodeKeys.isEmpty then afterFailover
       else handleDrainWithPromotion
-        (deprioritizeStandbySlaves s.standbyNodeKeys afterFailover.rebuildPartitionMap)
+        (deprioritizeStandbySlaves s.standbyNodeKeys
+          -- SAF-10c: a PLANNED promotion takes only a follower proven current
+          -- (or a node not in the mode); unproven and unfit are excluded, so
+          -- the drain guard refuses (and reports) rather than seating a
+          -- copy of unknown currency.
+          (shapePromotionCandidates (s.followUnfitKeys ++ s.followUnprovenKeys) s.followRankedKeys []
+            afterFailover.rebuildPartitionMap))
         s.drainNodeKeys
     -- Masters the drain guard kept (no promotable successor): the partition
     -- will lose its only data-bearing node at grace expiry and the operator
@@ -1316,10 +1817,29 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
     let blockedEffects := blocked.map fun k =>
       FlareEffect.Log s!"[flare-operator] CRITICAL: draining master {k} has NO promotable successor — kept as master until its grace period expires; the partition then loses its only data-bearing node (tmpfs: rewind to last S3 backup on reseed). Operator cannot recover this. See RUNBOOK #drain-no-successor"
     let keptEffects := keptMasters.map fun k =>
-      FlareEffect.Log s!"[flare-operator] CRITICAL: master {k} is NOT SERVING (pod present, NotReady) and has NO promotable successor — kept as master rather than demoted, because demoting would only make the partition masterless sooner and break its clean rejoin. The partition is serving nothing until this process recovers. See RUNBOOK #node-unhealthy"
+      FlareEffect.Log s!"[flare-operator] CRITICAL: master {k} is NOT SERVING or UNREACHABLE (pod present; NotReady, or the operator cannot connect to it) and has NO reachable promotable successor — kept as master rather than demoted, because demoting would only make the partition masterless sooner and break its clean rejoin. The partition is serving nothing until this process recovers. See RUNBOOK #node-unhealthy"
+    -- SAF-10c: a WAL-mode follower promoted WITHOUT proof of currency. The
+    -- design (§5.3) forbids describing such a promotion as loss-free.
+    let newlyMaster := fun (k : String) (n : FlareNode) =>
+      n.role == FlareRole.Master
+        && (match clusterState.lookupNode k with
+            | some o => o.role != FlareRole.Master
+            | none => true)
+    let unprovenPromoted := (newState.nodeMap.filter (fun kv =>
+      newlyMaster kv.1 kv.2 && s.followUnprovenKeys.contains kv.1)).map Prod.fst
+    let unprovenEffects := unprovenPromoted.map fun k =>
+      FlareEffect.Log s!"[flare-operator] PROMOTION NOT LOSS-FREE: {k} was promoted for availability while its continuous replication could not be proven current (not following the master's current history with a fresh observation within the promotion bound). Replication is asynchronous: writes the old master acknowledged past this node's applied position are lost. See docs/design-continuous-wal-replication.md §5.3"
+    -- A follower KNOWN unusable can still be crowned by the masterless
+    -- refill's data-bearing last resort (partial data beats emptiness);
+    -- that too must be said out loud.
+    let unfitPromoted := (newState.nodeMap.filter (fun kv =>
+      newlyMaster kv.1 kv.2 && s.followUnfitKeys.contains kv.1)).map Prod.fst
+    let unprovenEffects := unprovenEffects ++ unfitPromoted.map fun k =>
+      FlareEffect.Log s!"[flare-operator] PROMOTION NOT LOSS-FREE: {k} was promoted as a LAST RESORT although its continuous replication had declared its copy unusable (needs_rebuild / incomplete initial copy / another history); it was the only data-bearing copy left. Expect data loss relative to the old master. See docs/design-continuous-wal-replication.md §5.3"
     ({ s with reconcileStep := .AfterAssignRoles,
               updatedClusterState := some newState,
-              drainBlockedCount := blocked.length }, none, drainEffects ++ blockedEffects ++ keptEffects)
+              drainBlockedCount := blocked.length }, none,
+     drainEffects ++ blockedEffects ++ keptEffects ++ unprovenEffects)
 
   | .AfterAssignRoles =>
     -- Assign proxy roles (Main.lean:323-330)
@@ -1329,11 +1849,24 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
       -- otherwise be re-assigned a role here, undoing the drain (flapping).
       -- Also exclude nodes held by the replica-repair ledger: they must stay
       -- Proxy until they have applied that map (see repairHeldKeys).
-      let stateWithProxies := assignProxiesPure state crd s.livePodKeys s.podZones (s.terminatingKeys ++ s.repairHeldKeys)
+      let stateWithProxies := assignProxiesPure state crd s.livePodKeys s.podZones (s.terminatingKeys ++ s.repairHeldKeys) s.followUnfitKeys
       -- Refill partitions that lost every master to a total restart (all
       -- replicas re-registered as Slave/Prepare, so no proxy exists for
       -- autoAssign and no Down entry exists for failover).
-      let stateWithMasters := promoteMasterlessPartitions stateWithProxies crd s.livePodKeys s.standbyNodeKeys s.dataBearingKeys
+      let stateWithMasters := promoteMasterlessPartitions stateWithProxies crd s.livePodKeys s.standbyNodeKeys s.dataBearingKeys s.followUnfitKeys
+        s.followHoldEnabled s.followHoldExpiredParts s.knownEmptyKeys s.promotionBlockedKeys s.historyHolders s.followRankedKeys
+      let holdEffects := refillHoldEffects stateWithProxies stateWithMasters crd s
+      -- a partition still masterless after the refill: what the refill saw
+      -- for each of its copies (CI 807ae59, history (5): a replica on the
+      -- recorded history was neither crowned nor held for 300 s and nothing
+      -- said why)
+      let stillMasterless := (List.range crd.spec.partitions).filter fun p =>
+        !FlareOperator.Reconciler.hasMasterForPartition stateWithMasters p
+      let inputEffects := stillMasterless.map fun p =>
+        let copies := stateWithMasters.nodeMap.filter fun (_, n) => n.partition == Int.ofNat p || n.lastMasterOf == Int.ofNat p
+        let desc := copies.map fun (k, n) =>
+          s!"{k}: role={n.role.toNat} state={n.state.toNat} lastMasterOf={n.lastMasterOf} live={s.livePodKeys.contains k} dataBearing={s.dataBearingKeys.contains k} knownEmpty={s.knownEmptyKeys.contains k} unfit={s.followUnfitKeys.contains k} blocked={s.promotionBlockedKeys.contains k}"
+        FlareEffect.Log s!"[flare-operator] masterless refill inputs p{p} (hold {s.followHoldEnabled}, expired {s.followHoldExpiredParts.contains p}): {desc}"
       -- Persistent-violation detection: a partition whose copies all sit in
       -- one zone survives spread constraints (they place pods, not roles).
       -- Phase 1 warns; automated repair (slave migration) is future work.
@@ -1358,7 +1891,7 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
         | none => (stateWithMasters, [])
       ({ s with reconcileStep := .AfterUpdateConfigMap,
                 updatedClusterState := some stateFinal }, none,
-       warnEffects ++ repairEffects)
+       holdEffects ++ inputEffects ++ warnEffects ++ repairEffects)
     | _, _ =>
       ({ s with reconcileStep := .Error "missing cluster state or CRD at AfterAssignRoles" }, none, [])
 
@@ -1458,12 +1991,16 @@ def flareReconcileCore (resp : K8sResponse) (s : FlareReconcileState)
     | some crd =>
       -- Same guard as the normal path: an unhealthy-but-present master with
       -- no successor is kept, not stripped (see unhealthyMastersKept).
+      -- The same candidate state as the normal path (failoverCandidates), so
+      -- the keep decision and the promotion agree here too.
+      let candidates := failoverCandidates s.successorGates clusterState
       let failoverKeys := s.deadNodeKeys.filter (fun k =>
-        !(unhealthyMastersKept clusterState s.deadNodeKeys s.unhealthyKeys s.livePodKeys).contains k)
+        !(unhealthyMastersKept candidates s.deadNodeKeys s.unhealthyKeys s.successorGates.lagHeld).contains k)
       let afterFailover :=
         if failoverKeys.isEmpty then clusterState
-        else handleFailoverWithPromotion clusterState.rebuildPartitionMap failoverKeys
-      let recovered := promoteMasterlessPartitions afterFailover crd s.livePodKeys [] s.dataBearingKeys
+        else handleFailoverWithPromotion candidates failoverKeys
+      let recovered := promoteMasterlessPartitions afterFailover crd s.livePodKeys [] s.dataBearingKeys s.followUnfitKeys
+        s.followHoldEnabled s.followHoldExpiredParts s.knownEmptyKeys s.promotionBlockedKeys s.historyHolders s.followRankedKeys
       let refilled := (List.range crd.spec.partitions).filter (fun p =>
         !FlareOperator.Reconciler.hasMasterForPartition afterFailover p
           && FlareOperator.Reconciler.hasMasterForPartition recovered p)
@@ -1557,12 +2094,12 @@ theorem flareReconcileStep_decreases_measure (resp : K8sResponse)
       cases crd with
       | some c => left; simp [flareReconcileCore, h, flareReconcileMeasure]
       | none => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]
-    | PodListResponse _ _ _ _ _ _ => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]
+    | PodListResponse _ _ _ _ _ _ _ _ _ _ _ _ => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]
     | PatchResponse _ => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]
     | NoResponse => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]
   | AfterListPods =>
     cases resp with
-    | PodListResponse pods zones terminating dataBearing unhealthy repairHeld =>
+    | PodListResponse pods zones terminating dataBearing unhealthy repairHeld followUnfit followUnproven followRanked knownEmpty promotionBlocked historyHolders =>
       simp only [flareReconcileCore, h]
       split <;> (left; simp [flareReconcileMeasure])
     | CRDResponse _ => right; simp [flareReconcileCore, h, flareReconcileTerminalBool]
@@ -1574,7 +2111,7 @@ theorem flareReconcileStep_decreases_measure (resp : K8sResponse)
     · left; simp [flareReconcileMeasure]  -- deadCount == 0
     · -- deadCount > 0, check circuit breaker decision
       have h_decision := circuitBreakerDecision_only_returns_emergency_or_failover
-        s.deadNodeKeys.length cs.nodeMap.length
+        (breakerCountedKeys cs s.deadNodeKeys s.livePodKeys s.terminatingKeys).length cs.nodeMap.length
         (match s.cachedCrd with | some crd => crd.spec.circuitBreaker | none => {})
         s.wasTripped
       rcases h_decision with hd | hd | hd

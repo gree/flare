@@ -36,9 +36,13 @@ FROM --platform=linux/amd64 ubuntu:noble
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# openssl: the node guard's webhook-cert container (chart
+# nodeGuard.tls.mode=operator) makes its CA and serving certificate with it.
+# ca-certificates depends on it today; named so that cannot change silently.
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     curl \
+    openssl \
     && rm -rf /var/lib/apt/lists/*
 
 # Install kubectl

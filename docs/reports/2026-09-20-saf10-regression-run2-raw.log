@@ -1,0 +1,439 @@
+# === Suite: failover ===
+# Cleaning up cluster 'failover-test'
+# Deploying cluster 'failover-test' in namespace 'flare-failover'
+# Waiting for: namespace flare-failover not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-failover (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap failover-test-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet failover-test-nodes to be ready...
+# Waiting for: all 4 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 4 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 50s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator) ---
+#     (FlareOperator.K8s.F
+#   [TRACE] Event: NodeState failover-test-nodes-2.failover-test-nodes.flare-failover.svc.cluster.local:12121 | Result: Prepare->Active | Reason: reconstruction complete
+#   [TcpClient] Sent node sync v4294967311 (4 nodes) to 10.244.0.94:12121
+#   [TcpClient] Sent node sync v4294967311 (4 nodes) to 10.244.0.93:12121
+#   [TcpClient] Sent node sync v4294967311 (4 nodes) to 10.244.0.95:12121
+#   [TcpClient] Sent node sync v4294967311 (4 nodes) to 10.244.0.96:12121
+#   [TopologyBroadcast] Broadcast complete (v4294967311)
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 6950ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] continuous-replication probe: 2 stats read(s) in 1117ms (tick 3; in-mode remembered: 0, out-of-mode remembered: 0)
+#   [flare-operator] grace period: 20 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 5654ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 19 cycles remaining
+#   [flare-operator] re-sending v4294967313: 2 node(s) are Active in the map but their pods are not Ready yet (activation not applied locally)
+#   [flare-operator] topology changed (v4294967313 → v4294967313), broadcasting
+#   [TopologyBroadcast] Broadcasting node sync v4294967313 (4 nodes) to 4 pods
+#   [TcpClient] Sent node sync v4294967313 (4 nodes) to 10.244.0.93:12121
+#   [TcpClient] Sent node sync v4294967313 (4 nodes) to 10.244.0.96:12121
+#   [TcpClient] Sent node sync v4294967313 (4 nodes) to 10.244.0.94:12121
+#   [TcpClient] Sent node sync v4294967313 (4 nodes) to 10.244.0.95:12121
+#   [TopologyBroadcast] Broadcast complete (v4294967313)
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 6776ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 18 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 5023ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 17 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 4572ms (nodes=4 M=2 S=2 D=0 P=0)
+#   
+# Wrote via failover-test-nodes-0: stored 100/100
+# Distribution: P0=52, P1=48, total=100
+# Killing P0 master: failover-test-nodes-0
+# Waiting for: P0 master available (timeout: 90s)
+#   OK after 0s
+# New P0 master: failover-test-nodes-0 (was: failover-test-nodes-0)
+# Waiting for: balances normalized (timeout: 60s)
+#   OK after 0s
+# P1 curr_items after failover: 48
+# Waiting for: all 4 pods ready (timeout: 180s)
+#   OK after 10s
+# Waiting for: one-master-per-partition (timeout: 60s)
+#   OK after 5s
+# Total curr_items after recovery: 200
+# Cleaning up cluster 'failover-test'
+# === Suite: read-balance ===
+# Cleaning up cluster 'rb-test'
+# Deploying cluster 'rb-test' in namespace 'flare-readbalance'
+# Waiting for: namespace flare-readbalance not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-readbalance (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap rb-test-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet rb-test-nodes to be ready...
+# Waiting for: all 3 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 3 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 60s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator-rb) ---
+#   [TRACE] Event: NodeState rb-test-nodes-2.rb-test-nodes.flare-readbalance.svc.cluster.local:12121 | Result: Prepare->Active | Reason: reconstruction complete
+#   [TcpClient] Sent node sync v4294967310 (3 nodes) to 10.244.0.101:12121
+#   [TcpClient] Sent node sync v4294967310 (3 nodes) to 10.244.0.102:12121
+#   [TcpClient] Sent node sync v4294967310 (3 nodes) to 10.244.0.100:12121
+#   [TopologyBroadcast] Broadcast complete (v4294967310)
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 6672ms (nodes=3 M=1 S=2 D=0 P=0)
+#   [flare-operator] continuous-replication probe: 1 stats read(s) in 524ms (tick 4; in-mode remembered: 0, out-of-mode remembered: 1)
+#   [flare-operator] grace period: 19 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 4643ms (nodes=3 M=1 S=2 D=0 P=0)
+#   [flare-operator] grace period: 18 cycles remaining
+#   [flare-operator] re-sending v4294967311: 1 node(s) are Active in the map but their pods are not Ready yet (activation not applied locally)
+#   [flare-operator] topology changed (v4294967311 → v4294967311), broadcasting
+#   [TopologyBroadcast] Broadcasting node sync v4294967311 (3 nodes) to 3 pods
+#   [TcpClient] Sent node sync v4294967311 (3 nodes) to 10.244.0.100:12121
+#   [TcpClient] Sent node sync v4294967311 (3 nodes) to 10.244.0.102:12121
+#   [TcpClient] Sent node sync v4294967311 (3 nodes) to 10.244.0.101:12121
+#   [TopologyBroadcast] Broadcast complete (v4294967311)
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 6486ms (nodes=3 M=1 S=2 D=0 P=0)
+#   [flare-operator] grace period: 17 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 4111ms (nodes=3 M=1 S=2 D=0 P=0)
+#   [flare-operator] grace period: 16 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 4221ms (nodes=3 M=1 S=2 D=0 P=0)
+#   [flare-operator] grace period: 15 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 4446ms (nodes=3 M=1 S=2 D=0 P=0)
+#   
+# Waiting for: default balances (timeout: 60s)
+#   OK after 0s
+# Waiting for: patched balances (timeout: 90s)
+#   OK after 10s
+# Killing master rb-test-nodes-0 (standby=rb-test-nodes-2)
+# Waiting for: new non-standby master (timeout: 90s)
+#   OK after 15s
+# Promoted: rb-test-nodes-1 (standby correctly skipped)
+# Waiting for: standby balance 0 (timeout: 90s)
+#   OK after 0s
+# Cleaning up cluster 'rb-test'
+# === Suite: operator-restart ===
+# Cleaning up cluster 'op-restart'
+# Deploying cluster 'op-restart' in namespace 'flare-op-restart'
+# Waiting for: namespace flare-op-restart not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-op-restart (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap op-restart-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet op-restart-nodes to be ready...
+# Waiting for: all 4 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 4 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 50s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator) ---
+#     (FlareOperator.K8s.Flare
+#   [TRACE] Event: NodeState op-restart-nodes-2.op-restart-nodes.flare-op-restart.svc.cluster.local:12121 | Result: Prepare->Active | Reason: reconstruction complete
+#   [TcpClient] Sent node sync v4294967311 (4 nodes) to 10.244.0.109:12121
+#   [TcpClient] Sent node sync v4294967311 (4 nodes) to 10.244.0.108:12121
+#   [TcpClient] Sent node sync v4294967311 (4 nodes) to 10.244.0.107:12121
+#   [TcpClient] Sent node sync v4294967311 (4 nodes) to 10.244.0.106:12121
+#   [TopologyBroadcast] Broadcast complete (v4294967311)
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 6812ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] continuous-replication probe: 2 stats read(s) in 1038ms (tick 3; in-mode remembered: 0, out-of-mode remembered: 0)
+#   [flare-operator] grace period: 20 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 5757ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 19 cycles remaining
+#   [flare-operator] re-sending v4294967313: 2 node(s) are Active in the map but their pods are not Ready yet (activation not applied locally)
+#   [flare-operator] topology changed (v4294967313 → v4294967313), broadcasting
+#   [TopologyBroadcast] Broadcasting node sync v4294967313 (4 nodes) to 4 pods
+#   [TcpClient] Sent node sync v4294967313 (4 nodes) to 10.244.0.108:12121
+#   [TcpClient] Sent node sync v4294967313 (4 nodes) to 10.244.0.109:12121
+#   [TcpClient] Sent node sync v4294967313 (4 nodes) to 10.244.0.106:12121
+#   [TcpClient] Sent node sync v4294967313 (4 nodes) to 10.244.0.107:12121
+#   [TopologyBroadcast] Broadcast complete (v4294967313)
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 6630ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 18 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 5050ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 17 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 4520ms (nodes=4 M=2 S=2 D=0 P=0)
+#   
+# masters before restart: [op-restart-nodes-0.op-restart-nodes.flare-op-restart.svc.cluster.local:0:0, op-restart-nodes-1.op-restart-nodes.flare-op-restart.svc.cluster.local:0:1]
+# Waiting for: operator back and serving node sync (timeout: 120s)
+#   OK after 0s
+# masters after restart: [op-restart-nodes-0.op-restart-nodes.flare-op-restart.svc.cluster.local:0:0, op-restart-nodes-1.op-restart-nodes.flare-op-restart.svc.cluster.local:0:1] / [op-restart-nodes-0.op-restart-nodes.flare-op-restart.svc.cluster.local:0:0, op-restart-nodes-1.op-restart-nodes.flare-op-restart.svc.cluster.local:0:1]
+# Waiting for: P0 master available after kill (timeout: 180s)
+#   OK after 10s
+# Cleaning up cluster 'op-restart'
+# === Suite: replica-repair ===
+# Cleaning up cluster 'repl-repair'
+# Deploying cluster 'repl-repair' in namespace 'flare-repl-repair'
+# Waiting for: namespace flare-repl-repair not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-repl-repair (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap repl-repair-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet repl-repair-nodes to be ready...
+# Waiting for: all 2 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 2 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 50s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator) ---
+#   [TcpClient] Sent node sync v4294967303 (2 nodes) to 10.244.0.115:12121
+#   [TopologyBroadcast] Broadcast complete (v4294967303)
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 6200ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 21 cycles remaining
+#   [flare-operator] re-sending v4294967304: 1 node(s) are Active in the map but their pods are not Ready yet (activation not applied locally)
+#   [flare-operator] topology changed (v4294967304 → v4294967304), broadcasting
+#   [TopologyBroadcast] Broadcasting node sync v4294967304 (2 nodes) to 2 pods
+#   [TcpClient] Sent node sync v4294967304 (2 nodes) to 10.244.0.115:12121
+#   [TcpClient] Sent node sync v4294967304 (2 nodes) to 10.244.0.114:12121
+#   [TopologyBroadcast] Broadcast complete (v4294967304)
+#   [flare-operator] replica repair ledger initialized from repl-repair-nodes-0.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121: 0 destination counter(s) recorded as baseline, none attributed
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 7710ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [DEBUG] Received command: node sync
+#   [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+#   [DEBUG] Sending response: NODE repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local 12121 1 0 0 0 17 | NODE repl-repair-nodes-0.repl-repair-nodes.flare-repl-repair.svc.cluster.local 12121 0 0 0 100 16 | END | 
+#   [flare-operator] continuous-replication probe: 1 stats read(s) in 530ms (tick 3; in-mode remembered: 0, out-of-mode remembered: 0)
+#   [flare-operator] grace period: 20 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 5708ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 19 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 4101ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 18 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 5492ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 17 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 5229ms (nodes=2 M=1 S=1 D=0 P=0)
+#   
+# Waiting for: slave's local items reach the master's (timeout: 60s)
+#   OK after 0s
+# fault: rejecting 10.244.0.114 → 10.244.0.115:12121 on flare-e2e-control-plane
+# Waiting for: master counts dropped writes to the slave (was 0) (timeout: 120s)
+#   OK after 20s
+# stored 30/30 on the master; master dropped 2 write(s); local items master=70 slave=40 (gap 30)
+# fault cleared: 10.244.0.114 → 10.244.0.115 forwards again
+# slave was missing 30 item(s) locally while cut off
+# Waiting for: operator requests a replica repair (probe interval 15s) (timeout: 150s)
+#   OK after 0s
+# Waiting for: ledger in status names the slave (timeout: 60s)
+#   OK after 0s
+# Waiting for: operator records REPLICA REPAIR COMPLETE (timeout: 300s)
+#   OK after 35s
+# Waiting for: ledger persisted as empty (timeout: 60s)
+#   OK after 0s
+# Waiting for: slave's local items catch up to the master's (timeout: 120s)
+#   OK after 0s
+# Waiting for: restarted operator restores the ledger from status (timeout: 120s)
+#   OK after 50s
+# fault: rejecting 10.244.0.114 → 10.244.0.115:12121 on flare-e2e-control-plane
+# Waiting for: master counts dropped writes to the slave (was 2) (timeout: 120s)
+#   OK after 20s
+# stored 20/20 on the master; master dropped 2 write(s); local items master=90 slave=70 (gap 20)
+# fault cleared: 10.244.0.114 → 10.244.0.115 forwards again
+# Waiting for: operator HOLDS the repair (gate closed) (timeout: 150s)
+#   OK after 25s
+# Waiting for: HELD entry persisted to status with its gate reason (timeout: 90s)
+#   OK after 0s
+# Waiting for: restarted operator restores the HELD request (timeout: 120s)
+#   OK after 0s
+# Waiting for: operator records REPLICA REPAIR COMPLETE (timeout: 360s)
+#   OK after 80s
+# Waiting for: ledger persisted as empty (timeout: 60s)
+#   OK after 0s
+# Waiting for: slave's local items catch up to the master's (timeout: 120s)
+#   OK after 0s
+# fault: the operator may no longer patch flareclusters/status
+# fault: rejecting 10.244.0.114 → 10.244.0.115:12121 on flare-e2e-control-plane
+# Waiting for: master counts dropped writes to the slave (was 4) (timeout: 120s)
+#   OK after 20s
+# stored 20/20 on the master; master dropped 2 write(s); local items master=110 slave=90 (gap 20)
+# fault cleared: 10.244.0.114 → 10.244.0.115 forwards again
+# Waiting for: operator marks the ledger UNSAVED after the failed persist (timeout: 150s)
+#   OK after 30s
+# Waiting for: operator retries the unsaved ledger on a later pass (timeout: 90s)
+#   OK after 10s
+# fault cleared: status write allowed again
+# Waiting for: the operator's OWN service account may patch flareclusters/status again (probed from inside its pod) (timeout: 300s)
+#   OK after 0s
+# RBAC restore became effective for the operator's SA after 1s
+# Waiting for: the unsaved ledger lands once the write is allowed (entry present in status) (timeout: 300s)
+#   OK after 10s
+# unsaved ledger landed 10s after the permission became effective for the operator (via the top-of-pass retry)
+# Waiting for: restarted operator restores the HELD request from status (timeout: 120s)
+#   OK after 0s
+# Waiting for: operator records REPLICA REPAIR COMPLETE (timeout: 360s)
+#   OK after 75s
+# Waiting for: ledger persisted as empty (timeout: 60s)
+#   OK after 0s
+# Waiting for: slave's local items catch up to the master's (timeout: 120s)
+#   OK after 0s
+# fault: status.replicaRepairs.entries is now a string (unparseable)
+# Waiting for: restarted operator reports the ledger UNAVAILABLE (not absent) (timeout: 180s)
+#   OK after 80s
+# fault: rejecting 10.244.0.114 → 10.244.0.115:12121 on flare-e2e-control-plane
+# Waiting for: master counts dropped writes to the slave (was 6) (timeout: 120s)
+#   OK after 20s
+# stored 20/20 on the master; master dropped 2 write(s); local items master=130 slave=110 (gap 20)
+# fault cleared: 10.244.0.114 → 10.244.0.115 forwards again
+# fault cleared: ledger restored to its pre-corruption content
+# Waiting for: ledger RECOVERED from status (timeout: 120s)
+#   OK after 5s
+# Waiting for: the drop seen during the outage is requested after recovery (timeout: 150s)
+#   OK after 5s
+# Waiting for: operator records REPLICA REPAIR COMPLETE (timeout: 360s)
+#   OK after 35s
+# Waiting for: ledger persisted as empty (timeout: 60s)
+#   OK after 0s
+# Waiting for: slave's local items catch up to the master's (timeout: 120s)
+#   OK after 0s
+# Waiting for: victim pod has a UID (timeout: 60s)
+#   OK after 0s
+# Waiting for: victim pod gone (timeout: 90s)
+#   OK after 35s
+# Waiting for: replacement pod has a UID (timeout: 60s)
+#   OK after 0s
+# apiserver refused the stale-UID delete (409); replacement 2e8aafcf-770d-455a-8c98-458be7cb7f0d untouched
+# Waiting for: blackhole pod has an IP (timeout: 60s)
+#   OK after 5s
+# black-hole delete returned in 3352ms; server accepted 517 byte(s):  | 000 | curl_exit=28 | 
+# fault cleared: 10.244.0.114 → 10.244.0.115 forwards again
+# Cleaning up cluster 'repl-repair'
+# === Suite: prepare-evidence ===
+# Cleaning up cluster 'prep-evid'
+# Deploying cluster 'prep-evid' in namespace 'flare-prep-evid'
+# Waiting for: namespace flare-prep-evid not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-prep-evid (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap prep-evid-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet prep-evid-nodes to be ready...
+# Waiting for: all 2 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 2 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 20s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator) ---
+#   [DEBUG] Sending response: NODE prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local 12121 1 1 0 0 17 | NODE prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local 12121 0 0 0 100 16 | END | 
+#   [TopologyBroadcast] Broadcasting node sync v4294967303 (2 nodes) to 2 pods
+#   [DEBUG] Received command: node state prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local 12121 active
+#   [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeState
+#     "prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local"
+#     12121
+#     (FlareOperator.K8s.FlareSta
+#   [flare-operator] TEST SEAM: dropping node state event from prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 (FLARE_TEST_DROP_NODE_STATE)
+#   [TRACE] Event: NodeState prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 | Result: Prepare->Active | Reason: reconstruction complete
+#   [TcpClient] Sent node sync v4294967303 (2 nodes) to 10.244.0.128:12121
+#   [TcpClient] Sent node sync v4294967303 (2 nodes) to 10.244.0.127:12121
+#   [TopologyBroadcast] Broadcast complete (v4294967303)
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 6601ms (nodes=2 M=1 S=1 D=0 P=1)
+#   [flare-operator] continuous-replication probe: 1 stats read(s) in 532ms (tick 2; in-mode remembered: 0, out-of-mode remembered: 0)
+#   [flare-operator] grace period: 21 cycles remaining
+#   [flare-operator] topology changed (v4294967303 → v4294967310), broadcasting
+#   [TopologyBroadcast] Broadcasting node sync v4294967310 (2 nodes) to 2 pods
+#   [DEBUG] Received command: node state prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local 12121 active
+#   [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeState
+#     "prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local"
+#     12121
+#     (FlareOperator.K8s.FlareSta
+#   [flare-operator] TEST SEAM: dropping node state event from prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 (FLARE_TEST_DROP_NODE_STATE)
+#   [TRACE] Event: NodeState prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 | Result: Prepare->Active | Reason: reconstruction complete
+#   [TcpClient] Sent node sync v4294967310 (2 nodes) to 10.244.0.128:12121
+#   [TcpClient] Sent node sync v4294967310 (2 nodes) to 10.244.0.127:12121
+#   [TopologyBroadcast] Broadcast complete (v4294967310)
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 7043ms (nodes=2 M=1 S=1 D=0 P=1)
+#   
+# Waiting for: seam drops a node state event (timeout: 240s)
+#   OK after 0s
+# Waiting for: the slave reports a completed reconstruction (timeout: 120s)
+#   OK after 0s
+# Waiting for: PREPARE-REPAIR activates on evidence (timeout: 300s)
+#   OK after 120s
+# Waiting for: slave Active in the operator's map (timeout: 60s)
+#   OK after 0s
+# Cleaning up cluster 'prep-evid'
+# Tests: 30, Failures: 0
+# RESULT: PASS
+1..30
+ok 1 - operator responds to ping
+ok 2 - node sync assigns a UNIQUE thread_type to every node
+ok 3 - one-master-per-partition
+ok 4 - META returns partition-size 1024
+ok 5 - write 100 keys via proxy routing
+ok 6 - verify key distribution (P0 > 0, P1 > 0, total = 100)
+ok 7 - failover: new master elected for P0
+ok 8 - failover: balance follows role (master=100, slaves=0)
+ok 9 - failover: one-master-per-partition maintained
+ok 10 - failover: P1 curr_items unchanged
+ok 11 - recovery: all pods ready
+ok 12 - recovery: one-master-per-partition
+ok 13 - recovery: total curr_items across cluster
+ok 14 - default policy converges (master=100, slaves=0)
+ok 15 - policy patch (slave=100 + standby by podName) converges
+ok 16 - master kill promotes the NON-standby slave
+ok 17 - standby stays balance=0 across the failover
+ok 18 - cluster shape survives an operator restart (state reload)
+ok 19 - writes still served after operator restart
+ok 20 - failover still works after the restart (reloaded state is live)
+ok 21 - control: writes to the master replicate to the slave
+ok 22 - cut link: the master drops replica writes and the operator requests a repair
+ok 23 - the repair runs: held as proxy, confirmed, re-seated, reconstructed; keys recovered without another drop
+ok 24 - SAF-05: a drop seen while resync is disabled is held, survives an operator restart, and is repaired once the gate opens
+ok 25 - SAF-05: a ledger save that fails is marked unsaved, retried every pass, lands when allowed, and survives a restart
+ok 26 - SAF-05: a corrupt ledger is held as unavailable, never replaced by an empty one; the drop seen meanwhile is recovered once it is readable
+ok 27 - SAF-06: the delete carries the observed pod UID as an API precondition; a same-name pod with another UID is refused by the apiserver
+ok 28 - SAF-06: the UID-precondition delete has a deadline — a server that accepts and never answers returns within it
+ok 29 - the lost-activation condition is staged: the activation is dropped and a reconstruction completed
+ok 30 - the repair re-derives Prepare→Active from completion evidence and names it
+EXIT=0

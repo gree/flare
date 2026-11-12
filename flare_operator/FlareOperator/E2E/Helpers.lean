@@ -33,9 +33,26 @@ def kubectlApplyStdin (yaml : String) : IO (Except String String) := do
 def kubectlDelete (resource : String) (name ns : String) : IO Unit := do
   let _ ← kubectl ["delete", resource, name, "-n", ns, "--ignore-not-found"]
 
+/-- Copy retention (§9): the rebuild reserve E2E clusters run with. Unset,
+    every staged rebuild stops (rebuild_blocked=reserve_unset). -/
+def e2eRebuildReserveBytes : Nat := 67108864
+
+/-- A FlareCluster patch that sets `spec.rocksdb` makes the operator rewrite
+    extra.conf from the CR alone, so the reserve baked into the boot-time
+    extra.conf would be gone at the next pod start: such a patch carries the
+    reserve too, unless it sets one itself. -/
+def withRebuildReserve (resource patchJson : String) : String :=
+  let has := fun (n : String) => (patchJson.splitOn n).length > 1
+  if resource != "flarecluster" || has "rebuildReserveBytes" then patchJson
+  else if has "\"rocksdb\":{}" then
+    patchJson.replace "\"rocksdb\":{}" s!"\"rocksdb\":\{\"rebuildReserveBytes\":{e2eRebuildReserveBytes}}"
+  else if has "\"rocksdb\":{" then
+    patchJson.replace "\"rocksdb\":{" s!"\"rocksdb\":\{\"rebuildReserveBytes\":{e2eRebuildReserveBytes},"
+  else patchJson
+
 /-- Patch a K8s resource with JSON merge patch. -/
 def kubectlPatch (resource name ns patchJson : String) : IO (Except String String) :=
-  kubectl ["patch", resource, name, "-n", ns, "--type=merge", "-p", patchJson]
+  kubectl ["patch", resource, name, "-n", ns, "--type=merge", "-p", withRebuildReserve resource patchJson]
 
 /-- Wait for a resource to be ready using kubectl wait. -/
 def kubectlWaitReady (resource ns : String) (timeoutSec : Nat) : IO Bool := do
@@ -44,8 +61,25 @@ def kubectlWaitReady (resource ns : String) (timeoutSec : Nat) : IO Bool := do
   | .ok _ => return true
   | .error _ => return false
 
-/-- Wait for rollout status of a resource. -/
+/-- Wait for rollout status of a resource. A StatefulSet uses updateStrategy
+    OnDelete (A0: the operator replaces its pods), for which `kubectl rollout
+    status` is not available: it is done when the controller has seen the
+    latest spec and every replica is on the update revision and Ready. -/
 def kubectlRolloutStatus (resource ns : String) (timeoutSec : Nat) : IO Bool := do
+  if resource.startsWith "statefulset/" then
+    let deadline := (← IO.monoMsNow) + timeoutSec * 1000
+    repeat
+      match ← kubectl ["get", resource, "-n", ns, "-o",
+          "jsonpath={.metadata.generation}|{.status.observedGeneration}|{.spec.replicas}|{.status.updatedReplicas}|{.status.readyReplicas}"] with
+      | .ok out =>
+        match (out.trim.splitOn "|").map (·.toNat?) with
+        | [some g, some og, some n, some u, some r] =>
+          if og >= g && u == n && r == n then return true
+        | _ => pure ()
+      | .error _ => pure ()
+      if (← IO.monoMsNow) >= deadline then return false
+      IO.sleep 3000
+    return false
   match ← kubectl ["rollout", "status", resource, "-n", ns,
                     s!"--timeout={timeoutSec}s"] with
   | .ok _ => return true
@@ -78,51 +112,122 @@ def kubectlLogsLabel (label ns : String) (tail : Nat) : IO String := do
 -- Polling
 -- ===========================================================================
 
-/-- Wait for a condition, polling every 5s. Returns true if condition met. -/
+/-- One decision of `waitForCondition`, pure (unit tested). Times are
+    monotonic milliseconds. A check is only STARTED before the deadline; a
+    check that holds only AFTER the deadline is `late`, which the wait
+    reports as a timeout (not a success). -/
+inductive WaitStep where
+  | ok | late | timeout | again
+  deriving Repr, BEq
+
+/-- Before a check: may it start? -/
+def mayStartCheck (now deadline : Nat) : Bool := now < deadline
+
+/-- After a check that ended at `ended`. -/
+def waitStep (ok : Bool) (ended deadline : Nat) : WaitStep :=
+  if ok then (if ended ≤ deadline then .ok else .late)
+  else if ended ≥ deadline then .timeout else .again
+
+/-- Wait until `check` holds, for at most `timeoutSec` seconds of REAL
+    (monotonic) time (CI 37731207056: the elapsed time used to count only the
+    5 s sleeps, so slow checks stretched a "300 s" wait far beyond 300 s).
+    A check is started only before the deadline, and a check that holds only
+    after it counts as a TIMEOUT (logged as late) — so an OK is a success
+    within the limit. The call can still return up to one check's duration
+    after the deadline: a check is bounded only by the subprocess timeouts it
+    uses itself (every `kubectl` call: 30 s + 5 s kill; a check calling an
+    unbounded subprocess can overrun by that much). Each check slower than
+    10 s, and on a timeout the last kubectl failure seen during the wait, are
+    logged — to tell "the condition never held" from "it could not be
+    observed". -/
 def waitForCondition (desc : String) (timeoutSec : Nat) (check : IO Bool) : IO Bool := do
   IO.eprintln s!"# Waiting for: {desc} (timeout: {timeoutSec}s)"
-  let rec loop (elapsed : Nat) (fuel : Nat) : IO Bool := do
-    match fuel with
-    | 0 => return false
-    | fuel + 1 =>
-      if elapsed >= timeoutSec then
-        IO.eprintln s!"#   TIMEOUT after {timeoutSec}s waiting for: {desc}"
-        return false
-      let ok ← try check catch _ => pure false
-      if ok then
-        IO.eprintln s!"#   OK after {elapsed}s"
-        return true
-      IO.sleep 5000
-      loop (elapsed + 5) fuel
-  loop 0 (timeoutSec / 5 + 1)
+  let start ← IO.monoMsNow
+  let deadline := start + timeoutSec * 1000
+  let (seq0, _) ← FlareOperator.Kubectl.lastKubectlFailure.get
+  let mut checks := 0
+  let mut slowest := 0
+  let timeoutLine := fun (now checks slowest : Nat) (extra : String) => do
+    let (seq, last) ← FlareOperator.Kubectl.lastKubectlFailure.get
+    IO.eprintln s!"#   TIMEOUT after {(now - start) / 1000}s (limit {timeoutSec}s; {checks} check(s), slowest {slowest / 1000}s){extra} waiting for: {desc}{if seq != seq0 then s!"; last kubectl failure during the wait: {last}" else "; no kubectl failure during the wait"}"
+  repeat
+    let t0 ← IO.monoMsNow
+    if !mayStartCheck t0 deadline then
+      timeoutLine t0 checks slowest ""
+      return false
+    let ok ← try check catch _ => pure false
+    let t1 ← IO.monoMsNow
+    checks := checks + 1
+    let dur := t1 - t0
+    if dur > slowest then slowest := dur
+    if dur > 10000 then
+      let (seq, last) ← FlareOperator.Kubectl.lastKubectlFailure.get
+      IO.eprintln s!"#   slow check #{checks}: {dur / 1000}s{if seq != seq0 then s!" (last kubectl failure: {last})" else ""}"
+    match waitStep ok t1 deadline with
+    | .ok =>
+      IO.eprintln s!"#   OK after {(t1 - start) / 1000}s"
+      return true
+    | .late =>
+      timeoutLine t1 checks slowest s!"; the condition held only at {(t1 - start) / 1000}s, AFTER the limit (late, not a success)"
+      return false
+    | .timeout =>
+      timeoutLine t1 checks slowest ""
+      return false
+    | .again => IO.sleep 5000
+  return false
 
 -- ===========================================================================
 -- String helpers
 -- ===========================================================================
 
-/-- Check if needle is a substring of haystack. -/
+/-- Check if needle is a substring of haystack. Compares bytes in place
+    (`String.substrEq`) at each character position: O(n·m) without copying.
+    The previous version took `haystack.drop i` at every position — a copy
+    of the rest of the string each time, quadratic in the log size — and a
+    growing flared log made each wait check slower (CI 37740298550
+    copy-protection: checks of 11, 17, 27, 46, 88, 196 s). -/
 def containsSubstr (haystack needle : String) : Bool :=
-  let hLen := haystack.length
-  let nLen := needle.length
-  if nLen > hLen then false
+  let nb := needle.endPos.byteIdx
+  let hb := haystack.endPos.byteIdx
+  if nb == 0 then true
+  else if nb > hb then false
   else
-    let rec go (i : Nat) (fuel : Nat) : Bool :=
+    let rec go (p : String.Pos) (fuel : Nat) : Bool :=
       match fuel with
       | 0 => false
       | fuel + 1 =>
-        if i + nLen > hLen then false
-        else if (haystack.drop i).startsWith needle then true
-        else go (i + 1) fuel
-    go 0 (hLen + 1)
+        if p.byteIdx + nb > hb then false
+        else if haystack.substrEq p needle 0 nb then true
+        else go (haystack.next p) fuel
+    go 0 (hb + 1)
 
 -- ===========================================================================
 -- TCP/protocol helpers (via kubectl exec in debug pod)
 -- ===========================================================================
 
+/-- The COMPLETE logs of every pod in `ns` (all containers, timestamps, the
+    previous container too) into $FLARE_E2E_LOG_DIR/<ns>/ — uploaded with the
+    CI results. The printed tails below lost the decisive windows (CI 28761ff:
+    history (5)'s 240 s, authority 29's adoption). No-op without the variable. -/
+def saveFullLogs (ns : String) (label : String := "") : IO Unit := do
+  let some root ← IO.getEnv "FLARE_E2E_LOG_DIR" | return
+  let dir := if label.isEmpty then s!"{root}/{ns}" else s!"{root}/{ns}/{label}"
+  discard <| IO.Process.output { cmd := "mkdir", args := #["-p", dir] }
+  let pods ← match ← kubectl ["get", "pods", "-n", ns, "-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}"] with
+    | .ok o => pure ((o.splitOn "\n").map String.trim |>.filter (!·.isEmpty))
+    | .error _ => pure []
+  for pod in pods do
+    for (suffix, extra) in [("", ([] : List String)), (".previous", ["--previous"])] do
+      match ← kubectl (["logs", "-n", ns, pod, "--all-containers", "--timestamps", "--tail=-1"] ++ extra) with
+      | .ok out => if !out.isEmpty then IO.FS.writeFile s!"{dir}/{pod}{suffix}.log" out
+      | .error _ => pure ()
+  IO.eprintln s!"# full logs of {pods.length} pod(s) in {ns} saved under {dir}"
+
 /-- Dump the suite's operator + flared logs (call from TestSuite.onFailure:
     per-suite operators are deleted in teardown, so the CI end-of-run dump
     can never capture the failing suite's logs — this hook point can). -/
 def dumpClusterDiagnostics (ns : String) (operatorLabel : String := "app=flare-operator") : IO Unit := do
+  saveFullLogs ns
   -- NOTE: suites with a custom operatorName MUST pass their own label
   -- (s!"app={cfg.operatorName}") — the default matches nothing there and the
   -- operator-log block comes back silently empty (bit us on a real failure).
@@ -151,6 +256,21 @@ def dumpClusterDiagnostics (ns : String) (operatorLabel : String := "app=flare-o
   match ← kubectl ["describe", "pods", "-n", ns, "-l", "app=flare"] with
   | .ok out => for line in out.splitOn "\n" do IO.eprintln s!"# {line}"
   | .error e => IO.eprintln s!"# (describe unavailable: {e})"
+  -- name resolution at failure time (T24, CI 38186142795: a connect to a
+  -- pod name another connection had just reached timed out; which address
+  -- the name gave could not be told afterwards)
+  IO.eprintln s!"# === endpointslices ({ns}) ==="
+  match ← kubectl ["get", "endpointslices", "-n", ns, "-o",
+      "custom-columns=NAME:.metadata.name,ADDRS:.endpoints[*].addresses,HOSTS:.endpoints[*].hostname,READY:.endpoints[*].conditions.ready"] with
+  | .ok out => for line in out.splitOn "\n" do IO.eprintln s!"# {line}"
+  | .error e => IO.eprintln s!"# (endpointslices unavailable: {e})"
+  IO.eprintln "# === coredns (replicas, Corefile) ==="
+  match ← kubectl ["get", "deploy", "coredns", "-n", "kube-system", "-o", "jsonpath={.status.readyReplicas}/{.spec.replicas}"] with
+  | .ok out => IO.eprintln s!"# coredns ready/replicas: {out.trim}"
+  | .error e => IO.eprintln s!"# (coredns unavailable: {e})"
+  match ← kubectl ["get", "configmap", "coredns", "-n", "kube-system", "-o", "jsonpath={.data.Corefile}"] with
+  | .ok out => for line in out.splitOn "\n" do IO.eprintln s!"# {line}"
+  | .error e => IO.eprintln s!"# (Corefile unavailable: {e})"
 
 /-- Execute a command in the debug pod. -/
 def execInDebugPod (debugPod ns cmd : String) : IO (Except String String) := do
@@ -177,6 +297,13 @@ def memcachedGet (debugPod ns targetIp : String) (port : Nat) (key : String) : I
   match ← execInDebugPod debugPod ns cmd with
   | .ok output =>
     let lines := output.splitOn "\n" |>.map String.trim |>.filter (· != "")
+    -- An explicit error is NOT a miss (read-unavailable-error answers
+    -- SERVER_ERROR when a get cannot be served). This helper's callers only
+    -- see "no value", so make the difference visible in the log; tests that
+    -- must tell them apart use TraceMatch.parseGetReplies.
+    if lines.any (fun l => l.startsWith "SERVER_ERROR" || l.startsWith "CLIENT_ERROR" || l.startsWith "ERROR") then
+      IO.eprintln s!"# memcachedGet {key} on {targetIp}: EXPLICIT ERROR (not a miss): {lines.head?.getD ""}"
+      return none
     -- memcached GET response: VALUE <key> <flags> <len>\r\n<data>\r\n
     match lines with
     | _ :: dataLine :: _ =>

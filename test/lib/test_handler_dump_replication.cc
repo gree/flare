@@ -31,6 +31,7 @@
 #include "mock_storage.h"
 
 #include <cppcutter.h>
+#include <time.h>
 
 using namespace std;
 using namespace gree::flare;
@@ -88,11 +89,19 @@ namespace test_handler_dump_replication {
 		delete st;
 		delete cl;
 		delete stats_object;
+		handler_dump_replication::seed_connect_attempts = 6;
+		handler_dump_replication::seed_retry_base_ms = 5000;
 
 		if (sigaction(SIGUSR1, &prev_sigusr1_action, NULL) < 0) {
 			log_err("sigaction for %d failed: %s (%d)", SIGUSR1, util::strerror(errno), errno);
 			return;
 		}
+	}
+
+	uint64_t crepl(const string& name) {
+		map<string, uint64_t> m = stats_object->get_crepl();
+		map<string, uint64_t>::const_iterator it = m.find(name);
+		return it == m.end() ? 0 : it->second;
 	}
 
 	void prepare_storage(int item_num, int size = 0) {
@@ -121,7 +130,20 @@ namespace test_handler_dump_replication {
 		return t;
 	}
 
-	void response_dump(string response, int key_id, int data_size = 0) {
+	// monotonic microseconds, not truncated wall-clock milliseconds: with
+	// truncation a correct run of, for example, 500.4 ms (a hypothetical
+	// value — the failing run's elapsed time was not recorded) reads as 500
+	// and fails "> 500"
+	static long now_usec() {
+		struct timespec ts;
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		return ts.tv_sec * 1000000L + ts.tv_nsec / 1000L;
+	}
+
+	// `before_ack_usec`: the monotonic time taken right BEFORE the reply is
+	// sent — the handler can start its wait as soon as it has the reply, so
+	// only a time taken before sending is causally before that wait
+	void response_dump(string response, int key_id, int data_size = 0, long* before_ack_usec = NULL) {
 		int size = 5;
 		string data = "VALUE\n";
 		if (data_size > 0) {
@@ -136,6 +158,9 @@ namespace test_handler_dump_replication {
 			char *p, *q;
 			cs[0]->readline(&p);
 			cs[0]->readline(&q);
+			if (before_ack_usec != NULL) {
+				*before_ack_usec = now_usec();
+			}
 			cs[0]->writeline(response.c_str());
 			string req = "set key" + boost::lexical_cast<string>(key_id) + " 0 0 " + boost::lexical_cast<string>(size) + "\n";
 			cut_assert_equal_string(req.c_str(), p);
@@ -145,13 +170,6 @@ namespace test_handler_dump_replication {
 		}
 	}
 
-	long get_elapsed_msec(timeval& start_tv) {
-		static const long one_sec = 1000000L;
-		struct timeval end_tv;
-		gettimeofday(&end_tv, NULL);
-		long elapsed_usec = ((end_tv.tv_sec - start_tv.tv_sec) * one_sec + (end_tv.tv_usec - start_tv.tv_usec));
-		return elapsed_usec / 1000;
-	}
 
 	void test_run_success_single_partition() {
 		// prepare
@@ -199,22 +217,30 @@ namespace test_handler_dump_replication {
 		cl->set_partition(0, master);
 		cl->set_reconstruction_interval(100 * 1000); // 100 msecs
 		prepare_storage(5);
-		struct timeval start_tv;
-		gettimeofday(&start_tv, NULL);
+		const long start_usec = now_usec();
 
 		// execute
 		shared_thread t = start_handler();
+		long before_first_ack = 0;
 		for (int i = 0; i < 5; i++) {
-			response_dump("STORED", i);
+			response_dump("STORED", i, 0, i == 0 ? &before_first_ack : NULL);
 		}
+		// the throttle's invariant: after each reply the handler sleeps at
+		// least the interval (100 ms) before sending the next set, so from
+		// just BEFORE the first reply until request 4 has arrived there are at
+		// least 4 x 100 ms (usleep sleeps at least what it is asked; exactly
+		// 400 ms is correct). The start point precedes the first wait
+		// causally: it is taken before the reply that lets the handler go on.
+		long gap_usec = now_usec() - before_first_ack;
+		cut_assert_operator(gap_usec, >=, 4 * 100 * 1000L);
 
 		usleep(100 * 1000); // waiting for completion of sleep of last key
 
-		long elapsed_msec = get_elapsed_msec(start_tv);
-		// Lower bound proves the throttle actually slept; the upper bound only
-		// guards against a gross overshoot. 1000ms was too tight for a loaded
-		// CI runner (observed 1003ms — a 3.5ms scheduling wobble, not a bug).
-		cut_assert_true(elapsed_msec > 500 && elapsed_msec < 2000);
+		long elapsed_usec = now_usec() - start_usec;
+		// the upper bound only guards against a gross overshoot (1000 ms was
+		// too tight for a loaded CI runner: 1003 ms observed)
+		cut_assert_operator(elapsed_usec, >=, 500 * 1000L);
+		cut_assert_operator(elapsed_usec, <, 2000 * 1000L);
 
 		usleep(100 * 1000); // waiting for dump completed
 		cut_assert_equal_boolean(false, t->is_running());
@@ -227,8 +253,7 @@ namespace test_handler_dump_replication {
 		cl->set_partition(0, master);
 		cl->set_reconstruction_bwlimit(1); // 1 KB
 		prepare_storage(5, 100); // 5 keys * 500 Bytes ("VALUE") / 1 KBytes = about 500 msecs
-		struct timeval start_tv;
-		gettimeofday(&start_tv, NULL);
+		const long start_usec = now_usec();
 
 		// execute
 		shared_thread t = start_handler();
@@ -237,11 +262,13 @@ namespace test_handler_dump_replication {
 		}
 
 		usleep(200 * 1000); // waiting for dump completed
-		long elapsed_msec = get_elapsed_msec(start_tv);
-		// Lower bound proves the throttle actually slept; the upper bound only
-		// guards against a gross overshoot. 1000ms was too tight for a loaded
-		// CI runner (observed 1003ms — a 3.5ms scheduling wobble, not a bug).
-		cut_assert_true(elapsed_msec > 500 && elapsed_msec < 2000);
+		long elapsed_usec = now_usec() - start_usec;
+		// Lower bound proves the throttle actually slept (500 ms exactly is
+		// correct, so >=, in microseconds); the upper bound only guards against
+		// a gross overshoot (1000 ms was too tight for a loaded CI runner).
+		// Both values are printed on failure.
+		cut_assert_operator(elapsed_usec, >=, 500 * 1000L);
+		cut_assert_operator(elapsed_usec, <, 2000 * 1000L);
 
 		usleep(100 * 1000);
 		cut_assert_equal_boolean(false, t->is_running());
@@ -284,19 +311,75 @@ namespace test_handler_dump_replication {
 		cut_assert_equal_string("shutdown", t->get_state().c_str());
 	}
 
+	// The destination never listens: the seed tries a bounded number of
+	// times, then ends in a VISIBLE failed state (it used to end with one
+	// log line and nothing a controller could read; audit 2026-10-11).
 	void test_run_failure_unreachable_connection() {
 		// prepare
 		cluster::node master = cl->set_node("localhost", port, cluster::role_master, cluster::state_active);
 		cl->set_partition(0, master);
 		prepare_storage(3);
+		handler_dump_replication::seed_connect_attempts = 2;
+		handler_dump_replication::seed_retry_base_ms = 100;
 
 		// execute
 		shared_thread t = start_handler(false);
 
 		// assert
-		sleep(6);  // waiting for connection failure
+		sleep(4);  // two bounded attempts against a refused port
 		cut_assert_equal_boolean(false, t->is_running());
 		cut_assert_equal_string("", t->get_state().c_str());
+		cut_assert_equal_string("failed_connect", stats_object->get_crepl_seed_state().c_str());
+		cut_assert_equal_int(2, (int)crepl("seed_connect_attempts"));
+		cut_assert_equal_int(1, (int)crepl("seed_failed"));
+		cut_assert_equal_int(0, (int)crepl("seed_completed"));
+	}
+
+	// The destination starts listening after the first attempt failed (a
+	// Service created a moment after the replication was enabled): the seed
+	// retries — nothing had been sent — and completes.
+	void test_run_seed_retries_until_destination_listens() {
+		cluster::node master = cl->set_node("localhost", port, cluster::role_master, cluster::state_active);
+		cl->set_partition(0, master);
+		prepare_storage(3);
+		handler_dump_replication::seed_connect_attempts = 5;
+		handler_dump_replication::seed_retry_base_ms = 1500;
+
+		shared_thread t = start_handler(false);
+		// one attempt is one open() = 2 connects 0.5 s apart; listen after it
+		// (nix-linux 38120332346: listening at 300 ms let the first attempt in)
+		usleep(1200 * 1000);
+		cut_assert_equal_string("connecting", stats_object->get_crepl_seed_state().c_str());
+		cut_assert_equal_int(1, (int)crepl("seed_connect_attempts"));
+		s->listen(port);
+		cs = s->wait();
+		for (int i = 0; i < 3; i++) {
+			response_dump("STORED", i);
+		}
+
+		usleep(200 * 1000);
+		cut_assert_equal_boolean(false, t->is_running());
+		cut_assert_equal_string("completed_dump", stats_object->get_crepl_seed_state().c_str());
+		cut_assert_equal_int(1, (int)crepl("seed_completed"));
+		cut_assert(crepl("seed_connect_attempts") >= 2);
+	}
+
+	// A destination that answers but does not store: the seed ends FAILED,
+	// not completed, and is not retried.
+	void test_run_seed_not_stored_is_failed_transfer() {
+		cluster::node master = cl->set_node("localhost", port, cluster::role_master, cluster::state_active);
+		cl->set_partition(0, master);
+		prepare_storage(2);
+
+		shared_thread t = start_handler();
+		response_dump("SERVER_ERROR i/o error", 0);
+		response_dump("STORED", 1);
+
+		usleep(200 * 1000);
+		cut_assert_equal_boolean(false, t->is_running());
+		cut_assert_equal_string("failed_transfer", stats_object->get_crepl_seed_state().c_str());
+		cut_assert_equal_int(1, (int)crepl("seed_failed"));
+		cut_assert_equal_int(1, (int)crepl("seed_connect_attempts"));
 	}
 
 	void test_run_failure_database_busy() {

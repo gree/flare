@@ -29,18 +29,39 @@ import FlareOperator.E2E.Tests.BackupRestore
 import FlareOperator.E2E.Tests.CircuitBreaker
 import FlareOperator.E2E.Tests.OperatorRestart
 import FlareOperator.E2E.Tests.TopologyAuthority
+import FlareOperator.E2E.Tests.ReadTimeoutReload
+import FlareOperator.E2E.Tests.ClusterReplicationFaults
+import FlareOperator.E2E.Tests.ClusterReplicationReseed
+import FlareOperator.E2E.Tests.ClusterReplicationRestartDump
+import FlareOperator.E2E.Tests.ClusterReplicationPerKeyOnly
+import FlareOperator.E2E.Tests.MigrationPerKeyOnly
+import FlareOperator.E2E.Tests.VCaptureResources
 import FlareOperator.E2E.Tests.ReplicaRepair
+import FlareOperator.E2E.Tests.ContinuousReplication
+import FlareOperator.E2E.Tests.ContinuousReplicationLimits
+import FlareOperator.E2E.Tests.HistoryContinuation
+import FlareOperator.E2E.Tests.StatsCost
 import FlareOperator.E2E.Tests.PrepareEvidence
 import FlareOperator.E2E.Tests.NativeMetrics
 import FlareOperator.E2E.Tests.BlueGreenMigration
+import FlareOperator.E2E.Tests.VisibilityBench
 import FlareOperator.E2E.Tests.SnapshotPushSeed
 import FlareOperator.E2E.Tests.ReadBalance
+import FlareOperator.E2E.Tests.RestoreIsolated
+import FlareOperator.E2E.Tests.NodeOpsSwitch
+import FlareOperator.E2E.Tests.FailoverOrder
+import FlareOperator.E2E.Tests.FirstBuildBusyPool
+import FlareOperator.E2E.Tests.WebhookTls
 
 open FlareOperator.E2E
 
 def main (args : List String) : IO UInt32 :=
-  e2eMain [
+  e2eMain ([
     Tests.Failover.suite,
+    Tests.FailoverOrder.suite,
+    Tests.FirstBuildBusyPool.suite,
+    Tests.FirstBuildBusyPool.suiteDroppedAdd,
+    Tests.FirstBuildBusyPool.suiteStaleEvidence,
     Tests.ReadBalance.suite,
     Tests.ScaleOutMaster.suite,
     Tests.ScaleOutSlave.suite,
@@ -64,9 +85,71 @@ def main (args : List String) : IO UInt32 :=
     Tests.CircuitBreaker.suite,
     Tests.OperatorRestart.suite,
     Tests.TopologyAuthority.suite,
+    Tests.ReadTimeoutReload.suite,
+    Tests.ClusterReplicationFaults.suite,
+    Tests.ClusterReplicationFaults.perKeySuite,
+    Tests.ClusterReplicationReseed.suite,
+    Tests.ClusterReplicationRestartDump.suite,
+    Tests.ClusterReplicationPerKeyOnly.suite,
+    Tests.MigrationPerKeyOnly.suite,
+    Tests.VCaptureResources.suite,
     Tests.ReplicaRepair.suite,
+    Tests.ContinuousReplication.suite,
+    Tests.ContinuousReplicationLimits.purgeSuite,
+    Tests.ContinuousReplicationLimits.limitsSuite,
+    Tests.ContinuousReplicationLimits.lagHoldSuite,
+    Tests.ContinuousReplicationLimits.enableSuite,
+    Tests.ContinuousReplicationLimits.lagHoldTmpfsSuite,
+    Tests.ContinuousReplicationLimits.lagHoldExpirySuite,
+    Tests.ContinuousReplicationLimits.enablePurgedSuite,
+    Tests.ContinuousReplicationLimits.multiEnableSuite,
+    Tests.ContinuousReplicationLimits.multiHoldSuite,
+    Tests.ContinuousReplicationLimits.rebuildTmpfsSuite,
+    Tests.ContinuousReplicationLimits.parkedSlotSuite,
+    Tests.HistoryContinuation.walPinRestartSuite,
+    Tests.HistoryContinuation.handoverSuite,
+    Tests.HistoryContinuation.handoverFollowOffSuite,
+    Tests.HistoryContinuation.handoverRollingSuite,
+    Tests.HistoryContinuation.recoveryReplaceSuite,
+    Tests.HistoryContinuation.recoveryUnfencedSuite,
+    Tests.HistoryContinuation.recoveryBreakGlassSuite,
+    Tests.HistoryContinuation.recoveryOperatorRestartSuite,
+    Tests.ContinuousReplicationLimits.upgradeSuite,
+    Tests.ContinuousReplicationLimits.identitySuite,
+    Tests.ContinuousReplicationLimits.emptySourceSuite,
+    Tests.ContinuousReplicationLimits.r3SourceChangeSuite,
+    Tests.ContinuousReplicationLimits.copyProtectionSuite,
+    Tests.ContinuousReplicationLimits.copyRetentionSuite,
+    Tests.ContinuousReplicationLimits.copyRetentionConcurrencySuite,
+    Tests.ContinuousReplicationLimits.r3UnreadableSuite,
+    Tests.ContinuousReplicationLimits.promotionReasonsSuite,
+    Tests.ContinuousReplicationLimits.promotionPrecommitSuite,
+    Tests.RestoreIsolated.suite,
+    Tests.RestoreIsolated.repeatSuite,
+    Tests.ContinuousReplicationLimits.historyTrackingSuite,
+    Tests.ContinuousReplicationLimits.promotionDisconnectedSuite,
+    Tests.ContinuousReplicationLimits.promotionDisconnectedEmptySuite,
+    Tests.ContinuousReplicationLimits.promotionProxyOnlySuite,
+    Tests.StatsCost.suite,
+    Tests.ContinuousReplicationLimits.historyHeldSuite,
+    Tests.ContinuousReplicationLimits.historyIntentSuite,
+    Tests.ContinuousReplicationLimits.forwardWindowSuite,
+    Tests.ContinuousReplicationLimits.forwardWalSuite,
+    Tests.ContinuousReplicationLimits.forwardStepSuite,
+    Tests.ContinuousReplicationLimits.historyMasterlessSuite,
+    Tests.ContinuousReplicationLimits.historyFirstBuildSuite,
+    Tests.ContinuousReplicationLimits.reserveMeasureSuite,
+    Tests.ContinuousReplicationLimits.lagHoldUnreadableSuite,
+    Tests.ContinuousReplicationLimits.repairLedgerSuite,
+    Tests.VisibilityBench.visibilityBenchSuite,
+    Tests.ContinuousReplicationLimits.clusterInitSuite,
+    Tests.ContinuousReplicationLimits.scaleSuite,
+    Tests.ContinuousReplicationLimits.sustainedSuite,
+    Tests.ContinuousReplicationLimits.outageSuite,
+    Tests.ContinuousReplicationLimits.outageTmpfsSuite,
     Tests.PrepareEvidence.suite,
     Tests.NativeMetrics.suite,
     Tests.BlueGreenMigration.suite,
-    Tests.SnapshotPushSeed.suite
-  ] args
+    Tests.SnapshotPushSeed.suite,
+    Tests.WebhookTls.suite
+  ] ++ Tests.NodeOpsSwitch.switchSuites) args

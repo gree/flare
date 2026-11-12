@@ -1,0 +1,847 @@
+{
+ "harness": "visibility_bench.py",
+ "measurement": "end-to-end visibility: write SEND to first replica observation, one monotonic clock; NOT commit-to-apply",
+ "label": "redis-mem",
+ "proto": "redis",
+ "write": "10.244.0.28:6379",
+ "read": "10.244.0.29:6379",
+ "value_size": 100,
+ "writers": 4,
+ "observers": 4,
+ "timeout_s": 5.0,
+ "env": {
+  "python": "3.12.15",
+  "host": "vis-harness",
+  "cpus": 4
+ },
+ "floor_get_rtt": {
+  "n": 500,
+  "p50_us": 137.8795,
+  "p95_us": 168.8461,
+  "p99_us": 196.58848999999995,
+  "max_us": 251.403,
+  "mean_us": 136.91129800000002
+ },
+ "runs": [
+  {
+   "profile": {
+    "kind": "idle",
+    "count": 100,
+    "gap": 0.3,
+    "name": "idle",
+    "repeat": 0
+   },
+   "markers_total": 100,
+   "markers_measured": 100,
+   "visible": 100,
+   "timeouts": 0,
+   "unobserved": 0,
+   "errors": {
+    "write": 0,
+    "read": 0,
+    "set_not_stored": 0
+   },
+   "achieved_write_rate": 3.3333489405893495,
+   "write_ack": {
+    "n": 100,
+    "p50_us": 383.477,
+    "p95_us": 558.4470499999999,
+    "p99_us": 676.9032800000024,
+    "max_us": 1129.163,
+    "mean_us": 401.93938
+   },
+   "visibility_upper": {
+    "n": 100,
+    "p50_us": 509.6295,
+    "p95_us": 766.4564499999999,
+    "p99_us": 936.8315800000016,
+    "max_us": 1235.473,
+    "mean_us": 541.65785
+   },
+   "visibility_lower": {
+    "n": 100,
+    "p50_us": 0.0,
+    "p95_us": 185.3596,
+    "p99_us": 442.9589400000016,
+    "max_us": 745.992,
+    "mean_us": 71.75637
+   },
+   "probes_per_sample": {
+    "mean": 1.45,
+    "max": 4
+   },
+   "scheduler_lag": {
+    "n": 100,
+    "p50_us": 704.8685,
+    "p95_us": 1171.5186499999998,
+    "p99_us": 2109.6746600000006,
+    "max_us": 2162.705,
+    "mean_us": 701.79423
+   },
+   "backlog_max": 1,
+   "backlog_growing": false
+  },
+  {
+   "profile": {
+    "kind": "rate",
+    "rate": 100,
+    "duration": 20,
+    "warmup": 5,
+    "name": "low",
+    "repeat": 0
+   },
+   "markers_total": 2500,
+   "markers_measured": 2000,
+   "visible": 2000,
+   "timeouts": 0,
+   "unobserved": 0,
+   "errors": {
+    "write": 0,
+    "read": 0,
+    "set_not_stored": 0
+   },
+   "achieved_write_rate": 100.00054531062744,
+   "write_ack": {
+    "n": 2000,
+    "p50_us": 255.6815,
+    "p95_us": 476.73149999999976,
+    "p99_us": 653.3209399999998,
+    "max_us": 3106.655,
+    "mean_us": 284.771525
+   },
+   "visibility_upper": {
+    "n": 2000,
+    "p50_us": 339.254,
+    "p95_us": 649.2645,
+    "p99_us": 1023.9618399999998,
+    "max_us": 4108.704,
+    "mean_us": 389.037979
+   },
+   "visibility_lower": {
+    "n": 2000,
+    "p50_us": 0.0,
+    "p95_us": 110.70304999999999,
+    "p99_us": 158.20982,
+    "max_us": 2844.365,
+    "mean_us": 20.9876695
+   },
+   "probes_per_sample": {
+    "mean": 1.1895,
+    "max": 10
+   },
+   "scheduler_lag": {
+    "n": 2500,
+    "p50_us": 1029.6015,
+    "p95_us": 1980.6300000000003,
+    "p99_us": 2116.79201,
+    "max_us": 3190.903,
+    "mean_us": 1072.3424828
+   },
+   "backlog_max": 1,
+   "backlog_growing": false
+  },
+  {
+   "profile": {
+    "kind": "rate",
+    "rate": 500,
+    "duration": 20,
+    "warmup": 5,
+    "name": "normal",
+    "repeat": 0
+   },
+   "markers_total": 12500,
+   "markers_measured": 10000,
+   "visible": 10000,
+   "timeouts": 0,
+   "unobserved": 0,
+   "errors": {
+    "write": 0,
+    "read": 0,
+    "set_not_stored": 0
+   },
+   "achieved_write_rate": 499.99936931272674,
+   "write_ack": {
+    "n": 10000,
+    "p50_us": 198.504,
+    "p95_us": 356.7535499999998,
+    "p99_us": 518.0699900000003,
+    "max_us": 5248.981,
+    "mean_us": 219.8531921
+   },
+   "visibility_upper": {
+    "n": 10000,
+    "p50_us": 259.679,
+    "p95_us": 517.7369999999997,
+    "p99_us": 818.1272100000002,
+    "max_us": 5905.988,
+    "mean_us": 305.4990724
+   },
+   "visibility_lower": {
+    "n": 10000,
+    "p50_us": 0.0,
+    "p95_us": 74.692,
+    "p99_us": 100.22090000000003,
+    "max_us": 1014.881,
+    "mean_us": 12.370018799999999
+   },
+   "probes_per_sample": {
+    "mean": 1.1707,
+    "max": 8
+   },
+   "scheduler_lag": {
+    "n": 12500,
+    "p50_us": 622.4594999999999,
+    "p95_us": 1062.3379499999999,
+    "p99_us": 1098.2710500000003,
+    "max_us": 3157.787,
+    "mean_us": 615.08256328
+   },
+   "backlog_max": 1,
+   "backlog_growing": false
+  },
+  {
+   "profile": {
+    "kind": "rate",
+    "rate": 2000,
+    "duration": 20,
+    "warmup": 5,
+    "name": "peak",
+    "repeat": 0
+   },
+   "markers_total": 50000,
+   "markers_measured": 40000,
+   "visible": 40000,
+   "timeouts": 0,
+   "unobserved": 0,
+   "errors": {
+    "write": 0,
+    "read": 0,
+    "set_not_stored": 0
+   },
+   "achieved_write_rate": 2000.0970700377006,
+   "write_ack": {
+    "n": 40000,
+    "p50_us": 326.725,
+    "p95_us": 547.2350500000009,
+    "p99_us": 1079.9031000000002,
+    "max_us": 5442.575,
+    "mean_us": 348.28243342499997
+   },
+   "visibility_upper": {
+    "n": 40000,
+    "p50_us": 422.5105,
+    "p95_us": 763.728,
+    "p99_us": 1790.4764200000013,
+    "max_us": 8311.757,
+    "mean_us": 454.089378225
+   },
+   "visibility_lower": {
+    "n": 40000,
+    "p50_us": 0.0,
+    "p95_us": 77.957,
+    "p99_us": 203.56932000000128,
+    "max_us": 2944.713,
+    "mean_us": 15.841385899999999
+   },
+   "probes_per_sample": {
+    "mean": 1.1252,
+    "max": 11
+   },
+   "scheduler_lag": {
+    "n": 50000,
+    "p50_us": 383.209,
+    "p95_us": 1067.6547500000001,
+    "p99_us": 1099.33026,
+    "max_us": 7452.374,
+    "mean_us": 443.37396734
+   },
+   "backlog_max": 7,
+   "backlog_growing": false
+  },
+  {
+   "profile": {
+    "kind": "burst",
+    "count": 2000,
+    "name": "burst",
+    "repeat": 0
+   },
+   "markers_total": 2000,
+   "markers_measured": 2000,
+   "visible": 2000,
+   "timeouts": 0,
+   "unobserved": 0,
+   "errors": {
+    "write": 0,
+    "read": 0,
+    "set_not_stored": 0
+   },
+   "achieved_write_rate": 65702.52133343447,
+   "write_ack": {
+    "n": 2000,
+    "p50_us": 14685.844,
+    "p95_us": 30036.01615,
+    "p99_us": 32304.77704,
+    "max_us": 33705.396,
+    "mean_us": 15541.799824
+   },
+   "visibility_upper": {
+    "n": 2000,
+    "p50_us": 58573.247,
+    "p95_us": 92295.67079999999,
+    "p99_us": 94340.41287999999,
+    "max_us": 94841.147,
+    "mean_us": 59302.172292999996
+   },
+   "visibility_lower": {
+    "n": 2000,
+    "p50_us": 0.0,
+    "p95_us": 0.0,
+    "p99_us": 0.0,
+    "max_us": 0.0,
+    "mean_us": 0.0
+   },
+   "probes_per_sample": {
+    "mean": 1.0,
+    "max": 1
+   },
+   "scheduler_lag": {
+    "n": 2000,
+    "p50_us": 18881.78,
+    "p95_us": 29804.1246,
+    "p99_us": 30757.0629,
+    "max_us": 31040.027,
+    "mean_us": 18003.63776
+   },
+   "backlog_max": 2000,
+   "backlog_growing": null
+  },
+  {
+   "profile": {
+    "kind": "rate",
+    "rate": 4000,
+    "duration": 10,
+    "warmup": 3,
+    "name": "sat-4000",
+    "repeat": 0
+   },
+   "markers_total": 52000,
+   "markers_measured": 40000,
+   "visible": 40000,
+   "timeouts": 0,
+   "unobserved": 0,
+   "errors": {
+    "write": 0,
+    "read": 0,
+    "set_not_stored": 0
+   },
+   "achieved_write_rate": 4000.1000702051415,
+   "write_ack": {
+    "n": 40000,
+    "p50_us": 257.384,
+    "p95_us": 468.90295000000066,
+    "p99_us": 1025.6918000000003,
+    "max_us": 5285.88,
+    "mean_us": 282.78328875
+   },
+   "visibility_upper": {
+    "n": 40000,
+    "p50_us": 370.9685,
+    "p95_us": 819.8659500000001,
+    "p99_us": 1758.5359600000136,
+    "max_us": 6630.02,
+    "mean_us": 417.4366914
+   },
+   "visibility_lower": {
+    "n": 40000,
+    "p50_us": 0.0,
+    "p95_us": 59.331050000000005,
+    "p99_us": 341.4049100000006,
+    "max_us": 3696.548,
+    "mean_us": 15.401957625000001
+   },
+   "probes_per_sample": {
+    "mean": 1.10615,
+    "max": 10
+   },
+   "scheduler_lag": {
+    "n": 52000,
+    "p50_us": 232.8665,
+    "p95_us": 1067.1671,
+    "p99_us": 1098.42161,
+    "max_us": 3053.29,
+    "mean_us": 385.8837765961539
+   },
+   "backlog_max": 8,
+   "backlog_growing": false
+  },
+  {
+   "profile": {
+    "kind": "rate",
+    "rate": 8000,
+    "duration": 10,
+    "warmup": 3,
+    "name": "sat-8000",
+    "repeat": 0
+   },
+   "markers_total": 104000,
+   "markers_measured": 80000,
+   "visible": 80000,
+   "timeouts": 0,
+   "unobserved": 0,
+   "errors": {
+    "write": 0,
+    "read": 0,
+    "set_not_stored": 0
+   },
+   "achieved_write_rate": 8000.122395402471,
+   "write_ack": {
+    "n": 80000,
+    "p50_us": 238.49349999999998,
+    "p95_us": 623.2785500000003,
+    "p99_us": 1647.344509999998,
+    "max_us": 4476.707,
+    "mean_us": 302.8221646875
+   },
+   "visibility_upper": {
+    "n": 80000,
+    "p50_us": 330.502,
+    "p95_us": 2623.01705,
+    "p99_us": 5882.007389999977,
+    "max_us": 11150.119,
+    "mean_us": 647.0709728
+   },
+   "visibility_lower": {
+    "n": 80000,
+    "p50_us": 0.0,
+    "p95_us": 0.0,
+    "p99_us": 206.7841999999978,
+    "max_us": 2508.522,
+    "mean_us": 10.9280527875
+   },
+   "probes_per_sample": {
+    "mean": 1.05755,
+    "max": 7
+   },
+   "scheduler_lag": {
+    "n": 104000,
+    "p50_us": 100.2585,
+    "p95_us": 295.97830000000005,
+    "p99_us": 479.37534999999934,
+    "max_us": 13593.35,
+    "mean_us": 129.83681827884615
+   },
+   "backlog_max": 130,
+   "backlog_growing": false
+  },
+  {
+   "profile": {
+    "kind": "idle",
+    "count": 100,
+    "gap": 0.3,
+    "name": "idle",
+    "repeat": 1
+   },
+   "markers_total": 100,
+   "markers_measured": 100,
+   "visible": 100,
+   "timeouts": 0,
+   "unobserved": 0,
+   "errors": {
+    "write": 0,
+    "read": 0,
+    "set_not_stored": 0
+   },
+   "achieved_write_rate": 3.3332582558997785,
+   "write_ack": {
+    "n": 100,
+    "p50_us": 311.2065,
+    "p95_us": 463.82404999999994,
+    "p99_us": 699.7683500000002,
+    "max_us": 725.345,
+    "mean_us": 325.97305
+   },
+   "visibility_upper": {
+    "n": 100,
+    "p50_us": 424.028,
+    "p95_us": 587.7838499999998,
+    "p99_us": 958.0251500000014,
+    "max_us": 1219.103,
+    "mean_us": 442.66311
+   },
+   "visibility_lower": {
+    "n": 100,
+    "p50_us": 51.7225,
+    "p95_us": 190.2978,
+    "p99_us": 211.02434000000034,
+    "max_us": 276.2,
+    "mean_us": 79.4306
+   },
+   "probes_per_sample": {
+    "mean": 1.5,
+    "max": 2
+   },
+   "scheduler_lag": {
+    "n": 100,
+    "p50_us": 670.1625,
+    "p95_us": 1143.4385499999999,
+    "p99_us": 1944.7087700000004,
+    "max_us": 1987.652,
+    "mean_us": 688.11526
+   },
+   "backlog_max": 0,
+   "backlog_growing": false
+  },
+  {
+   "profile": {
+    "kind": "rate",
+    "rate": 100,
+    "duration": 20,
+    "warmup": 5,
+    "name": "low",
+    "repeat": 1
+   },
+   "markers_total": 2500,
+   "markers_measured": 2000,
+   "visible": 2000,
+   "timeouts": 0,
+   "unobserved": 0,
+   "errors": {
+    "write": 0,
+    "read": 0,
+    "set_not_stored": 0
+   },
+   "achieved_write_rate": 100.00168681684724,
+   "write_ack": {
+    "n": 2000,
+    "p50_us": 192.29399999999998,
+    "p95_us": 343.6476,
+    "p99_us": 536.2134799999998,
+    "max_us": 2153.882,
+    "mean_us": 213.15957
+   },
+   "visibility_upper": {
+    "n": 2000,
+    "p50_us": 245.6385,
+    "p95_us": 480.44295,
+    "p99_us": 734.2349399999998,
+    "max_us": 2464.098,
+    "mean_us": 283.17910350000005
+   },
+   "visibility_lower": {
+    "n": 2000,
+    "p50_us": 0.0,
+    "p95_us": 102.80959999999996,
+    "p99_us": 157.08872999999997,
+    "max_us": 866.184,
+    "mean_us": 17.9525305
+   },
+   "probes_per_sample": {
+    "mean": 1.182,
+    "max": 8
+   },
+   "scheduler_lag": {
+    "n": 2500,
+    "p50_us": 1084.335,
+    "p95_us": 2026.5683000000001,
+    "p99_us": 2100.1994200000004,
+    "max_us": 2854.135,
+    "mean_us": 1097.0996704
+   },
+   "backlog_max": 1,
+   "backlog_growing": false
+  },
+  {
+   "profile": {
+    "kind": "rate",
+    "rate": 500,
+    "duration": 20,
+    "warmup": 5,
+    "name": "normal",
+    "repeat": 1
+   },
+   "markers_total": 12500,
+   "markers_measured": 10000,
+   "visible": 10000,
+   "timeouts": 0,
+   "unobserved": 0,
+   "errors": {
+    "write": 0,
+    "read": 0,
+    "set_not_stored": 0
+   },
+   "achieved_write_rate": 500.00704237841677,
+   "write_ack": {
+    "n": 10000,
+    "p50_us": 153.429,
+    "p95_us": 279.6374,
+    "p99_us": 412.3667100000004,
+    "max_us": 3402.967,
+    "mean_us": 169.73138
+   },
+   "visibility_upper": {
+    "n": 10000,
+    "p50_us": 194.707,
+    "p95_us": 404.0530999999998,
+    "p99_us": 631.9753800000001,
+    "max_us": 3922.376,
+    "mean_us": 231.08507179999998
+   },
+   "visibility_lower": {
+    "n": 10000,
+    "p50_us": 0.0,
+    "p95_us": 74.28005,
+    "p99_us": 103.03410000000001,
+    "max_us": 3117.77,
+    "mean_us": 13.1214549
+   },
+   "probes_per_sample": {
+    "mean": 1.178,
+    "max": 23
+   },
+   "scheduler_lag": {
+    "n": 12500,
+    "p50_us": 605.7974999999999,
+    "p95_us": 1054.93415,
+    "p99_us": 1102.50504,
+    "max_us": 2582.537,
+    "mean_us": 604.19709416
+   },
+   "backlog_max": 1,
+   "backlog_growing": false
+  },
+  {
+   "profile": {
+    "kind": "rate",
+    "rate": 2000,
+    "duration": 20,
+    "warmup": 5,
+    "name": "peak",
+    "repeat": 1
+   },
+   "markers_total": 50000,
+   "markers_measured": 40000,
+   "visible": 40000,
+   "timeouts": 0,
+   "unobserved": 0,
+   "errors": {
+    "write": 0,
+    "read": 0,
+    "set_not_stored": 0
+   },
+   "achieved_write_rate": 2000.0874919144521,
+   "write_ack": {
+    "n": 40000,
+    "p50_us": 252.66649999999998,
+    "p95_us": 443.105,
+    "p99_us": 1416.4913100000022,
+    "max_us": 6260.482,
+    "mean_us": 283.242536125
+   },
+   "visibility_upper": {
+    "n": 40000,
+    "p50_us": 302.46,
+    "p95_us": 712.6740500000024,
+    "p99_us": 2231.385710000002,
+    "max_us": 7935.4,
+    "mean_us": 362.78582775
+   },
+   "visibility_lower": {
+    "n": 40000,
+    "p50_us": 0.0,
+    "p95_us": 86.18250000000003,
+    "p99_us": 808.1986100000009,
+    "max_us": 5623.893,
+    "mean_us": 26.625013449999997
+   },
+   "probes_per_sample": {
+    "mean": 1.157925,
+    "max": 16
+   },
+   "scheduler_lag": {
+    "n": 50000,
+    "p50_us": 471.515,
+    "p95_us": 1014.6942,
+    "p99_us": 1093.26178,
+    "max_us": 3745.034,
+    "mean_us": 489.13068538000005
+   },
+   "backlog_max": 9,
+   "backlog_growing": false
+  },
+  {
+   "profile": {
+    "kind": "burst",
+    "count": 2000,
+    "name": "burst",
+    "repeat": 1
+   },
+   "markers_total": 2000,
+   "markers_measured": 2000,
+   "visible": 2000,
+   "timeouts": 0,
+   "unobserved": 0,
+   "errors": {
+    "write": 0,
+    "read": 0,
+    "set_not_stored": 0
+   },
+   "achieved_write_rate": 66725.28522472536,
+   "write_ack": {
+    "n": 2000,
+    "p50_us": 17652.809,
+    "p95_us": 29409.67235,
+    "p99_us": 31562.20029,
+    "max_us": 33016.392,
+    "mean_us": 17238.1526955
+   },
+   "visibility_upper": {
+    "n": 2000,
+    "p50_us": 57627.7,
+    "p95_us": 95418.25995,
+    "p99_us": 96370.81409999999,
+    "max_us": 96723.763,
+    "mean_us": 59736.3463305
+   },
+   "visibility_lower": {
+    "n": 2000,
+    "p50_us": 0.0,
+    "p95_us": 0.0,
+    "p99_us": 0.0,
+    "max_us": 0.0,
+    "mean_us": 0.0
+   },
+   "probes_per_sample": {
+    "mean": 1.0,
+    "max": 1
+   },
+   "scheduler_lag": {
+    "n": 2000,
+    "p50_us": 15771.565999999999,
+    "p95_us": 28981.37085,
+    "p99_us": 30703.54463,
+    "max_us": 31105.925,
+    "mean_us": 16290.908892
+   },
+   "backlog_max": 2000,
+   "backlog_growing": null
+  },
+  {
+   "profile": {
+    "kind": "rate",
+    "rate": 4000,
+    "duration": 10,
+    "warmup": 3,
+    "name": "sat-4000",
+    "repeat": 1
+   },
+   "markers_total": 52000,
+   "markers_measured": 40000,
+   "visible": 40000,
+   "timeouts": 0,
+   "unobserved": 0,
+   "errors": {
+    "write": 0,
+    "read": 0,
+    "set_not_stored": 0
+   },
+   "achieved_write_rate": 4000.0389805543714,
+   "write_ack": {
+    "n": 40000,
+    "p50_us": 259.94,
+    "p95_us": 489.68450000000007,
+    "p99_us": 1146.3741900000007,
+    "max_us": 3615.687,
+    "mean_us": 287.314027
+   },
+   "visibility_upper": {
+    "n": 40000,
+    "p50_us": 373.549,
+    "p95_us": 881.2805500000005,
+    "p99_us": 2026.6907900000083,
+    "max_us": 6042.833,
+    "mean_us": 430.451918875
+   },
+   "visibility_lower": {
+    "n": 40000,
+    "p50_us": 0.0,
+    "p95_us": 56.49700000000006,
+    "p99_us": 405.1749300000043,
+    "max_us": 2574.674,
+    "mean_us": 15.699013625000001
+   },
+   "probes_per_sample": {
+    "mean": 1.103025,
+    "max": 10
+   },
+   "scheduler_lag": {
+    "n": 52000,
+    "p50_us": 237.95749999999998,
+    "p95_us": 1067.2611,
+    "p99_us": 1099.1222800000003,
+    "max_us": 4093.906,
+    "mean_us": 389.9449734615385
+   },
+   "backlog_max": 10,
+   "backlog_growing": false
+  },
+  {
+   "profile": {
+    "kind": "rate",
+    "rate": 8000,
+    "duration": 10,
+    "warmup": 3,
+    "name": "sat-8000",
+    "repeat": 1
+   },
+   "markers_total": 104000,
+   "markers_measured": 80000,
+   "visible": 80000,
+   "timeouts": 0,
+   "unobserved": 0,
+   "errors": {
+    "write": 0,
+    "read": 0,
+    "set_not_stored": 0
+   },
+   "achieved_write_rate": 8000.006356884513,
+   "write_ack": {
+    "n": 80000,
+    "p50_us": 246.384,
+    "p95_us": 558.5906000000006,
+    "p99_us": 1369.6401099999953,
+    "max_us": 4489.538,
+    "mean_us": 300.1843809
+   },
+   "visibility_upper": {
+    "n": 80000,
+    "p50_us": 347.7895,
+    "p95_us": 2316.989250000003,
+    "p99_us": 8220.21331999997,
+    "max_us": 18368.304,
+    "mean_us": 681.205802475
+   },
+   "visibility_lower": {
+    "n": 80000,
+    "p50_us": 0.0,
+    "p95_us": 0.0,
+    "p99_us": 172.59508999999994,
+    "max_us": 2576.244,
+    "mean_us": 9.0467034625
+   },
+   "probes_per_sample": {
+    "mean": 1.048775,
+    "max": 7
+   },
+   "scheduler_lag": {
+    "n": 104000,
+    "p50_us": 102.12450000000001,
+    "p95_us": 273.841,
+    "p99_us": 396.2952099999999,
+    "max_us": 3721.667,
+    "mean_us": 117.12869536538462
+   },
+   "backlog_max": 131,
+   "backlog_growing": false
+  }
+ ]
+}

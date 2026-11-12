@@ -1,0 +1,137 @@
+# SAF-10c eligibility (reads / promotion / copy deletion) — flare_unit run
+# commit: 2c3bd87c741586583f78469e65f9c491c74c57b8   date: 2026-09-20   host: local darwin (lake build flare_unit)
+# command: cd flare_operator && lake build flare_unit && .lake/build/bin/flare_unit
+# exit code: 0
+# new groups: checkFollowJudge (13), checkFollowClassify (8), checkFollowShaping (7); deleteGate calls updated for the survivorFollowOk argument
+
+ok - first observation is a baseline, attributes nothing
+ok - an increase attributes the delta
+ok - unchanged attributes nothing
+ok - a counter that went DOWN is a reset: the new count is all new drops
+ok - a reset to zero (fresh master, no drops yet) attributes nothing
+ok - a destination first seen on an INITIALIZED ledger counts fully
+ok - counters are keyed per master: another master's first sighting also counts
+ok - a request is recorded once per destination
+ok - more drops on the same destination extend the entry, not duplicate it
+ok - a destination matching a Slave resolves to its key
+ok - an unmatched destination stays requested and unresolved
+ok - a destination that is now a MASTER is voided, not demoted
+ok - resolution accepts the bare host as well as host:port
+ok - a gated request is HELD with its reason and produces no action
+ok - a held request is not excluded from assignment (only a demoted one is)
+ok - when the gate opens the held request becomes an action and the hold clears
+ok - a demoted node is held out of assignment
+ok - plan does not act twice on a demoted entry
+ok - the mode on and following/initial_sync/disconnected/error own; needs_rebuild, idle, off and unreadable do not
+ok - at request time an unreadable follower is Unknown: neither owned nor not-owned
+ok - holding records ownership, a visible reason, the bar and its epoch
+ok - a later drop in the same epoch raises the bar and never lowers it; a new epoch replaces it
+ok - an owned request is never planned for demotion while the gate is open
+ok - a request held on an unreadable follower is not demoted either
+ok - following at 99 keeps; following at 100 closes without a rebuild
+ok - a BIGGER position in ANOTHER epoch does not close: it is a different number line
+ok - a disconnected follower's position is not trusted for closing, but ownership continues
+ok - a TRANSIENT stats failure keeps the hold and hands nothing over (no rebuild on a probe hiccup)
+ok - after the hiccup a readable pass resumes: following past the bar closes
+ok - needs_rebuild hands the entry to the ordinary path, keeping its drops and node key
+ok - an owned entry with no recorded bar stays owned and is not closed by position
+ok - ownership, bar and epoch survive the status round trip (an operator restart)
+ok - a node still reporting the OLD version stays held
+ok - a node reporting the demotion version is released, recording boot id, current id and drops at reseat
+ok - unreadable stats change nothing (fail closed: stay held)
+ok - Slave/Prepare is in progress, not complete
+ok - Slave/Active with NO reconstruction newer than the reseat one (same boot, same id) is NOT completion (re-announced Active)
+ok - a newer reconstruction still RUNNING is not completion
+ok - a newer reconstruction that FAILED is not completion (last success is still #1)
+ok - a newer success from a DIFFERENT source than the current master is not completion
+ok - a newer reconstruction that SUCCEEDED from the current master completes and removes the entry
+ok - failure then success: #3 succeeded after #2 failed → completion (cumulative counters would never match)
+ok - restart with IDENTICAL counters (new boot 200, #1 succeeded == baseline #1) completes: the boot id tells the processes apart
+ok - restart whose boot reconstruction is still running is not completion
+ok - late drops after the reseat: completion requeues exactly the increment as a fresh request
+ok - a node that became MASTER while reseated is voided
+ok - with no baseline the first readable record becomes the baseline; nothing completes yet
+ok - ledger survives a JSON round trip
+ok - an empty ledger round-trips
+ok - strict parse: a valid entry loads
+ok - strict parse: an entry missing masterKey fails the WHOLE ledger (not an empty ledger)
+ok - strict parse: one valid + one invalid entry fails the whole ledger
+ok - strict parse: a malformed counter fails the whole ledger
+ok - strict parse: an unknown phase kind fails the whole ledger
+ok - a Slave/Prepare node under an Active master starts an episode
+ok - the same source keeps the episode and counts the pass
+ok - a different master between passes restarts the episode
+ok - a node no longer Slave/Prepare ends its episode
+ok - a changed master key is a source change, not a wait
+ok - the master lineage is pinned at first sight
+ok - a changed master lineage is a source change
+ok - an unreadable record is refused
+ok - no reconstruction in this process (#0) is refused even with a near cursor
+ok - the latest reconstruction RUNNING is refused (past success is not the current copy)
+ok - the latest reconstruction FAILED after an earlier success is refused (store may be partial)
+ok - the latest reconstruction ABORTED is refused
+ok - a success from a DIFFERENT source than the current master is refused
+ok - reviewer input (round 1): same lineage, slave LSN 0, master 10000 → refused (cursor not seeded)
+ok - a lineage mismatch is refused
+ok - a cursor AHEAD of the head is refused
+ok - RocksDB with lineage missing → refused (truncated reply)
+ok - RocksDB with cursor missing → refused
+ok - an INCOMPLETE master stats reply (backend unknown) is refused
+ok - RocksDB: latest #1 succeeded from the current master, lineage matches, cursor seeded → activate
+ok - a FAR-behind but seeded cursor does not block (proximity is not the test)
+ok - non-RocksDB backend (complete reply, no rocksdb keys) activates on the record alone
+ok - failure then success: #2 succeeded after #1 failed → activate (counters 2/1 would have said IN FLIGHT)
+ok - abort then success: #2 succeeded after #1 was aborted → activate
+ok - after a restart, the new process's own #1 success activates
+ok - after a source change a success from the OLD master is refused
+ok - once a success from the new master (matching lineage) is recorded it activates
+ok - a well-formed curr_items line parses to known
+ok - a blank reply (dropped/reset connection) is unknown, not known 0
+ok - a reply that omits curr_items is unknown
+ok - a non-numeric curr_items is unknown
+ok - a genuine zero is known 0, distinct from unknown
+ok - known-0 master with a known data-bearing slave → act
+ok - a nonzero master is never empty
+ok - an UNKNOWN master is never treated as empty (the SAF-04 defect)
+ok - a known-0 master with an UNKNOWN slave does not delete (no confirmed successor)
+ok - both empty → skip (nothing to hand over)
+ok - successor still valid when it is a data-bearing Active slave in the master's partition
+ok - successor INVALID when it is not in the data-bearing set (a resync just demoted its data)
+ok - successor INVALID when it was demoted to Proxy in the same tick
+ok - successor INVALID when the target is no longer an Active master (leadership lost)
+ok - delete gate: fresh verdict act, successor valid, UID stable, lease held → delete
+ok - delete gate: operator LOST THE LEASE → refuse (item 5)
+ok - delete gate: target pod UID changed across the observation (replaced) → refuse
+ok - delete gate: successor invalid on the post-read map → refuse
+ok - delete gate: fresh verdict is skip → refuse regardless of the rest
+ok - delete gate: refusal reasons name the failing check
+ok - an unreadable reply is Unknown for reads and promotion (never healthy, never unfit)
+ok - a complete reply with the mode off is not-in-mode: this module has no say
+ok - a complete reply in the mode without a state is Unknown
+ok - following, same epoch, fresh, caught up: eligible for reads and promotion
+ok - disconnected is ineligible (not unfit): resuming is the follower's job, but nothing is proven
+ok - following another epoch is ineligible AND unfit (a copy of another history)
+ok - a stale observation (6 s > 5 s) is ineligible; 5 s is still fresh
+ok - lag 500: within the read bound (1000) but over the promotion bound (100)
+ok - lag exactly at the promotion bound is eligible
+ok - an applied position AHEAD of the master's head is ineligible (another sequence space)
+ok - an unreadable master, or a master without a source epoch, makes the verdict Unknown
+ok - needs_rebuild, initial_sync and idle are unfit; following the master's epoch is not
+ok - survival uses the promotion bound
+ok - ranked = proven-current followers, highest applied position first
+ok - unproven = disconnected; unfit = needs_rebuild; both withheld from reads
+ok - mode off, never-read unreadable and not-probed nodes get no say on the first pass
+ok - the mode memory records what was readable: a-d in the mode, e out, f and g unchanged
+ok - a node remembered in the mode that is unreadable or not probed is Unknown: unproven and withheld, never unfit
+ok - without a master reading nothing is proven: no ranked, following nodes unproven and withheld
+ok - probe policy: in the mode every tick; out of the mode every interval; never read: now
+ok - only changed judgements are reported; the summaries are carried forward
+ok - shaping: excluded removed, ranked first, the rest in map order; nodeMap untouched
+ok - shaping: unproven go last; empty lists are the identity
+ok - the successor search sees the shaped order (proven follower first)
+ok - drain shaping (unfit ++ unproven excluded) can leave NO successor: the guard then keeps the master
+ok - withholding: a listed Slave gets balance 0; master, Down corpse and unlisted slaves untouched; keys preserved
+ok - the masterless refill skips an excluded (unfit) Active slave
+ok - deleteGate: an unproven surviving follower refuses the delete
+1..129
+# 129 checks passed

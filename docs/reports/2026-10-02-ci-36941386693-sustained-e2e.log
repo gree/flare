@@ -1,0 +1,77 @@
+# === Suite: continuous-replication-sustained ===
+# Deploying cluster 'cont-repl-sustained' in namespace 'flare-cont-repl-sustained'
+# Waiting for: namespace flare-cont-repl-sustained not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-cont-repl-sustained (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap cont-repl-sustained-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting 50s grace period for operator reconciliation...
+# Waiting for: replica following (timeout: 120s)
+#   OK after 0s
+# T17 300/s window 0: get latency replica [p50=1835us p99=55634us max=57050us n=50] master [p50=1727us p99=54158us max=56997us n=50]; reconcile 4 passes, mean 1835.000000ms; lease age 6s
+# sustain 300/s window 0: state=following lag=0 (head 9004, applied 9004) items master=9000 replica=9000 master RSS=38120kB WAL=72092kB data=76300kB replica RSS=35924kB tombstones=0 wal_skipped=5164
+# T17 300/s window 1: get latency replica [p50=3621us p99=84751us max=90476us n=50] master [p50=3119us p99=60768us max=86094us n=50]; reconcile 5 passes, mean 1787.000000ms; lease age 2s
+# sustain 300/s window 1: state=following lag=0 (head 18004, applied 18004) items master=18000 replica=18000 master RSS=41344kB WAL=72092kB data=76312kB replica RSS=37816kB tombstones=0 wal_skipped=9469
+# T17 300/s window 2: get latency replica [p50=2016us p99=90817us max=92086us n=50] master [p50=1581us p99=87318us max=90695us n=50]; reconcile 4 passes, mean 1910.000000ms; lease age 6s
+# sustain 300/s window 2: state=following lag=0 (head 27004, applied 27004) items master=27000 replica=27000 master RSS=42756kB WAL=72092kB data=76324kB replica RSS=39636kB tombstones=0 wal_skipped=12559
+# T17 300/s window 3: get latency replica [p50=2698us p99=70134us max=84155us n=50] master [p50=3010us p99=88765us max=88882us n=50]; reconcile 4 passes, mean 1856.000000ms; lease age 1s
+# sustain 300/s window 3: state=following lag=0 (head 36004, applied 36004) items master=36000 replica=36000 master RSS=46552kB WAL=72092kB data=76336kB replica RSS=41472kB tombstones=0 wal_skipped=16816
+# T17 300/s window 4: get latency replica [p50=2478us p99=88774us max=89439us n=50] master [p50=2028us p99=57735us max=86478us n=50]; reconcile 4 passes, mean 1819.000000ms; lease age 4s
+# sustain 300/s window 4: state=following lag=0 (head 45004, applied 45004) items master=45000 replica=45000 master RSS=49508kB WAL=72092kB data=76348kB replica RSS=43332kB tombstones=0 wal_skipped=22682
+# T17 300/s window 5: get latency replica [p50=2183us p99=88599us max=90191us n=50] master [p50=2296us p99=88555us max=90042us n=50]; reconcile 4 passes, mean 1837.000000ms; lease age 0s
+# sustain 300/s window 5: state=following lag=0 (head 54004, applied 54004) items master=54000 replica=54000 master RSS=50288kB WAL=72092kB data=76360kB replica RSS=45172kB tombstones=0 wal_skipped=28200
+# T17 300/s window 6: get latency replica [p50=2400us p99=86380us max=88571us n=50] master [p50=2806us p99=87293us max=88924us n=50]; reconcile 5 passes, mean 1920.000000ms; lease age 3s
+# sustain 300/s window 6: state=following lag=0 (head 63004, applied 63004) items master=63000 replica=63000 master RSS=50452kB WAL=72092kB data=76376kB replica RSS=46968kB tombstones=0 wal_skipped=36497
+# T17 300/s window 7: get latency replica [p50=3102us p99=58720us max=58905us n=50] master [p50=2703us p99=57679us max=58117us n=50]; reconcile 4 passes, mean 1864.000000ms; lease age 6s
+# sustain 300/s window 7: state=following lag=0 (head 72004, applied 72004) items master=72000 replica=72000 master RSS=50648kB WAL=72092kB data=76388kB replica RSS=48776kB tombstones=0 wal_skipped=40542
+# sustain 300/s: 300/s: lag first-minute max 0, last-minute max 0 → KEPT UP (bounded)
+# T17 900/s window 0: get latency replica [p50=2614us p99=86517us max=92074us n=50] master [p50=2175us p99=86248us max=88316us n=50]; reconcile 4 passes, mean 2003.000000ms; lease age 2s
+# sustain 900/s window 0: state=following lag=0 (head 99004, applied 99004) items master=99000 replica=99000 master RSS=56564kB WAL=72092kB data=76404kB replica RSS=54252kB tombstones=0 wal_skipped=67744
+# T17 900/s window 1: get latency replica [p50=2440us p99=54250us max=54554us n=50] master [p50=2617us p99=55306us max=56662us n=50]; reconcile 4 passes, mean 1860.000000ms; lease age 4s
+# sustain 900/s window 1: state=following lag=0 (head 126004, applied 126004) items master=126000 replica=126000 master RSS=62532kB WAL=72092kB data=76416kB replica RSS=59712kB tombstones=0 wal_skipped=94904
+# T17 900/s window 2: get latency replica [p50=2491us p99=89653us max=89717us n=50] master [p50=1386us p99=88690us max=88730us n=50]; reconcile 4 passes, mean 2036.000000ms; lease age 6s
+# sustain 900/s window 2: state=following lag=0 (head 153004, applied 153004) items master=153000 replica=153000 master RSS=72036kB WAL=72092kB data=76432kB replica RSS=65212kB tombstones=0 wal_skipped=122096
+# T17 900/s window 3: get latency replica [p50=3712us p99=58653us max=62203us n=50] master [p50=2635us p99=58024us max=61326us n=50]; reconcile 4 passes, mean 1980.000000ms; lease age 2s
+# sustain 900/s window 3: state=following lag=0 (head 180004, applied 180004) items master=180000 replica=180000 master RSS=78156kB WAL=72092kB data=76448kB replica RSS=70692kB tombstones=0 wal_skipped=149282
+# T17 900/s window 4: get latency replica [p50=2366us p99=93355us max=93796us n=50] master [p50=1652us p99=85799us max=91543us n=50]; reconcile 4 passes, mean 1918.000000ms; lease age 4s
+# sustain 900/s window 4: state=following lag=0 (head 207004, applied 207004) items master=207000 replica=207000 master RSS=83204kB WAL=72092kB data=76460kB replica RSS=76144kB tombstones=0 wal_skipped=176465
+# T17 900/s window 5: get latency replica [p50=3917us p99=54328us max=54358us n=50] master [p50=3728us p99=56373us max=86893us n=50]; reconcile 4 passes, mean 2042.000000ms; lease age 7s
+# sustain 900/s window 5: state=following lag=0 (head 234004, applied 234004) items master=234000 replica=234000 master RSS=85480kB WAL=72092kB data=76476kB replica RSS=81580kB tombstones=0 wal_skipped=203646
+# T17 900/s window 6: get latency replica [p50=3124us p99=58966us max=59145us n=50] master [p50=3236us p99=56893us max=57040us n=50]; reconcile 5 passes, mean 1997.000000ms; lease age 2s
+# sustain 900/s window 6: state=following lag=0 (head 261004, applied 261004) items master=261000 replica=261000 master RSS=88360kB WAL=72092kB data=76488kB replica RSS=86876kB tombstones=0 wal_skipped=230821
+# T17 900/s window 7: get latency replica [p50=2314us p99=92008us max=94591us n=50] master [p50=1744us p99=88330us max=92622us n=50]; reconcile 4 passes, mean 2060.000000ms; lease age 4s
+# sustain 900/s window 7: state=following lag=0 (head 288004, applied 288004) items master=288000 replica=288000 master RSS=96392kB WAL=72092kB data=76500kB replica RSS=92280kB tombstones=0 wal_skipped=257992
+# sustain 900/s: 900/s: lag first-minute max 0, last-minute max 0 → KEPT UP (bounded)
+# T17 2000/s window 0: get latency replica [p50=2963us p99=84692us max=90302us n=50] master [p50=2919us p99=91041us max=91104us n=50]; reconcile 4 passes, mean 2244.000000ms; lease age 6s
+# sustain 2000/s window 0: state=following lag=16905 (head 348004, applied 331099) items master=348000 replica=348000 master RSS=106996kB WAL=72092kB data=76512kB replica RSS=103748kB tombstones=0 wal_skipped=304074
+# T17 2000/s window 1: get latency replica [p50=8041us p99=53503us max=55597us n=50] master [p50=3812us p99=54156us max=54577us n=50]; reconcile 4 passes, mean 2383.000000ms; lease age 1s
+# sustain 2000/s window 1: state=following lag=34575 (head 408004, applied 373429) items master=408000 replica=408000 master RSS=110864kB WAL=72092kB data=76532kB replica RSS=115028kB tombstones=0 wal_skipped=346826
+# T17 2000/s window 2: get latency replica [p50=2375us p99=59006us max=59018us n=50] master [p50=1838us p99=58981us max=60171us n=50]; reconcile 5 passes, mean 2423.000000ms; lease age 3s
+# sustain 2000/s window 2: state=following lag=55050 (head 468004, applied 412954) items master=468000 replica=468000 master RSS=116056kB WAL=72092kB data=76544kB replica RSS=126004kB tombstones=0 wal_skipped=385994
+# T17 2000/s window 3: get latency replica [p50=2965us p99=54725us max=55074us n=50] master [p50=2349us p99=55787us max=56544us n=50]; reconcile 4 passes, mean 2403.000000ms; lease age 4s
+# sustain 2000/s window 3: state=following lag=79860 (head 528004, applied 448144) items master=528000 replica=528000 master RSS=124084kB WAL=72092kB data=76552kB replica RSS=75176kB tombstones=0 wal_skipped=420810
+# T17 2000/s window 4: get latency replica [p50=4248us p99=55490us max=56280us n=50] master [p50=3052us p99=55911us max=59683us n=50]; reconcile 4 passes, mean 2455.000000ms; lease age 5s
+# sustain 2000/s window 4: state=following lag=107220 (head 588004, applied 480784) items master=588000 replica=588000 master RSS=134764kB WAL=72092kB data=76560kB replica RSS=86308kB tombstones=0 wal_skipped=453834
+# T17 2000/s window 5: get latency replica [p50=3327us p99=56964us max=59136us n=50] master [p50=4791us p99=57380us max=58190us n=50]; reconcile 4 passes, mean 2488.000000ms; lease age 6s
+# sustain 2000/s window 5: state=following lag=136365 (head 648004, applied 511639) items master=648000 replica=648000 master RSS=143308kB WAL=72092kB data=76572kB replica RSS=97348kB tombstones=0 wal_skipped=485066
+# T17 2000/s window 6: get latency replica [p50=4220us p99=56995us max=97848us n=50] master [p50=3394us p99=53123us max=55778us n=50]; reconcile 4 passes, mean 2714.000000ms; lease age 0s
+# sustain 2000/s window 6: state=following lag=167040 (head 708004, applied 540964) items master=708000 replica=708000 master RSS=153920kB WAL=72092kB data=76580kB replica RSS=108332kB tombstones=0 wal_skipped=514250
+# T17 2000/s window 7: get latency replica [p50=2300us p99=85718us max=90307us n=50] master [p50=2486us p99=88949us max=93150us n=50]; reconcile 4 passes, mean 2753.000000ms; lease age 1s
+# sustain 2000/s window 7: state=following lag=198735 (head 768004, applied 569269) items master=768000 replica=768000 master RSS=160388kB WAL=72092kB data=76588kB replica RSS=119228kB tombstones=0 wal_skipped=542666
+# sustain 2000/s: 2000/s: lag first-minute max 34575, last-minute max 198735 → FELL BEHIND (growing)
+# Waiting for: follow stream drains the backlog after the load stops (timeout: 1200s)
+#   OK after 130s
+# sustained summary: 300/s: lag first-minute max 0, last-minute max 0 → KEPT UP (bounded) | 900/s: lag first-minute max 0, last-minute max 0 → KEPT UP (bounded) | 2000/s: lag first-minute max 34575, last-minute max 198735 → FELL BEHIND (growing); drained after the load stopped=true in 162s; master RSS 33764→160388 kB; WAL 72092 kB; data 76648 kB; items master=768000 replica=768000; master restarts 0→0; reconstruction_started 1→1; wal_applied=(some 32852) wal_skipped=(some 739893) forward_applied=(some 735148)
+# T17 apply lock on the replica: batches=772867 hold total=64805266us hold max=294527us exclusive-acquire wait max=79052us forwarded-write wait max=81336us
+# Cleaning up cluster 'cont-repl-sustained'
+# Tests: 1, Failures: 0
+# RESULT: PASS
+1..1
+ok 1 - sustained load: does the follow stream keep up at a steady write rate, and do WAL/RSS/disk stay bounded until it does? (evaluation)

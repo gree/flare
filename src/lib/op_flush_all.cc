@@ -135,6 +135,15 @@ int op_flush_all::_run_server() {
 		log_warning("flush_all refused (flush-all-enabled = false)", 0);
 		return this->_send_result(result_server_error, "flush_all disabled by configuration");
 	}
+	if (this->_cluster != NULL) {
+		cluster::role r;
+		cluster::state st;
+		int partition = -1;
+		if (this->_cluster->get_own_assignment(r, st, partition) && r == cluster::role_slave) {
+			log_warning("flush_all refused on a replica (partition %d): it would wipe this copy alone; flush the master — the replicas follow its history", partition);
+			return this->_send_result(result_server_error, "flush_all refused on a replica: flush the master");
+		}
+	}
 	if (this->_storage->truncate() < 0) {
 		if (this->_option & storage::option_noreply) {
 			return 0;

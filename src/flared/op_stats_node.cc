@@ -27,7 +27,10 @@
  *	$Id$
  */
 #include "flared.h"
+#include "op_repl_snapshot_push.h"
 #include "op_stats_node.h"
+#include <sys/stat.h>
+#include <cstdlib>
 
 namespace gree {
 namespace flare {
@@ -89,10 +92,25 @@ int op_stats_node::_run_server() {
 	case stats_type_nodes:
 		this->_send_stats_nodes(singleton<flared>::instance().get_cluster());
 		break;
+	case stats_type_tombstones:
+		// writes its own END / SERVER_ERROR
+		return this->_send_stats_tombstones(singleton<flared>::instance().get_storage());
 	case stats_type_threads_queue:
 		this->_send_stats_threads_queue();
 		break;
 	default:
+		{
+			// TEST SEAM (E2E only, decision 2026-10-07): while the file named by
+			// FLARE_TEST_STATS_FAIL_FILE exists, `stats` answers an INCOMPLETE
+			// reply (no END), as a node that cannot be read completely would
+			const char* fail = getenv("FLARE_TEST_STATS_FAIL_FILE");
+			struct stat fsb;
+			if (fail != NULL && fail[0] != '\0' && stat(fail, &fsb) == 0) {
+				this->_send_stat("pid", stats_object->get_pid());
+				log_warning("stats answered INCOMPLETE (no END): held by FLARE_TEST_STATS_FAIL_FILE (test seam)", 0);
+				return -1;
+			}
+		}
 		this->_send_stats(singleton<flared>::instance().get_req_thread_pool(),singleton<flared>::instance().get_other_thread_pool(),
 				singleton<flared>::instance().get_storage(),
 				singleton<flared>::instance().get_cluster());
@@ -106,8 +124,12 @@ int op_stats_node::_run_server() {
 			shared_cluster_replication repl = singleton<flared>::instance().get_cluster_replication();
 			if (repl) {
 				this->_send_stat("cluster_replication", repl->is_started() ? "on" : "off");
+				// destination side of the same switch, shown whether or not this
+				// node replicates: does it ACCEPT a snapshot push (item 1, 2026-10-13)
+				this->_send_stat("snapshot_push_accept", op_repl_snapshot_push::accept_push ? "on" : "off");
 				if (repl->is_started()) {
 					this->_send_stat("cluster_replication_mode", cluster_replication::mode_cast(repl->get_mode()));
+					this->_send_stat("cluster_replication_snapshot_push", repl->get_snapshot_push() ? "on" : "off");
 					char repl_dest[BUFSIZ];
 					snprintf(repl_dest, sizeof(repl_dest), "%s:%d", repl->get_server_name().c_str(), repl->get_server_port());
 					this->_send_stat("cluster_replication_destination", repl_dest);

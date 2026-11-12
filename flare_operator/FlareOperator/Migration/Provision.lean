@@ -34,6 +34,9 @@ open FlareOperator.K8s
     `rocksdb:`). Empty string when nothing is set. -/
 def rocksdbSpecYaml (r : RocksdbConfigSpec) : String :=
   let fields : List (Option String) := [
+    r.blockCacheSizeMb.map (s!"    blockCacheSizeMb: {·}"),
+    r.writeBufferSizeMb.map (s!"    writeBufferSizeMb: {·}"),
+    r.maxWriteBufferNumber.map (s!"    maxWriteBufferNumber: {·}"),
     r.walTtlSeconds.map (s!"    walTtlSeconds: {·}"),
     r.walSizeLimitMb.map (s!"    walSizeLimitMb: {·}"),
     r.syncWrites.map (fun b => s!"    syncWrites: {if b then "true" else "false"}"),
@@ -42,7 +45,9 @@ def rocksdbSpecYaml (r : RocksdbConfigSpec) : String :=
     r.walSyncBwlimit.map (s!"    walSyncBwlimit: {·}"),
     r.walSyncInterval.map (s!"    walSyncInterval: {·}"),
     r.snapshotBwlimit.map (s!"    snapshotBwlimit: {·}"),
-    r.flushAllEnabled.map (fun b => s!"    flushAllEnabled: {if b then "true" else "false"}")
+    r.flushAllEnabled.map (fun b => s!"    flushAllEnabled: {if b then "true" else "false"}"),
+    -- copy retention §9: unset, every staged rebuild of the target stops
+    r.rebuildReserveBytes.map (s!"    rebuildReserveBytes: {·}")
   ]
   let lines := fields.filterMap id
   if lines.isEmpty then "" else "\n  rocksdb:\n" ++ String.intercalate "\n" lines
@@ -67,6 +72,13 @@ structure TargetPlan where
   operatorImage : String      -- read from the controller's own pod
   serviceAccount : String     -- read from the controller's own pod
   rocksdb : RocksdbConfigSpec -- copied from the source CR
+  /-- The source CR's `clusterReplication.snapshotPush`. `false` (the
+      per-key-only migration, user decision 2026-10-13 item 1) is given to
+      the TARGET as well — replication off there, `snapshotPush: false` — so
+      the target refuses any snapshot push from the moment it starts
+      (flared `cluster-replication-snapshot-push = false`), not only the
+      seed this migration starts. -/
+  snapshotPush : Bool := true
   flarePort : Nat := 12121
   operatorPort : Nat := 12120
 
@@ -91,6 +103,16 @@ def adoptionAnnotations (p : TargetPlan) : String :=
     meta.helm.sh/release-namespace: {p.ns}"
   | none => ""
 
+/-- The target's own replication block: present only for a per-key-only
+    migration (see `TargetPlan.snapshotPush`). -/
+def targetRepl (p : TargetPlan) : Option ClusterReplicationSpec :=
+  if p.snapshotPush then none else some { enabled := false, snapshotPush := false }
+
+def targetReplYaml (p : TargetPlan) : String :=
+  match targetRepl p with
+  | none => ""
+  | some _ => "\n  clusterReplication:\n    enabled: false\n    snapshotPush: false"
+
 def flareClusterYaml (p : TargetPlan) : String :=
   s!"apiVersion: flare.gree.net/v1alpha1
 kind: FlareCluster
@@ -101,13 +123,15 @@ metadata:
     {commonLabels p}{adoptionLabels p}{adoptionAnnotations p}
 spec:
   partitions: {p.partitions}
-  replicas: {p.replicas}{rocksdbSpecYaml p.rocksdb}"
+  replicas: {p.replicas}{rocksdbSpecYaml p.rocksdb}{targetReplYaml p}"
 
 /-- extra.conf seed: flared refuses to start without the file. Content is
     what the target operator would render anyway (rocksdb passthrough + the
     explicit replication-off line), so the first SIGHUP is a no-op. -/
 def configMapYaml (p : TargetPlan) : String :=
-  let content := FlareOperator.K8s.Bridge.renderFlaredExtraConf p.rocksdb none
+  -- the same text the target operator renders for its CR (replication off,
+  -- the switch carried when false), so its first reconcile changes nothing
+  let content := FlareOperator.K8s.Bridge.renderFlaredExtraConf p.rocksdb none p.snapshotPush
   let indented := String.intercalate "\n    " (content.splitOn "\n")
   s!"apiVersion: v1
 kind: ConfigMap
@@ -190,7 +214,7 @@ def statefulSetYaml (p : TargetPlan) : String :=
   let cluster := p.targetName
   let numPods := p.partitions * p.replicas
   let operatorSvc := s!"{p.targetName}-operator.{p.ns}.svc.cluster.local"
-  let graceSeconds := p.drainSeconds + 30
+  let graceSeconds := p.drainSeconds + 75  -- the chart's grace: preStop + flared's 65 s stop budget + 10 s
   s!"apiVersion: v1
 kind: Service
 metadata:
@@ -220,6 +244,8 @@ metadata:
     {commonLabels p}{adoptionLabels p}{adoptionAnnotations p}
 spec:
   serviceName: {cluster}-nodes
+  updateStrategy:
+    type: OnDelete
   replicas: {numPods}
   selector:
     matchLabels:
@@ -239,7 +265,7 @@ spec:
           env:
             - name: MALLOC_ARENA_MAX
               value: \"2\"
-          command: [\"sh\", \"-c\", \"if [ -f /data/flare/RESTORE ]; then SRC=$(cat /data/flare/RESTORE) && rm -rf /data/flare/flare.rocksdb && cp -a $SRC /data/flare/flare.rocksdb && rm -f /data/flare/RESTORE; fi; mkdir -p /data/flare; rm -f /data/flare/flared.pid; exec flared --config=/etc/flared/extra.conf --data-dir /data/flare --server-port {p.flarePort} --index-server-name {operatorSvc} --index-server-port {p.operatorPort} --storage-type=rocksdb --metrics-server-port 9150 --stderr\"]
+          command: [\"sh\", \"-c\", \"if [ -f /data/flare/RESTORE ]; then SRC=$(cat /data/flare/RESTORE) && rm -rf /data/flare/flare.rocksdb && cp -a $SRC /data/flare/flare.rocksdb && touch /data/flare/flare.rocksdb/RESTORED && rm -f /data/flare/RESTORE; fi; mkdir -p /data/flare; rm -f /data/flare/flared.pid; exec flared --config=/etc/flared/extra.conf --data-dir /data/flare --server-port {p.flarePort} --index-server-name {operatorSvc} --index-server-port {p.operatorPort} --storage-type=rocksdb --metrics-server-port 9150 --stderr\"]
           lifecycle:
             preStop:
               exec:
@@ -295,6 +321,18 @@ spec:
         resources:
           requests:
             storage: {p.persistenceSize}"
+
+/-- What a target plan takes from the source CR: its rocksdb tuning and its
+    `clusterReplication.snapshotPush`. A source CR that cannot be read (a
+    transient API error, a Forbidden) is UNKNOWN, not a default: the
+    default (`{}`, pushes accepted) would provision a target that accepts a
+    snapshot push from its first start although the source opted out
+    (review 2026-10-13 finding 1). The caller stops the provision (nothing
+    applied) and retries. -/
+def sourceSettings (r : Except String FlareClusterView) : Except String (RocksdbConfigSpec × Bool) :=
+  match r with
+  | .ok crd => .ok (crd.spec.rocksdb, crd.spec.clusterReplication.snapshotPush)
+  | .error e => .error s!"cannot read the source FlareCluster (its snapshotPush switch is unknown): {e}; nothing of the target applied, retried"
 
 /-- Every target manifest, in apply order (config before pods). -/
 def allManifests (p : TargetPlan) : List String :=

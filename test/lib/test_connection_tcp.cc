@@ -31,6 +31,16 @@
 #include <connection_tcp.h>
 
 #include <iostream>
+#include <time.h>
+#include <errno.h>
+#include <poll.h>
+#include <signal.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <string.h>
+#include <pthread.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
 
 using namespace gree::flare;
 
@@ -156,6 +166,247 @@ namespace test_connection_tcp
 		cut_assert_equal_int(0, ctcp.get_tcp_nodelay(nodelay));
 		cut_assert_equal_boolean(false, nodelay);
 		cut_assert_equal_boolean(false, get_tcp_nodelay(ctcp._addr_family, ctcp._sock));
+	}
+
+	// ---- deadlines (review 2026-10-06): a per-read timeout bounds a SILENT
+	// peer; only the total deadline bounds a peer that TRICKLES bytes; the
+	// connect deadline bounds an address that never answers.
+	namespace {
+		uint64_t mono_ms() {
+			struct timespec ts;
+			clock_gettime(CLOCK_MONOTONIC, &ts);
+			return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+		}
+		struct trickle_server {
+			int sfd;
+			unsigned short port;
+			pthread_t th;
+			bool started;
+			trickle_server() : sfd(-1), port(0), started(false) {
+				// the client may close while this server still writes: a write
+				// to a closed peer must fail with EPIPE, not kill the test
+				// process with SIGPIPE (flared ignores SIGPIPE as well)
+				signal(SIGPIPE, SIG_IGN);
+				sfd = socket(AF_INET, SOCK_STREAM, 0);
+				int on = 1;
+				setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+				struct sockaddr_in a;
+				memset(&a, 0, sizeof(a));
+				a.sin_family = AF_INET;
+				a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+				a.sin_port = 0;
+				// ::bind, not std::bind (an unqualified bind resolved to
+				// std::bind here and silently bound nothing: port 0)
+				if (::bind(sfd, (struct sockaddr*)&a, sizeof(a)) != 0) return;
+				socklen_t len = sizeof(a);
+				::getsockname(sfd, (struct sockaddr*)&a, &len);
+				port = ntohs(a.sin_port);
+				::listen(sfd, 4);
+				started = (pthread_create(&th, NULL, &trickle_server::run, this) == 0);
+			}
+			static void* run(void* p) {
+				trickle_server* self = static_cast<trickle_server*>(p);
+				// never block forever: a client that does not come must not
+				// hang the suite in the destructor's join
+				struct pollfd pfd;
+				pfd.fd = self->sfd;
+				pfd.events = POLLIN;
+				pfd.revents = 0;
+				if (poll(&pfd, 1, 10000) != 1) return NULL;
+				int c = ::accept(self->sfd, NULL, NULL);
+				if (c < 0) return NULL;
+				for (int i = 0; i < 20; i++) {		// 6 s of one byte / 300 ms, never a newline
+					if (write(c, "a", 1) != 1) break;
+					usleep(300 * 1000);
+				}
+				close(c);
+				return NULL;
+			}
+			~trickle_server() {
+				if (started) pthread_join(th, NULL);
+				if (sfd >= 0) close(sfd);
+			}
+		};
+	}
+
+	void test_connection_tcp_read_timeout_bounds_a_silent_peer()
+	{
+		// the test server sends its output and then HOLDS the connection
+		shared_connection c(new_connection_tcp("no newline, then silence"));
+		cut_assert_equal_int(0, c->open());
+		connection_tcp& ctcp = dynamic_cast<connection_tcp&>(*c);
+		ctcp.set_read_timeout(1000);
+		char* line = NULL;
+		const uint64_t t0 = mono_ms();
+		cut_assert_equal_int(-1, c->readline(&line));
+		const uint64_t took = mono_ms() - t0;
+		// the per-read TIMEOUT ended it (not the peer closing: that is -2)
+		cut_assert_equal_int(-1, ctcp.get_errno());
+		cut_assert_operator(took, >=, (uint64_t)900);
+		cut_assert_operator(took, <, (uint64_t)3000);
+		delete[] line;
+	}
+
+	void test_connection_tcp_total_deadline_bounds_a_trickling_peer()
+	{
+		trickle_server srv;
+		cut_assert_true(srv.started && srv.port != 0, cut_message("the local trickle server did not start (port %d)", (int)srv.port));
+		connection_tcp* t = new connection_tcp("localhost", srv.port);
+		shared_connection c(t);
+		t->set_read_timeout(1000);			// never fires: a byte arrives every 300 ms
+		cut_assert_equal_int(0, c->open(), cut_message("connect to the local trickle server on port %d failed (errno %d)", (int)srv.port, t->get_errno()));
+		t->set_deadline_from_now(1500);
+		char* line = NULL;
+		const uint64_t t0 = mono_ms();
+		cut_assert_equal_int(-1, c->readline(&line));
+		const uint64_t took = mono_ms() - t0;
+		cut_assert_equal_int(-3, t->get_errno(), cut_message("readline ended after %llu ms with errno %d", (unsigned long long)took, t->get_errno()));			// the TOTAL deadline ended it
+		cut_assert_operator(took, <, (uint64_t)3000);		// not the 6 s of trickling
+		cut_assert_operator(took, >=, (uint64_t)1400);
+		delete[] line;
+	}
+
+	void test_connection_tcp_connect_deadline_bounds_an_unanswered_address()
+	{
+		// 192.0.2.1 (TEST-NET-1, RFC 5737) is never routed: either the
+		// connect is refused at once or it would wait for the kernel's SYN
+		// timeout; with a deadline it must give up within the deadline.
+		connection_tcp* t = new connection_tcp("192.0.2.1", 9);
+		shared_connection c(t);
+		t->set_connect_timeout_ms(1000);
+		t->set_connect_retry_limit(1);
+		const uint64_t t0 = mono_ms();
+		cut_assert_equal_int(-1, c->open());
+		const uint64_t took = mono_ms() - t0;
+		if (t->get_errno() != ETIMEDOUT) {
+			// refused or unreachable at once: the DEADLINE path was not reached
+			// (this network answers for TEST-NET-1). Not a pass of this test.
+			cut_omit("connect to 192.0.2.1 failed immediately (errno %d): the connect deadline was not exercised here", t->get_errno());
+		}
+		cut_assert_operator(took, >=, (uint64_t)1800);		// two 1 s deadlines
+		cut_assert_operator(took, <, (uint64_t)5000);		// 2 tries x 1 s + retry wait
+	}
+
+	// ---- write bounds (verification capture, 2026-10-12): a peer that stays
+	// connected but never reads used to block write() forever (the poll loop
+	// had no deadline). An accepted, NON-BLOCKING socket as flared's server
+	// side has; the peer connects and never reads.
+	namespace {
+		struct stalled_pair {
+			int lfd, cfd, afd;
+			struct sockaddr_in addr;
+			stalled_pair() : lfd(-1), cfd(-1), afd(-1) {
+				lfd = socket(AF_INET, SOCK_STREAM, 0);
+				memset(&addr, 0, sizeof(addr));
+				addr.sin_family = AF_INET;
+				addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+				addr.sin_port = 0;
+				bind(lfd, (struct sockaddr*)&addr, sizeof(addr));
+				listen(lfd, 1);
+				socklen_t l = sizeof(addr);
+				getsockname(lfd, (struct sockaddr*)&addr, &l);
+				cfd = socket(AF_INET, SOCK_STREAM, 0);
+				int small = 4096;
+				setsockopt(cfd, SOL_SOCKET, SO_RCVBUF, &small, sizeof(small));
+				connect(cfd, (struct sockaddr*)&addr, sizeof(addr));
+				struct sockaddr_in peer;
+				socklen_t pl = sizeof(peer);
+				afd = accept(lfd, (struct sockaddr*)&peer, &pl);
+				fcntl(afd, F_SETFL, fcntl(afd, F_GETFL, 0) | O_NONBLOCK);
+			}
+			~stalled_pair() {
+				if (cfd >= 0) ::close(cfd);
+				if (lfd >= 0) ::close(lfd);
+			}
+		};
+	}
+
+	void test_write_progress_timeout_ends_a_write_to_a_peer_that_stopped_reading()
+	{
+		stalled_pair sp;
+		cut_assert_operator(sp.afd, >=, 0);
+		connection_tcp* t = new connection_tcp(sp.afd, sp.addr);
+		shared_connection c(t);
+		t->set_write_progress_timeout_ms(1500);
+		const int n = 64 << 20;		// far beyond both socket buffers
+		char* buf = new char[n];
+		memset(buf, 'x', n);
+		const uint64_t t0 = mono_ms();
+		cut_assert_equal_int(-1, c->write(buf, n));
+		const uint64_t took = mono_ms() - t0;
+		delete[] buf;
+		cut_assert_equal_int(-4, t->get_errno());
+		cut_assert_operator(took, >=, (uint64_t)1400);
+		cut_assert_operator(took, <, (uint64_t)5000);
+		cut_assert_false(t->is_available());		// closed: the serve ends
+	}
+
+	void test_write_deadline_ends_a_write_even_with_a_longer_progress_timeout()
+	{
+		stalled_pair sp;
+		connection_tcp* t = new connection_tcp(sp.afd, sp.addr);
+		shared_connection c(t);
+		t->set_write_progress_timeout_ms(60000);
+		t->set_write_deadline_from_now(1000);
+		const int n = 64 << 20;
+		char* buf = new char[n];
+		memset(buf, 'x', n);
+		const uint64_t t0 = mono_ms();
+		cut_assert_equal_int(-1, c->write(buf, n));
+		const uint64_t took = mono_ms() - t0;
+		delete[] buf;
+		cut_assert_equal_int(-5, t->get_errno());
+		cut_assert_operator(took, <, (uint64_t)4000);
+		// a later write is refused (the socket is closed)
+		cut_assert_equal_int(-1, c->write("x", 1));
+	}
+
+	void test_write_bounds_do_not_end_a_write_the_peer_reads()
+	{
+		stalled_pair sp;
+		connection_tcp* t = new connection_tcp(sp.afd, sp.addr);
+		shared_connection c(t);
+		t->set_write_progress_timeout_ms(1000);
+		t->set_write_deadline_from_now(30000);
+		const int n = 1 << 20;
+		char* buf = new char[n];
+		memset(buf, 'y', n);
+		// the peer reads in another thread: every byte arrives, no bound fires
+		struct reader {
+			static void* run(void* a) {
+				int fd = *static_cast<int*>(a);
+				char b[65536];
+				long total = 0;
+				while (total < (1 << 20)) {
+					ssize_t r = ::read(fd, b, sizeof(b));
+					if (r <= 0) break;
+					total += r;
+				}
+				return reinterpret_cast<void*>(total);
+			}
+		};
+		pthread_t th;
+		pthread_create(&th, NULL, reader::run, &sp.cfd);
+		cut_assert_equal_int(n, c->write(buf, n));
+		void* got = NULL;
+		pthread_join(th, &got);
+		delete[] buf;
+		cut_assert_equal_int(0, t->get_errno());
+		cut_assert_equal_int(n, static_cast<int>(reinterpret_cast<long>(got)));
+	}
+
+	// the read timeout flared applies at startup AND on reload (one rule):
+	// a SIGHUP used to turn the k8s build's 30 s into net_read_timeout (600 s)
+	void test_effective_read_timeout_is_the_same_rule_at_startup_and_reload()
+	{
+		// k8s build, not configured: 30 s (whatever the option default says)
+		cut_assert_equal_int(30000, connection_tcp::effective_read_timeout_ms(true, false, 600));
+		// k8s build, configured explicitly: the configured value (also 600 when asked for)
+		cut_assert_equal_int(5000, connection_tcp::effective_read_timeout_ms(true, true, 5));
+		cut_assert_equal_int(600000, connection_tcp::effective_read_timeout_ms(true, true, 600));
+		// classic build: net_read_timeout (default 600 s, or as configured)
+		cut_assert_equal_int(600000, connection_tcp::effective_read_timeout_ms(false, false, 600));
+		cut_assert_equal_int(10000, connection_tcp::effective_read_timeout_ms(false, true, 10));
 	}
 
 	void teardown()

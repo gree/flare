@@ -26,6 +26,7 @@
  *
  *	$Id$
  */
+#include "signal_interrupt.h"
 #include "flarei.h"
 #include "coordinator_factory.h"
 #include "connection_tcp.h"
@@ -66,9 +67,9 @@ void sa_hup_handler(int sig) {
  *	signal handler (SIGUSR1)
  */
 void sa_usr1_handler(int sig) {
-	log_notice("received signal [SIGUSR1]", 0);
-
-	// just interrupting -> nothing to do
+	// just interrupting -> nothing to do. Async-signal-safe only: no logging
+	// (it allocated and locked inside the handler; see signal_interrupt.h)
+	sigusr1_interrupt_handler(sig);
 }
 // }}}
 

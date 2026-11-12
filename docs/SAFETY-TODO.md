@@ -7,6 +7,62 @@ status; [STPA-node-state.md](STPA-node-state.md) owns the hazard analysis.
 
 ## Merge gate
 
+For deployment rather than code integration, use the consolidated
+[production enablement gate](PRODUCTION-READINESS.md). It separates guarantee
+decisions, incomplete implementation, missing runtime evidence and rollout work.
+
+2026-10-01: startup-republish-alone E2E added to topology-authority (operator
+replaced while a committed pass is held before its send; audit off via a test
+seam; first send must be pending-only and every pod must adopt the withheld
+read-balance weight), plus a logged send-trigger record. CI pending.
+[Scope and residuals](reports/2026-10-01-startup-republish-e2e.md).
+
+2026-09-27: added fresh round-robin recipient topology observations bracketed
+by Pod UID reads, and startup republish through the existing lease fence.
+Lower applied versions request retry; Unknown/ahead do not trigger destructive
+actions. [Scope and residuals](reports/2026-09-27-topology-observation.md).
+SAF-09 remains partial (generation recovery and isolated restart E2E pending).
+
+2026-09-27: SAF-09 transport increment implemented: explicit node-sync reply
+confirmation, propagated send errors, and retention of failed deliveries for
+retry through the existing lease fence. [Scope and residuals](reports/2026-09-27-topology-delivery-retry.md).
+Per-Pod applied-generation tracking and restart/generation recovery remain open.
+
+2026-09-27: memory-budget CRD/Helm configuration and initial startup seeding
+are implemented; existing pods require a planned restart/migration. Runtime
+budget validation is still open, and these knobs are not an RSS cap. See
+[scope and tests](reports/2026-09-27-memory-config.md). The selective read
+E2E now isolates both index request replies and topology pushes; CI pending.
+
+### SAF-10 audit follow-ups (2026-09-24)
+
+Integrated `saf-10-audit-followups` through `89f3cff` into the PR #144 branch
+on 2026-09-26. The earlier SAF-10d status below describes the pre-integration
+evaluation: its "parked" follow-ups are now included, but performance must be
+remeasured after the MORE scheduling fix. Merge-revision CI is still pending;
+this integration does not mark any EV verified or approve PR #144 for merge.
+See [working-tree report](reports/2026-09-24-saf10-audit-followups.md).
+
+2026-09-26: added the isolated stale-positive-balance read-routing E2E
+([scenario and limitations](reports/2026-09-26-local-read-guard-e2e.md)).
+It requires the master's new value while both replication apply paths remain
+stopped, and observes the replica's local map before and after GET. Implemented
+and compiled, not yet executed in CI; the acceptance item below remains open.
+
+| Ordinary failure | Required behavior / current audit change | Remaining acceptance |
+|---|---|---|
+| Forwarding succeeded but WAL cursor trails | Drain MORE without a 200ms sleep even when all values were skipped as superseded | Rerun sustained 900/2000 writes/s and backlog drain |
+| Slave disconnected or lagging | Keep Slave role and cursor; local reads proxy to master, operator withholds read balance; no automatic full rebuild for a blip | Execute updated read-value E2E and isolate local guard with stale positive-balance map |
+| Master unreachable from slave | Do not return known-stale local content; forwarding can fail | Legacy read errors may appear as cache misses; protocol compatibility decision remains |
+| Operator restart with unreadable stats | Never-observed replicas are Unknown, not read-eligible; restore after a complete eligible reading | Cold-start unit tests pass; stage the combined restart/stats-failure E2E |
+| Source observation lies in the future | Unknown, not fresh via saturating subtraction | Unit-pinned; no clock-fault E2E |
+| WAL purged / source history changed | Explicit needs_rebuild with safe reseed, no retry forever | Preserve existing T6 evidence; re-run regressions after integrating changes |
+
+Before production enablement: T17, large-DB boot/probes, RocksDB memory-budget
+configuration, WAL retention/compaction under sustained lag, simultaneous
+repair-request staging, and remaining promotion/deletion safety gaps remain
+open. No asynchronous-failover loss-free guarantee is added by these changes.
+
 SAF-01 through SAF-07 block the operator merge until their acceptance scenarios
 have passed on the candidate implementation and a reviewer has assessed the
 linked safety constraints. A library build alone does not close these tasks.
@@ -21,9 +77,14 @@ All tasks below are open; record completion with evidence IDs and a PR reference
 | SAF-05 | Before merge | Retain pending replica repair until completion, including operator/master restart and counter reset. A drop observed while the breaker is held or a destination cannot be resolved must be repaired later without another drop. | SC-03 / EV-03 | SAF-02 |
 | SAF-06 | Before merge | Arbitrate competing repairs. When resync demotes a successor in the same tick as empty-master repair, do not delete using the previous successor snapshot. Cover concurrent re-registration and leadership loss before deletion. | SC-05 / EV-05 | SAF-04 |
 | SAF-07 | Before merge | Align documentation with actual guarantees: committed-map uniqueness is not distributed writer fencing; masterless refill can deliberately promote partial Prepare data. State the loss/availability tradeoff and residual risks. Re-audit all old DONE claims. | SC-01, SC-02, SC-04, SC-06 / EV-01, EV-02, EV-04, EV-06 | Final review after SAF-01–06 |
-| SAF-08 | Next stage | Type Pod observations, including identity, readiness, data knowledge and observation time; move repair decisions into pure functions. Unknown must not become healthy or empty. | SC-05, SC-07 / EV-05, EV-07 | SAF-03–06 |
-| SAF-09 | Next stage | Separate desired topology from per-node applied generation. Retry failed application and expose lag; specify delayed command handling and verify reconnect convergence. | SC-01, SC-02 / EV-01, EV-02 | SAF-01 |
-| SAF-10 | Separate design | Compare content anti-entropy, master LSN on proxied writes and continuous WAL shipping by guarantees, compatibility and operating cost. Include write acknowledgements, replica reads and cross-cluster migration. | SC-03, SC-12, SC-13 / EV-03, EV-12, EV-13 | No dependency for the design |
+| SAF-08 | Partial. 2026-10-02: follow evidence bound to the flared process (boot id). 2026-10-05 (CI pending, audit docs/reports/2026-10-05-saf08-copy-identity-audit.md): NotReady Active slaves are not promotion candidates (same-name replacement); repair demotion checks its rebuild source and re-checks atomically; PREPARE-REPAIR re-checks the process before activating; E2E copy-identity (same-name replacement, process restart). Open: audit rows 1, 2, 6, 9, 13; typed Pod observation record and pure repair decisions (structural, later) | Type Pod observations, including identity, readiness, data knowledge and observation time; move repair decisions into pure functions. Unknown must not become healthy or empty. | SC-05, SC-07 / EV-05, EV-07 | SAF-03–06 |
+| SAF-09 | Partial. 2026-10-02: new leader generation above the persisted record; send only persisted versions. 2026-10-05 (CI pending): the startup map read tells a failed read (retry, then exit), invalid content (halt), an actual loss (halt) and a first build (fresh) apart, with a Lease marker and the pods' own map versions as history; FLARE_NODE_MAP_RESET for a deliberate fresh start. Open: automatic reconstruction of a lost map; per-node applied generation persisted | Separate desired topology from per-node applied generation. Retry failed application and expose lag; specify delayed command handling and verify reconnect convergence. | SC-01, SC-02 / EV-01, EV-02 | SAF-01 |
+| SAF-10 | Separate design | Parent task: op-level forwarding for low-latency propagation KEPT, plus continuous WAL replication for gap-free recovery, so a replica that lost connectivity catches up automatically while the master survives. Both paths must deliver identified changes through one apply rule; the current verbatim WriteBatch apply must not run alongside forwarding. Decomposed into SAF-10a..d below. Guarantees excluded up front: acknowledged-write survival against master data loss, synchronous ACK, latest-read from coexistence alone, cross-partition placement, Tokyo Cabinet. | SC-03, SC-04, SC-13 / EV-03, EV-04, EV-13 (+ proposed SC-14..16) | No dependency for the design |
+| SAF-10a | Separate design | Audit the existing recovery code with call paths and produce the continuous-replication design: replication path choice (WAL-only for WAL-mode replicas vs. coexistence with op-level proxy), guarantee scope, open hazards. Review gate before any implementation. | SC-13 / EV-13 | None |
+| SAF-10b | Implemented on the branch (stages 1-3b), unverified: unit-tested and exercised by the SAF-10d acceptance suite (12/12 on one revision) | flared: the COMMON APPLY RULE for both delivery paths (decode every change to `{key, type, value, flag, expire, version, session, src_seq}`; apply iff `src_seq` exceeds the key's applied source sequence; persistent tombstones carrying the delete's sequence, dropped only once the applied position has passed the delete; a change at or below the applied position is refused whichever path delivered it; read-decide-write in one critical section with GC inside the applier's exclusive window; reserved keys never applied as data) plus continuous fetch/apply — follow mode with bounded responses, contiguous cursor that no forwarded write may advance, crash-atomic position in one WriteBatch with the changes, self-driven reconnect that needs no new writes, session validation at apply time, explicit needs-rebuild on lost history, resource ceilings and tombstone GC. Verbatim WriteBatch application is removed. | SC-03, SC-13 / EV-03, EV-13 (+ SC-16..20 proposed) | SAF-10a |
+| SAF-10c | Implemented on the branch, unverified: lifecycle, ledger ownership, follower-declared rebuild, and read/promotion/deletion eligibility (StateMachine/FollowEvidence); unit-pinned and exercised by the SAF-10d suite (read withholding, promotion/epoch, ownership, Unknown handling); drain exclusion and the survivor gate are unit-only | Operator interface: source/generation, contiguous applied position, master position with observation time, stream state, last progress, reason codes; purpose-specific eligibility for reads, promotion and copy deletion with Unknown handling; suppress the replica-repair ledger for WAL-mode nodes so only one rebuild runs. | SC-04, SC-05 / EV-04, EV-05, EV-11, EV-15 | SAF-10b |
+| SAF-10d | Acceptance suites pass locally and on CI: continuous-replication 13/13, continuous-replication-purge (T6), continuous-replication-limits (T9, bounded); full CI matrix green on 41ea98e (pull_request, 5 legs) together with the non-WAL and RocksDB regression suites. Five defects found by these tests and fixed on the branch (follower thread lifecycle 325a2f8; drop observation hidden by an unreadable replica eb2ba17; tch follower reading held as Unknown + 3 s-per-probe cost 2379cff; curr_items estimate blind to WAL-only keys d9d1285; a served WAL gap treated as a retryable error instead of history loss 3b7f38c). Evaluations, not acceptance: scale (2M keys — follow ceiling ≈1,280 changes/s at the default 256 batches per 200 ms poll, boot scan 0.48-0.98 µs/key, ≈8-16 s extrapolated for 15.8M keys) and sustained load (lag 0 at 300 and 900 keys/s, falls behind monotonically at 2000 keys/s, drains in 442 s after the load stops; disk figures not established — no flush in the window, and WAL retention for a trailing follower untested). Open: T17 lock-hold measurement (deferred by agreement); true concurrency of the two rebuild-request routes; the RocksDB memory floor (≈704 MB at flared defaults, chart limit 1Gi, no CRD knob); WAL retention and compaction under sustained load with a trailing follower; and the audit follow-ups parked on branch saf-10-audit-followups (flared-side read guard, follower retry_immediately, never-read withholding) — all before enabling anywhere real. PR #144 open as Draft; author-run only, nothing verified. Reports: docs/reports/2026-09-20-saf10d-*.txt, docs/reports/2026-09-21-saf10d-*.txt |
+| SAF-11 | Implemented 2026-10-01, CI pending: breaker counts nodes unavailable now (dead this tick + Down + pod-less Prepare); definition to be confirmed by the reviewer ([report](reports/2026-10-01-saf11-breaker-unavailable.md)). History: 5 CI no-trips (2026-09-14 ×2, runs 36719136539, 36741543371, 36796752122) | SC-09 / EV-09 | None |
 
 **Status (this branch).** SAF-01 through SAF-07 are implemented with tests on
 this branch. A review of the first cut (HEAD ffa2a05) reopened SAF-02 to
@@ -104,7 +165,32 @@ are pinned only by `flare_unit` and not staged end to end (a drop in the last
 stretch of a reconstruction; a change interposed between the delete's
 observation and the delete). SAF-07 is the "Guarantees, and what they are
 not" section of the [README](../README.md). SAF-08 through SAF-10 remain out
-of scope. Re-audit of older DONE claims lives in
+of scope; SAF-10 is now decomposed (SAF-10a..d) and its design stage is
+[design-continuous-wal-replication.md](design-continuous-wal-replication.md),
+which is a DRAFT for review — audit and design only, no implementation, and
+no register entry is promoted by it. Revision 2 records the reviewer's
+decision to keep both delivery paths and adds the common apply rule they
+require; the audit establishes that the existing per-key `version` orders
+updates of a live key and nothing else (delete/re-create, touch, incr,
+internal deletes and a master change are all outside it), which is why the
+rule uses the master's commit sequence instead. Revision 3 replaces the
+time-based tombstone GC with refusal by applied position, specifies the
+serialization from decision to write, and records the four preconditions
+without which the sequence comparison is unsound — session identity needs a
+generation token (`regenerate_master_id` fires only when the cursor exceeds
+the node's own sequence, so two DBs can share a `master_id` over unrelated
+sequence spaces — revision 4 splits this into a source epoch for the master's
+history and a receiver incarnation for the replica's copy, neither of which
+changes on a plain process restart), the label must be captured inside the
+key's critical section by EVERY path that can change a key (bulk operations
+switch the epoch instead) (otherwise a set and the delete that follows it can carry the
+same number and a deleted key is resurrected), per-entry numbering must match
+the batch's own count, and metadata inherited through a snapshot swap must be
+cleared. Revision 4 also records that a transient disconnection must never be
+a repair trigger — the stream owns the decision while the mode is on, and only
+an explicit needs-rebuild hands the node over — that such a replica stays out
+of the read set until SAF-10c, and that the new constraints are SC-16..20
+(SC-14/15 were already in use). Re-audit of older DONE claims lives in
 [STPA-node-state.md](STPA-node-state.md#8-what-this-document-got-wrong).
 
 ## Evidence workflow

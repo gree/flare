@@ -106,6 +106,16 @@ bool handler_storage_check::_sleep_interruptible(int seconds) {
 			return false;
 		}
 		sleep(1);
+#ifdef HAVE_LIBROCKSDB
+		// WAL_PIN (wal_pin.h): the deadline and the free-space floor are
+		// checked every second, whatever the integrity-check interval
+		if (this->_storage != NULL && this->_storage->get_type() == storage::type_rocksdb) {
+			storage_rocksdb* rdb = dynamic_cast<storage_rocksdb*>(this->_storage);
+			if (rdb != NULL) {
+				rdb->wal_pin_tick(wal_pin::now_ms());
+			}
+		}
+#endif
 	}
 	return !this->_thread->is_shutdown_request();
 }

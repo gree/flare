@@ -56,7 +56,11 @@ ini_option::ini_option():
 		_mysql_replication_table(""),
 #endif
 		_noreply_window_limit(default_noreply_window_limit),
+		_shutdown_forward_drain_msec(default_shutdown_forward_drain_msec),
+		_proxy_forward_hold_msec(default_proxy_forward_hold_msec),
+		_master_wait_msec(default_master_wait_msec),
 		_net_read_timeout(default_net_read_timeout),
+		_net_read_timeout_set(false),
 		_proxy_concurrency(default_proxy_concurrency),
 		_reconstruction_interval(default_reconstruction_interval),
 		_reconstruction_bwlimit(default_reconstruction_bwlimit),
@@ -78,6 +82,7 @@ ini_option::ini_option():
 		_thread_pool_size(default_thread_pool_size),
 		_proxy_prior_netmask(default_proxy_prior_netmask),
 		_max_total_thread_queue(default_max_total_thread_queue),
+		_read_unavailable_error(default_read_unavailable_error),
 		_time_watcher_enabled(false),
 		_time_watcher_polling_interval_msec(default_time_watcher_polling_interval_msec),
 		_storage_access_watch_threshold_warn_msec(0),
@@ -87,19 +92,28 @@ ini_option::ini_option():
 		_cluster_replication_server_port(default_server_port),
 		_cluster_replication_concurrency(default_proxy_concurrency),
 		_cluster_replication_mode(""),
+		_cluster_replication_snapshot_push(true),
 		_rocksdb_block_cache_size_mb(default_rocksdb_block_cache_size_mb),
 		_rocksdb_write_buffer_size_mb(default_rocksdb_write_buffer_size_mb),
 		_rocksdb_max_write_buffer_number(default_rocksdb_max_write_buffer_number),
 		_rocksdb_wal_ttl_seconds(default_rocksdb_wal_ttl_seconds),
 		_rocksdb_wal_size_limit_mb(default_rocksdb_wal_size_limit_mb),
+		_rocksdb_max_total_wal_size_mb(default_rocksdb_max_total_wal_size_mb),
 		_rocksdb_sync_writes(false),
 		_rocksdb_resync_failure_threshold(default_rocksdb_resync_failure_threshold),
 		_rocksdb_wal_max_batch_bytes(default_rocksdb_wal_max_batch_bytes),
 		_rocksdb_wal_sync_bwlimit(default_rocksdb_wal_sync_bwlimit),
 		_rocksdb_wal_sync_interval(default_rocksdb_wal_sync_interval),
 		_rocksdb_backup_keep(default_rocksdb_backup_keep),
+		_rocksdb_rebuild_reserve_bytes(-1),
 		_rocksdb_snapshot_bwlimit(default_rocksdb_snapshot_bwlimit),
 		_flush_all_enabled(default_flush_all_enabled),
+		_repl_identity_forward(default_repl_identity_forward),
+		_wal_follow_enabled(default_wal_follow_enabled),
+		_wal_follow_max_batches(default_wal_follow_max_batches),
+		_wal_follow_max_bytes(default_wal_follow_max_bytes),
+		_wal_follow_poll_interval_usec(default_wal_follow_poll_interval_usec),
+		_wal_follow_batch_delay_usec(0),
 		_reap_expired(default_reap_expired),
 		_reap_expired_interval(default_reap_expired_interval),
 		_reap_expired_chunk_size(default_reap_expired_chunk_size),
@@ -253,12 +267,22 @@ int ini_option::load() {
 		}
 #endif
 
+		if (opt_var_map.count("shutdown-forward-drain-msec")) {
+			this->_shutdown_forward_drain_msec = opt_var_map["shutdown-forward-drain-msec"].as<int>();
+		}
+		if (opt_var_map.count("proxy-forward-hold-msec")) {
+			this->_proxy_forward_hold_msec = opt_var_map["proxy-forward-hold-msec"].as<int>();
+		}
+		if (opt_var_map.count("master-wait-msec")) {
+			this->_master_wait_msec = opt_var_map["master-wait-msec"].as<int>();
+		}
 		if (opt_var_map.count("noreply-window-limit")) {
 			this->_noreply_window_limit = opt_var_map["noreply-window-limit"].as<int>();
 		}
 
 		if (opt_var_map.count("net-read-timeout")) {
 			this->_net_read_timeout = opt_var_map["net-read-timeout"].as<int>();
+			this->_net_read_timeout_set = true;
 		}
 
 		if (opt_var_map.count("proxy-concurrency")) {
@@ -364,6 +388,9 @@ int ini_option::load() {
 			this->_proxy_prior_netmask = opt_var_map["proxy-prior-netmask"].as<uint32_t>();
 		}
 
+		if (opt_var_map.count("read-unavailable-error")) {
+			this->_read_unavailable_error = opt_var_map["read-unavailable-error"].as<bool>();
+		}
 		if (opt_var_map.count("max-total-thread-queue")) {
 			this->_max_total_thread_queue = opt_var_map["max-total-thread-queue"].as<uint32_t>();
 		}
@@ -413,6 +440,13 @@ int ini_option::load() {
 			this->_cluster_replication_mode = cluster_replication::mode_cast(cluster_replication::mode_duplicate);
 		}
 
+		// Opt-in: false = a cross-cluster seed never tries a snapshot push
+		// (the per-key merge dump only; the destination keeps its own
+		// history). Default true (unchanged). In-cluster replica snapshots
+		// (repl_snapshot reseed) are a different path and are not affected.
+		this->_cluster_replication_snapshot_push = opt_var_map.count("cluster-replication-snapshot-push")
+			? opt_var_map["cluster-replication-snapshot-push"].as<bool>() : true;
+
 		if (opt_var_map.count("rocksdb-block-cache-size-mb")) {
 			this->_rocksdb_block_cache_size_mb = opt_var_map["rocksdb-block-cache-size-mb"].as<uint64_t>();
 		}
@@ -424,6 +458,9 @@ int ini_option::load() {
 		}
 		if (opt_var_map.count("rocksdb-wal-ttl-seconds")) {
 			this->_rocksdb_wal_ttl_seconds = opt_var_map["rocksdb-wal-ttl-seconds"].as<uint64_t>();
+		}
+		if (opt_var_map.count("rocksdb-max-total-wal-size-mb")) {
+			this->_rocksdb_max_total_wal_size_mb = opt_var_map["rocksdb-max-total-wal-size-mb"].as<uint64_t>();
 		}
 		if (opt_var_map.count("rocksdb-wal-size-limit-mb")) {
 			this->_rocksdb_wal_size_limit_mb = opt_var_map["rocksdb-wal-size-limit-mb"].as<uint64_t>();
@@ -447,9 +484,31 @@ int ini_option::load() {
 		if (opt_var_map.count("rocksdb-backup-keep")) {
 			this->_rocksdb_backup_keep = opt_var_map["rocksdb-backup-keep"].as<int>();
 		}
+		if (opt_var_map.count("rocksdb-rebuild-reserve-bytes")) {
+			this->_rocksdb_rebuild_reserve_bytes = opt_var_map["rocksdb-rebuild-reserve-bytes"].as<long long>();
+		}
 
 		if (opt_var_map.count("rocksdb-snapshot-bwlimit")) {
 			this->_rocksdb_snapshot_bwlimit = opt_var_map["rocksdb-snapshot-bwlimit"].as<int>();
+		}
+
+		if (opt_var_map.count("repl-identity-forward")) {
+			this->_repl_identity_forward = opt_var_map["repl-identity-forward"].as<bool>();
+		}
+		if (opt_var_map.count("repl-follow-enabled")) {
+			this->_wal_follow_enabled = opt_var_map["repl-follow-enabled"].as<bool>();
+		}
+		if (opt_var_map.count("repl-follow-max-batches")) {
+			this->_wal_follow_max_batches = opt_var_map["repl-follow-max-batches"].as<int>();
+		}
+		if (opt_var_map.count("repl-follow-max-bytes")) {
+			this->_wal_follow_max_bytes = opt_var_map["repl-follow-max-bytes"].as<int>();
+		}
+		if (opt_var_map.count("repl-follow-poll-interval-usec")) {
+			this->_wal_follow_poll_interval_usec = opt_var_map["repl-follow-poll-interval-usec"].as<int>();
+		}
+		if (opt_var_map.count("repl-follow-batch-delay-usec")) {
+			this->_wal_follow_batch_delay_usec = opt_var_map["repl-follow-batch-delay-usec"].as<int>();
 		}
 
 		if (opt_var_map.count("flush-all-enabled")) {
@@ -539,6 +598,7 @@ int ini_option::reload() {
 		if (opt_var_map.count("net-read-timeout")) {
 			log_notice("  net_read_timeout:       %d -> %d", this->_net_read_timeout, opt_var_map["net-read-timeout"].as<int>());
 			this->_net_read_timeout = opt_var_map["net-read-timeout"].as<int>();
+			this->_net_read_timeout_set = true;
 		}
 
 		if (opt_var_map.count("reconstruction-interval")) {
@@ -580,10 +640,35 @@ int ini_option::reload() {
 			log_notice("  rocksdb_backup_keep: %d -> %d", this->_rocksdb_backup_keep, opt_var_map["rocksdb-backup-keep"].as<int>());
 			this->_rocksdb_backup_keep = opt_var_map["rocksdb-backup-keep"].as<int>();
 		}
+		if (opt_var_map.count("rocksdb-rebuild-reserve-bytes")) {
+			log_notice("  rocksdb_rebuild_reserve_bytes: %lld -> %lld", this->_rocksdb_rebuild_reserve_bytes, opt_var_map["rocksdb-rebuild-reserve-bytes"].as<long long>());
+			this->_rocksdb_rebuild_reserve_bytes = opt_var_map["rocksdb-rebuild-reserve-bytes"].as<long long>();
+		}
 
 		if (opt_var_map.count("rocksdb-snapshot-bwlimit")) {
 			log_notice("  rocksdb_snapshot_bwlimit: %d -> %d", this->_rocksdb_snapshot_bwlimit, opt_var_map["rocksdb-snapshot-bwlimit"].as<int>());
 			this->_rocksdb_snapshot_bwlimit = opt_var_map["rocksdb-snapshot-bwlimit"].as<int>();
+		}
+
+		if (opt_var_map.count("repl-identity-forward")) {
+			log_notice("  repl_identity_forward: %d -> %d", this->_repl_identity_forward, opt_var_map["repl-identity-forward"].as<bool>());
+			this->_repl_identity_forward = opt_var_map["repl-identity-forward"].as<bool>();
+		}
+		if (opt_var_map.count("repl-follow-enabled")) {
+			log_notice("  repl_follow_enabled: %d -> %d", this->_wal_follow_enabled, opt_var_map["repl-follow-enabled"].as<bool>());
+			this->_wal_follow_enabled = opt_var_map["repl-follow-enabled"].as<bool>();
+		}
+		if (opt_var_map.count("repl-follow-max-batches")) {
+			this->_wal_follow_max_batches = opt_var_map["repl-follow-max-batches"].as<int>();
+		}
+		if (opt_var_map.count("repl-follow-max-bytes")) {
+			this->_wal_follow_max_bytes = opt_var_map["repl-follow-max-bytes"].as<int>();
+		}
+		if (opt_var_map.count("repl-follow-poll-interval-usec")) {
+			this->_wal_follow_poll_interval_usec = opt_var_map["repl-follow-poll-interval-usec"].as<int>();
+		}
+		if (opt_var_map.count("repl-follow-batch-delay-usec")) {
+			this->_wal_follow_batch_delay_usec = opt_var_map["repl-follow-batch-delay-usec"].as<int>();
 		}
 
 		if (opt_var_map.count("flush-all-enabled")) {
@@ -640,6 +725,12 @@ int ini_option::reload() {
 			log_warning("rocksdb-wal-ttl-seconds changed in config (%llu -> %llu) but requires reopening the DB; restart flared to apply",
 					(unsigned long long)this->_rocksdb_wal_ttl_seconds,
 					(unsigned long long)opt_var_map["rocksdb-wal-ttl-seconds"].as<uint64_t>());
+		}
+		if (opt_var_map.count("rocksdb-max-total-wal-size-mb")
+				&& opt_var_map["rocksdb-max-total-wal-size-mb"].as<uint64_t>() != this->_rocksdb_max_total_wal_size_mb) {
+			log_warning("rocksdb-max-total-wal-size-mb changed in config (%llu -> %llu) but requires reopening the DB; restart flared to apply",
+					(unsigned long long)this->_rocksdb_max_total_wal_size_mb,
+					(unsigned long long)opt_var_map["rocksdb-max-total-wal-size-mb"].as<uint64_t>());
 		}
 		if (opt_var_map.count("rocksdb-wal-size-limit-mb")
 				&& opt_var_map["rocksdb-wal-size-limit-mb"].as<uint64_t>() != this->_rocksdb_wal_size_limit_mb) {
@@ -710,6 +801,10 @@ int ini_option::reload() {
 			}
 		}
 
+		if (opt_var_map.count("read-unavailable-error")) {
+			log_notice("  read_unavailable_error: %d -> %d", this->_read_unavailable_error, opt_var_map["read-unavailable-error"].as<bool>());
+			this->_read_unavailable_error = opt_var_map["read-unavailable-error"].as<bool>();
+		}
 		if (opt_var_map.count("max-total-thread-queue")) {
 			log_notice("  max_total_thread_queue: %u -> %u", this->_max_total_thread_queue, opt_var_map["max-total-thread-queue"].as<uint32_t>());
 			this->_max_total_thread_queue = opt_var_map["max-total-thread-queue"].as<uint32_t>();
@@ -771,6 +866,17 @@ int ini_option::reload() {
 			this->_cluster_replication_mode = opt_var_map["cluster-replication-mode"].as<string>();
 		}
 
+		{
+			// absent = the default (true): every reload states it fully
+			bool sp = opt_var_map.count("cluster-replication-snapshot-push")
+				? opt_var_map["cluster-replication-snapshot-push"].as<bool>() : true;
+			if (sp != this->_cluster_replication_snapshot_push) {
+				log_notice("  cluster_replication_snapshot_push: %s -> %s",
+						this->_cluster_replication_snapshot_push ? "true" : "false", sp ? "true" : "false");
+			}
+			this->_cluster_replication_snapshot_push = sp;
+		}
+
 	} catch (int e) {
 		ostringstream ss;
 		ss << option << endl;
@@ -822,6 +928,9 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("mysql-replication-table",	program_options::value<string>(),		"mysql replication table")
 #endif
 		("noreply-window-limit",		program_options::value<int>(),			"noreply window limit")
+		("shutdown-forward-drain-msec",	program_options::value<int>(),			"on a graceful stop, how long the forwarding threads keep sending the in-cluster forwards still queued to replicas before they stop (msec, 0 = do not wait)")
+		("proxy-forward-hold-msec",	program_options::value<int>(),			"how long an in-cluster forward to a replica that does not answer is kept and sent again, resolving the replica's name on each try, before it is dropped and counted (msec, 0 = the 4 quick tries of before)")
+		("master-wait-msec",	program_options::value<int>(),			"how long a write to a partition without a master (its master is down in the node map during a planned handover) waits for a master before it fails (msec, 0 = fail at once as before)")
 		("net-read-timeout",				program_options::value<int>(),			"network read timeout (sec) (dynamic)")
 		("proxy-concurrency",				program_options::value<int>(),			"proxy request concurrency for each node")
 		("reconstruction-interval",	program_options::value<int>(),			"master/slave dump interval in usec (dynamic)")
@@ -844,6 +953,7 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("thread-pool-size",				program_options::value<int>(),			"thread pool size (dynamic)")
 		("proxy-prior-netmask",			program_options::value<uint32_t>(),	"proxy prior netmask")
 		("max-total-thread-queue",	program_options::value<uint32_t>(),	"max thread queue length (dynamic)")
+		("read-unavailable-error",	program_options::value<bool>(),	"answer SERVER_ERROR instead of a miss when a get cannot be served (forward to the master failed, no partition, enqueue or storage error); for flare used as the primary store (default false = legacy miss, dynamic)")
 		("time-watcher-enabled",												program_options::value<bool>(),			"time watcher enabled")
 		("time-watcher-polling-interval-msec",					program_options::value<uint32_t>(),	"time watcher polling interval (msec)")
 		("storage-access-watch-threshold-warn-msec",		program_options::value<uint32_t>(),	"threshold to log error when a thread accessing storage long time (msec)")
@@ -853,19 +963,28 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("cluster-replication-server-port",	program_options::value<int>(),		"destination server port to replicate over cluster (dynamic)")
 		("cluster-replication-concurrency",	program_options::value<int>(),		"concurrency to replicate over cluster")
 		("cluster-replication-mode",				program_options::value<string>(),	"cluster replication mode (write, read, both) (write)")
+		("cluster-replication-snapshot-push",	program_options::value<bool>(),		"cross-cluster seed may use a snapshot push (default true; false = per-key dump only, the destination keeps its history)")
 		("rocksdb-block-cache-size-mb",		program_options::value<uint64_t>(),	"RocksDB block cache size in MB (default 512, rocksdb only)")
 		("rocksdb-write-buffer-size-mb",	program_options::value<uint64_t>(),	"RocksDB memtable write buffer size in MB (default 64, rocksdb only)")
 		("rocksdb-max-write-buffer-number",	program_options::value<int>(),		"RocksDB max number of memtables (default 3, rocksdb only)")
 		("rocksdb-wal-ttl-seconds",				program_options::value<uint64_t>(),	"RocksDB WAL retention window in seconds; controls how far a slave may fall behind before full-dump is forced (default 86400, rocksdb only)")
 		("rocksdb-wal-size-limit-mb",			program_options::value<uint64_t>(),	"RocksDB WAL retention size cap in MB (default 10240, rocksdb only)")
+		("rocksdb-max-total-wal-size-mb",		program_options::value<uint64_t>(),	"RocksDB live WAL bound in MB: past it memtables flush and the WAL switches files, so a follower poll re-reads at most this much (default 16, 0 = RocksDB default, rocksdb only)")
 		("rocksdb-sync-writes",						program_options::value<bool>(),		"force fsync on every RocksDB write for strict durability (default false, rocksdb only)")
 		("rocksdb-resync-failure-threshold",program_options::value<int>(),		"consecutive WAL/dump resync failures before the slave self-demotes to down state; data is preserved (default 3, rocksdb only)")
 		("rocksdb-wal-max-batch-bytes",		program_options::value<uint64_t>(),	"max size of a single replicated RocksDB WriteBatch; batches beyond this abort WAL sync and fall back to full dump (default 16MB, 0 disables, rocksdb only)")
 		("rocksdb-wal-sync-bwlimit",			program_options::value<int>(),		"bandwidth limit in KB/s for WAL incremental sync; 0 inherits reconstruction-bwlimit (default 0, rocksdb only)")
 		("rocksdb-wal-sync-interval",			program_options::value<int>(),		"inter-batch delay in usec for WAL incremental sync; 0 inherits reconstruction-interval (default 0, rocksdb only)")
+		("rocksdb-rebuild-reserve-bytes",		program_options::value<long long>(),	"bytes kept free besides the staging copy during a rebuild (compaction, WAL catch-up, quarantine). UNSET = staged rebuilds STOP (stats rebuild_blocked=reserve_unset); no default is assumed (dynamic, rocksdb only)")
 		("rocksdb-backup-keep",					program_options::value<int>(),		"number of on-disk named backups (checkpoints) to retain under data-dir/backups/; oldest pruned by name order (default 7, dynamic, rocksdb only)")
 		("rocksdb-snapshot-bwlimit",			program_options::value<int>(),		"bandwidth cap in KB/s for serving a snapshot-bootstrap stream (repl_snapshot); 0 = unlimited (default 32768 = ~256 Mbps, dynamic, rocksdb only)")
 		("flush-all-enabled",					program_options::value<bool>(),		"administrative gate for the flush_all op; false refuses it with SERVER_ERROR (default true, dynamic)")
+		("repl-identity-forward",			program_options::value<bool>(),		"carry the source's replication identity on forwarded writes so the destination orders them against the WAL stream (SAF-10b); enable only when every node understands it (default false, dynamic)")
+		("repl-follow-enabled",				program_options::value<bool>(),		"run a continuous WAL follower on an active RocksDB slave so a blip is recovered from the applied position without a rebuild (SAF-10c); requires repl-identity-forward cluster-wide (default false, dynamic)")
+		("repl-follow-max-batches",			program_options::value<int>(),		"bound on WAL batches per follow response (default 256, dynamic)")
+		("repl-follow-max-bytes",			program_options::value<int>(),		"bound on WAL bytes per follow response (default 4194304, dynamic)")
+		("repl-follow-poll-interval-usec",	program_options::value<int>(),		"how often an idle follower asks its source again (default 200000, dynamic)")
+		("repl-follow-batch-delay-usec",	program_options::value<int>(),		"pause after every follow response that applied changes, throttling catch-up (default 0 = none, dynamic)")
 		("reap-expired",						program_options::value<bool>(),		"enable the background expire crawler that physically deletes past-expire keys on the partition master (default true, dynamic, rocksdb only)")
 		("reap-expired-interval",				program_options::value<int>(),		"seconds between full expire sweeps (default 300, dynamic, rocksdb only)")
 		("reap-expired-chunk-size",				program_options::value<int>(),		"keys scanned per chunk before the throttle sleep (default 10000, dynamic, rocksdb only)")

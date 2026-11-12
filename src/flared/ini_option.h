@@ -66,7 +66,11 @@ private:
 	string			_mysql_replication_table;
 #endif
 	int					_noreply_window_limit;
+	int					_shutdown_forward_drain_msec;
+	int					_proxy_forward_hold_msec;
+	int					_master_wait_msec;
 	int					_net_read_timeout;
+	bool				_net_read_timeout_set;
 	int					_proxy_concurrency;
 	int					_reconstruction_interval;
 	int					_reconstruction_bwlimit;
@@ -88,6 +92,7 @@ private:
 	int					_thread_pool_size;
 	uint32_t 		_proxy_prior_netmask;
 	uint32_t 		_max_total_thread_queue;
+	bool				_read_unavailable_error;
 	bool				_time_watcher_enabled;
 	uint32_t 		_time_watcher_polling_interval_msec;
 	uint32_t 		_storage_access_watch_threshold_warn_msec;
@@ -97,6 +102,7 @@ private:
 	int					_cluster_replication_server_port;
 	int					_cluster_replication_concurrency;
 	string			_cluster_replication_mode;
+	bool				_cluster_replication_snapshot_push;
 
 	// RocksDB backend tuning (ignored when storage-type != rocksdb).
 	uint64_t		_rocksdb_block_cache_size_mb;
@@ -104,6 +110,7 @@ private:
 	int				_rocksdb_max_write_buffer_number;
 	uint64_t		_rocksdb_wal_ttl_seconds;
 	uint64_t		_rocksdb_wal_size_limit_mb;
+	uint64_t		_rocksdb_max_total_wal_size_mb;
 	bool			_rocksdb_sync_writes;
 	int				_rocksdb_resync_failure_threshold;
 	// Hard cap on a single replicated WriteBatch in bytes. Batches
@@ -119,9 +126,16 @@ private:
 	int				_rocksdb_wal_sync_bwlimit;
 	int				_rocksdb_wal_sync_interval;
 	int				_rocksdb_backup_keep;
+	long long		_rocksdb_rebuild_reserve_bytes;
 	int				_rocksdb_snapshot_bwlimit;
 	// Administrative gate for the (unauthenticated) flush_all op.
 	bool			_flush_all_enabled;
+	bool			_repl_identity_forward;
+	bool			_wal_follow_enabled;
+	int				_wal_follow_max_batches;
+	int				_wal_follow_max_bytes;
+	int				_wal_follow_poll_interval_usec;
+	int				_wal_follow_batch_delay_usec;
 	// Background expire crawler (memcached lru_crawler equivalent): a
 	// master-only sweep that physically deletes past-expire keys so they are
 	// reclaimed and — being real deletes — replicate through the WAL to slaves.
@@ -145,6 +159,20 @@ public:
 	static const int default_mysql_replication_id = 19790217;
 #endif
 	static const int default_noreply_window_limit = 0;						// disabled
+	// on a graceful stop (SIGTERM), how long flared keeps its forwarding threads
+	// running for the in-cluster forwards still queued to replicas (NODE-OPS-
+	// LOSSLESS-PLAN L2): they are writes a client was told STORED
+	static const int default_shutdown_forward_drain_msec = 30000;
+	// how long an in-cluster forward to a replica that does not answer is kept
+	// and sent again (the address is resolved again on each try) before it is
+	// dropped: a replica recreated under the same name is reached at its new
+	// address once the name resolves to it (L12 — DNS answers for a pod name
+	// are cached up to ~30 s)
+	static const int default_proxy_forward_hold_msec = 60000;
+	// W (handover design): how long a write to a partition whose master is
+	// master/down (a planned handover's demote step) waits for a map with a
+	// master before it fails (Tw; Th + Tb < Tw, Tw + forward < Tc = 30 s)
+	static const int default_master_wait_msec = 20000;
 	static const int default_net_read_timeout = 10*60;						// sec
 	static const int default_proxy_concurrency = 2;
 	static const int default_reconstruction_interval = 0;
@@ -166,6 +194,9 @@ public:
 	static const int      default_rocksdb_max_write_buffer_number  = 3;
 	static const uint64_t default_rocksdb_wal_ttl_seconds          = 86400;
 	static const uint64_t default_rocksdb_wal_size_limit_mb        = 10240;
+	// live WAL bound: a follower poll re-reads the live WAL file from its
+	// start (GetUpdatesSince), so it is kept small; see storage_rocksdb
+	static const uint64_t default_rocksdb_max_total_wal_size_mb    = 16;
 	static const int      default_rocksdb_resync_failure_threshold = 3;
 	static const uint64_t default_rocksdb_wal_max_batch_bytes      = 16 * 1024 * 1024;  // 16 MB
 	static const int      default_rocksdb_wal_sync_bwlimit         = 0;  // inherit
@@ -173,6 +204,16 @@ public:
 	static const int      default_rocksdb_backup_keep              = 7;
 	static const int      default_rocksdb_snapshot_bwlimit         = 32768;  // KB/s ~= 1/4 of 1 Gbps
 	static const bool     default_flush_all_enabled               = true;   // memcached compat; disable in exposed clusters
+	// SAF-10b stage 3. OFF until every node in the cluster understands the
+	// tag: a node that predates it rejects the request outright, so enabling
+	// it mid-upgrade would turn every forwarded write into a dropped one.
+	static const bool     default_repl_identity_forward            = false;
+	// SAF-10c. The follower only ever applies through the common rule, so it
+	// must not be enabled before repl-identity-forward is on cluster-wide.
+	static const bool     default_wal_follow_enabled               = false;
+	static const int      default_wal_follow_max_batches           = 256;
+	static const int      default_wal_follow_max_bytes             = 4 * 1024 * 1024;
+	static const int      default_wal_follow_poll_interval_usec    = 200 * 1000;
 	static const bool     default_reap_expired                    = true;
 	static const int      default_reap_expired_interval           = 300;    // sec between full sweeps
 	static const int      default_reap_expired_chunk_size         = 10000;  // keys scanned per chunk
@@ -182,6 +223,7 @@ public:
 	static const int default_thread_pool_size = 5;
 	static const uint32_t default_proxy_prior_netmask = 0x00;
 	static const uint32_t default_max_total_thread_queue = 0;				// unlimited
+	static const bool default_read_unavailable_error = false;
 	static const uint32_t default_time_watcher_polling_interval_msec = 0; // disabled
 	static const uint32_t default_cluster_replication_concurrency = 1;
 
@@ -217,7 +259,12 @@ public:
 	string get_mysql_replication_table() { return this->_mysql_replication_table; };
 #endif
 	int get_noreply_window_limit() { return this->_noreply_window_limit; };
+	int get_shutdown_forward_drain_msec() { return this->_shutdown_forward_drain_msec; };
+	int get_proxy_forward_hold_msec() { return this->_proxy_forward_hold_msec; };
+	int get_master_wait_msec() { return this->_master_wait_msec; };
 	int get_net_read_timeout() { return this->_net_read_timeout; };
+	// net-read-timeout was given explicitly (config file or command line)
+	bool is_net_read_timeout_set() { return this->_net_read_timeout_set; };
 	int get_proxy_concurrency() { return this->_proxy_concurrency; };
 	int get_reconstruction_interval() { return this->_reconstruction_interval; };
 	int get_reconstruction_bwlimit() { return this->_reconstruction_bwlimit; };
@@ -239,6 +286,7 @@ public:
 	int get_thread_pool_size() { return this->_thread_pool_size; };
 	uint32_t get_proxy_prior_netmask() { return this->_proxy_prior_netmask; };
 	uint32_t get_max_total_thread_queue() { return this->_max_total_thread_queue; };
+	bool is_read_unavailable_error() { return this->_read_unavailable_error; };
 	bool get_time_watcher_enabled() { return this->_time_watcher_enabled; };
 	uint32_t get_time_watcher_polling_interval_msec() { return this->_time_watcher_polling_interval_msec; };
 	uint32_t get_storage_access_watch_threshold_warn_msec() { return this->_storage_access_watch_threshold_warn_msec; };
@@ -248,20 +296,29 @@ public:
 	int get_cluster_replication_server_port() { return this->_cluster_replication_server_port; }
 	int get_cluster_replication_concurrency() { return this->_cluster_replication_concurrency; };
 	string get_cluster_replication_mode() { return this->_cluster_replication_mode; }
+	bool is_cluster_replication_snapshot_push() { return this->_cluster_replication_snapshot_push; }
 
 	uint64_t get_rocksdb_block_cache_size_mb() { return this->_rocksdb_block_cache_size_mb; }
 	uint64_t get_rocksdb_write_buffer_size_mb() { return this->_rocksdb_write_buffer_size_mb; }
 	int get_rocksdb_max_write_buffer_number() { return this->_rocksdb_max_write_buffer_number; }
 	uint64_t get_rocksdb_wal_ttl_seconds() { return this->_rocksdb_wal_ttl_seconds; }
 	uint64_t get_rocksdb_wal_size_limit_mb() { return this->_rocksdb_wal_size_limit_mb; }
+	uint64_t get_rocksdb_max_total_wal_size_mb() { return this->_rocksdb_max_total_wal_size_mb; }
 	bool is_rocksdb_sync_writes() { return this->_rocksdb_sync_writes; }
 	int get_rocksdb_resync_failure_threshold() { return this->_rocksdb_resync_failure_threshold; }
 	uint64_t get_rocksdb_wal_max_batch_bytes() { return this->_rocksdb_wal_max_batch_bytes; }
 	int get_rocksdb_wal_sync_bwlimit() { return this->_rocksdb_wal_sync_bwlimit; }
 	int get_rocksdb_wal_sync_interval() { return this->_rocksdb_wal_sync_interval; }
 	int get_rocksdb_backup_keep() { return this->_rocksdb_backup_keep; }
+	long long get_rocksdb_rebuild_reserve_bytes() { return this->_rocksdb_rebuild_reserve_bytes; }
 	int get_rocksdb_snapshot_bwlimit() { return this->_rocksdb_snapshot_bwlimit; }
 	bool is_flush_all_enabled() { return this->_flush_all_enabled; }
+	bool is_repl_identity_forward() { return this->_repl_identity_forward; }
+	bool is_wal_follow_enabled() { return this->_wal_follow_enabled; }
+	int get_wal_follow_max_batches() { return this->_wal_follow_max_batches; }
+	int get_wal_follow_max_bytes() { return this->_wal_follow_max_bytes; }
+	int get_wal_follow_poll_interval_usec() { return this->_wal_follow_poll_interval_usec; }
+	int get_wal_follow_batch_delay_usec() { return this->_wal_follow_batch_delay_usec; }
 	bool is_reap_expired() { return this->_reap_expired; }
 	int get_reap_expired_interval() { return this->_reap_expired_interval; }
 	int get_reap_expired_chunk_size() { return this->_reap_expired_chunk_size; }

@@ -1,0 +1,38 @@
+# === Suite: continuous-replication-scale ===
+# Deploying cluster 'cont-repl-scale' in namespace 'flare-cont-repl-scale'
+# Waiting for: namespace flare-cont-repl-scale not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-cont-repl-scale (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap cont-repl-scale-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting 50s grace period for operator reconciliation...
+# load at 0: stored so far 20000; master RSS=41928kB heap in-use=25093kB heap free=1416kB restarts=0 thread_queue=0 items=20000; replica applied=12499 forward_applied=10197 RSS=37032kB heap in-use=21508kB
+# load at 500000: stored so far 520000; master RSS=208640kB heap in-use=179815kB heap free=14078kB restarts=0 thread_queue=0 items=520000; replica applied=211144 forward_applied=325765 RSS=98548kB heap in-use=88358kB
+# load at 1000000: stored so far 1020000; master RSS=452376kB heap in-use=244208kB heap free=193641kB restarts=0 thread_queue=0 items=1020000; replica applied=332524 forward_applied=698118 RSS=101108kB heap in-use=94742kB
+# load at 1500000: stored so far 1520000; master RSS=476160kB heap in-use=408036kB heap free=52592kB restarts=0 thread_queue=0 items=1520000; replica applied=427129 forward_applied=1025487 RSS=109844kB heap in-use=98289kB
+# load at 2000000: stored so far 2020000; master RSS=702704kB heap in-use=496300kB heap free=190880kB restarts=0 thread_queue=0 items=2020000; replica applied=510514 forward_applied=1363389 RSS=159996kB heap in-use=106013kB
+# load at 2500000: stored so far 2520000; master RSS=862200kB heap in-use=607697kB heap free=239447kB restarts=0 thread_queue=0 items=2520000; replica applied=580894 forward_applied=1673277 RSS=163944kB heap in-use=107830kB
+# load at 3000000: stored so far 3020000; master RSS=1006496kB heap in-use=800182kB heap free=191740kB restarts=0 thread_queue=0 items=3020000; replica applied=642859 forward_applied=1959014 RSS=177752kB heap in-use=103831kB
+# load at 3500000: stored so far 3520000; master RSS=1015796kB heap in-use=898346kB heap free=102100kB restarts=0 thread_queue=0 items=3520000; replica applied=710434 forward_applied=2285625 RSS=187996kB heap in-use=108114kB
+# load at 4000000: stored so far 4020000; master RSS=1155824kB heap in-use=1090161kB heap free=50603kB restarts=0 thread_queue=0 items=4020000; replica applied=764239 forward_applied=2571128 RSS=193084kB heap in-use=171285kB
+# load at 4500000: stored so far 4520000; master RSS=1317564kB heap in-use=1216406kB heap free=86136kB restarts=0 thread_queue=0 items=4520000; replica applied=841249 forward_applied=2856947 RSS=201852kB heap in-use=159177kB
+# load at 5000000: stored so far 5020000; master RSS=1496840kB heap in-use=1430728kB heap free=51280kB restarts=0 thread_queue=0 items=5020000; replica applied=961609 forward_applied=0 RSS=217180kB heap in-use=191920kB
+# load at 5500000: stored so far 5520000; master RSS=1767192kB heap in-use=1714241kB heap free=38317kB restarts=0 thread_queue=0 items=5520000; replica applied=1046269 forward_applied=0 RSS=234836kB heap in-use=0kB
+# memory after the load +1 min: master RSS=2031636kB heap in-use=1750841kB heap free=265203kB restarts=0 items=6000000; replica RSS=236584kB heap in-use=0kB
+# memory after the load +2 min: master RSS=2031636kB heap in-use=1616777kB heap free=399249kB restarts=0 items=6000000; replica RSS=237304kB heap in-use=197404kB
+# memory after the load +3 min: master RSS=2031636kB heap in-use=1493362kB heap free=522907kB restarts=0 items=6000000; replica RSS=249672kB heap in-use=0kB
+# memory-only: loaded 6000000/6000000 in 1179213 ms; master restarts 0→0
+# Cleaning up cluster 'cont-repl-scale'
+# Tests: 3, Failures: 0
+# RESULT: PASS
+1..3
+ok 1 - scale: load FLARE_E2E_SCALE_KEYS keys (pipelined) and let the follower converge
+ok 2 - scale: exact key scan at open (kill -9 on the PVC-backed replica) — duration recorded # SKIP memory-only profile
+ok 3 - scale: operator probe cost at this size — recorded from the operator's own timing lines # SKIP memory-only profile

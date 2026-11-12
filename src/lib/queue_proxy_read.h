@@ -56,6 +56,9 @@ protected:
 	string									_op_ident;
 	op::result							_result;
 	string									_result_message;
+	// R3: forwarded because this node's copy is not eligible for its source;
+	// a failed forward must then be an explicit error, never a miss
+	bool										_strict;
 
 public:
 	static const int max_retry = 4;
@@ -68,6 +71,8 @@ public:
 	string get_result_message() { return this->_result_message; };
 	storage::entry& get_entry() { return this->_entry; };
 	list<storage::entry>& get_entry_list() { return this->_entry_list; };
+	void set_strict(bool b) { this->_strict = b; };
+	bool is_strict() const { return this->_strict; };
 
 protected:
 	op_proxy_read* _get_op(string op_ident, shared_connection c);

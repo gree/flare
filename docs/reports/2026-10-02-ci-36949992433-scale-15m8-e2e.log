@@ -1,0 +1,37 @@
+# === Suite: continuous-replication-scale ===
+# Deploying cluster 'cont-repl-scale' in namespace 'flare-cont-repl-scale'
+# Waiting for: namespace flare-cont-repl-scale not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-cont-repl-scale (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap cont-repl-scale-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting 50s grace period for operator reconciliation...
+# load at 0: stored so far 20000; master RSS=43804kB restarts=0 thread_queue=0 items=20000; replica applied=10030 forward_applied=3793
+# load at 500000: stored so far 520000; master RSS=257752kB restarts=0 thread_queue=0 items=520000; replica applied=205360 forward_applied=369091
+# load at 1000000: stored so far 1020000; master RSS=372508kB restarts=0 thread_queue=0 items=1020000; replica applied=308635 forward_applied=743252
+# load at 1500000: stored so far 1520000; master RSS=568040kB restarts=0 thread_queue=0 items=1520000; replica applied=383095 forward_applied=1035095
+# load at 2000000: stored so far 2020000; master RSS=936316kB restarts=0 thread_queue=0 items=2020000; replica applied=450160 forward_applied=1333911
+# load at 2500000: stored so far 2520000; master RSS=1286388kB restarts=0 thread_queue=0 items=2520000; replica applied=510595 forward_applied=1613617
+# load at 3000000: stored so far 3020000; master RSS=1673568kB restarts=0 thread_queue=0 items=3020000; replica applied=563380 forward_applied=0
+# load at 3500000: stored so far 3520000; master RSS=1798480kB restarts=0 thread_queue=0 items=3520000; replica applied=0 forward_applied=0
+# load at 4000000: stored so far 4020000; master RSS=1943260kB restarts=0 thread_queue=0 items=4020000; replica applied=661810 forward_applied=0
+# chunk at 4460000 stored 0 (timeout 150 kubectl exec -n flare-cont-repl-scale debug-cont-repl-scale -- sh -c (awk -v s=4460000 -v m=20000 'BEGIN{for(k=s;k<s+m;k++) printf "set s%d 0 0 16\r\n0123456789abcdef\r\n", k; printf "quit\r\n"}') | nc -w 60 10.244.0.10 12121 | grep -c STORED failed (1): command terminated with exit code 1)
+# load at 4460000: stored so far 4452833; master RSS=0kB restarts=0 thread_queue=0 items=4452834; replica applied=697510 forward_applied=2572145
+# load at 4500000: stored so far 4492833; master RSS=49024kB restarts=1 thread_queue=0 items=2622305; replica applied=698020 forward_applied=0
+# load at 5000000: stored so far 4992833; master RSS=136868kB restarts=1 thread_queue=0 items=3122305; replica applied=0 forward_applied=0
+# load at 5500000: stored so far 5492833; master RSS=168392kB restarts=1 thread_queue=0 items=3622305; replica applied=0 forward_applied=0
+# load at 6000000: stored so far 5992833; master RSS=187116kB restarts=1 thread_queue=0 items=4122305; replica applied=698020 forward_applied=0
+# load at 6500000: stored so far 6492833; master RSS=194500kB restarts=1 thread_queue=0 items=4622305; replica applied=698020 forward_applied=0
+# load at 7000000: stored so far 6992833; master RSS=243240kB restarts=1 thread_queue=0 items=0; replica applied=698020 forward_applied=2572145
+# load at 7500000: stored so far 7492833; master RSS=262456kB restarts=1 thread_queue=0 items=5622305; replica applied=0 forward_applied=0
+# load at 8000000: stored so far 7992833; master RSS=267120kB restarts=1 thread_queue=0 items=0; replica applied=0 forward_applied=0
+# load at 8500000: stored so far 8492833; master RSS=271508kB restarts=1 thread_queue=0 items=0; replica applied=698020 forward_applied=2572145
+# load at 9000000: stored so far 8992833; master RSS=271936kB restarts=1 thread_queue=0 items=0; replica applied=698020 forward_applied=2572145
+# load at 9500000: stored so far 9492833; master RSS=274080kB restarts=1 thread_queue=0 items=0; replica applied=698020 forward_applied=2572145

@@ -94,7 +94,7 @@ StatefulSet, PDB and Services — by enabling the managed cluster:
 helm install flare ./helm/flare-operator -n flare-system --create-namespace \
   --set cluster.enabled=true \
   --set cluster.partitions=4 \
-  --set cluster.replicas=2
+  --set cluster.replicas=3
 ```
 
 If you prefer to manage the CR yourself, it MUST match the operator's
@@ -108,7 +108,7 @@ metadata:
   namespace: flare-system  # = namespace in the helm values
 spec:
   partitions: 4
-  replicas: 2
+  replicas: 3
 ```
 
 Note that the CR alone does not create any pods: the operator assigns

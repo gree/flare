@@ -46,6 +46,15 @@
        and never answers ends by curl's timeout (exit 28) within the
        deadline, so a stalled API cannot stall the reconcile; a refused
        connection does not pass this test.
+    9. ADOPTION (CI 41278035134): with the gate closed, drops are counted
+       against the slave while it is Slave/Active and the request is HELD;
+       the slave's pod is then deleted and recreated. The recreated pod's
+       boot reconstruction began after the drops, so the operator ADOPTS it
+       as the repair and closes the request on its success — no demotion,
+       no extra rebuild — while the gate is still closed (the old path could
+       only demote, which a closed gate forbids). Every acknowledged key is
+       on the recreated replica; with the gate opened afterwards nothing is
+       demoted.
 
   Every fault-injecting step heals in every exit path.
 -/
@@ -149,6 +158,29 @@ private def droppedByMaster (masterIp : String) : IO Nat := do
 
 private def opLog (tail : Nat := 600) : IO String :=
   kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» tail
+
+/-- The master's drop counter once it has stopped moving after `heal`: a
+    forward of the burst can still be inside its last connect attempt when the
+    rule is removed (one open is bounded by ~2 x 3 s + 0.5 s), and its drop
+    lands after the heal. CI 38072338837 (3123bd5): gated_2's last connect was
+    refused at 18:02:52.338, the rule was removed at 52.38, the drop was
+    counted at 52.838 — after the baseline was read (6), so "the repair cost a
+    drop" (7) blamed the repair for the burst's own drop. Unchanged for 10 s
+    (longer than one open), at most 60 s. -/
+private def settledDrops (masterIp : String) : IO Nat := do
+  let mut last ← droppedByMaster masterIp
+  let mut stableMs := 0
+  let mut waitedMs := 0
+  while stableMs < 10000 && waitedMs < 60000 do
+    IO.sleep 2000
+    waitedMs := waitedMs + 2000
+    let now ← droppedByMaster masterIp
+    if now == last then stableMs := stableMs + 2000 else
+      IO.eprintln s!"# drop counter still moving after the heal: {last} → {now}"
+      last := now
+      stableMs := 0
+  if stableMs < 10000 then IO.eprintln s!"# drop counter did not settle within 60 s (last {last})"
+  return last
 
 /-- One operator metric value (counters render as integers). -/
 private def operatorMetric (name : String) : IO (Option Nat) := do
@@ -258,8 +290,11 @@ private def awaitRepair (masterIp slaveIp : String)
   -- of looking for them in the final snapshot.
   let sawDemote ← IO.mkRef false
   let sawConfirm ← IO.mkRef false
+  -- Whole current log, not a tail: if the repair finished before the wait
+  -- started, the demotion line must still be in the snapshot that shows
+  -- the completion (CI 36882921953 saw completion without it).
   let done ← waitForCondition "operator records REPLICA REPAIR COMPLETE" budget do
-    let l ← opLog 2000
+    let l ← opLog 200000
     if containsSubstr l "REPLICA REPAIR: demoting" then sawDemote.set true
     if containsSubstr l "confirmed the demotion" then sawConfirm.set true
     return containsSubstr l "REPLICA REPAIR COMPLETE"
@@ -324,17 +359,264 @@ private def patchLedgerRaw (raw : String) : IO (Except String String) :=
   kubectl ["patch", "flarecluster", cfg.name, "-n", cfg.«namespace», "--subresource=status",
            "--type=merge", "-p", s!"\{\"status\":\{\"replicaRepairs\":{raw}}}"]
 
-private def setGate (closed : Bool) : IO (Except String Unit) := do
-  let arg := if closed then "FLARE_RESYNC_ON_DROP=0" else "FLARE_RESYNC_ON_DROP-"
-  match ← kubectl ["set", "env", s!"deployment/{cfg.operatorName}", "-n", cfg.«namespace», arg] with
+/-- Run an action that rolls the operator Deployment, wait for the rollout,
+    then wait until none of the operator pods present BEFORE the action
+    remain. `kubectl rollout status` returns once the new pod is available,
+    and the operator reports Ready before it holds the lease, so the old pod
+    can still be terminating; until it is gone `kubectl logs -l` mixes both
+    processes. CI 36882921953: "restarted operator restores the HELD
+    request" passed on the OLD pod's log, and the completion wait started
+    after the new process had already finished the whole repair. -/
+private def rolloutSettled (action : IO (Except String String)) : IO (Except String Unit) := do
+  let label := s!"app={cfg.operatorName}"
+  let before ← getPodNames label cfg.«namespace»
+  match ← action with
   | .error e => return .error e
   | .ok _ =>
-    if ← kubectlRolloutStatus s!"deployment/{cfg.operatorName}" cfg.«namespace» 240 then return .ok ()
-    else return .error "operator rollout did not complete"
+    if !(← kubectlRolloutStatus s!"deployment/{cfg.operatorName}" cfg.«namespace» 240) then
+      return .error "operator rollout did not complete"
+    let gone ← waitForCondition "the previous operator pod is gone" 180 do
+      let now ← getPodNames label cfg.«namespace»
+      return !now.isEmpty && !now.any (before.contains ·)
+    if gone then return .ok ()
+    else return .error s!"the previous operator pod(s) {before} did not go away within 180 s"
+
+private def setGate (closed : Bool) : IO (Except String Unit) := do
+  let arg := if closed then "FLARE_RESYNC_ON_DROP=0" else "FLARE_RESYNC_ON_DROP-"
+  rolloutSettled (kubectl ["set", "env", s!"deployment/{cfg.operatorName}", "-n", cfg.«namespace», arg])
 
 private def restartOperator : IO Bool := do
-  discard <| kubectl ["rollout", "restart", s!"deployment/{cfg.operatorName}", "-n", cfg.«namespace»]
-  kubectlRolloutStatus s!"deployment/{cfg.operatorName}" cfg.«namespace» 240
+  return (← rolloutSettled (kubectl ["rollout", "restart", s!"deployment/{cfg.operatorName}", "-n", cfg.«namespace»])).toBool
+
+-- ─── adoption (test 9) ─────────────────────────────────────────────────
+
+private def utcNow : IO String := do
+  let out ← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%SZ"] }
+  return out.stdout.trim
+
+private def stamp (msg : String) : IO Unit := do
+  IO.eprintln s!"# [{← utcNow}] {msg}"
+
+/-- `status.replicaRepairs.entries[*].adoptable` as printed by jsonpath. -/
+private def ledgerAdoptable : IO String := do
+  match ← kubectlGetJsonpath "flarecluster" cfg.name cfg.«namespace» "{.status.replicaRepairs.entries[*].adoptable}" with
+  | .ok out => return out.trim
+  | .error _ => return ""
+
+private def podUidOf (pod : String) : IO (Option String) := do
+  match ← kubectlGetJsonpath "pod" pod cfg.«namespace» "{.metadata.uid}" with
+  | .ok u => return (if u.trim.isEmpty then none else some u.trim)
+  | .error _ => return none
+
+/-- Write `count` keys to the master with the master→slave link cut; returns
+    the keys the master ACKNOWLEDGED (STORED) once it has counted drops. The
+    caller heals the link on every path. -/
+private def ackedUnderCut (mIp sIp keyPrefix : String) (count : Nat) : IO (Except String (List String)) := do
+  let d0 ← droppedByMaster mIp
+  match ← cutMasterToSlave mIp sIp with
+  | .error e => return .error s!"could not inject the fault: {e}"
+  | .ok _ => pure ()
+  IO.sleep 2000
+  let mut acked : List String := []
+  for i in List.range count do
+    let k := s!"{keyPrefix}_{i}"
+    if (← memcachedSet cfg.debugPod cfg.«namespace» mIp cfg.flarePort k s!"val_{i}") then
+      acked := acked ++ [k]
+  let dropped ← waitForCondition s!"master counts dropped writes to the slave (was {d0})" 120 do
+    return (← droppedByMaster mIp) > d0
+  if !dropped then
+    return .error s!"the master never counted a dropped write while the link was cut ({acked.length}/{count} acknowledged)"
+  stamp s!"{acked.length}/{count} acknowledged by the master under the cut; dropped {(← droppedByMaster mIp) - d0}"
+  return .ok acked
+
+/-- The request is recorded, HELD by the closed gate, and carries the
+    adoption evidence (recorded while the slave was not reconstructing). -/
+private def awaitHeldAdoptable : IO (Except String Unit) := do
+  let held ← waitForCondition "operator HOLDS the repair (gate closed)" 150 do
+    return containsSubstr (← opLog 200000) "replica repair HELD"
+  if !held then return .error "with the gate closed the drop was neither held nor logged"
+  let adoptable ← waitForCondition "the held entry is persisted as adoptable" 90 do
+    return containsSubstr (← ledgerAdoptable) "true"
+  if !adoptable then
+    return .error s!"the held entry is not adoptable (status adoptable='{← ledgerAdoptable}', dests {← ledgerDests}): the drops were recorded while the slave was reconstructing, or the sight was not read"
+  stamp s!"request held and adoptable: {← ledgerDests}"
+  return .ok ()
+
+/-- Delete the slave's pod and wait for its replacement (another UID) to be
+    Ready; returns the replacement's IP. -/
+private def recreatePod (pod : String) : IO (Except String String) := do
+  let uid0 ← podUidOf pod
+  discard <| kubectl ["delete", "pod", pod, "-n", cfg.«namespace», "--wait=false"]
+  stamp s!"deleted slave pod {pod} (uid {uid0.getD "?"})"
+  let replaced ← waitForCondition "the slave pod is recreated with another UID" 240 do
+    let u ← podUidOf pod
+    return u.isSome && u != uid0
+  if !replaced then return .error s!"pod {pod} was not recreated within 240 s"
+  if !(← kubectlWaitReady s!"pod/{pod}" cfg.«namespace» 300) then
+    return .error s!"the recreated pod {pod} did not become Ready"
+  match ← getPodIp pod cfg.«namespace» with
+  | none => return .error s!"the recreated pod {pod} has no IP"
+  | some ip =>
+    stamp s!"recreated {pod} (uid {(← podUidOf pod).getD "?"}) is Ready at {ip}"
+    return .ok ip
+
+/-- Wait for COMPLETE (adopted), with the gate still closed (ADOPTED comes
+    first only when a pass saw the Prepare); any demotion seen meanwhile
+    fails the test. -/
+private def awaitAdoptedCompletion (mIp sIp : String) : IO TestResult := do
+  let sawDemote ← IO.mkRef false
+  let sawAdopted ← IO.mkRef false
+  let done ← waitForCondition "operator records REPLICA REPAIR COMPLETE (adopted)" 360 do
+    let l ← opLog 200000
+    if containsSubstr l "REPLICA REPAIR: demoting" then sawDemote.set true
+    if containsSubstr l "REPLICA REPAIR ADOPTED" then sawAdopted.set true
+    return containsSubstr l "REPLICA REPAIR COMPLETE (adopted)"
+  if !done then
+    diagnostics mIp sIp
+    let l ← opLog 200000
+    let adoptedSeen ← sawAdopted.get
+    let why := if containsSubstr l "REPLICA REPAIR not adopted" then " (the operator logged 'not adopted')"
+      else if containsSubstr l "adoption lapsed" then " (the operator logged 'adoption lapsed')"
+      else if !adoptedSeen then " (no ADOPTED line: the Prepare of the recreated pod was never observed with the request adoptable)"
+      else ""
+    return .fail s!"the recreated pod's reconstruction did not close the held request within 360 s{why}"
+  if (← sawDemote.get) then return .fail "the replica was demoted although its own reconstruction was adopted"
+  -- with the gate closed only an adoption can close the request: either
+  -- seen in Prepare (ADOPTED, then COMPLETE) or, when the boot copy finished
+  -- between two passes, closed directly on its newer success (COMPLETE
+  -- alone, 41372172476)
+  if (← sawAdopted.get) then
+    stamp "the recreated pod's boot reconstruction was ADOPTED in Prepare and closed the request"
+  else
+    stamp "the recreated pod's boot reconstruction finished between two passes and closed the request directly (no Prepare seen)"
+  return .pass
+
+/-- After the adopted completion: ledger empty, the recreated replica holds
+    every acknowledged write locally (curr_items reaches the master's — a
+    proxied get alone proves nothing) and serves each acknowledged key, and
+    the repair cost no further drop. -/
+private def verifyAdoptedRecovery (mIp sIp : String) (acked : List String) (dSettled : Nat) : IO TestResult := do
+  let emptied ← waitForCondition "ledger persisted as empty" 60 do
+    return (← ledgerDests).isEmpty
+  if !emptied then return .fail s!"the ledger still lists {← ledgerDests} after the adopted completion"
+  let caught ← waitForCondition "recreated replica's local items reach the master's" 120 do
+    let m ← currItems mIp
+    let sv ← currItems sIp
+    return m > 0 && sv ≥ m
+  if !caught then
+    return .fail s!"the recreated replica's local curr_items ({← currItems sIp}) did not reach the master's ({← currItems mIp})"
+  let mut missing : List String := []
+  for k in acked do
+    if (← memcachedGet cfg.debugPod cfg.«namespace» sIp cfg.flarePort k).isNone then
+      missing := missing ++ [k]
+  if !missing.isEmpty then
+    return .fail s!"{missing.length}/{acked.length} acknowledged key(s) not served by the recreated replica: {missing.take 10}"
+  let dNow ← droppedByMaster mIp
+  if dNow != dSettled then
+    return .fail s!"the adopted repair cost drops: proxy_write_dropped moved {dSettled} → {dNow}"
+  stamp s!"all {acked.length} acknowledged keys present; replica items {← currItems sIp} ≥ master {← currItems mIp}"
+  return .pass
+
+/-- Open the gate (a new operator process) and confirm nothing is demoted and
+    the ledger stays empty for 30 s. -/
+private def gateOpenedQuiet : IO TestResult := do
+  match ← setGate false with
+  | .error e => return .fail s!"could not open the gate: {e}"
+  | .ok _ => pure ()
+  stamp "gate opened (new operator process)"
+  IO.sleep 30000
+  if containsSubstr (← opLog 200000) "REPLICA REPAIR: demoting" then
+    return .fail "after the gate opened the operator demoted a replica although the request was closed by adoption"
+  if !(← ledgerDests).isEmpty then
+    return .fail s!"after the gate opened the ledger lists {← ledgerDests}"
+  return .pass
+
+/-- Test 9, after the precondition: drops under the cut, held, the slave pod
+    recreated, adopted and closed with the gate still closed. -/
+private def adoptionScenario (mIp sIp sPod : String) : IO TestResult := do
+  match ← ackedUnderCut mIp sIp "adopt" 30 with
+  | .error e =>
+    heal mIp sIp
+    return .fail e
+  | .ok acked =>
+    heal mIp sIp
+    let dSettled ← settledDrops mIp
+    match ← awaitHeldAdoptable with
+    | .error e =>
+      diagnostics mIp sIp
+      return .fail e
+    | .ok _ => pure ()
+    match ← recreatePod sPod with
+    | .error e => return .fail e
+    | .ok sIp2 =>
+      match ← awaitAdoptedCompletion mIp sIp2 with
+      | .pass => verifyAdoptedRecovery mIp sIp2 acked dSettled
+      | r => return r
+
+/-- Test 10, after the adopted completion of a recreated pod (gate closed):
+    the held request saved before the recreation is put back in status and a
+    new operator starts with the gate OPEN. Its first pass sees the replica
+    already Slave/Active with a success newer than the baseline (a Prepare
+    shorter than a pass, as production sees it) and must close the request
+    before its demotion plan (review of a549080, P1: the plan demoted first). -/
+private def gateOpenAlreadyActive (mIp sIp : String) (saved : String) (acked : List String)
+    (dSettled : Nat) (opened : IO.Ref Bool) : IO TestResult := do
+  match ← patchLedgerRaw saved with
+  | .error e => return .fail s!"could not put the held request back in status: {e}"
+  | .ok _ => pure ()
+  if (← ledgerDests).isEmpty then
+    return .fail "the held request did not come back in status"
+  stamp s!"held request restored in status ({← ledgerDests}); opening the gate (new operator process)"
+  let s0 := (← flaredStat sIp "reconstruction_started").getD 0
+  match ← setGate false with
+  | .error e => return .fail s!"could not open the gate: {e}"
+  | .ok _ => opened.set true
+  let closed ← waitForCondition "the gate-open operator closes the request before its demotion plan" 180 do
+    return containsSubstr (← opLog 200000) "(decided before the demotion plan)"
+  if containsSubstr (← opLog 200000) "REPLICA REPAIR: demoting" then
+    return .fail "with the gate open the replica was demoted although its reconstruction after the drops had already succeeded"
+  if !closed then
+    diagnostics mIp sIp
+    return .fail "with the gate open the restored request was not closed by the reconstruction that already succeeded"
+  let emptied ← waitForCondition "ledger persisted as empty" 60 do
+    return (← ledgerDests).isEmpty
+  if !emptied then return .fail s!"the ledger still lists {← ledgerDests} after the gate-open close"
+  IO.sleep 20000
+  if containsSubstr (← opLog 200000) "REPLICA REPAIR: demoting" then
+    return .fail "after the gate-open close the operator demoted the replica"
+  let s1 := (← flaredStat sIp "reconstruction_started").getD 0
+  if s1 != s0 then
+    return .fail s!"the replica reconstructed again ({s0} → {s1}) although the request was closed"
+  stamp "gate open: the request was closed before the plan, no demotion, no extra rebuild"
+  verifyAdoptedRecovery mIp sIp acked dSettled
+
+/-- Test 10: test 9's steps with the held request saved, then
+    `gateOpenAlreadyActive`. -/
+private def gateOpenScenario (mIp sIp sPod : String) (opened : IO.Ref Bool) : IO TestResult := do
+  match ← ackedUnderCut mIp sIp "adoptopen" 30 with
+  | .error e =>
+    heal mIp sIp
+    return .fail e
+  | .ok acked =>
+    heal mIp sIp
+    let dSettled ← settledDrops mIp
+    match ← awaitHeldAdoptable with
+    | .error e =>
+      diagnostics mIp sIp
+      return .fail e
+    | .ok _ => pure ()
+    let some saved ← ledgerRawJson
+      | return .fail "could not read the held request to save it"
+    match ← recreatePod sPod with
+    | .error e => return .fail e
+    | .ok sIp2 =>
+      match ← awaitAdoptedCompletion mIp sIp2 with
+      | .pass =>
+        let emptied ← waitForCondition "ledger persisted as empty" 60 do
+          return (← ledgerDests).isEmpty
+        if !emptied then return .fail s!"the ledger still lists {← ledgerDests} after the adopted completion"
+        gateOpenAlreadyActive mIp sIp2 saved acked dSettled opened
+      | r => return r
 
 def suite : TestSuite := {
   name := "replica-repair"
@@ -425,11 +707,9 @@ def suite : TestSuite := {
         | .error e => return .fail e
         | .ok (_, mIp, _, sIp) =>
           -- Close the gate by restarting the operator with resync disabled.
-          match ← kubectl ["set", "env", s!"deployment/{cfg.operatorName}", "-n", cfg.«namespace», "FLARE_RESYNC_ON_DROP=0"] with
-          | .error e => return .fail s!"could not set the gate: {e}"
+          match ← setGate true with
+          | .error e => return .fail s!"could not close the gate: {e}"
           | .ok _ => pure ()
-          if !(← kubectlRolloutStatus s!"deployment/{cfg.operatorName}" cfg.«namespace» 240) then
-            return .fail "operator rollout with FLARE_RESYNC_ON_DROP=0 did not complete"
           let restored ← waitForCondition "restarted operator restores the ledger from status" 120 do
             return containsSubstr (← opLog) "replica repair ledger restored from status"
           if !restored then
@@ -441,7 +721,7 @@ def suite : TestSuite := {
             heal mIp sIp
             if burst.gapWhileCut == 0 then
               return .fail "the gated burst left no local gap on the slave: nothing to hold"
-            let dAfterHeal ← droppedByMaster mIp
+            let dAfterHeal ← settledDrops mIp
             let held ← waitForCondition "operator HOLDS the repair (gate closed)" 150 do
               return containsSubstr (← opLog) "replica repair HELD"
             if !held then
@@ -466,11 +746,9 @@ def suite : TestSuite := {
             -- from status and finish it without any further drop.
             let s0 := (← flaredStat sIp "reconstruction_started").getD 0
             let c0 := (← flaredStat sIp "reconstruction_completed").getD 0
-            match ← kubectl ["set", "env", s!"deployment/{cfg.operatorName}", "-n", cfg.«namespace», "FLARE_RESYNC_ON_DROP-"] with
+            match ← setGate false with
             | .error e => return .fail s!"could not open the gate: {e}"
             | .ok _ => pure ()
-            if !(← kubectlRolloutStatus s!"deployment/{cfg.operatorName}" cfg.«namespace» 240) then
-              return .fail "operator rollout with the gate open did not complete"
             let restored2 ← waitForCondition "restarted operator restores the HELD request" 120 do
               let l ← opLog
               return containsSubstr l "replica repair ledger restored from status" && containsSubstr l "requested"
@@ -742,7 +1020,48 @@ def suite : TestSuite := {
             return .pass
           | _, _ =>
             discard <| kubectl ["delete", "pod", hole, "-n", cfg.«namespace», "--wait=false"]
-            return .fail "could not start the black-hole pod" }
+            return .fail "could not start the black-hole pod" },
+
+    { name := "adoption: drops counted while Active, then the slave pod is recreated — its boot reconstruction is adopted as the repair (no demotion, no extra rebuild) and every acknowledged key is on the new replica"
+      run := do
+        if !(← ledgerDests).isEmpty then
+          return .fail s!"precondition: the ledger is not empty ({← ledgerDests})"
+        match ← pair with
+        | .error e => return .fail e
+        | .ok (_, mIp, sPod, sIp) =>
+          stamp s!"master {mIp}, slave {sPod} at {sIp}; closing the gate"
+          match ← setGate true with
+          | .error e => return .fail s!"could not close the gate: {e}"
+          | .ok _ => pure ()
+          let opened ← IO.mkRef false
+          try
+            match ← adoptionScenario mIp sIp sPod with
+            | .pass =>
+              opened.set true
+              gateOpenedQuiet
+            | r => return r
+          finally
+            heal mIp sIp
+            -- a closed gate must not leak into later suites' operator
+            if !(← opened.get) then discard <| setGate false },
+
+    { name := "adoption, gate open: the recreated replica is already Active with its boot reconstruction succeeded when an operator with resync enabled first sees the request — closed before the demotion plan, no demotion, no extra rebuild, every acknowledged key on the replica"
+      run := do
+        if !(← ledgerDests).isEmpty then
+          return .fail s!"precondition: the ledger is not empty ({← ledgerDests})"
+        match ← pair with
+        | .error e => return .fail e
+        | .ok (_, mIp, sPod, sIp) =>
+          stamp s!"master {mIp}, slave {sPod} at {sIp}; closing the gate"
+          match ← setGate true with
+          | .error e => return .fail s!"could not close the gate: {e}"
+          | .ok _ => pure ()
+          let opened ← IO.mkRef false
+          try
+            gateOpenScenario mIp sIp sPod opened
+          finally
+            heal mIp sIp
+            if !(← opened.get) then discard <| setGate false }
   ]
 }
 

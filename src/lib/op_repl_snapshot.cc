@@ -28,12 +28,16 @@
 #include <boost/lexical_cast.hpp>
 #ifdef HAVE_LIBROCKSDB
 #include "storage_rocksdb.h"
+#include "connection_tcp.h"
+#include "copy_capacity.h"
 #endif
 
 #include <algorithm>
 #include <dirent.h>
 #include <sys/stat.h>
 #include <stdio.h>
+#include <string.h>
+#include <time.h>
 
 namespace gree {
 namespace flare {
@@ -42,12 +46,24 @@ namespace flare {
 // SST in memory and the bandwidth throttle gets fine-grained sleep points.
 static const size_t kSnapshotChunkBytes = 1024 * 1024;
 
+// 120 s without one byte accepted: the receiver reads the socket
+// continuously while it writes each file (op_repl_snapshot::_run_client),
+// so only a receiver that stopped (hung, its disk stalled for minutes, or a
+// half-open connection) waits that long; its own space watch stops the copy
+// by closing the connection, which ends the serve at once. The sender's
+// bwlimit sleeps are between writes and never count as a stall.
+int op_repl_snapshot::reseed_progress_timeout_ms = 120 * 1000;
+
 // {{{ ctor/dtor
 op_repl_snapshot::op_repl_snapshot(shared_connection c, storage* st):
 		op(c, "repl_snapshot"),
 		_storage(st),
 		_bwlimit(0),
-		_peer_bwlimit_request(0) {
+		_peer_bwlimit_request(0),
+		_received_seq(0),
+		_busy(false),
+		_capture(false),
+		_capture_deadline_sec(kCaptureMaxDeadlineSec) {
 }
 
 op_repl_snapshot::~op_repl_snapshot() {
@@ -63,13 +79,44 @@ int op_repl_snapshot::_parse_text_server_parameters() {
 	// Optional: the client's requested bandwidth cap in KB/s (0 = no
 	// preference). The effective cap is min(server-configured, requested).
 	// Unknown trailing tokens are ignored for forward compat.
+	// tokens end at ' ', '\n' or NUL; a trailing '\r' is not part of one
+	struct tok {
+		static unsigned int next(const char* src, char* dst, unsigned int n) {
+			const unsigned int used = util::next_word(src, dst, n);
+			const size_t l = strlen(dst);
+			if (l > 0 && dst[l - 1] == '\r') {
+				dst[l - 1] = '\0';
+			}
+			return used;
+		}
+	};
 	char q[BUFSIZ];
-	util::next_word(p, q, sizeof(q));
+	const char* cur = p;
+	cur += tok::next(cur, q, sizeof(q));
 	if (q[0]) {
 		try {
 			this->_peer_bwlimit_request = boost::lexical_cast<uint64_t>(q);
 		} catch (...) {
 			// ignore malformed value; keep server default
+		}
+	}
+	// Optional: "capture [<deadline_sec>]" — the verification capture mode
+	// (see op_repl_snapshot.h). A deadline above the server maximum is cut
+	// to it; a malformed or zero one keeps the maximum.
+	char w[BUFSIZ];
+	cur += tok::next(cur, w, sizeof(w));
+	if (strcmp(w, "capture") == 0) {
+		this->_capture = true;
+		char d[BUFSIZ];
+		tok::next(cur, d, sizeof(d));
+		if (d[0]) {
+			try {
+				const uint64_t sec = boost::lexical_cast<uint64_t>(d);
+				if (sec > 0 && sec < kCaptureMaxDeadlineSec) {
+					this->_capture_deadline_sec = sec;
+				}
+			} catch (...) {
+			}
 		}
 	}
 	delete[] p;
@@ -88,6 +135,43 @@ int op_repl_snapshot::_run_server() {
 	if (rdb == NULL) {
 		return this->_send_result(result_server_error, "internal_error");
 	}
+	// restore provenance: an unverified RESTORED copy is not a replication source: its data may belong to another partition / routing layout (a
+	// copy of it would come out bound to the map, laundering the restore)
+	if (rdb->is_restored_unverified()) {
+		log_warning("repl_snapshot refused: this copy is an unverified RESTORED copy", 0);
+		return this->_send_result(result_server_error, "restored_unverified");
+	}
+
+	// VERIFICATION CAPTURE: guards before anything is pinned or flushed
+	connection_tcp* ctcp = NULL;
+	int64_t capture_reserve = -1;
+	if (this->_capture) {
+		string why;
+		const char* reason = NULL;
+		ctcp = dynamic_cast<connection_tcp*>(this->_connection.get());
+		if (ctcp == NULL) {
+			reason = "unbounded_connection";
+			why = "the connection cannot carry write deadlines";
+		} else if (rdb->is_rebuild_in_flight()) {
+			reason = "rebuild_in_flight";
+			why = "a rebuild is running on this node";
+		} else {
+			uint64_t need = 0;
+			capture_reserve = rdb->get_rebuild_reserve_bytes();
+			const capacity_verdict v = decide_capture_capacity(capture_reserve, true, rdb->local_copy_bytes(),
+				rdb->rebuild_space_available(), need, why);
+			if (v != capacity_ok) {
+				reason = capacity_verdict_name(v);
+			}
+		}
+		if (reason != NULL) {
+			log_warning("capture refused (%s): %s — nothing pinned, no checkpoint", reason, why.c_str());
+			rdb->note_capture(1, reason);
+			return this->_send_result(result_server_error, (string("capture_refused ") + reason).c_str());
+		}
+		log_notice("capture may start: %s (progress timeout %d ms, deadline %llu s)", why.c_str(),
+			kCaptureProgressMs, (unsigned long long)this->_capture_deadline_sec);
+	}
 
 	string cp_path;
 	uint64_t cp_seq = 0;
@@ -98,10 +182,40 @@ int op_repl_snapshot::_run_server() {
 	if (rdb->disable_file_deletions() < 0) {
 		return this->_send_result(result_server_error, "pin_failed");
 	}
-	if (rdb->create_snapshot_checkpoint(cp_path, cp_seq) < 0) {
+	const int cr = rdb->create_snapshot_checkpoint(cp_path, cp_seq);
+	if (cr < 0) {
 		rdb->enable_file_deletions();
-		return this->_send_result(result_server_error, "checkpoint_failed");
+		if (this->_capture) {
+			rdb->note_capture(1, cr == -2 ? "busy" : "checkpoint_failed");
+		}
+		// one serve per source (design §5): the requester waits and retries
+		return this->_send_result(result_server_error, cr == -2 ? "busy" : "checkpoint_failed");
 	}
+	if (ctcp != NULL) {
+		// from here every write is bounded: a peer that stays connected but
+		// stops reading ends the serve (and its pin) instead of holding it
+		ctcp->set_write_progress_timeout_ms(kCaptureProgressMs);
+		ctcp->set_write_deadline_from_now(static_cast<int>(this->_capture_deadline_sec * 1000));
+	} else if (!this->_capture) {
+		// RESEED: the progress bound only (review 2026-10-12, round 8). Before,
+		// a receiver that stayed connected without reading held the
+		// checkpoint, the file-deletion pin and the one-serve slot (every
+		// other reseed answered busy) for as long as the connection lived.
+		ctcp = dynamic_cast<connection_tcp*>(this->_connection.get());
+		if (ctcp != NULL) {
+			ctcp->set_write_progress_timeout_ms(op_repl_snapshot::reseed_progress_timeout_ms);
+		} else {
+			log_notice("snapshot serve on a non-TCP connection: its writes are not bounded", 0);
+		}
+	}
+	// why a write failed (capture: recorded; reseed: logged)
+	struct write_fail {
+		static string why(connection_tcp* t) {
+			if (t == NULL) return "write";
+			const int e = t->get_errno();
+			return e == -4 ? "no_progress" : e == -5 ? "deadline" : "write";
+		}
+	};
 
 	// Enumerate the checkpoint's regular files (checkpoints are flat).
 	vector<pair<string, uint64_t> > files;
@@ -126,11 +240,17 @@ int op_repl_snapshot::_run_server() {
 	closedir(d);
 
 	char line[BUFSIZ];
-	snprintf(line, sizeof(line), "SNAPSHOT %llu %s %zu\r\n",
-		(unsigned long long)cp_seq, rdb->get_master_id().c_str(), files.size());
+	snprintf(line, sizeof(line), "SNAPSHOT %llu %s %zu%s\r\n",
+		(unsigned long long)cp_seq, rdb->get_master_id().c_str(), files.size(), this->_capture ? " capture" : "");
 	if (this->_connection->write(line, strlen(line)) < 0) {
 		rdb->remove_snapshot_checkpoint(cp_path);
 		rdb->enable_file_deletions();
+		if (this->_capture) {
+			rdb->note_capture(2, write_fail::why(ctcp));
+		} else {
+			log_warning("snapshot serve ended before the first file (%s): checkpoint removed, file deletions re-enabled, slot released",
+				write_fail::why(ctcp).c_str());
+		}
 		return -1;
 	}
 
@@ -149,8 +269,13 @@ int op_repl_snapshot::_run_server() {
 	bw.set_bwlimit(effective_kbps);
 
 	int r = 0;
+	string abort_why;		// capture: why the serve was ended early
+	struct timespec last_watch;
+	clock_gettime(CLOCK_MONOTONIC, &last_watch);
 	char* buf = new char[kSnapshotChunkBytes];
+	rdb->peaks_begin(true);		// the measured window of this serve (source side)
 	for (size_t i = 0; i < files.size() && r == 0; i++) {
+		rdb->peaks_sample(true);
 		const string& name = files[i].first;
 		uint64_t size = files[i].second;
 
@@ -181,6 +306,7 @@ int op_repl_snapshot::_run_server() {
 		snprintf(line, sizeof(line), "FILE %s %llu %u\r\n", name.c_str(), (unsigned long long)size, crc);
 		if (this->_connection->write(line, strlen(line)) < 0) {
 			r = -1;
+			abort_why = write_fail::why(ctcp);
 			break;
 		}
 
@@ -202,9 +328,25 @@ int op_repl_snapshot::_run_server() {
 			}
 			if (this->_connection->write(buf, static_cast<int>(got)) < 0) {
 				r = -1;
+				abort_why = write_fail::why(ctcp);
 				break;
 			}
 			sent += got;
+			if (this->_capture) {
+				// at most once a second: free space must stay at the reserve
+				struct timespec now;
+				clock_gettime(CLOCK_MONOTONIC, &now);
+				if (now.tv_sec > last_watch.tv_sec) {
+					last_watch = now;
+					string why;
+					if (!capacity_watch_ok(capture_reserve, rdb->rebuild_space_available(), why)) {
+						log_warning("capture ABORTED: free space fell below the reserve (%s)", why.c_str());
+						abort_why = "no_space";
+						r = -1;
+						break;
+					}
+				}
+			}
 			long sleep_usec = bw.sleep_for_bwlimit(got);
 			if (sleep_usec > 0) {
 				usleep(sleep_usec);
@@ -214,17 +356,37 @@ int op_repl_snapshot::_run_server() {
 	}
 	delete[] buf;
 
+	rdb->peaks_sample(true, true);
 	rdb->remove_snapshot_checkpoint(cp_path);
 	rdb->enable_file_deletions();
 
 	if (r < 0) {
 		// The stream is torn mid-file; the peer detects the short read and
 		// falls back to the legacy dump. Nothing more we can send safely.
+		if (this->_capture) {
+			rdb->note_capture(2, abort_why.empty() ? "write" : abort_why);
+			log_warning("capture serve ended early (%s): checkpoint removed, slot released",
+				abort_why.empty() ? "write" : abort_why.c_str());
+		} else {
+			log_warning("snapshot serve ended early (%s): checkpoint removed, file deletions re-enabled, slot released; the receiver falls back (staged dump)",
+				abort_why.empty() ? "local_read" : abort_why.c_str());
+		}
 		return -1;
 	}
 
 	if (this->_connection->write("END\r\n", 5) < 0) {
+		if (this->_capture) {
+			rdb->note_capture(2, write_fail::why(ctcp));
+		} else {
+			log_warning("snapshot serve: END not delivered (%s); checkpoint already removed, slot released", write_fail::why(ctcp).c_str());
+		}
 		return -1;
+	}
+	if (this->_capture) {
+		rdb->note_capture(0, "");
+	} else if (ctcp != NULL) {
+		// the connection serves further requests: unbounded again
+		ctcp->set_write_progress_timeout_ms(0);
 	}
 	log_notice("snapshot streamed to peer (files=%zu, seq=%llu)", files.size(), (unsigned long long)cp_seq);
 	return 0;
@@ -269,7 +431,9 @@ int op_repl_snapshot::_run_client() {
 	char q[BUFSIZ];
 	int n = util::next_word(p, q, sizeof(q));
 	if (strcmp(q, "SNAPSHOT") != 0) {
-		log_warning("peer declined snapshot (reply=%s)", p);
+		// "SERVER_ERROR busy": the source is serving another snapshot
+		this->_busy = strcmp(q, "SERVER_ERROR") == 0 && strstr(p, "busy") != NULL;
+		log_warning("peer declined snapshot (reply=%s)%s", p, this->_busy ? " — busy: wait and retry" : "");
 		delete[] p;
 		return -1;
 	}
@@ -294,7 +458,9 @@ int op_repl_snapshot::_run_client() {
 	delete[] p;
 
 	string staging;
-	if (rdb->prepare_snapshot_staging(staging) < 0) {
+	if (!this->_receive_dir.empty()) {
+		staging = this->_receive_dir;		// created (empty) by the caller, removed by it on failure
+	} else if (rdb->prepare_snapshot_staging(staging) < 0) {
 		return -1;
 	}
 
@@ -303,7 +469,16 @@ int op_repl_snapshot::_run_client() {
 
 	int r = 0;
 	uint64_t received = 0;
+	uint64_t watched = 0;
 	for (uint64_t i = 0; i < nfiles && r == 0; i++) {
+		if (this->_space_watch) {
+			string why;
+			if (!this->_space_watch(why)) {
+				log_err("snapshot transfer stopped by the space watch (received=%llu bytes): %s", (unsigned long long)received, why.c_str());
+				r = -1;
+				break;
+			}
+		}
 		if (this->_connection->readline(&p) < 0) {
 			r = -1;
 			break;
@@ -373,6 +548,16 @@ int op_repl_snapshot::_run_client() {
 				break;
 			}
 			got_total += want;
+			watched += want;
+			if (this->_space_watch && watched >= kSpaceWatchBytes) {
+				watched = 0;
+				string why;
+				if (!this->_space_watch(why)) {
+					log_err("snapshot transfer stopped by the space watch (file %s): %s", name.c_str(), why.c_str());
+					r = -1;
+					break;
+				}
+			}
 		}
 		fclose(fp);
 		received += got_total;
@@ -401,12 +586,35 @@ int op_repl_snapshot::_run_client() {
 	}
 
 	if (r < 0) {
-		log_warning("snapshot bootstrap failed mid-stream (received=%llu bytes) -> caller falls back to full dump",
+		log_warning("snapshot bootstrap failed mid-stream (received=%llu bytes) -> removing the partial staging copy; caller falls back to full dump",
 			(unsigned long long)received);
+		if (this->_receive_dir.empty()) {
+			rdb->remove_snapshot_staging(staging);
+		}
 		return -1;
 	}
+	if (!this->_receive_dir.empty()) {
+		// staged only: the caller opens, verifies and switches
+		this->_received_seq = cp_seq;
+		this->_received_master_id = peer_master_id;
+		log_notice("snapshot received into [%s]: %llu bytes, checkpoint sequence %llu", staging.c_str(),
+			(unsigned long long)received, (unsigned long long)cp_seq);
+		return 0;
+	}
 
+	if (this->_pre_swap_gate) {
+		string why;
+		if (!this->_pre_swap_gate(why)) {
+			log_warning("snapshot swap REFUSED by copy protection (%s) -> the staged copy is removed and the local copy is kept", why.c_str());
+			rdb->remove_snapshot_staging(staging);
+			return -1;
+		}
+	}
 	if (rdb->swap_in_snapshot(staging, cp_seq) < 0) {
+		// Refused (verification, unidentified history) or failed: the staged
+		// copy must not stay on disk next to the full dump that follows — on
+		// tmpfs that is two copies in RAM.
+		rdb->remove_snapshot_staging(staging);
 		return -1;
 	}
 	log_notice("snapshot bootstrap: swapped in %llu bytes, replication cursor at %llu",

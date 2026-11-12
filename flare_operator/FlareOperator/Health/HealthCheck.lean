@@ -223,7 +223,7 @@ def startHealthServer (status : HealthStatus) (config : ServerConfig := {}) : IO
         acceptLoop fuel
       | .ok clientSocket =>
         -- Handle request in background task
-        let _ ← IO.asTask (prio := .default) do
+        let _ ← IO.asTask (prio := .dedicated) do
           try
             handleClient clientSocket status
           catch e =>
@@ -234,7 +234,7 @@ def startHealthServer (status : HealthStatus) (config : ServerConfig := {}) : IO
 
 /-- Start health server in background task -/
 def startHealthServerBackground (status : HealthStatus) (config : ServerConfig := {}) : IO Unit := do
-  let _ ← IO.asTask (prio := .default) do
+  let _ ← IO.asTask (prio := .dedicated) do
     startHealthServer status config
   pure ()
 

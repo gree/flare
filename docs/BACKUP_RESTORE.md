@@ -51,9 +51,68 @@ Components:
   the master). The S3 layout is **generation-first**, keyed by partition (NOT
   pod): `<cluster>/latest/p<N>/` is the live mirror, `<cluster>/snapshots/<date>/p<N>/`
   the dated generations — so a master change (failover) keeps a stable path.
-- Restore hook in the StatefulSet startup command (PVC deployments): if
-  `<data-dir>/RESTORE` exists, its content names a checkpoint directory; the
-  live DB is replaced by it and the marker consumed before flared starts.
+- Restore hook in the StatefulSet startup command (PVC deployments),
+  `flare-restore-hook` (shipped in the flared images; the E2E harness runs the
+  same script): if `<data-dir>/RESTORE` exists, its content names a checkpoint
+  directory; after the **restore provenance check** below the live DB is
+  replaced by it (with a `RESTORED` marker) and the marker consumed before
+  flared starts.
+
+## Restore provenance (partition binding)
+
+Every RocksDB copy records which partition, under which routing rule, its
+data belongs to — the reserved key `__flare_partition_binding`
+(`v1 partition=<p> partitions=<n> size=<s> hash=<a> resolver=<t> hint=<h>
+virtual=<v>`, `stats`: `rocksdb_partition_binding`). flared (re)records it
+whenever the node map makes a LIVE copy a master or an Active slave — a live
+copy's partition is the operator's decision, so it is never refused for its
+binding; a completed full dump, a staged copy switch and a snapshot swap drop
+the old one (the new content is bound when it becomes Active). The binding
+travels inside every checkpoint and backup. `partitions=<n>` is informational
+and never compared: flared's count of the map's Active partitions is not a
+stable fact (Prepare partitions are not in it).
+
+Checked at three points, before anything serves the restored data:
+
+1. **Before the live copy is replaced** (`flare-restore-hook`): the backup must
+   carry a binding (`flared --checkpoint-binding <dir>`, read-only); when the
+   live copy is bound and readable, both must name the same partition and
+   routing rule (an unreadable — corrupt — live copy is replaced). Refused ->
+   the live copy is kept and served, the marker becomes `RESTORE.refused`
+   (+ `.reason`); with no live copy the pod does not start. The chart runs the
+   hook only when a `RESTORE` marker exists.
+   (The hook still REPLACES the live copy without keeping it once the check
+   passes — keeping it is the separate in-place design, not implemented.)
+2. **When the map makes the restored copy a master** (flared): a `RESTORED`
+   copy (`rocksdb_restored_unverified 1`) serves as a master only of the
+   partition and routing rule its binding names; an unbound restored copy (a
+   backup from before bindings) is refused. Refused -> `promotion_refused 1`,
+   no reads or writes as master. Verified -> the flag is cleared, durably. A
+   restored copy is also no longer "restored" once a completed rebuild, a
+   staged switch or a snapshot swap replaced its content (an ABANDONED rebuild
+   attempt does not clear it).
+3. **When the operator promotes an existing copy, or seats the first master of
+   a new partition from the FSM** (the classifier, `restore provenance: …`):
+   the same rule, as an abort. (The first master of a brand-new cluster is
+   seated by `node add` without a read; there point 2 is the guard.)
+
+Old backups (taken before bindings) are refused by points 1 and 2 on this
+release. **Rollout hazard:** `backupBootstrap` seeds from `latest/p0/` with a
+`RESTORED` marker; until a backup has been taken by the new release, a full
+restart that bootstraps from an OLD backup leaves the partition without a
+usable master (flared refuses the unbound restored copy). Take a backup with
+the new release before relying on bootstrap (compatibility policy for old
+backups: pending a decision). See RUNBOOK.md#restore-refused.
+
+A master that refuses this way stays in the map (not counted by
+`flare_operator_partitions_masterless`); it raises `FlareMasterRefusesToServe`
+(`flare_node_promotion_refused`, read from the node itself). An unverified
+restored copy also refuses to be a replication source (dump / snapshot / WAL),
+so its data cannot be copied into a replica that the map then binds as its own.
+
+Not implemented (known gaps): the partition COUNT of a backup is not compared with the
+cluster's (pending a decision); the hook replaces a live copy without keeping
+it once the check passes (in-place restore with retention, plan I).
 
 ## Taking a backup
 
@@ -88,7 +147,23 @@ KVS this is normally acceptable; if you need a hard cut, quiesce writes first.
 
 ## Restore
 
-### Case A — single-partition cluster (partitions=1): fully supported, e2e-tested
+> **NOT SUPPORTED ON THE CURRENT SAF-10 CANDIDATE (branch
+> `safety/saf-10-wal-replication`, from the reason-based promotion change
+> ce8d661 / f9289aa on).** Do not run Case A or B on a cluster whose operator
+> is built from this branch. The restored copies come back with the history
+> of the backup; the operator holds the partition's LAST master history (for
+> example the one a `flush_all` created) and, by design, does not promote a
+> copy of a different history. The partition then stays **without a master**
+> (CI: eb7bc43, run 37770467697, failover-data job 113288583371 —
+> `backup-restore` test 24 failed, "PROMOTION ABORTED … unknown (its history
+> … is not the last master's …)" repeated, no master after 180 s). There is no
+> step in this procedure that adopts the restored history explicitly; until
+> one is designed and approved (release checklist R8), these steps are valid
+> only for an operator release that predates that change. Do NOT work around
+> it by restarting the operator (that only erases the operator's record of
+> the last history).
+
+### Case A — single-partition cluster (partitions=1): ~~fully supported, e2e-tested~~ NOT supported on the SAF-10 candidate (see above)
 
 1. Pick the restore point: `kubectl exec <pod> -- ls /data/flare/backups`
 2. On EVERY pod of the cluster, write the marker:
@@ -100,12 +175,18 @@ KVS this is normally acceptable; if you need a hard cut, quiesce writes first.
    kubectl delete pod <pod-0> <pod-1> --force --grace-period=0
    ```
 4. The StatefulSet recreates the pods; the startup hook swaps the checkpoint
-   in; the operator re-elects a master. Verify with key sampling before
-   re-enabling traffic.
+   in; on releases that predate the SAF-10 reason-based promotion the
+   operator re-elects a master. **On the SAF-10 candidate it does NOT: the
+   partition stays without a master (see the notice above).** Verify with key
+   sampling before re-enabling traffic.
+   - The hook adds a `RESTORED` marker (both restore paths now do): the
+     restored copy gets a new copy identity and is checked against its
+     partition binding before it serves as a master.
 
 This flow is exercised end-to-end by the `backup-restore` e2e suite
 (write → checkpoint → flush_all on all replicas → marker → pod deletion →
-per-key exact-value verification).
+per-key exact-value verification). That suite FAILS on the SAF-10 candidate
+(eb7bc43, run 37770467697): it is not evidence that the flow works there.
 
 ### Case B — restore from object storage (PVC also lost)
 
@@ -127,8 +208,13 @@ the partition you are restoring:
    (For a dated restore, sync from `…/<cluster>/snapshots/<DATE>/p<N>/`.)
 3. Continue with Case A steps 2–4 (write the `RESTORE` marker naming
    `/data/flare/backups/<name>`, delete the pods, let the startup hook swap it in).
+   **The same limitation applies: not supported on the SAF-10 candidate (see
+   the notice at the top of "Restore").**
 
 ### Case C — multi-partition cluster: MANUAL, read this first
+
+> Not supported on the SAF-10 candidate either: step 1 is the Case A restore
+> (see the notice at the top of "Restore").
 
 **Known limitation**: role/partition assignment is registration-order based.
 After a full-cluster restart, the first pod to register becomes P0 master,
@@ -137,8 +223,10 @@ multi-partition cluster naively can therefore assign a pod carrying P1 data
 to the P0 slot; key lookups then miss, and a subsequent `orphan_purge` would
 **delete** the "misplaced" data.
 
-Until partition pinning is implemented (operator reading a partition marker
-from restored data — future work), multi-partition restore must be manual:
+Partition bindings (see "Restore provenance") now refuse a copy of another
+partition / routing layout as a master, but they do not CHOOSE the right pod
+for each partition: registration order still assigns partitions. Multi-
+partition restore therefore stays manual:
 
 1. Restore all pods from same-timestamp checkpoints (markers on every pod),
    delete all pods together.

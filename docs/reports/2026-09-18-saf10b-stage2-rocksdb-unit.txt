@@ -1,0 +1,42 @@
+# SAF-10b stage 2 — the common apply rule: per-key replication metadata, tombstones, serialization
+# host: local darwin arm64, nix devShell
+# build: ~/git/flare/configure --with-rocksdb=<rocksdb-8.3.2> CXXFLAGS="-std=c++17 -g -O0 -D_LIBCPP_ENABLE_CXX17_REMOVED_RANDOM_SHUFFLE -D_LIBCPP_ENABLE_CXX17_REMOVED_AUTO_PTR"
+# command: cutter --keep-opening-modules -v v -s test -n "<filter>" test/lib
+# date: 2026-09-18
+# NOTE ON SCOPE: RocksDB unit tests only. The non-RocksDB cutter suite is recorded separately (it does not compile these paths).
+
+=== new stage-2 tests (filter: /apply_rule/) plus the stage-1 set ===
+test_apply_rule_forwarded_newer_survives_older_wal              pass   forwarded newer value stands; the older WAL copy is skipped as superseded
+test_apply_rule_delete_then_older_put_does_not_resurrect        pass   the tombstone's label refuses the older put; the key stays deleted
+test_apply_rule_old_put_refused_after_tombstone_collected       pass   once the position passed the delete the tombstone is collected and the older put is refused BY POSITION (design §3.5)
+test_apply_rule_forwarded_change_does_not_advance_cursor        pass   a forwarded write never moves the applied position (design §3.4)
+test_apply_rule_refuses_foreign_session_and_stale_incarnation   pass   another history, or a delivery for a previous copy, is refused before anything is compared
+test_apply_rule_intra_batch_same_key_twice                      pass   the later change in one batch sees the earlier one; result equals applying them in order
+test_apply_rule_refuses_undecodable_batch                       pass   an operation the decoder cannot number refuses the whole batch in a RELEASE build; the position does not move
+test_apply_rule_refuses_gap_in_the_stream                       pass   a batch that does not continue the applied position is refused
+test_apply_rule_restore_clears_inherited_metadata               pass   a snapshot restore clears the source's per-key metadata and tombstones
+(+ the 10 stage-1 tests: generations, order label, all-or-nothing restore)
+RESULT: 19 test(s), 124 assertion(s), 0 failure(s), 0 error(s) — 100% passed
+
+=== regression: the whole RocksDB-related set ===
+filter: /(hard_reset|swap_in_snapshot|repl_last_lsn|truncate|snapshot_bootstrap|validate_batch|phaseA|phaseC|analyze_checkpoint|backup|expire_|wal_|verify_integrity|corrupt|apply_rule|generation|restore|order_label)/
+RESULT: 62 test(s), 640 assertion(s), 0 failure(s), 0 error(s) — 100% passed
+
+=== a false alarm worth recording ===
+An intermediate run showed test_swap_in_snapshot_clears_corruption_latch failing and several others failing with
+"storage_set_string -> -1". Cause: the cutter test modules statically embed libflare objects, so a test module
+built against the new header while carrying older embedded objects reads members at the wrong offsets (a counter
+read back as 57043968). `make -C test/lib clean` before rebuilding removes it. The library's behaviour was correct
+throughout — instrumented runs showed the corrupt batch returning a Corruption status as before. Recorded because
+the same shape could otherwise be mistaken for a regression in CI.
+
+=== NOT executed here ===
+* The full cutter suite in one run (network-dependent modules hang on this host); the RocksDB module is run by name
+  filter. The complete suite runs in CI (nix-linux, test-flare-rocksdb).
+* No E2E yet: nothing is wired to the wire protocol until stage 3, so there is nothing end-to-end to observe.
+* Lock-hold time and writer starvation (design §3.8, test T17) are NOT measured yet — the serialization is in place
+  but its bounds are unmeasured, which stays an open item for stage 3/4.
+
+=== separate record: non-RocksDB cutter suite ===
+# command: nix build .#flare   (nix/default.nix doCheck -> make check)
+# result: not re-run at this revision; last run recorded in 2026-09-17-saf10b-stage1-rocksdb-unit.txt.

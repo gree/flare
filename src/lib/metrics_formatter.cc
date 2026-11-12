@@ -85,6 +85,26 @@ const command_mapping memcached_commands[] = {
 const stat_mapping flared_gauges[] = {
 	{ "node_map_version",   "flared_node_map_version",                 "gauge"   },
 	{ "proxy_write_dropped",     "flare_node_proxy_write_dropped",     "counter" },
+	// in-cluster forwards to replicas: queued now (gauge) and answered with a
+	// refusal / with "already newer" (counters); the drain gate reads them
+	{ "proxy_write_in_flight",   "flare_node_proxy_write_in_flight",   "gauge"   },
+	{ "proxy_write_failed",      "flare_node_proxy_write_failed",      "counter" },
+	{ "proxy_write_skipped",     "flare_node_proxy_write_skipped",     "counter" },
+	// forwards that waited out an unanswering replica (L12 hold) and the
+	// longest such wait (msec)
+	{ "proxy_write_held",        "flare_node_proxy_write_held",        "counter" },
+	{ "proxy_write_held_ms_max", "flare_node_proxy_write_held_ms_max", "gauge"   },
+	// client requests being executed now (a graceful stop waits for 0)
+	{ "requests_in_progress",    "flare_node_requests_in_progress",    "gauge"   },
+	// writes waiting for their partition to get a master (planned handover)
+	{ "writes_waiting_for_master", "flare_node_writes_waiting_for_master", "gauge" },
+	{ "master_waits_ok",         "flare_node_master_waits_ok",         "counter" },
+	{ "master_waits_timeout",    "flare_node_master_waits_timeout",    "counter" },
+	// 1 = the node map makes this node a master but it REFUSES to serve as one
+	// (a copy it knows is unfit, or a restored copy of another partition):
+	// writes to its partition fail. A confirmed refusal, read from the node
+	// itself; an unreachable node is not this (no sample: `up` says it).
+	{ "promotion_refused",       "flare_node_promotion_refused",       "gauge"   },
 	{ "reconstruction_started",   "flare_node_reconstruction_started_total",   "counter" },
 	{ "reconstruction_completed", "flare_node_reconstruction_completed_total", "counter" },
 	{ "reconstruction_failed",    "flare_node_reconstruction_failed_total",    "counter" },
@@ -93,6 +113,9 @@ const stat_mapping flared_gauges[] = {
 	{ "data_dir_used_bytes",     "flare_node_data_dir_used_bytes",     "gauge"   },
 	{ "data_dir_capacity_bytes", "flare_node_data_dir_capacity_bytes", "gauge"   },
 	{ "total_thread_queue", "flared_thread_queue_total",               "gauge"   },
+	{ "malloc_in_use_bytes", "flared_malloc_in_use_bytes",             "gauge"   },
+	{ "malloc_free_bytes",   "flared_malloc_free_bytes",               "gauge"   },
+	{ "malloc_arena_bytes",  "flared_malloc_arena_bytes",              "gauge"   },
 	{ "rusage_user",        "flared_process_user_cpu_seconds_total",   "counter" },
 	{ "rusage_system",      "flared_process_system_cpu_seconds_total", "counter" },
 };
@@ -100,6 +123,20 @@ const stat_mapping flared_gauges[] = {
 void append_header(string& out, const string& name, const char* prom_type) {
 	out += "# HELP " + name + " flared stat\n";
 	out += "# TYPE " + name + " " + prom_type + "\n";
+}
+
+// Prometheus label values: escape backslash, double quote and newline.
+string label_escape(const string& v) {
+	string r;
+	r.reserve(v.size());
+	for (string::size_type i = 0; i < v.size(); i++) {
+		char c = v[i];
+		if (c == '\\') { r += "\\\\"; }
+		else if (c == '"') { r += "\\\""; }
+		else if (c == '\n') { r += "\\n"; }
+		else { r += c; }
+	}
+	return r;
 }
 
 }	// anonymous namespace
@@ -206,6 +243,62 @@ string metrics_formatter::format(const stats_list& stats) {
 			string name = "flare_node_" + it->first;
 			append_header(out, name, "gauge");
 			_append_sample(out, name, "", it->second);
+		}
+	}
+
+	// copy retention: why a staged rebuild stopped (absent = not blocked),
+	// and whether it is parked / running (design §9, §10)
+	{
+		const string* blocked = _lookup(stats, "rebuild_blocked");
+		if (blocked != NULL && !blocked->empty()) {
+			append_header(out, "flare_node_rebuild_blocked_info", "gauge");
+			_append_sample(out, "flare_node_rebuild_blocked_info", "reason=\"" + label_escape(*blocked) + "\"", "1");
+		}
+		const char* passthrough[] = { "rebuild_parked", "rebuild_in_flight" };
+		for (size_t i = 0; i < sizeof(passthrough) / sizeof(passthrough[0]); i++) {
+			const string* v = _lookup(stats, passthrough[i]);
+			if (v != NULL && is_numeric(*v)) {
+				const string name = string("flare_node_") + passthrough[i];
+				append_header(out, name, "gauge");
+				_append_sample(out, name, "", *v);
+			}
+		}
+	}
+
+	// continuous replication, follower side (SAF-10 / EV-15): this replica's
+	// own follow state, so operations compare each replica with its source
+	// instead of inferring from cluster-wide counts. Numeric repl_* stats
+	// pass through as flare_node_repl_*; the lag and the state/source/epoch
+	// strings are derived below.
+	for (stats_list::const_iterator it = stats.begin(); it != stats.end(); it++) {
+		if (it->first.compare(0, 5, "repl_") == 0 && is_numeric(it->second)) {
+			string name = "flare_node_" + it->first;
+			append_header(out, name, "gauge");
+			_append_sample(out, name, "", it->second);
+		}
+	}
+	{
+		const string* applied = _lookup(stats, "repl_applied_lsn");
+		const string* source = _lookup(stats, "repl_source_lsn");
+		if (applied != NULL && source != NULL && is_numeric(*applied) && is_numeric(*source)
+				&& applied->find('.') == string::npos && source->find('.') == string::npos
+				&& (*applied)[0] != '-' && (*source)[0] != '-') {
+			unsigned long long a = strtoull(applied->c_str(), NULL, 10);
+			unsigned long long sv = strtoull(source->c_str(), NULL, 10);
+			char buf[32];
+			snprintf(buf, sizeof(buf), "%llu", sv > a ? sv - a : 0ULL);
+			append_header(out, "flare_node_repl_follow_lag", "gauge");
+			_append_sample(out, "flare_node_repl_follow_lag", "", buf);
+		}
+		const string* state = _lookup(stats, "repl_follow_state");
+		if (state != NULL) {
+			const string* src = _lookup(stats, "repl_follow_source");
+			const string* epoch = _lookup(stats, "repl_follow_source_epoch");
+			string labels = "state=\"" + label_escape(*state) + "\""
+				+ ",source=\"" + label_escape(src != NULL ? *src : string()) + "\""
+				+ ",epoch=\"" + label_escape(epoch != NULL ? *epoch : string()) + "\"";
+			append_header(out, "flare_node_repl_follow_info", "gauge");
+			_append_sample(out, "flare_node_repl_follow_info", labels, "1");
 		}
 	}
 

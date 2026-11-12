@@ -28,6 +28,7 @@
 #define	OP_FLUSH_ALL_H
 
 #include "op.h"
+#include "cluster.h"
 #include "storage.h"
 
 using namespace std;
@@ -47,8 +48,15 @@ protected:
 	// `flush-all-enabled` config (SIGHUP-hot-reloadable; in K8s mode
 	// toggleable cluster-wide in seconds via the FlareCluster CRD).
 	bool _flush_all_enabled = true;
+	// R3-D: flush_all is never forwarded between nodes, so one sent to a
+	// REPLICA wipes that replica alone — an independent wipe of a copy. With
+	// the cluster known, a slave refuses it; a legitimate flush goes to the
+	// master (its bulk rewrite advances its history and the replicas
+	// rebuild through the guarded path).
+	cluster* _cluster = NULL;
 public:
 	void set_flush_all_enabled(bool b) { this->_flush_all_enabled = b; };
+	void set_cluster(cluster* cl) { this->_cluster = cl; };
 protected:
 	storage*					_storage;
 	int								_expire;

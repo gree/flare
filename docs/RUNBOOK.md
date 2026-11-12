@@ -1694,6 +1694,9 @@ move), or `status.nodeMoves.moves[].unservedMs`. To tune:
   forgets a half-closed connection (seen at about 30–135 s on real paths) may
   then wait in `close()` for libmemcached's SO_LINGER (1000 s) if it comes
   back to that connection later than the load balancer remembers it.
+  Removing it rewrites `extra.conf` only while `spec.rocksdb` still sets
+  another field (the chart always does): with `spec.rocksdb` empty the
+  operator leaves the file as it is, so remove the line by hand there.
 - Or raise `nodeReplacement.drainWaitSeconds` above the client idle timeout,
   so the normal wait does not raise `FlareCordonMoveHeld`.
 

@@ -160,10 +160,14 @@ def suite : TestSuite := {
         match ← getPodIp pod cfg.«namespace» with
         | none => return .fail s!"no IP for {pod}"
         | some ip =>
-          let patch := fun (v : String) =>
+          -- flushAllEnabled (its default, true) stays set while the knob is
+          -- removed: the operator leaves extra.conf alone once spec.rocksdb
+          -- is empty (hand-edited keys), as the chart never leaves it (E2E
+          -- 43172827217: the removal never reached the file)
+          let patch := fun (rocksdb : String) =>
             kubectl ["patch", "flarecluster", cfg.name, "-n", cfg.«namespace», "--type", "merge",
-              "-p", s!"\{\"spec\":\{\"rocksdb\":\{\"clientIdleTimeoutSeconds\":{v}}}}"]
-          match ← patch (toString clientIdleSec) with
+              "-p", s!"\{\"spec\":\{\"rocksdb\":{rocksdb}}}"]
+          match ← patch s!"\{\"clientIdleTimeoutSeconds\":{clientIdleSec},\"flushAllEnabled\":true}" with
           | .error e => return .fail s!"could not set clientIdleTimeoutSeconds: {e}"
           | .ok _ => pure ()
           let mounted ← waitForCondition "the mounted extra.conf carries client-idle-timeout" 180 do
@@ -182,7 +186,7 @@ def suite : TestSuite := {
               if !(a + 3 ≥ clientIdleSec && a ≤ clientIdleSec + 7) then
                 return .fail s!"the half-sent client command was dropped after {a} s, expected about {clientIdleSec}"
             | none => return .fail "could not measure from the debug pod"
-            match ← patch "null" with
+            match ← patch "{\"clientIdleTimeoutSeconds\":null}" with
             | .error e => return .fail s!"could not remove clientIdleTimeoutSeconds: {e}"
             | .ok _ => pure ()
             let gone ← waitForCondition "the mounted extra.conf no longer carries client-idle-timeout" 180 do
@@ -194,6 +198,9 @@ def suite : TestSuite := {
               let client2 := (clientIdleLines (← kubectlLogs pod cfg.«namespace» 5000)).getLast?
               IO.eprintln s!"# removed: read timeout {ms2} ms, client idle {client2} ms"
               if client2 != some 600000 then return .fail s!"after removing it the reload printed client idle timeout {client2} ms, expected 600000"
+              -- spec.rocksdb empty again: the next test hand-edits extra.conf,
+              -- which the operator then leaves alone
+              discard <| patch "{\"flushAllEnabled\":null}"
               return .pass },
 
     { name := s!"net-read-timeout = {explicitSec} set explicitly: a SIGHUP reload applies it, and a second reload with the file unchanged keeps it (measured)"

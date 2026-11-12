@@ -482,6 +482,16 @@ private def runNodeMoves (crName ns : String) (stateRef : IO.Ref FlareClusterSta
   metrics.cordonMovesActive.set (final.moves.filter (!·.finished)).length.toFloat
   metrics.cordonMoveHeld.set (if final.moves.any (fun m => !m.finished && m.held) then 1.0 else 0.0)
   metrics.cordonMovesStuck.set final.stuckMoves.length.toFloat
+  metrics.cordonMoveUnservedSeconds.set
+    (match final.moves.find? (fun m => !m.finished && !m.stuck && m.phase == .unserved) with
+     | some m => ((wallNow - m.phaseMs).toFloat / 1000.0)
+     | none => 0.0)
+  match (final.moves.filter (·.releasedMs > 0)).foldl
+      (fun (acc : Option NodeMove.Move) m => match acc with
+        | some a => if m.releasedMs > a.releasedMs then some m else some a
+        | none => some m) none with
+  | some m => metrics.cordonMoveLastUnservedSeconds.set (m.unservedMs.toFloat / 1000.0)
+  | none => pure ()
   metrics.cordonMoveBlocked.set (if final.active.isNone then final.blocked.length.toFloat else 0.0)
   return heldNow
 

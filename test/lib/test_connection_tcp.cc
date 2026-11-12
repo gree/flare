@@ -421,6 +421,9 @@ namespace test_connection_tcp
 	{
 		cut_assert_equal_int(600000, connection_tcp::effective_accepted_read_timeout_ms(600));
 		cut_assert_equal_int(5000, connection_tcp::effective_accepted_read_timeout_ms(5));
+		// client-idle-timeout overrides it for accepted connections; 0 = unset
+		cut_assert_equal_int(120000, connection_tcp::effective_accepted_read_timeout_ms(600, 120));
+		cut_assert_equal_int(600000, connection_tcp::effective_accepted_read_timeout_ms(600, 0));
 		// the k8s build's 30 s stays on the connections flared opens
 		cut_assert_equal_int(30000, connection_tcp::effective_read_timeout_ms(true, false, 600));
 

@@ -43,6 +43,8 @@ private def cfg : ClusterConfig := {
 
 private def pod : String := s!"{cfg.name}-nodes-0"
 private def explicitSec : Nat := 8
+/-- spec.rocksdb.clientIdleTimeoutSeconds set through the FlareCluster -/
+private def clientIdleSec : Nat := 12
 /-- Measurement cap: well above 30 s, far below the 600 s default. -/
 private def capSec : Nat := 75
 
@@ -152,6 +154,47 @@ def suite : TestSuite := {
               if b + 1 < capSec then return .fail s!"after the reload the half-sent client command was dropped after {b} s, expected still open at the {capSec} s cap (client idle timeout 600 s)"
               return .pass
             | _, _ => return .fail s!"could not measure from the debug pod: {t0} / {t1}" },
+
+    { name := s!"spec.rocksdb.clientIdleTimeoutSeconds = {clientIdleSec}: the operator writes client-idle-timeout, a reload closes an idle client after it while the opened connections keep 30 s; removing it goes back to 600 s"
+      run := do
+        match ← getPodIp pod cfg.«namespace» with
+        | none => return .fail s!"no IP for {pod}"
+        | some ip =>
+          let patch := fun (v : String) =>
+            kubectl ["patch", "flarecluster", cfg.name, "-n", cfg.«namespace», "--type", "merge",
+              "-p", s!"\{\"spec\":\{\"rocksdb\":\{\"clientIdleTimeoutSeconds\":{v}}}}"]
+          match ← patch (toString clientIdleSec) with
+          | .error e => return .fail s!"could not set clientIdleTimeoutSeconds: {e}"
+          | .ok _ => pure ()
+          let mounted ← waitForCondition "the mounted extra.conf carries client-idle-timeout" 180 do
+            return containsSubstr (← mountedConf) s!"client-idle-timeout = {clientIdleSec}"
+          if !mounted then return .fail "the operator never wrote client-idle-timeout into the pod's extra.conf"
+          match ← reloadAndRead with
+          | .error e => return .fail e
+          | .ok ms =>
+            let client := (clientIdleLines (← kubectlLogs pod cfg.«namespace» 5000)).getLast?
+            let t ← closeAfterPartialCommand ip
+            IO.eprintln s!"# set: read timeout {ms} ms, client idle {client} ms; half-sent command dropped after {t} s"
+            if ms != 30000 then return .fail s!"client-idle-timeout changed the opened connections' read timeout to {ms} ms, expected 30000"
+            if client != some (clientIdleSec * 1000) then return .fail s!"the reload printed client idle timeout {client} ms, expected {clientIdleSec * 1000}"
+            match t with
+            | some a =>
+              if !(a + 3 ≥ clientIdleSec && a ≤ clientIdleSec + 7) then
+                return .fail s!"the half-sent client command was dropped after {a} s, expected about {clientIdleSec}"
+            | none => return .fail "could not measure from the debug pod"
+            match ← patch "null" with
+            | .error e => return .fail s!"could not remove clientIdleTimeoutSeconds: {e}"
+            | .ok _ => pure ()
+            let gone ← waitForCondition "the mounted extra.conf no longer carries client-idle-timeout" 180 do
+              return !containsSubstr (← mountedConf) "client-idle-timeout"
+            if !gone then return .fail "client-idle-timeout stayed in the pod's extra.conf after it was removed from the spec"
+            match ← reloadAndRead with
+            | .error e => return .fail e
+            | .ok ms2 =>
+              let client2 := (clientIdleLines (← kubectlLogs pod cfg.«namespace» 5000)).getLast?
+              IO.eprintln s!"# removed: read timeout {ms2} ms, client idle {client2} ms"
+              if client2 != some 600000 then return .fail s!"after removing it the reload printed client idle timeout {client2} ms, expected 600000"
+              return .pass },
 
     { name := s!"net-read-timeout = {explicitSec} set explicitly: a SIGHUP reload applies it, and a second reload with the file unchanged keeps it (measured)"
       run := do

@@ -1087,6 +1087,10 @@ private def checkBreakerUnavailable (ctx : Ctx) : IO Unit := do
   let big := cs ((List.range 8).map fun i =>
     node s!"n{i}" (if i == 0 then .Master else .Slave) (if i == 7 then .Down else .Active))
   let pair := cs [node "a" .Master .Active, node "b" .Slave .Active]
+  check ctx "client-idle-timeout renders into extra.conf only when set"
+    (({ clientIdleTimeoutSeconds := some 120 } : RocksdbConfigSpec).toExtraConf == "client-idle-timeout = 120"
+      && ({ clientIdleTimeoutSeconds := some 120 } : RocksdbConfigSpec).hasAny
+      && ({ maxTotalThreadQueue := some 1 } : RocksdbConfigSpec).toExtraConf == "max-total-thread-queue = 1")
   check ctx "read-unavailable-error renders into extra.conf only when set"
     (({ readUnavailableError := some true } : RocksdbConfigSpec).toExtraConf == "read-unavailable-error = true"
       && ({ readUnavailableError := some false } : RocksdbConfigSpec).toExtraConf == "read-unavailable-error = false"

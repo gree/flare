@@ -120,8 +120,11 @@ public:
 	// build's 30 s closed idle clients, and behind a stateful middlebox that
 	// forgets the half-closed flow (a load balancer) a libmemcached client's
 	// close() then hung for its SO_LINGER (1000 s).
-	static int effective_accepted_read_timeout_ms(int net_read_timeout_sec) {
-		return net_read_timeout_sec * 1000;
+	// client-idle-timeout (sec, > 0) overrides it for accepted connections
+	// only, so the idle close of clients can be tuned without touching the
+	// connections flared opens.
+	static int effective_accepted_read_timeout_ms(int net_read_timeout_sec, int client_idle_timeout_sec = 0) {
+		return (client_idle_timeout_sec > 0 ? client_idle_timeout_sec : net_read_timeout_sec) * 1000;
 	};
 	static const int connect_retry_limit = 8;
 	static const int connect_retry_wait = 500*1000;	// usec

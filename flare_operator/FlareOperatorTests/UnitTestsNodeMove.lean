@@ -73,6 +73,10 @@ def results : List (String × Bool) := Id.run do
   let rel := step cfg un (drainedObs 5000 (some (pod "u1" .Proxy false)))
   r := r ++ [("node move: unserved -> released when all three proofs hold (the operator writes it)",
               phaseOf rel == .released && rel.1.releasedMs == 5000)]
+  r := r ++ [("node move: the release records how long the move waited in unserved",
+              rel.1.unservedMs == 5000 - un.phaseMs
+                && (match Move.fromJson? { rel.1 with unservedMs := 7 }.toJson with
+                    | some m => m.unservedMs == 7 | none => false))]
   let late := step cfg un { drainedObs 130000 (some (pod "u1" .Proxy false)) with currConnections := some 1 }
   r := r ++ [("node move: past the 120 s bound the move HOLDS as a proxy, nothing is deleted, the reason says why",
               phaseOf late == .unserved && late.1.held && actOf late == .none && late.1.reason.length > 0)]

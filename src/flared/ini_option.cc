@@ -61,6 +61,7 @@ ini_option::ini_option():
 		_master_wait_msec(default_master_wait_msec),
 		_net_read_timeout(default_net_read_timeout),
 		_net_read_timeout_set(false),
+		_client_idle_timeout(0),
 		_proxy_concurrency(default_proxy_concurrency),
 		_reconstruction_interval(default_reconstruction_interval),
 		_reconstruction_bwlimit(default_reconstruction_bwlimit),
@@ -283,6 +284,9 @@ int ini_option::load() {
 		if (opt_var_map.count("net-read-timeout")) {
 			this->_net_read_timeout = opt_var_map["net-read-timeout"].as<int>();
 			this->_net_read_timeout_set = true;
+		}
+		if (opt_var_map.count("client-idle-timeout")) {
+			this->_client_idle_timeout = opt_var_map["client-idle-timeout"].as<int>();
 		}
 
 		if (opt_var_map.count("proxy-concurrency")) {
@@ -599,6 +603,15 @@ int ini_option::reload() {
 			log_notice("  net_read_timeout:       %d -> %d", this->_net_read_timeout, opt_var_map["net-read-timeout"].as<int>());
 			this->_net_read_timeout = opt_var_map["net-read-timeout"].as<int>();
 			this->_net_read_timeout_set = true;
+		}
+		{
+			// read from the file on every reload: a file without it goes back
+			// to net-read-timeout (the operator rewrites the whole file)
+			const int v = opt_var_map.count("client-idle-timeout") ? opt_var_map["client-idle-timeout"].as<int>() : 0;
+			if (v != this->_client_idle_timeout) {
+				log_notice("  client_idle_timeout:    %d -> %d", this->_client_idle_timeout, v);
+			}
+			this->_client_idle_timeout = v;
 		}
 
 		if (opt_var_map.count("reconstruction-interval")) {
@@ -932,6 +945,7 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("proxy-forward-hold-msec",	program_options::value<int>(),			"how long an in-cluster forward to a replica that does not answer is kept and sent again, resolving the replica's name on each try, before it is dropped and counted (msec, 0 = the 4 quick tries of before)")
 		("master-wait-msec",	program_options::value<int>(),			"how long a write to a partition without a master (its master is down in the node map during a planned handover) waits for a master before it fails (msec, 0 = fail at once as before)")
 		("net-read-timeout",				program_options::value<int>(),			"network read timeout (sec) (dynamic)")
+		("client-idle-timeout",				program_options::value<int>(),			"idle timeout of the connections flared accepts (clients), sec; 0 or unset = net-read-timeout. A reload without it in the config file goes back to net-read-timeout (dynamic)")
 		("proxy-concurrency",				program_options::value<int>(),			"proxy request concurrency for each node")
 		("reconstruction-interval",	program_options::value<int>(),			"master/slave dump interval in usec (dynamic)")
 		("reconstruction-bwlimit",	program_options::value<int>(),			"master/slave dump limit I/O bandwidth; KBytes per second (dynamic)")

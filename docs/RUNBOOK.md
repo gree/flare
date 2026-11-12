@@ -1675,6 +1675,31 @@ the load balancer's targets, and the pod's `stats` (`client_requests`,
 held; a later change adds it. A held move turns [stuck](#cordon-move-stuck)
 after `unservedTimeoutSeconds`.
 
+**How long `unserved` takes (client idle timeout).** Flared closes a client
+connection that has been idle for its client idle timeout: `net_read_timeout`,
+600 s, unless `spec.rocksdb.clientIdleTimeoutSeconds` (flared
+`client-idle-timeout`) is set. A client that keeps a connection open but idle
+(a persistent libmemcached connection) therefore keeps the moved pod
+`unserved` for up to that long — worst case about 10 min per pod, with
+`FlareCordonMoveHeld` after `drainWaitSeconds` (120 s). Watch it with the
+operator metrics `flare_operator_cordon_move_unserved_seconds` (the running
+move) and `flare_operator_cordon_move_last_unserved_seconds` (the last released
+move), or `status.nodeMoves.moves[].unservedMs`. To tune:
+
+- Shorten `spec.rocksdb.clientIdleTimeoutSeconds` (chart
+  `cluster.rocksdb.clientIdleTimeoutSeconds`). It is applied by SIGHUP, no pod
+  restart; removing it goes back to 600 s. It only changes the connections
+  flared accepts; the connections flared opens keep their own timeout. A short
+  value closes idle clients sooner: a client behind a load balancer that
+  forgets a half-closed connection (seen at about 30–135 s on real paths) may
+  then wait in `close()` for libmemcached's SO_LINGER (1000 s) if it comes
+  back to that connection later than the load balancer remembers it.
+  Removing it rewrites `extra.conf` only while `spec.rocksdb` still sets
+  another field (the chart always does): with `spec.rocksdb` empty the
+  operator leaves the file as it is, so remove the line by hand there.
+- Or raise `nodeReplacement.drainWaitSeconds` above the client idle timeout,
+  so the normal wait does not raise `FlareCordonMoveHeld`.
+
 **Uncordon.** The operator writes `cancelled` (generation + 1) **first** and
 puts the serving label back **after** that write succeeded, so an eviction
 that races the uncordon either sees `released` (the move completes) or does
@@ -1762,6 +1787,8 @@ the Service selector loses the serving label requirement.
 
 - Flared does not yet close client connections after a response (L9); the
   move relies on clients or the load balancer dropping the pod.
+  An idle persistent client keeps the pod `unserved` up to the client idle
+  timeout (600 s unless `clientIdleTimeoutSeconds` is set; see above).
 - `curr_connections` counts every open connection to the pod; the operator
   subtracts only its own one. Any other connection still open (a client's,
   or another flared node's) keeps the move `unserved` and, after

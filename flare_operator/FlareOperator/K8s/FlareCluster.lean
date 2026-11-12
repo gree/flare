@@ -189,6 +189,15 @@ structure RocksdbConfigSpec where
       this, free under the data dir (tmpfs: also within the memory limit).
       flared: `rocksdb-rebuild-reserve-bytes` (dynamic, SIGHUP). -/
   rebuildReserveBytes : Option Nat := none
+  /-- Idle timeout of the client connections flared accepts, in seconds
+      (unset = net_read_timeout, 600 s). A cordon move waits for the moved
+      pod's connections to reach 0, so an idle persistent client delays it by
+      up to this long; shorter closes idle clients sooner, and a client behind
+      a load balancer that forgets the half-closed flow may then hang in
+      close() (libmemcached SO_LINGER). Backend-agnostic.
+      flared: `client-idle-timeout` (dynamic, SIGHUP; removing it goes back to
+      net_read_timeout). -/
+  clientIdleTimeoutSeconds : Option Nat := none
   deriving Repr, BEq
 
 /-- True when at least one rocksdb field has been set by the user. -/
@@ -199,7 +208,8 @@ def RocksdbConfigSpec.hasAny (r : RocksdbConfigSpec) : Bool :=
   r.walSyncBwlimit.isSome || r.walSyncInterval.isSome || r.snapshotBwlimit.isSome ||
   r.flushAllEnabled.isSome || r.backupKeep.isSome || r.readUnavailableError.isSome ||
   r.replIdentityForward.isSome || r.replFollowEnabled.isSome || r.replFollowPollIntervalUsec.isSome ||
-  r.maxTotalThreadQueue.isSome || r.noreplyWindowLimit.isSome || r.rebuildReserveBytes.isSome
+  r.maxTotalThreadQueue.isSome || r.noreplyWindowLimit.isSome || r.rebuildReserveBytes.isSome ||
+  r.clientIdleTimeoutSeconds.isSome
 
 /-- Render the rocksdb spec as `extra.conf` lines (one per set field).
     Returns an empty string when no fields are set. Lines are joined with "\n";
@@ -272,6 +282,9 @@ def RocksdbConfigSpec.toExtraConf (r : RocksdbConfigSpec) : String :=
     | none => lines
   let lines := match r.noreplyWindowLimit with
     | some n => lines ++ [s!"noreply-window-limit = {n}"]
+    | none => lines
+  let lines := match r.clientIdleTimeoutSeconds with
+    | some n => lines ++ [s!"client-idle-timeout = {n}"]
     | none => lines
   String.intercalate "\n" lines
 

@@ -181,6 +181,10 @@ structure Move where
   startedMs : Nat := 0
   phaseMs : Nat := 0
   releasedMs : Nat := 0
+  /-- how long it waited in `unserved` before its release (ms): the client
+      Service leaving the pod and its client connections closing (an idle
+      persistent client keeps one open up to flared's client idle timeout) -/
+  unservedMs : Nat := 0
   deriving Repr, BEq, Inhabited
 
 /-- A pod that cannot be moved now (under minCopies, ...): what is shown. -/
@@ -459,7 +463,7 @@ def step (cfg : Config) (m : Move) (o : Obs) : Move × Action :=
     -- stuck: never released (the guard keeps holding the pod); only an
     -- uncordon (cancel) or the pod going away ends it
     else if m.stuck then (m, .none)
-    else if drained cfg o then ({ goto m .released now with releasedMs := now }, .none)
+    else if drained cfg o then ({ goto m .released now with releasedMs := now, unservedMs := now - m.phaseMs }, .none)
     else if pastDeadline m now cfg.unservedTimeoutMs then
       (markStuck { m with held := true } now
         s!"the client Service still reaches the pod ({drainWhy cfg o}); held as a proxy, never released; the next move may start", .none)
@@ -643,7 +647,7 @@ def Move.toJson (m : Move) : Json :=
     ("attempts", Json.num m.attempts), ("admittedUid", Json.str m.admittedUid),
     ("restored", Json.bool m.restored), ("stuck", Json.bool m.stuck), ("stuckMs", Json.num m.stuckMs),
     ("startedMs", Json.num m.startedMs),
-    ("phaseMs", Json.num m.phaseMs), ("releasedMs", Json.num m.releasedMs)]
+    ("phaseMs", Json.num m.phaseMs), ("releasedMs", Json.num m.releasedMs), ("unservedMs", Json.num m.unservedMs)]
 
 open Lean in
 def Move.fromJson? (j : Json) : Option Move := do
@@ -660,7 +664,8 @@ def Move.fromJson? (j : Json) : Option Move := do
          held := (j.getObjValAs? Bool "held").toOption.getD false, attempts := (n "attempts").getD 0,
          admittedUid := (s "admittedUid").getD "", restored := (j.getObjValAs? Bool "restored").toOption.getD false,
          stuck := (j.getObjValAs? Bool "stuck").toOption.getD false, stuckMs := (n "stuckMs").getD 0,
-         startedMs := (n "startedMs").getD 0, phaseMs := (n "phaseMs").getD 0, releasedMs := (n "releasedMs").getD 0 }
+         startedMs := (n "startedMs").getD 0, phaseMs := (n "phaseMs").getD 0, releasedMs := (n "releasedMs").getD 0,
+         unservedMs := (n "unservedMs").getD 0 }
 
 open Lean in
 def Ledger.toJson (l : Ledger) : Json :=

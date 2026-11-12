@@ -5936,16 +5936,18 @@ def historyTrackingSuite : TestSuite := {
           -- before the operator saw it die) about 0.3 s before the new process
           -- started, then read the new process (items 0) — which the operator
           -- had registered as Slave (Prepare) in between, never master. Its
-          -- own_role is the process's own role, read with its items.
+          -- own_role, curr_items and boot id come from ONE stats reply (one
+          -- sample of one process), so no transition falls between them.
           let mut emptyMaster := false
           let mut seated := false
           for i in [0:60] do
             if let some m := ← masterPodOf c then
               if m == mPod then
                 let ip := (← getPodIp mPod ns).getD ""
-                let items ← c.statNat ip "curr_items"
-                let boot ← c.statStr ip "reconstruction_boot_id"
-                let role := (← c.statStr ip "own_role").map String.trim
+                let sample ← c.statsOf ip
+                let items := sample.bind (statVal · "curr_items") |>.bind (·.toNat?)
+                let boot := sample.bind (statVal · "reconstruction_boot_id")
+                let role := sample.bind (statVal · "own_role")
                 IO.eprintln s!"# sample {i}: map master {m}; its process boot {boot} (before the kill {boot0}), curr_items {items}, own_role {role}"
                 if items == some 0 && boot.isSome && boot != some boot0 && role == some "master" then emptyMaster := true
               if m == sPod then seated := true

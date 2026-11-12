@@ -37,6 +37,7 @@ namespace gree {
 namespace flare {
 
 int connection_tcp::read_timeout = 10*60*1000;
+int connection_tcp::accepted_read_timeout = 10*60*1000;
 
 namespace {
 uint64_t monotonic_ms_now() {
@@ -105,7 +106,7 @@ connection_tcp::connection_tcp(int sock, struct sockaddr_in addr):
 		_port(-1),
 		_path(""),
 		_sock(sock),
-		_read_timeout(read_timeout),
+		_read_timeout(accepted_read_timeout),
 		_errno(0),
 		_read_buf(NULL),
 		_read_buf_p(NULL),
@@ -135,7 +136,7 @@ connection_tcp::connection_tcp(int sock, struct sockaddr_un addr):
 		_port(-1),
 		_path(""),
 		_sock(sock),
-		_read_timeout(read_timeout),
+		_read_timeout(accepted_read_timeout),
 		_errno(0),
 		_read_buf(NULL),
 		_read_buf_p(NULL),

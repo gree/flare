@@ -34,6 +34,10 @@
 #include <time.h>
 #include <errno.h>
 #include <poll.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <netinet/in.h>
 #include <signal.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -407,6 +411,37 @@ namespace test_connection_tcp
 		// classic build: net_read_timeout (default 600 s, or as configured)
 		cut_assert_equal_int(600000, connection_tcp::effective_read_timeout_ms(false, false, 600));
 		cut_assert_equal_int(10000, connection_tcp::effective_read_timeout_ms(false, true, 10));
+	}
+
+	// accepted connections (clients) keep net_read_timeout in every build: the
+	// k8s build's 30 s closed idle clients, and behind a load balancer that
+	// forgets the half-closed flow a libmemcached close() then hung for its
+	// SO_LINGER
+	void test_accepted_connections_use_net_read_timeout_in_every_build()
+	{
+		cut_assert_equal_int(600000, connection_tcp::effective_accepted_read_timeout_ms(600));
+		cut_assert_equal_int(5000, connection_tcp::effective_accepted_read_timeout_ms(5));
+		// the k8s build's 30 s stays on the connections flared opens
+		cut_assert_equal_int(30000, connection_tcp::effective_read_timeout_ms(true, false, 600));
+
+		const int saved_read = connection_tcp::read_timeout;
+		const int saved_accepted = connection_tcp::accepted_read_timeout;
+		connection_tcp::read_timeout = 30000;
+		connection_tcp::accepted_read_timeout = 600000;
+		int fds[2];
+		cut_assert_equal_int(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds));
+		struct sockaddr_in in_addr;
+		memset(&in_addr, 0, sizeof(in_addr));
+		struct sockaddr_un un_addr;
+		memset(&un_addr, 0, sizeof(un_addr));
+		connection_tcp opened("127.0.0.1", 1);
+		connection_tcp accepted_in(fds[0], in_addr);
+		connection_tcp accepted_un(fds[1], un_addr);
+		connection_tcp::read_timeout = saved_read;
+		connection_tcp::accepted_read_timeout = saved_accepted;
+		cut_assert_equal_int(30000, opened.get_read_timeout());
+		cut_assert_equal_int(600000, accepted_in.get_read_timeout());
+		cut_assert_equal_int(600000, accepted_un.get_read_timeout());
 	}
 
 	void teardown()

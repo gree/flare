@@ -197,6 +197,55 @@ namespace test_handler_proxy {
 		cut_assert_equal_int(0, stats_object->get_total_thread_queue());
 	}
 
+	// the SENDER closes a forwarding connection it has not used for
+	// proxy_idle_close_sec (the receiver keeps idle connections for its client
+	// idle timeout, 600 s): the receiver sees EOF, and the next forward opens
+	// a new connection and succeeds
+	void test_idle_forwarding_connection_is_closed_by_the_sender_and_reopened() {
+		const int saved = handler_proxy::proxy_idle_close_sec;
+		handler_proxy::proxy_idle_close_sec = 1;
+		cluster::node n = cl->set_node("localhost", port, cluster::role_slave, cluster::state_active);
+		shared_thread t = start_handler_proxy(n.node_thread_type);
+
+		shared_queue_proxy_write q1 = get_proxy_queue_write();
+		proxy_request(t, q1, "STORED");
+		const bool ok1 = q1->is_success();
+
+		// the receiver's end of the first connection reads EOF once the
+		// sender has closed it (within a few seconds, not 600)
+		bool eof = false;
+		for (int r = 0; r < 50 && !eof && cs.size() > 0; r++) {
+			char b;
+			const int x = ::recv(cs[0]->get_sock(), &b, 1, MSG_PEEK | MSG_DONTWAIT);
+			eof = (x == 0);
+			if (!eof) usleep(100 * 1000);
+		}
+
+		shared_queue_proxy_write q2 = get_proxy_queue_write();
+		q2->sync_ref();
+		shared_thread_queue tq2 = q2;
+		t->enqueue(tq2);
+		vector<shared_connection_tcp> cs2;
+		for (int r = 0; r < 50 && cs2.size() == 0; r++) {
+			cs2 = s->wait();
+			if (cs2.size() == 0) usleep(100 * 1000);
+		}
+		if (cs2.size() > 0) {
+			cs2[0]->writeline("STORED");
+		}
+		q2->sync();
+		const bool ok2 = q2->is_success();
+		for (size_t k = 0; k < cs2.size(); k++) {
+			cs.push_back(cs2[k]);
+		}
+		handler_proxy::proxy_idle_close_sec = saved;
+
+		cut_assert_true(ok1, cut_message("the first forward did not succeed"));
+		cut_assert_true(eof, cut_message("the sender did not close its idle forwarding connection"));
+		cut_assert_true(cs2.size() > 0, cut_message("the next forward did not open a new connection"));
+		cut_assert_true(ok2, cut_message("the forward on the reopened connection did not succeed"));
+	}
+
 	void test_proxy_write_to_slave() {
 		cluster::node n = cl->set_node("localhost", port, cluster::role_slave, cluster::state_active);
 		shared_thread t = start_handler_proxy(n.node_thread_type);

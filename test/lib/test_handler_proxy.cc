@@ -212,13 +212,17 @@ namespace test_handler_proxy {
 		const bool ok1 = q1->is_success();
 
 		// the receiver's end of the first connection reads EOF once the
-		// sender has closed it (within a few seconds, not 600)
+		// sender has closed it (within a few seconds, not 600). The forwarded
+		// request was never read here, so read it off first: EOF comes after it
 		bool eof = false;
 		for (int r = 0; r < 50 && !eof && cs.size() > 0; r++) {
-			char b;
-			const int x = ::recv(cs[0]->get_sock(), &b, 1, MSG_PEEK | MSG_DONTWAIT);
-			eof = (x == 0);
-			if (!eof) usleep(100 * 1000);
+			char b[1024];
+			const int x = ::recv(cs[0]->get_sock(), b, sizeof(b), MSG_DONTWAIT);
+			if (x == 0) {
+				eof = true;
+			} else if (x < 0) {
+				usleep(100 * 1000);
+			}
 		}
 
 		shared_queue_proxy_write q2 = get_proxy_queue_write();

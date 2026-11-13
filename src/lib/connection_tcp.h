@@ -195,6 +195,7 @@ public:
 
 	virtual int close();
 	virtual bool is_available() const { return this->_sock >= 0 ? true : false; };
+	int get_sock() const { return this->_sock; };
 
 	int set_tcp_nodelay(bool nodelay);
 	int get_tcp_nodelay(bool& nodelay);

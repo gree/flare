@@ -1681,7 +1681,11 @@ connection that has been idle for its client idle timeout: `net_read_timeout`,
 `client-idle-timeout`) is set. A client that keeps a connection open but idle
 (a persistent libmemcached connection) therefore keeps the moved pod
 `unserved` for up to that long — worst case about 10 min per pod, with
-`FlareCordonMoveHeld` after `drainWaitSeconds` (120 s). Watch it with the
+`FlareCordonMoveHeld` after `drainWaitSeconds` (120 s). The other flared
+pods' forwarding connections to the moved pod do not hold it that long: the
+sending flared closes a forwarding connection it has not used for 30 s, so
+without such a client the move is released about 30 s after the pod became a
+proxy (see [spec.md](spec.md#normal), "Connections are of three kinds"). Watch it with the
 operator metrics `flare_operator_cordon_move_unserved_seconds` (the running
 move) and `flare_operator_cordon_move_last_unserved_seconds` (the last released
 move), or `status.nodeMoves.moves[].unservedMs`. To tune:

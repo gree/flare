@@ -72,9 +72,60 @@ protected:
 	int									_write_buf_chunk_size;
 	int									_connect_retry_limit;
 	int									_connect_retry_wait;	// usec
+	// Opt-in connect deadline (msec; 0 = blocking connect as before). A peer
+	// that vanished without a RST otherwise blocks connect() for the
+	// kernel's SYN timeout on every retry (~15 min for 8 retries, CI
+	// 37407630865: a reconstruction could not re-select its source).
+	int									_connect_timeout_ms;
+	// Opt-in TOTAL deadline for this connection's reads (monotonic msec,
+	// 0 = none). The per-read timeout bounds a silent peer; this bounds a
+	// peer that trickles bytes, for short requests such as an identity probe.
+	uint64_t						_deadline_ms;
+	// Opt-in WRITE bounds (0 = none: a peer that stays connected but stops
+	// reading blocks write() forever, as before). progress: the longest a
+	// write may wait without a single byte accepted; deadline: monotonic msec
+	// after which no write is attempted. Used by the verification capture
+	// serve (op_repl_snapshot, capture mode); errno -4 / -5 when they fire.
+	int									_write_progress_timeout_ms;
+	uint64_t						_write_deadline_ms;
+	// When the last open() TIMED OUT (monotonic msec, 0 = the last open
+	// succeeded or failed fast — refused, lookup failure): lets a sender fail
+	// fast instead of queueing behind another connect that will time out.
+	uint64_t						_open_failed_at_ms;
+	// the SENDER's own verdict on this destination (cluster replication): a
+	// forward already waited out its whole retry window here, so the next
+	// ones make one attempt each instead of waiting again (see
+	// queue_proxy_write::_run_foreign). Cleared by the first delivery.
+	bool								_sender_given_up;
 
 public:
-	static int read_timeout;												// msec
+	static int read_timeout;												// msec, connections this process opens
+	static int accepted_read_timeout;								// msec, connections it accepts
+	static const int k8s_default_read_timeout_ms = 30 * 1000;
+	// The read timeout flared applies to the connections it OPENS (to other
+	// nodes), at startup AND on every reload: an explicitly configured
+	// net-read-timeout wins; otherwise the k8s build uses 30 s (a silent peer
+	// is detected sooner) and the classic build the option's default. (A
+	// reload used to set net_read_timeout unconditionally: in the k8s build a
+	// SIGHUP turned 30 s into 600 s.)
+	static int effective_read_timeout_ms(bool k8s_build, bool explicitly_set, int net_read_timeout_sec) {
+		if (explicitly_set || !k8s_build) {
+			return net_read_timeout_sec * 1000;
+		}
+		return k8s_default_read_timeout_ms;
+	};
+	// The read timeout of the connections flared ACCEPTS (clients, and other
+	// nodes' forwards): net_read_timeout (600 s unless configured) in every
+	// build. It is how long an idle client connection stays open: the k8s
+	// build's 30 s closed idle clients, and behind a stateful middlebox that
+	// forgets the half-closed flow (a load balancer) a libmemcached client's
+	// close() then hung for its SO_LINGER (1000 s).
+	// client-idle-timeout (sec, > 0) overrides it for accepted connections
+	// only, so the idle close of clients can be tuned without touching the
+	// connections flared opens.
+	static int effective_accepted_read_timeout_ms(int net_read_timeout_sec, int client_idle_timeout_sec = 0) {
+		return (client_idle_timeout_sec > 0 ? client_idle_timeout_sec : net_read_timeout_sec) * 1000;
+	};
 	static const int connect_retry_limit = 8;
 	static const int connect_retry_wait = 500*1000;	// usec
 	static const int write_timeout = 10*1000;				// msec
@@ -85,7 +136,11 @@ public:
 	connection_tcp(int sock, struct sockaddr_un addr);
 	virtual ~connection_tcp();
 
-	virtual int open() { return this->_open(this->get_host(), this->get_port()); };
+	virtual int open();
+	// true when the last open() timed out less than `ms` ago
+	bool open_failed_within(int ms) const;
+	bool sender_given_up() const { return this->_sender_given_up; };
+	void set_sender_given_up(bool v) { this->_sender_given_up = v; };
 	virtual int read(char** p, int expect_len, bool readline, bool& actual);
 	virtual int readline(char** p);
 	virtual int readsize(int expect_len, char** p);
@@ -116,18 +171,31 @@ public:
 	
 	string get_host() const;
 	int get_port() const;
+	// "ip:port" of the peer of an ACCEPTED inet connection ("" otherwise):
+	// identifies one client connection in diagnostics
+	string get_peer() const;
 	string get_path() const;
 	
 	virtual int get_read_timeout() const { return this->_read_timeout; };
 	virtual int set_read_timeout(int timeout) { this->_read_timeout = timeout; return 0; };
 	virtual int get_connect_retry_limit() const { return this->_connect_retry_limit; };
 	virtual int set_connect_retry_limit(int retry_limit) { this->_connect_retry_limit = retry_limit; return 0; };
+	virtual int set_connect_timeout_ms(int ms) { this->_connect_timeout_ms = ms; return 0; };
+	int get_connect_timeout_ms() const { return this->_connect_timeout_ms; };
+	// drop the whole-request read / write deadlines (set_*deadline_from_now)
+	void clear_deadlines() { this->_deadline_ms = 0; this->_write_deadline_ms = 0; };
+	// Whole-request deadline, `ms` from now (applies to every read after it).
+	virtual int set_deadline_from_now(int ms);
+	virtual int set_write_progress_timeout_ms(int ms) { this->_write_progress_timeout_ms = ms > 0 ? ms : 0; return 0; };
+	int get_write_progress_timeout_ms() const { return this->_write_progress_timeout_ms; };
+	virtual int set_write_deadline_from_now(int ms);
 
 	int get_errno() const { return this->_errno; };
 	bool is_error() const { return this->_errno != 0 ? true : false; };
 
 	virtual int close();
 	virtual bool is_available() const { return this->_sock >= 0 ? true : false; };
+	int get_sock() const { return this->_sock; };
 
 	int set_tcp_nodelay(bool nodelay);
 	int get_tcp_nodelay(bool& nodelay);

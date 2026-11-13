@@ -1,0 +1,4940 @@
+/-
+  Main.lean - Flare Operator entry point
+  Operator-as-Index: replaces flarei with a K8s-native operator
+
+  Wires together:
+  - K8s.Bridge: kubectl subprocess calls (CRD fetch, pod list, service patch, etc.)
+  - Server.TcpServer: native TCP server for flarei text protocol
+  - StateMachine.Reconciler: pure state transitions (verified)
+  - Kubectl: low-level kubectl wrapper
+
+  Reconcile loop (operatorLoop):
+    1. Fetch CRD spec
+    2. List live pods
+    3. Detect dead nodes (pure comparison against stateRef)
+    4. Handle failover (pure state transition + K8s service patches)
+    5. Ensure service routing for all partitions
+    6. Update ConfigMap for observability
+    7. Sleep and repeat
+-/
+
+import FlareOperator.Operator.Handovers
+import FlareOperator.Operator.Fence
+import FlareOperator.K8s.FlareCluster
+import FlareOperator.StateMachine.TopologyObservation
+import FlareOperator.K8s.Bridge
+import FlareOperator.Flare.Protocol
+import FlareOperator.StateMachine.Reconciler
+import FlareOperator.StateMachine.K8sReconciler
+import FlareOperator.StateMachine.ReplicaRepair
+import FlareOperator.StateMachine.Handover
+import FlareOperator.StateMachine.HandoverDrive
+import FlareOperator.StateMachine.HistoryContinuation
+import FlareOperator.StateMachine.Rolling
+import FlareOperator.StateMachine.NodeGuard
+import FlareOperator.StateMachine.NodeMove
+import FlareOperator.K8s.Admission
+import FlareOperator.Server.WebhookServer
+import FlareOperator.StateMachine.SyncEvidence
+import FlareOperator.StateMachine.StatsObservation
+import FlareOperator.StateMachine.FollowEvidence
+import FlareOperator.StateMachine.FailoverOrder
+import FlareOperator.StateMachine.UnreachableNode
+import FlareOperator.StateMachine.DuplicateMaster
+import FlareOperator.StateMachine.NodeMapRecovery
+import FlareOperator.Kubectl
+import FlareOperator.Server.TcpServer
+import FlareOperator.Server.TopologyBroadcast
+import FlareOperator.Server.PublicationGate
+import FlareOperator.Metrics.Prometheus
+import FlareOperator.Metrics.HttpServer
+import FlareOperator.Migration.Controller
+import FlareOperator.Health.HealthCheck
+import FlareOperator.StateMachine.SourceEligibility
+import FlareOperator.StateMachine.RebuildConcurrency
+import FlareOperator.StateMachine.CopyDiscardApproval
+import FlareOperator.StateMachine.RedundantCopy
+import FlareOperator.StateMachine.PromotionEvidence
+import FlareOperator.StateMachine.AuthoritativeHistory
+
+namespace FlareOperator
+
+open FlareOperator.K8s
+open FlareOperator.K8s.Bridge
+open FlareOperator.Flare
+open FlareOperator.Reconciler
+open FlareOperator.Kubectl
+open FlareOperator.Server
+open FlareOperator.Metrics.Prometheus
+open FlareOperator.Metrics.HttpServer
+open FlareOperator.Health.HealthCheck
+/-- A0: one pass of the operator-driven replacement (StateMachine/Rolling).
+    With updateStrategy OnDelete nothing else replaces the pods. Reads the
+    StatefulSet's update revision and the pods' revisions; only when a pod
+    is outdated are the slaves' stats read for the stability check. Deletes
+    at most one pod per pass (UID precondition). FLARE_OPERATOR_ROLLING=off
+    turns it off (pods are then replaced by hand, one at a time). -/
+private def runRolling (crName ns : String) (stateRef : IO.Ref FlareClusterState)
+    (replicas : Nat) (busy : Bool) (leaseHeld : IO Bool) : IO Unit := do
+  if (← IO.getEnv "FLARE_OPERATOR_ROLLING") == some "off" then return
+  let rev ← match ← Bridge.statefulSetUpdateRevision s!"{crName}-nodes" ns with
+    | .ok r => pure r
+    | .error _ => pure ""
+  let pods ← match ← Bridge.listFlaredPodsE crName ns with
+    | .ok ps => pure ps
+    | .error _ => return
+  let cands : List Rolling.Candidate := pods.map fun p =>
+    { name := p.name, nodeKey := p.toNodeKey, uid := p.uid, revision := p.revision,
+      ready := p.ready, terminating := p.terminating }
+  let st ← stateRef.get
+  let masterKeys := (st.nodeMap.filter fun kv => kv.2.role == FlareRole.Master).map Prod.fst
+  let old := Rolling.outdated rev cands
+  let mut passes ← rollingStablePassesRef.get
+  if old.isEmpty then
+    rollingStablePassesRef.set 0
+  else
+    let readyKeys := (pods.filter fun p => p.ready && !p.terminating).map Bridge.PodInfo.toNodeKey
+    let mut eligible : List String := []
+    for (k, n) in st.nodeMap do
+      if n.role == FlareRole.Slave && n.state == FlareState.Active then
+        -- R3 eligible, or a flared that predates R3 (the promotion path's
+        -- compatibility rule): an upgrade from such a release must roll
+        if PromotionEvidence.successorIdle (← podStatsOf k ns) then
+          eligible := eligible ++ [k]
+    let ok := Rolling.stable st (replicas - 1) readyKeys eligible busy
+    passes := if ok then passes + 1 else 0
+    rollingStablePassesRef.set passes
+  -- an old master rolling had handed over (review of 9756855): once it is no
+  -- longer the master (a proxy, or a slave not yet rebuilt) its pod is
+  -- deleted first, before anything else, with no stability wait — it holds
+  -- no partition's data now
+  let handed := (← rollingHandoverRef.get).filter fun (k, u) =>
+    cands.any (fun c => c.nodeKey == k && c.uid == u && !c.terminating)
+  rollingHandoverRef.set handed
+  let handedDone := handed.find? fun (k, _) => !masterKeys.contains k
+  let d0 := match handedDone with
+    | some (k, u) => match cands.find? (fun c => c.nodeKey == k && c.uid == u) with
+      | some c => Rolling.Decision.delete c "its partition was handed over; the old master is replaced now"
+      | none => Rolling.decide rev cands masterKeys passes 2
+    | none => Rolling.decide rev cands masterKeys passes 2
+  -- a master is never deleted while it is the master (review of 9756855:
+  -- the successor read before an irreversible delete can change before a
+  -- handover that starts from Terminating). It is handed over first; the
+  -- pod is deleted above once that is done.
+  let (d1, toHand0) := Rolling.handOverFirst d0 masterKeys
+  -- an old master from a release before the handover (no boot id, no forward
+  -- counters) can never be handed over losslessly: rolling deletes it as the
+  -- StatefulSet did before (Terminating → the drain's promotion gates), only
+  -- with a successor the handover precheck accepts now, and says it is NOT
+  -- loss-free (the one-time upgrade from such a release)
+  let mut d := d1
+  let mut toHand := toHand0
+  if let some c := toHand0 then
+    let reply ← podStatsOf c.nodeKey ns
+    if Handover.oldMasterPredatesHandover reply then
+      toHand := none
+      let allowed := (← IO.getEnv "FLARE_OPERATOR_LEGACY_MASTER_SWITCH") == some "allow"
+      -- the drain that promotes its replica is inactive during the startup
+      -- grace (998dc30 rc56 upgrade: deleted 52 s before the drain was active)
+      let graceS ← startupGraceSeconds
+      let inGrace := ((← IO.monoMsNow) - (← leaderSinceMsRef.get)) / 1000 < graceS
+      let mut safe := false
+      if let some n := st.lookupNode c.nodeKey then
+        if let some (_, part) := st.partitionMap.find? (fun (i, _) => Int.ofNat i == n.partition) then
+          for k in Handover.successorCandidates st part.slaves n.partition c.nodeKey
+              ((pods.filter fun p => p.ready && !p.terminating).map Bridge.PodInfo.toNodeKey) (← nodeGuardRepairRef.get) do
+            if safe then break
+            if let some sp := pods.find? (·.toNodeKey == k) then
+              safe ← handoverSuccessorOk st k sp.uid (← podStatsOf k ns)
+      d := if inGrace then
+          Rolling.Decision.wait s!"master {c.name} runs a flared from before the ordered handover; it is replaced only after the operator's startup grace, when the drain is active"
+        else if !allowed then
+          Rolling.Decision.wait s!"master {c.name} runs a flared from before the ordered handover, which cannot be handed over without possible loss; it is not deleted until the operator's legacyMasterSwitch (FLARE_OPERATOR_LEGACY_MASTER_SWITCH=allow) accepts that"
+        else if safe then
+          Rolling.Decision.delete c s!"master {c.name} runs a flared from before the ordered handover (no boot id / forward counters): deleted for the drain's promotion — NOT loss-free (the one-time upgrade from that release)"
+        else Rolling.Decision.wait s!"master {c.name} runs a flared from before the ordered handover and no successor is accepted now; it is not deleted"
+  if let some c := toHand then
+    plannedHandoverRef.modify fun l => if l.contains (c.nodeKey, c.uid) then l else l ++ [(c.nodeKey, c.uid)]
+    if !(handed.contains (c.nodeKey, c.uid)) then
+      rollingHandoverRef.set (handed ++ [(c.nodeKey, c.uid)])
+  let label := d.label
+  if label != (← rollingLastRef.get) then
+    rollingLastRef.set label
+    IO.eprintln s!"[flare-operator] ROLLING: {label}"
+  match d with
+  | .delete c _ =>
+    -- a pod is deleted only by the lease holder, checked right before
+    if !(← leaseHeld) then
+      IO.eprintln s!"[flare-operator] ROLLING: the lease could not be confirmed; {c.name} is not deleted this pass"
+      passLeaseLostRef.set true
+      return
+    match ← Bridge.deletePodWithUidPrecondition c.name ns c.uid with
+    | .ok () => IO.eprintln s!"[flare-operator] ROLLING: deleted {c.name} (uid {c.uid}, revision {c.revision} -> {rev})"
+    | .error e => IO.eprintln s!"[flare-operator] ROLLING: delete of {c.name} not confirmed ({e}); the next pass reads it again"
+    rollingStablePassesRef.set 0
+  | _ => pure ()
+
+-- ═══════════════════════════════════════════════════════════════════════
+-- CORDON MOVE (flare-cordon-proactive-move; StateMachine/NodeMove.lean,
+-- flare-ci-inputs/decisions/NODE-OPS-NOSTOP-IMPLEMENTATION-PLAN-2026-10-26.md C)
+-- ═══════════════════════════════════════════════════════════════════════
+
+/-- keys the move holds out of assignment, as of the last pass -/
+initialize nodeMoveLedgerCacheRef : IO.Ref NodeMove.Ledger ← IO.mkRef {}
+initialize nodeMoveHeldRef : IO.Ref (List String) ← IO.mkRef []
+/-- pod → (total_connections, operator probes to the pod, mono ms of the last
+    increase not explained by the operator's own probes) -/
+initialize nodeMoveConnRef : IO.Ref (List (String × NodeMove.QuietBase)) ← IO.mkRef []
+/-- master|dest → (dropped, failed) when first seen: a later increase means the
+    copy is not a real copy -/
+initialize nodeMoveBaseRef : IO.Ref (List (String × (Nat × Nat))) ← IO.mkRef []
+/-- phases and blocked pods already announced as Events -/
+initialize nodeMoveAnnouncedRef : IO.Ref (List String) ← IO.mkRef []
+
+private def nodeReplacementEnabled : IO Bool := do
+  return (← IO.getEnv "FLARE_NODE_REPLACEMENT") != some "off"
+
+private def envNat (name : String) (dflt : Nat) : IO Nat := do
+  match ← IO.getEnv name with
+  | some v => return v.trim.toNat?.getD dflt
+  | none => return dflt
+
+/-- values.yaml nodeReplacement.* reach the operator as environment variables -/
+private def nodeReplacementCfg : IO NodeMove.Config := do
+  return { minCopies := ← envNat "FLARE_NODE_REPLACEMENT_MIN_COPIES" 3,
+           drainWaitMs := (← envNat "FLARE_NODE_REPLACEMENT_DRAIN_WAIT_SECONDS" 120) * 1000,
+           quietMs := (← envNat "FLARE_NODE_REPLACEMENT_QUIET_SECONDS" 10) * 1000,
+           evictWaitMs := (← envNat "FLARE_NODE_REPLACEMENT_EVICT_WAIT_SECONDS" 60) * 1000,
+           unservedTimeoutMs := (← envNat "FLARE_NODE_REPLACEMENT_UNSERVED_TIMEOUT_SECONDS" 1800) * 1000,
+           resyncTimeoutMs := (← envNat "FLARE_NODE_REPLACEMENT_RESYNC_TIMEOUT_SECONDS" 1800) * 1000 }
+
+/-- how long total_connections of `pod` has not increased by more than the
+    operator's own stats connections (none = not readable) -/
+private def observeClientConnections (pod ns : String) (stats : Option String) : IO (Option Nat × Option Nat) := do
+  match stats with
+  | none => return (none, none)
+  | some out =>
+    let now ← IO.monoMsNow
+    let probes ← Bridge.probesTo pod
+    let curr := (statNat out "curr_connections").map (· - 1)  -- minus the operator's own connection
+    -- client_requests counts data requests only: the kubelet's probes (one
+    -- connection each, every 5 s) never reset it, as they did
+    -- total_connections (41136280524: unserved for 10 min, "new connections
+    -- 0 ms ago"). An older flared without it: total_connections minus the
+    -- operator's own stats connections.
+    let (counter, own) := match statNat out "client_requests" with
+      | some n => (some n, 0)
+      | none => (statNat out "total_connections", probes)
+    match counter with
+    | none => return (none, curr)
+    | some total =>
+      -- the flared process the counter belongs to: a restart starts it at 0
+      let boot := ((out.splitOn "\n").findSome? fun line =>
+        match (line.trim.replace "\r" "").splitOn " " with
+        | ["STAT", "reconstruction_boot_id", v] => some v
+        | _ => none).getD ""
+      let b := NodeMove.quietStep ((← nodeMoveConnRef.get).lookup pod) total own boot now
+      nodeMoveConnRef.modify fun l => (pod, b) :: l.filter (·.1 != pod)
+      return (some (now - b.lastIncrease), curr)
+
+/-- One pass of the cordon move: reads the cordoned nodes and the record,
+    steps the running move, persists (CAS) before it acts, and starts the
+    next one. Returns the keys held out of assignment. -/
+private def runNodeMoves (crName ns : String) (stateRef : IO.Ref FlareClusterState)
+    (repairLed : ReplicaRepair.Ledger) (metrics : OperatorMetrics) (leaseHeld : IO Bool)
+    : IO (List String) := do
+  if !(← nodeReplacementEnabled) then return []
+  let cfg ← nodeReplacementCfg
+  let heldFallback ← nodeMoveHeldRef.get
+  let cordoned ← match ← Bridge.listCordonedNodes with
+    | .ok c => pure c
+    | .error e =>
+      IO.eprintln s!"[flare-operator] NODE MOVE: {e}; nothing is decided this pass"
+      return heldFallback
+  let (led0, raw0) ← match ← Bridge.readNodeMoves crName ns with
+    | .ok r => pure r
+    | .error e =>
+      IO.eprintln s!"[flare-operator] NODE MOVE: {e}; nothing is decided this pass"
+      return heldFallback
+  let pods ← match ← Bridge.listFlaredPodsE crName ns with
+    | .ok ps => pure ps
+    | .error e =>
+      IO.eprintln s!"[flare-operator] NODE MOVE: pods unreadable ({e}); nothing is decided this pass"
+      return heldFallback
+  let ledRef ← IO.mkRef led0
+  let rawRef ← IO.mkRef raw0
+  let announce := fun (key reason msg : String) (warn : Bool) => do
+    if !(← nodeMoveAnnouncedRef.get).contains key then
+      nodeMoveAnnouncedRef.modify (key :: ·)
+      Bridge.emitEvent crName ns reason msg warn
+  -- persist `l` only as the lease holder, with the CAS on what was read
+  let save := fun (l : NodeMove.Ledger) => do
+    if !(← leaseHeld) then
+      IO.eprintln "[flare-operator] NODE MOVE: the lease could not be confirmed; nothing is written this pass"
+      passLeaseLostRef.set true
+      return false
+    match ← Bridge.casNodeMoves crName ns (← rawRef.get) l with
+    | .ok _ =>
+      ledRef.set l
+      rawRef.set (some l.toJson)
+      return true
+    | .error e =>
+      IO.eprintln s!"[flare-operator] NODE MOVE: record not saved ({e}); it is read again next pass"
+      return false
+  let wallNow ← Bridge.wallMs
+  let st0 ← stateRef.get
+  let hled ← handoverRef.get
+  let handoverLoaded ← handoverLoadedRef.get
+  let podByName := fun (n : String) => pods.find? (·.name == n)
+  -- ── the running move ────────────────────────────────────────────────
+  for m in led0.moves.filter (!·.finished) do
+    let st ← stateRef.get
+    let cur : Option NodeMove.CurPod ← match podByName m.pod with
+      | none => pure none
+      | some p =>
+        let k := p.toNodeKey
+        let n := st.lookupNode k
+        let needSynced := (m.phase == .resyncing || m.phase == .cancelled) && p.uid != m.podUid || m.phase == .cancelled
+        let synced ← if needSynced && n.any (·.role == FlareRole.Slave) then
+            match ← podStatsOf k ns with
+            | some out => pure (statNat out "repl_read_source_eligible" == some 1)
+            | none => pure false
+          else pure false
+        pure (some { uid := p.uid, terminating := p.terminating, ready := p.ready, serving := p.serving,
+                     role := n.map (·.role), active := n.any (·.state == FlareState.Active), synced })
+    let handover : NodeMove.HandoverView :=
+      if !handoverLoaded then .running
+      else if m.role != "master" then .none
+      else match Handover.find? hled m.partition.toNat with
+        | none => .none
+        | some e =>
+          if e.oldMaster != m.key then .running
+          else if e.phase == .aborted then
+            (if e.v1.isNone || e.vBack.isSome || e.noRollback then .aborted e.reason else .running)
+          else .running
+    let successorIsMaster := !m.successor.isEmpty
+      && (st.lookupNode m.successor).any (fun n => n.role == FlareRole.Master && n.state == FlareState.Active)
+    -- the drain evidence is read only while it can matter (a stuck move is
+    -- never released: its evidence is not read)
+    let (inEndpoints, quiet, curr, ownProxy) ← if m.phase == .unserved && !m.stuck && cur.any (·.uid == m.podUid) then do
+        let ep ← match ← Bridge.serviceEndpointPods s!"{crName}-nodes-external" ns with
+          | .ok names => pure (some (names.contains m.pod))
+          | .error _ => pure none
+        let stats ← podStatsOf m.key ns
+        let (q, c) ← observeClientConnections m.pod ns stats
+        pure (ep, q, c, stats.bind (fun o => (statStr o "own_role").map (· == "proxy")))
+      else pure (none, none, none, none)
+    let obs : NodeMove.Obs := {
+      nowMs := wallNow, nodeCordoned := cordoned.contains m.node, cur, handover, successorIsMaster,
+      inEndpoints, quietMs := quiet, currConnections := curr, ownProxy }
+    let (m1, act) := NodeMove.step cfg m obs
+    if m1 != m then
+      let l1 := (← ledRef.get).upsert m1 |>.trim
+      if !(← save l1) then continue
+      if m1.phase != m.phase then
+        IO.eprintln s!"[flare-operator] NODE MOVE {m.pod}@{m.node}: {m.phase} -> {m1.phase} (generation {m1.generation}){if m1.reason.isEmpty then "" else s!" — {m1.reason}"}"
+        if m1.phase == .released then
+          Bridge.emitEvent crName ns "FlareCordonMoveReleased"
+            s!"pod {m.pod} on cordoned node {m.node} drained from the client Service and released; eviction or deletion is now allowed" false
+        else if m1.phase == .cancelled then
+          Bridge.emitEvent crName ns "FlareCordonMoveCancelled" s!"{m1.reason}: the move of {m.pod} off {m.node} was cancelled" false
+        else if m1.phase == .done then
+          Bridge.emitEvent crName ns "FlareCordonMoveDone" s!"pod {m.pod} moved off node {m.node}; its replacement serves again" false
+      if m1.held && !m.held then
+        Bridge.emitEvent crName ns "FlareCordonMoveHeld" s!"{m1.reason} (pod {m.pod}, node {m.node})" true
+      -- risk B13: past the phase's deadline; no longer the active move (the
+      -- next one may start), never released (the guard keeps holding the pod)
+      if m1.stuck && !m.stuck then
+        IO.eprintln s!"[flare-operator] NODE MOVE {m.pod}@{m.node}: {m1.reason}"
+        Bridge.emitEvent crName ns "FlareCordonMoveStuck" s!"{m1.reason} (pod {m.pod}, node {m.node}, request {m.id})" true
+    else if m1.held && m.held && m1.reason != m.reason then pure ()
+    -- the action follows the persisted state
+    match act with
+    | .none => pure ()
+    | .requestHandover =>
+      let free := match Handover.find? hled m1.partition.toNat with
+        | none => true
+        | some e => e.oldMaster == m1.key && e.phase == .aborted
+                      && (e.v1.isNone || e.vBack.isSome || e.noRollback)
+      let okMaster := (st.lookupNode m1.key).any (fun n => n.role == FlareRole.Master && n.state == FlareState.Active)
+      let succOk := (st.lookupNode m1.successor).any (fun n => n.role == FlareRole.Slave && n.state == FlareState.Active
+                        && n.partition == m1.partition)
+      if handoverLoaded && free && okMaster && succOk then
+        let now ← IO.monoMsNow
+        let entry : Handover.Entry :=
+          { partition := m1.partition.toNat, oldMaster := m1.key, successor := m1.successor,
+            oldUid := m1.podUid, attempt := m1.attempts, startedMs := now, phaseMs := now }
+        handoverRef.modify fun l => Handover.upsert l entry
+        handoverDirtyRef.set true
+        IO.eprintln s!"[flare-operator] NODE MOVE {m1.pod}: ordered handover requested, partition {m1.partition} {m1.key} -> {m1.successor} (attempt {m1.attempts})"
+      else if handoverLoaded && !succOk then
+        IO.eprintln s!"[flare-operator] NODE MOVE {m1.pod}: the successor {m1.successor} is no longer an Active replica of partition {m1.partition}; the handover waits"
+    | .demote =>
+      let applied ← stateRef.modifyGet fun cur =>
+        match cur.lookupNode m1.key with
+        | some n =>
+          if n.role == FlareRole.Slave && n.partition == m1.partition then
+            let v := cur.nodeMapVersion + 1
+            (some v, { (cur.addNode m1.key { n with role := FlareRole.Proxy, state := FlareState.Active,
+                                                    partition := -1, formerSlaveOf := -1 }) with nodeMapVersion := v })
+          else (none, cur)
+        | none => (none, cur)
+      if let some v := applied then
+        IO.eprintln s!"[flare-operator] NODE MOVE {m1.pod}: replica {m1.key} demoted to a proxy at v{v}; held out of assignment"
+    | .removeServing =>
+      match ← Bridge.setServingLabel m1.pod ns m1.podUid false with
+      | .ok _ => IO.eprintln s!"[flare-operator] NODE MOVE {m1.pod}: serving label removed"
+      | .error e => IO.eprintln s!"[flare-operator] NODE MOVE {m1.pod}: serving label not removed ({e}); next pass retries"
+    | .restoreServing =>
+      -- the pod now holding the name (the recreated one in `resyncing`)
+      match podByName m1.pod with
+      | some p =>
+        match ← Bridge.setServingLabel m1.pod ns p.uid true with
+        | .ok _ => IO.eprintln s!"[flare-operator] NODE MOVE {m1.pod}: serving label restored on {p.uid}"
+        | .error e => IO.eprintln s!"[flare-operator] NODE MOVE {m1.pod}: serving label not restored ({e})"
+      | none => pure ()
+    | .deletePod =>
+      if (← leaseHeld) then
+        match ← Bridge.deletePodWithUidPrecondition m1.pod ns m1.podUid with
+        | .ok _ => IO.eprintln s!"[flare-operator] NODE MOVE {m1.pod}: no eviction within {cfg.evictWaitMs / 1000} s of the release; deleted (uid {m1.podUid})"
+        | .error e => IO.eprintln s!"[flare-operator] NODE MOVE {m1.pod}: delete not confirmed ({e}); the next pass reads it again"
+      else passLeaseLostRef.set true
+  -- ── starting the next move ──────────────────────────────────────────
+  let mut led ← ledRef.get
+  let st ← stateRef.get
+  let mut cands : List NodeMove.Cand := []
+  if led.active.isNone then
+    for p in pods do
+      if !cordoned.contains p.nodeName then continue
+      let k := p.toNodeKey
+      let n? := st.lookupNode k
+      let role := match n?.map (·.role) with
+        | some FlareRole.Master => "master" | some FlareRole.Slave => "slave" | some FlareRole.Proxy => "proxy" | none => ""
+      let movable := p.ready && !p.terminating && n?.isSome && p.serving
+      let part : Int := (n?.map (·.partition)).getD (-1)
+      let mut others : List NodeMove.CopyFact := []
+      let mut succ : Option String := none
+      if movable && (role == "master" || role == "slave") && part >= 0 then
+        let masterKey := match st.partitionMap.find? (fun (i, _) => (i : Int) == part) with
+          | some (_, pt) => pt.master
+          | none => none
+        let mStats ← match masterKey with
+          | some mk => podStatsOf mk ns
+          | none => pure none
+        for (ck, cn) in st.nodeMap do
+          if ck == k || cn.partition != part || cn.role == FlareRole.Proxy then continue
+          let cp := pods.find? (·.toNodeKey == ck)
+          let nodeName := (cp.map (·.nodeName)).getD ""
+          let active := cn.state == FlareState.Active && (cp.any fun x => x.ready && !x.terminating)
+          let cStats ← if active then podStatsOf ck ns else pure none
+          let sameHistory := match mStats, cStats with
+            | some mo, some co =>
+              NodeMove.sameHistoryOf (statStr mo "rocksdb_master_id") (statStr mo "rocksdb_source_epoch")
+                (statStr co "rocksdb_master_id") (statStr co "rocksdb_source_epoch")
+                (statNat co "rocksdb_copy_identity_consistent") (statNat co "rocksdb_quarantined")
+            | _, _ => false
+          let repairOpen := repairLed.entries.any (·.nodeKey == some ck)
+          let dropIncreased ← match mStats, masterKey with
+            | some mo, some mk =>
+              if mk == ck then pure false
+              else
+                let d := (statDest mo "proxy_write_dropped" ck).getD 0
+                let f := (statDest mo "proxy_write_failed" ck).getD 0
+                let bk := s!"{mk}|{ck}"
+                match (← nodeMoveBaseRef.get).lookup bk with
+                | some (d0, f0) => pure (d > d0 || f > f0)
+                | none =>
+                  nodeMoveBaseRef.modify fun l => (bk, (d, f)) :: l
+                  pure false
+            | _, _ => pure false
+          others := others ++ [{ key := ck, nodeName, active, sameHistory, repairOpen, dropIncreased }]
+          if role == "master" && succ.isNone && cn.role == FlareRole.Slave && active && sameHistory
+              && !cordoned.contains nodeName && !repairOpen && !dropIncreased then
+            if (cStats.bind (fun o => statNat o "repl_read_source_eligible")) == some 1 then succ := some ck
+      -- a node-local volume cannot follow the pod: the move is not started
+      -- (read only for a pod that could start, a tmpfs pod has no claim)
+      let pinned ← if movable && (role == "master" || role == "slave") then Bridge.pinnedVolumeOf p.name ns
+        else pure none
+      cands := cands ++ [{ pod := p.name, key := k, uid := p.uid, node := p.nodeName, role,
+                           partition := part, others, successor := succ, movable, pinned }]
+  let (start, blocked) := NodeMove.next cfg led cordoned cands wallNow
+  if let .start m := start then
+    led := { led with seq := led.seq + 1, blocked := blocked }
+    led := (led.upsert m).trim
+    if ← save led then
+      IO.eprintln s!"[flare-operator] NODE MOVE started: {m.pod} ({m.role}) on cordoned node {m.node}, request {m.id}"
+      Bridge.emitEvent crName ns "FlareCordonMoveStarted" s!"moving pod {m.pod} ({m.role}) off cordoned node {m.node}" false
+      -- C7 option B: allowed with only copies on other cordoned nodes left
+      if let some c := cands.find? (·.pod == m.pod) then
+        if NodeMove.leavesOnlyCordoned cordoned c.node c.others then
+          IO.eprintln s!"[flare-operator] WARNING: NODE MOVE {m.pod}: while it runs, the partition's other copies are only on cordoned node(s) — uncordon one or add a copy if those nodes go away before the move is done"
+          Bridge.emitEvent crName ns "FlareCordonMoveOnCordonedCopy"
+            s!"moving pod {m.pod} off {m.node}: the partition's other copies are only on cordoned node(s) until it is back" true
+  else if led.active.isNone && blocked != led.blocked then
+    if ← save { led with blocked } then
+      for b in blocked do
+        announce s!"blocked|{b.pod}|{b.reason}" "FlareCordonMoveBlocked"
+          s!"pod {b.pod} on cordoned node {b.node} cannot be moved: {b.reason}" true
+  let final ← ledRef.get
+  let heldNow := final.heldKeys
+  nodeMoveHeldRef.set heldNow
+  nodeMoveLedgerCacheRef.set final
+  metrics.cordonMovesActive.set (final.moves.filter (!·.finished)).length.toFloat
+  metrics.cordonMoveHeld.set (if final.moves.any (fun m => !m.finished && m.held) then 1.0 else 0.0)
+  metrics.cordonMovesStuck.set final.stuckMoves.length.toFloat
+  metrics.cordonMoveUnservedSeconds.set
+    (match final.moves.find? (fun m => !m.finished && !m.stuck && m.phase == .unserved) with
+     | some m => ((wallNow - m.phaseMs).toFloat / 1000.0)
+     | none => 0.0)
+  match (final.moves.filter (·.releasedMs > 0)).foldl
+      (fun (acc : Option NodeMove.Move) m => match acc with
+        | some a => if m.releasedMs > a.releasedMs then some m else some a
+        | none => some m) none with
+  | some m => metrics.cordonMoveLastUnservedSeconds.set (m.unservedMs.toFloat / 1000.0)
+  | none => pure ()
+  metrics.cordonMoveBlocked.set (if final.active.isNone then final.blocked.length.toFloat else 0.0)
+  return heldNow
+
+/-- The serving label of every pod that can serve and has none (a pod of the
+    chart's StatefulSet is created without it: the operator labels it once it
+    can serve; a pod a move owns is never touched here). -/
+private def runServingLabels (crName ns : String) (stateRef : IO.Ref FlareClusterState) : IO Unit := do
+  if !(← nodeReplacementEnabled) then return
+  let led := (← nodeMoveLedgerCacheRef.get)
+  let pods ← match ← Bridge.listFlaredPodsE crName ns with
+    | .ok ps => pure ps
+    | .error _ => return
+  let st ← stateRef.get
+  let mut n := 0
+  for p in pods do
+    if p.serving || p.terminating || !p.ready || p.uid.isEmpty || led.ownsLabel p.name then continue
+    let canServe := match st.lookupNode p.toNodeKey with
+      | some nd => nd.state == FlareState.Active
+      | none => false
+    if !canServe || n >= 4 then continue
+    match ← Bridge.setServingLabel p.name ns p.uid true with
+    | .ok _ => n := n + 1; IO.eprintln s!"[flare-operator] serving label added to {p.name}"
+    | .error _ => pure ()
+
+/-- The allow of a released cordon move (plan C.6): only the CURRENT leader,
+    with enough lease left for the write, writes `admitted` (CAS on the record
+    the decision was made on) and only then allows. A write that fails (the
+    operator wrote `cancelled`, the record moved) or a lease that ran out
+    during it: held (429); `released` already stands, so the next review, or
+    the operator after its grace, finishes the move. -/
+private def nodeMoveAdmit (crName ns leaseName identity : String) (led : NodeMove.Ledger)
+    (raw : Option Lean.Json) (m : NodeMove.Move) (reviewUid : String) : IO NodeGuard.Verdict := do
+  let margin := 5   -- the API call's bound (4 s) + 1 s
+  let remaining := fun (l : Bridge.LeaseInfo) => (l.leaseDurationSeconds : Int) - l.ageSeconds
+  match ← getLease leaseName ns with
+  | .error e => return .hold s!"flare: the lease could not be read ({e}); only the current leader releases a pod"
+  | .ok l1 =>
+    if l1.holderIdentity != identity || l1.expired then
+      return .hold "flare: this operator does not hold the lease; only the current leader releases a pod"
+    else if remaining l1 < margin then
+      return .hold s!"flare: the lease has {remaining l1} s left, less than the {margin} s the write needs; retry"
+    else
+      let bound := (min 4 (remaining l1 - 1)).toNat
+      match ← Bridge.casNodeMoves crName ns raw (led.admit m reviewUid) bound with
+      | .error e => return .hold s!"flare: the release of {m.pod} was not recorded ({e}); retry"
+      | .ok _ =>
+        match ← getLease leaseName ns with
+        | .ok l2 =>
+          if l2.holderIdentity == identity && !l2.expired && l2.transitions == l1.transitions && remaining l2 > 0 then
+            return .allow s!"the cordon move {m.id} (generation {m.generation}) released {m.pod}: drained from the client Service; the admission is recorded"
+          else return .hold "flare: leadership changed while the release was recorded; retry"
+        | .error _ => return .hold "flare: the lease could not be confirmed after the write; retry"
+
+/-- A0 stage 6b: the node-guard webhook's answer to one AdmissionReview
+    (StateMachine/NodeGuard). Pods DELETE of this cluster's flared pods and
+    UPDATE of its StatefulSet / scale subresource; anything else is allowed.
+    It writes nothing (sideEffects: None); a review it cannot judge (pods
+    unreadable) is refused (fail closed). -/
+private def nodeGuardAnswer (crName ns leaseName identity : String) (stateRef : IO.Ref FlareClusterState)
+    (_path body : String) : IO String := do
+  match Admission.parseReview body with
+  | .error e => return Admission.malformedResponse body e
+  | .ok r0 =>
+    -- the break-glass receipt of a halted handover (mutating, flareclusters UPDATE)
+    if r0.resource == "flareclusters" then return ← Fence.answer crName ns r0
+    -- an EVICTION (kubectl drain, the autoscaler) removes the pod inside the
+    -- apiserver without calling the pods DELETE webhook: it is judged here as
+    -- the delete of that pod, read now (the eviction names it only). A pod
+    -- that cannot be read is held (fail closed); a refusal is a 429 so
+    -- `kubectl drain` waits and retries instead of giving up.
+    let isEviction := r0.resource == "pods" && r0.subResource == "eviction" && r0.operation == "CREATE"
+    let evictedPod ← if isEviction && r0.«namespace» == ns then
+        match ← kubectl ["get", "pod", r0.name, "-n", ns, "-o", "json"] with
+        | .ok out => pure (Lean.Json.parse out).toOption
+        | .error _ => pure none
+      else pure none
+    if isEviction && r0.«namespace» == ns && evictedPod.isNone then
+      IO.eprintln s!"[flare-operator] NODE GUARD: HELD eviction of {r0.name} by {r0.username}: the pod could not be read"
+      return Admission.reviewResponse r0.uid false s!"flare: the pod {r0.name} could not be read to judge its eviction; retry" 429 "TooManyRequests"
+    let r := match evictedPod with
+      | some pj => { r0 with operation := "DELETE", oldObject := pj }
+      | none => r0
+    let opAccount := match ← IO.getEnv "FLARE_OPERATOR_SERVICE_ACCOUNT" with
+      | some sa => if sa.isEmpty then "" else s!"system:serviceaccount:{ns}:{sa}"
+      | none => ""
+    let st ← stateRef.get
+    -- addendum 5 §1: the kubelet's own DELETE confirms it STOPPED a pod that
+    -- an open continuation handover could still promote (its successor,
+    -- same pod UID): recorded before the delete is allowed, in a status
+    -- field of its own (the handover loop rewrites status.handovers). Not
+    -- recorded = held (429): the kubelet retries. An unloaded ledger records
+    -- every such confirm (a true fact; fail toward the record).
+    let stopHold ← if r.«namespace» == ns && r.resource == "pods" && r.operation == "DELETE" && !r.dryRun
+        && NodeGuard.isClusterPod crName r.podSubdomain && !r.podUid.isEmpty
+        && NodeGuard.kubeletConfirms r.username r.podNodeName r.podTerminating then do
+        let key := if r.podHostname.isEmpty || r.podSubdomain.isEmpty then ""
+          else FlareClusterState.toNodeKey s!"{r.podHostname}.{r.podSubdomain}.{ns}.svc.cluster.local" 12121
+        let relevant := !(← handoverLoadedRef.get) || (← handoverRef.get).entries.any fun e =>
+          (e.phase == .committingReplicas || (e.phase == .promoting && e.v2.isSome))
+            && e.successor == key && Handover.bindingUid e.successorBinding == r.podUid
+        if !relevant || key.isEmpty then pure none
+        else match ← Bridge.addHandoverStop crName ns key r.podUid (← utcNowIso) with
+          | .ok _ =>
+            IO.eprintln s!"[flare-operator] NODE GUARD: the kubelet of {r.podNodeName} confirmed the stop of {key} (uid {r.podUid}); recorded for its handover"
+            pure none
+          | .error e => pure (some s!"flare: the kubelet's stop of {r.name} could not be recorded for its handover ({e}); retry")
+      else pure none
+    let verdict ← if r.«namespace» != ns then
+        pure (NodeGuard.Verdict.allow "not this cluster's namespace")
+      -- the webhook sees every pod delete of the namespace (no label
+      -- selector, review of 62dddf9): judged only for this cluster's flared
+      -- pods, told apart by their immutable subdomain
+      else if r.resource == "pods" && !NodeGuard.isClusterPod crName r.podSubdomain then
+        pure (NodeGuard.Verdict.allow "not a flared pod of this cluster")
+      else match r.resource, r.operation with
+      | "statefulsets", "DELETE" =>
+        if r.name != s!"{crName}-nodes" then pure (NodeGuard.Verdict.allow "another StatefulSet")
+        else pure (NodeGuard.statefulSetDelete r.username opAccount r.propagationPolicy r.podUid
+          (r.podAnnotation NodeGuard.overrideAnnotation))
+      | "pods", "DELETE" =>
+        let key := if r.podHostname.isEmpty || r.podSubdomain.isEmpty then ""
+          else FlareClusterState.toNodeKey s!"{r.podHostname}.{r.podSubdomain}.{ns}.svc.cluster.local" 12121
+        let legacyMaster ← match st.lookupNode key with
+          | some n =>
+            if n.role == FlareRole.Master then
+              Handover.oldMasterPredatesHandover <$> podStatsOf key ns
+            else pure false
+          | none => pure false
+        let facts : NodeGuard.PodFacts := {
+          nodeKey := key, uid := r.podUid, overrideUid := r.podAnnotation NodeGuard.overrideAnnotation,
+          gracePeriod := r.gracePeriodSeconds, nodeName := r.podNodeName, terminating := r.podTerminating,
+          predatesHandover := legacyMaster,
+          legacySwitchAllowed := (← IO.getEnv "FLARE_OPERATOR_LEGACY_MASTER_SWITCH") == some "allow",
+          -- an unloaded (unreadable) ledger may hold an unfinished handover
+          -- from this pod: held too (fail closed, review of 3dcfc5c)
+          handoverUnfinished := !(← handoverLoadedRef.get)
+            || (← handoverRef.get).unfinishedFor key r.podUid }
+        -- the successor evidence is read now, only for a master's delete:
+        -- the replica's pod Ready and not Terminating, R3 eligible in its
+        -- own stats, no replica repair pending
+        let caughtUp ← match st.lookupNode key with
+          | some n =>
+            if n.role != FlareRole.Master then pure (some [])
+            else match ← Bridge.listFlaredPodsE crName ns with
+              | .error _ => pure none
+              | .ok pods =>
+                let repairs ← nodeGuardRepairRef.get
+                let mut ok : List String := []
+                for (k, m) in st.nodeMap do
+                  if k == key || m.role != FlareRole.Slave || m.state != FlareState.Active || m.partition != n.partition then continue
+                  if repairs.contains k then continue
+                  let some sp := pods.find? fun p => p.toNodeKey == k && p.ready && !p.terminating | continue
+                  -- the successor the ordered handover itself would accept
+                  -- (eligible, complete binding): another one is no successor
+                  if ← handoverSuccessorOk st k sp.uid (← podStatsOf k ns) then
+                    ok := ok ++ [k]
+                    break
+                pure (some ok)
+          | none => pure (some [])
+        -- the cordon move (plan C.6): judged on the record and the Nodes read NOW
+        let moveGuard ← if !(← nodeReplacementEnabled) then pure (some NodeMove.Guard.unrelated, none)
+          else match ← Bridge.readNodeMoves crName ns, ← Bridge.listCordonedNodes with
+            | .ok (led, raw), .ok cordoned =>
+              pure (some (NodeMove.guard led cordoned r.name r.podUid r.podNodeName
+                    ((r.podLabel NodeMove.servingLabel).isSome) ((st.lookupNode key).map (·.role))), some (led, raw))
+            | _, _ => pure (none, none)
+        match caughtUp, moveGuard.1 with
+        | none, _ => pure (NodeGuard.Verdict.deny "flare: the pods could not be read to judge this delete; retry")
+        | _, none => pure (NodeGuard.Verdict.hold "flare: the cordon move record or the Nodes could not be read to judge this delete; retry")
+        | some cu, some g =>
+          let init ← nodeGuardInitRef.get
+          -- the refused delete of a master starts its ordered handover now;
+          -- the retried delete passes once it is a proxy (review of 9756855)
+          if NodeGuard.requestsHandover init st cu r.username opAccount facts then
+            let pl ← plannedHandoverRef.get
+            plannedHandoverRef.modify fun l => if l.contains (key, r.podUid) then l else l ++ [(key, r.podUid)]
+            if !(pl.contains (key, r.podUid)) then
+              IO.eprintln s!"[flare-operator] NODE GUARD: the delete of master {key} (uid {r.podUid}) by {r.username} asks for its ordered handover first"
+          let v := NodeGuard.podDelete init st cu r.username opAccount facts g
+          match v, moveGuard.2 with
+          | .admit m, some (led, raw) =>
+            if r.dryRun then pure (NodeGuard.Verdict.hold "flare: dry run: the cordon move would release this pod; nothing is written or allowed")
+            else pure (← nodeMoveAdmit crName ns leaseName identity led raw m r.uid)
+          | v, _ => pure v
+      | "statefulsets", "UPDATE" =>
+        if r.name != s!"{crName}-nodes" then pure (NodeGuard.Verdict.allow "another StatefulSet")
+        else match r.replicas with
+          | (some new, some old) =>
+            pure (NodeGuard.scale (← nodeGuardInitRef.get) st r.username opAccount old new fun i =>
+              FlareClusterState.toNodeKey s!"{crName}-nodes-{i}.{crName}-nodes.{ns}.svc.cluster.local" 12121)
+          | _ => pure (NodeGuard.Verdict.allow "replicas not changed")
+      | _, _ => pure (NodeGuard.Verdict.allow "not gated")
+    let verdict := match stopHold with
+      | some why => NodeGuard.Verdict.hold why
+      | none => verdict
+    match verdict with
+    | .hold why =>
+      IO.eprintln s!"[flare-operator] NODE GUARD: HELD {r.operation} {r.resource} {r.name}{if r.podUid.isEmpty then "" else s!" (uid {r.podUid})"} by {r.username}{if r.dryRun then " (dry run)" else ""}: {why}"
+    | .admit _ => pure ()
+    | .deny why =>
+      IO.eprintln s!"[flare-operator] NODE GUARD: REFUSED {r.operation} {r.resource}{if r.subResource.isEmpty then "" else "/" ++ r.subResource} {r.name}{if r.podUid.isEmpty then "" else s!" (uid {r.podUid}, grace {r.gracePeriodSeconds})"} by {r.username}{if r.dryRun then " (dry run)" else ""}: {why}"
+    | .allow why =>
+      if r.resource == "pods" || r.subResource == "scale" || r.resource == "statefulsets" then
+        IO.eprintln s!"[flare-operator] NODE GUARD: allowed {r.operation} {r.resource}{if r.subResource.isEmpty then "" else "/" ++ r.subResource} {r.name}{if r.podUid.isEmpty then "" else s!" (uid {r.podUid}, grace {r.gracePeriodSeconds})"} by {r.username}{if r.dryRun then " (dry run)" else ""}: {why}"
+    -- a hold answers 429: `kubectl drain` waits and tries again (an
+    -- eviction's refusal too: the drain retries until the move releases it)
+    match verdict with
+    | .hold why => return Admission.reviewResponse r.uid false why 429 "TooManyRequests"
+    | .deny why => if evictedPod.isSome then return Admission.reviewResponse r.uid false why 429 "TooManyRequests"
+                   else return Admission.reviewResponse r.uid false why
+    | _ => return Admission.reviewResponse r.uid verdict.allowed verdict.message
+
+/-- Ensure K8s Service selectors point to the current Master for each partition. -/
+private def ensureServiceRouting (state : FlareClusterState) (crName ns : String)
+    : IO Unit := do
+  for (_, part) in state.partitionMap do
+    match part.master with
+    | none => pure ()
+    | some masterKey =>
+      match state.lookupNode masterKey with
+      | none => pure ()
+      | some masterNode =>
+        let svcName := s!"{crName}-{masterNode.partition}"
+        let podName := extractPodName masterNode.serverName
+        match ← patchClientServiceSelector svcName ns podName with
+        | .error e =>
+          IO.eprintln s!"[flare-operator] warning: failed to patch service {svcName}: {e}"
+        | .ok () => pure ()
+
+-- ===========================================================================
+-- ConfigMap Observability
+-- ===========================================================================
+
+/-- Serialize the current node map to a string for ConfigMap storage.
+    Delegates to the shared `FlareClusterState.serializeNodeMap` (inverse of
+    `fromNodeMapData`) so the reconcile loop and the restart-reload path can never
+    drift into incompatible formats. -/
+private def serializeNodeMap (state : FlareClusterState) : String :=
+  FlareClusterState.serializeNodeMap state
+
+/-- Update the ConfigMap with the current cluster state for observability. -/
+private def updateObservabilityConfigMap (state : FlareClusterState) (crName ns : String)
+    : IO Unit := do
+  let cmName := s!"{crName}-node-map"
+  let data := serializeNodeMap state
+  match ← updateFlaredConfigMap cmName ns data with
+  | .error e =>
+    IO.eprintln s!"[flare-operator] warning: failed to update configmap: {e}"
+  | .ok () => pure ()
+
+-- ===========================================================================
+-- Lag Detection
+-- ===========================================================================
+
+/-- Copy retention §7: relay valid FlareCopyDiscardApprovals of THIS cluster
+    to the named pod's flared once and record the result. An approval of
+    another cluster in the namespace is left to its operator. No CRD or no
+    access (older chart): nothing to do. -/
+private def processCopyDiscardApprovals (crName ns : String) : IO Unit := do
+  match ← kubectl ["get", "flarecopydiscardapprovals", "-n", ns, "-o", "json"] with
+  | .error _ => return
+  | .ok out =>
+    match Lean.Json.parse out with
+    | .error _ => return
+    | .ok j =>
+      let items := ((j.getObjValD "items").getArr?.toOption.getD #[]).toList
+      let str := fun (o : Lean.Json) (k : String) => ((o.getObjValD k).getStr?.toOption.getD "")
+      let approvals : List CopyDiscardApproval.Approval := items.filterMap fun it =>
+        let md := it.getObjValD "metadata"
+        let sp := it.getObjValD "spec"
+        let st := it.getObjValD "status"
+        let nm := str md "name"
+        if nm.isEmpty then none else some {
+          name := nm, clusterUID := str sp "clusterUID", podUID := str sp "podUID", copyId := str sp "copyId"
+          requestId := str sp "requestId", operation := str sp "operation", expiresAt := str sp "expiresAt"
+          phase := str st "phase", attempt := (st.getObjValD "attempt").getNat?.toOption.getD 0 }
+      let open_ := approvals.filter fun a => a.phase == "" || a.phase == "Pending"
+      if open_.isEmpty then return
+      let uid := match ← kubectl ["get", "flarecluster", crName, "-n", ns, "-o", "jsonpath={.metadata.uid}"] with
+        | .ok u => u.trim
+        | .error _ => ""
+      if uid.isEmpty then return
+      let pods : List (String × String) := match ← kubectl ["get", "pods", "-n", ns, "-l", s!"app=flare,cluster={crName}", "-o",
+          "jsonpath={range .items[*]}{.metadata.name}={.metadata.uid} {end}"] with
+        | .ok o => (o.trim.splitOn " ").filterMap fun e => match e.splitOn "=" with
+          | [n, u] => some (u, n)
+          | _ => none
+        | .error _ => []
+      let nowOut ← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%SZ"] }
+      let now := nowOut.stdout.trim
+      for a in open_ do
+        let record := fun (phase reason : String) (attempt : Nat) => do
+          let body := Lean.Json.mkObj [("status", Lean.Json.mkObj [("phase", Lean.Json.str phase), ("reason", Lean.Json.str reason),
+            ("attempt", Lean.toJson attempt), ("decidedAt", Lean.Json.str now)])]
+          match ← kubectl ["patch", "flarecopydiscardapproval", a.name, "-n", ns, "--subresource=status", "--type=merge", "-p", body.compress] with
+          | .ok _ => pure ()
+          | .error e => IO.eprintln s!"[flare-operator] COPY DISCARD APPROVAL {a.name}: could not record {phase} ({e}); flared's record answers a repeat"
+        match CopyDiscardApproval.decide a uid now (fun u => pods.lookup u) with
+        | .skip => pure ()
+        | .expire =>
+          IO.eprintln s!"[flare-operator] COPY DISCARD APPROVAL {a.name}: Expired (expiresAt {a.expiresAt}); nothing sent"
+          record "Expired" s!"expired at {a.expiresAt}" a.attempt
+        | .refuse why =>
+          IO.eprintln s!"[flare-operator] COPY DISCARD APPROVAL {a.name}: Refused — {why}; nothing sent"
+          record "Refused" why a.attempt
+        | .send pod =>
+          let out ← Bridge.queryPodStats pod ns s!"copy_discard {a.requestId} {a.operation} {a.copyId}"
+          let reply := match out with
+            | .ok o => CopyDiscardApproval.parseReply o
+            | .error _ => none
+          let (phase, reason) := CopyDiscardApproval.classify reply
+          IO.eprintln s!"[flare-operator] COPY DISCARD APPROVAL {a.name} ({a.operation} of copy {a.copyId} on {pod}, request {a.requestId}): {phase} — {reason}"
+          record phase reason (a.attempt + 1)
+
+/-- R7 (review 2026-10-08; round 2): each mapped node's FRESH observation
+    from one stats read, the nodes rebuilding NOW by their own stats,
+    whatever the map says (an Active member catching up at boot, a master
+    reconstruction): `reconstruction_current_state=running` or a copy in
+    flight. Every mapped node whose pod exists is read; a pod that exists but
+    cannot be read completely is counted (fail closed: a rebuild that cannot
+    be ruled out). Read only when a decision needs it (a new assignment, a
+    resume). -/
+private def rebuildObservations (st : FlareClusterState) (ns : String) : IO (List (String × RebuildConcurrency.Obs)) := do
+  let mut obs : List (String × RebuildConcurrency.Obs) := []
+  for (key, _) in st.nodeMap do
+    let pod := extractPodName key
+    -- absent ONLY on an empty --ignore-not-found answer; any failure
+    -- (forbidden, timeout) is unknown
+    let found : Option Bool ← match ← kubectl ["get", "pod", pod, "-n", ns, "--ignore-not-found=true", "-o", "jsonpath={.metadata.uid}"] with
+      | .ok uid => pure (some !uid.trim.isEmpty)
+      | .error _ => pure none
+    let reply ← if found == some true then
+        match ← Bridge.queryPodStats pod ns "stats" with
+        | .ok out => pure (some out)
+        | .error _ => pure none
+      else pure none
+    let o := RebuildConcurrency.obsOfReply found reply
+    obs := obs ++ [(key, o)]
+  let unk := obs.filterMap fun (k, o) => if o == .unknown then some k else none
+  if !unk.isEmpty then
+    IO.eprintln s!"[flare-operator] rebuild concurrency: {unk} could not be read — counted as running (a rebuild there cannot be ruled out)"
+  return obs
+
+/-- A person's choice of the copy to keep for a partition held with no master
+    (`flare.gree.net/history-adopt-holder` = `<uid>/<partition>/<node key or
+    pod>`, for THIS cluster's uid only): (partition, node key or pod). -/
+initialize historyChosenRef : IO.Ref (Option (Nat × String)) ← IO.mkRef none
+
+/-- docs/spec.md "A redundant copy is discarded on the operator's word":
+    `FLARE_OPERATOR_REDUNDANT_COPY_DISCARD=off` (also 0 / false) turns it off;
+    default on. -/
+private def redundantCopyDiscardOn : IO Bool := do
+  let v := (← IO.getEnv "FLARE_OPERATOR_REDUNDANT_COPY_DISCARD").map (·.trim.toLower)
+  return !(v == some "off" || v == some "0" || v == some "false")
+
+/-- The last reason a parked copy was KEPT, per node (logged when it changes). -/
+initialize redundantKeptRef : IO.Ref (List (String × String)) ← IO.mkRef []
+/-- Grants sent: (node key, copy id). A node that becomes grantable skips the
+    5 min backoff once per copy. -/
+initialize redundantGrantedRef : IO.Ref (List (String × String)) ← IO.mkRef []
+/-- When a backed-off parked node's condition was last read (mono ms). -/
+initialize redundantCheckedAtRef : IO.Ref (List (String × Nat)) ← IO.mkRef []
+
+/-- The facts `RedundantCopy.decide` reads about the parked node `key`: read
+    fresh now — its stats (the pod UID is read before and after them and must
+    not change), the master's and each other copy's stats, the pods, the
+    repair ledger (`none` = unavailable = every other copy counts as under
+    repair), and the promotion candidates. The other copies are judged as the
+    node move judges them (same history, no new drop) plus the survivor
+    verdict of the delete gate for a WAL follower. -/
+private def gatherRedundantFacts (st : FlareClusterState) (pods : List Bridge.PodInfo)
+    (repairKeys : Option (List String)) (ns key : String) : IO RedundantCopy.Facts := do
+  let podName := extractPodName key
+  let uidBefore ← Bridge.podUid podName ns
+  let out ← match ← Bridge.queryPodStats podName ns "stats" with
+    | .ok o => pure (if statsReplyComplete o then o else "")
+    | .error _ => pure ""
+  let uidAfter ← Bridge.podUid podName ns
+  let podUid := match uidBefore, uidAfter with
+    | some a, some b => if a == b then a else ""
+    | _, _ => ""
+  let part : Int := ((st.lookupNode key).map (·.partition)).getD (-1)
+  let masterKey := RedundantCopy.masterOf st part
+  let mStats ← match masterKey with
+    | some mk => podStatsOf mk ns
+    | none => pure none
+  let bounds ← followBoundsFromEnv
+  let mut others : List RedundantCopy.Other := []
+  for (ck, cn) in st.nodeMap do
+    if ck == key || cn.partition != part || cn.role != FlareRole.Slave then continue
+    let cp := pods.find? (·.toNodeKey == ck)
+    let active := cn.state == FlareState.Active && (cp.any fun x => x.ready && !x.terminating)
+    let cStats ← if active then podStatsOf ck ns else pure none
+    let sameHistory := match mStats, cStats with
+      | some mo, some co =>
+        NodeMove.sameHistoryOf (statStr mo "rocksdb_master_id") (statStr mo "rocksdb_source_epoch")
+          (statStr co "rocksdb_master_id") (statStr co "rocksdb_source_epoch")
+          (statNat co "rocksdb_copy_identity_consistent") (statNat co "rocksdb_quarantined")
+      | _, _ => false
+    let repairOpen := match repairKeys with | some ks => ks.contains ck | none => true
+    -- fail closed: the copy's own identity / quarantine values and the
+    -- master's per-destination counters are passed as read (none = not
+    -- reported); RedundantCopy.evidenceOk requires them reported, and the
+    -- counters 0 since the master's flared started (no baseline: one taken
+    -- now, or after an operator restart, would hide earlier drops)
+    let consistent := cStats.bind (statNat · "rocksdb_copy_identity_consistent")
+    let quarantined := cStats.bind (statNat · "rocksdb_quarantined")
+    let dropped := mStats.bind (statDest · "proxy_write_dropped" ck)
+    let failed := mStats.bind (statDest · "proxy_write_failed" ck)
+    let followOk := match mStats, cStats with
+      | some mo, some co =>
+        match FollowEvidence.judge .survive bounds (followReadingFrom co) (masterReadingFrom mo) with
+        | .notInMode _ | .eligible _ => true
+        | _ => false
+      | _, _ => false
+    others := others ++ [{ key := ck, podUid := (cp.map (·.uid)).getD "", active, sameHistory, repairOpen,
+                           consistent, quarantined, dropped, failed, followOk }]
+  -- nodes that may be promoted: a handover's successor, a pinned successor,
+  -- the copy a person chose to keep, a node move's successor
+  let nameOrKey := fun (x : String) => x == key || x == podName
+  let hled ← handoverRef.get
+  let pins ← pinnedSuccessorRef.get
+  let moves := (← nodeMoveLedgerCacheRef.get).moves.filter (!·.finished)
+  let chosen ← historyChosenRef.get
+  let isCandidate :=
+    hled.entries.any (fun e => nameOrKey e.successor)
+    || pins.any (fun (k, _, _) => nameOrKey k)
+    || (match chosen with | some (cp, who) => (cp : Int) == part && nameOrKey who | none => false)
+    || moves.any (fun m => nameOrKey m.successor)
+  return { key, podUid, copyId := (statStr out "rocksdb_copy_id").getD "",
+           flaredMapVersion := statNat out "node_map_version",
+           consistent := statNat out "rocksdb_copy_identity_consistent",
+           quarantined := statNat out "rocksdb_quarantined",
+           others, candidates := if isCandidate then [key] else [] }
+
+/-- Copy retention §10: read the rebuilding nodes' park state, and resume
+    ONE parked rebuild when its slots are free. A node counts as parked-idle
+    only on a complete stats reply saying parked=1, in_flight=0 and no
+    snapshot being served; anything else (unreadable included) counts as
+    running. The resume carries the operator's word that the copy may be
+    discarded (`RedundantCopy.decide`) when the partition has a master and
+    another Active slave of its history on another pod; otherwise it is the
+    plain resume and the old copy is kept. -/
+private def refreshParkedRebuilds (stateRef : IO.Ref FlareClusterState) (crName ns : String)
+    (repairKeys : Option (List String)) : IO Unit := do
+  let st ← stateRef.get
+  let mut parked : List String := []
+  for (key, n) in st.nodeMap do
+    if RebuildConcurrency.rebuilding n then
+      match ← Bridge.queryPodStats (extractPodName key) ns "stats" with
+      | .ok out =>
+        let complete := (out.splitOn "\n").any fun l => l.trim == "END"
+        if complete && statNat out "rebuild_parked" == some 1 && statNat out "rebuild_in_flight" == some 0
+            && statNat out "rocksdb_snapshot_serving" == some 0 then
+          parked := parked ++ [key]
+      | .error _ => pure ()
+  let prev ← parkedIdleRef.get
+  if parked != prev then
+    IO.eprintln s!"[flare-operator] parked rebuilds (blocked, nothing in flight; their cluster and partition slots are free): {parked}"
+  parkedIdleRef.set parked
+  let nowMs ← IO.monoMsNow
+  let recent := (← resumedAtRef.get).filter fun (_, t) => nowMs < t + 300000
+  resumedAtRef.set recent
+  let discardOn ← redundantCopyDiscardOn
+  -- a parked node still in its backoff whose copy has become redundant is
+  -- resumed once (with the grant) without waiting out the 5 min; read at most
+  -- every 15 s a node
+  let mut bypass : List String := []
+  if discardOn && !parked.isEmpty && parked.any (fun k => recent.any (·.1 == k)) then
+    let checked := (← redundantCheckedAtRef.get).filter fun (_, t) => nowMs < t + 15000
+    redundantCheckedAtRef.set checked
+    match ← Bridge.listFlaredPodsE crName ns with
+    | .ok pods =>
+      for k in parked do
+        if recent.any (·.1 == k) && !(checked.any (·.1 == k)) then
+          redundantCheckedAtRef.modify (· ++ [(k, nowMs)])
+          let f ← gatherRedundantFacts st pods repairKeys ns k
+          if RedundantCopy.decide st f matches .grant .. then
+            if !((← redundantGrantedRef.get).any fun (gk, gc) => gk == k && gc == f.copyId) then
+              bypass := bypass ++ [k]
+    | .error _ => pure ()
+  let eligibleToResume := parked.filter fun k => !(recent.any (·.1 == k)) || bypass.contains k
+  -- nodes in their backoff stay parked (not counted) but are not resumed now
+  let ordered := eligibleToResume ++ parked.filter (!eligibleToResume.contains ·)
+  let (running, parkedNow) ← if eligibleToResume.isEmpty then pure ([], parked)
+    else pure (RebuildConcurrency.reconcile parked (← rebuildObservations st ns))
+  match (RebuildConcurrency.resumeCandidate st 1 1 (ordered.filter parkedNow.contains) running).filter (eligibleToResume.contains ·) with
+  | none => pure ()
+  | some k =>
+    resumedAtRef.modify (· ++ [(k, nowMs)])
+    -- the condition is decided again, from fresh reads, before every grant
+    let mut verdict : RedundantCopy.Verdict := .keep "the operator's redundant-copy discard is off"
+    let mut facts : Option RedundantCopy.Facts := none
+    if discardOn then
+      match ← Bridge.listFlaredPodsE crName ns with
+      | .ok pods =>
+        let f ← gatherRedundantFacts st pods repairKeys ns k
+        facts := some f
+        verdict := RedundantCopy.decide st f
+      | .error e => verdict := .keep s!"the pods could not be read ({e})"
+    let cmd := match verdict with
+      | .grant u c v => s!"rebuild_resume discard {u} {c} {v}"
+      | .keep _ => "rebuild_resume"
+    match verdict with
+    | .keep why =>
+      if discardOn && (← redundantKeptRef.get).lookup k != some why then
+        redundantKeptRef.modify fun l => (k, why) :: l.filter (·.1 != k)
+        IO.eprintln s!"[flare-operator] REDUNDANT COPY KEPT: {k} — {why}; its rebuild is resumed without a discard"
+    | .grant u c v =>
+      redundantKeptRef.modify (·.filter (·.1 != k))
+      let others := (facts.map (·.others.filter (·.active) |>.map (·.key))).getD []
+      IO.eprintln s!"[flare-operator] REDUNDANT COPY DISCARD GRANTED: {k} (pod UID {u}, copy {c}, node map version {v}); the partition has a master and other Active slave(s) of its history: {others}"
+    match ← Bridge.queryPodStats (extractPodName k) ns cmd with
+    | .ok out =>
+      if cmd != "rebuild_resume" then
+        match statStr out "rebuild_discard_grant" with
+        | some "accepted" =>
+          redundantGrantedRef.modify (· ++ [(k, (facts.map (·.copyId)).getD "")])
+        | other =>
+          IO.eprintln s!"[flare-operator] REDUNDANT COPY DISCARD for {k} was REFUSED by the node ({other}); it stays parked and the copy is kept; decided again next pass"
+          resumedAtRef.modify (·.filter (·.1 != k))
+      if statNat out "rebuild_resumed" == some 1 then
+        IO.eprintln s!"[flare-operator] REBUILD RESUMED: {k} takes the rebuild slot again (it re-checks capacity, source and copy identity)"
+        parkedIdleRef.set (parked.filter (· != k))
+    | .error e => IO.eprintln s!"[flare-operator] {cmd} to {k} failed ({e}); it stays parked"
+
+initialize historyRvRef : IO.Ref String ← IO.mkRef ""
+initialize historyApprovedRef : IO.Ref Bool ← IO.mkRef false
+/-- The last masterless-hold reason logged per partition (CRITICAL on change
+    and every 15 s, not every pass). -/
+initialize historyHeldLoggedRef : IO.Ref (List (Nat × String)) ← IO.mkRef []
+/-- A choice was evaluated (adopted or refused) but its removal is not yet
+    confirmed: the annotation still read back is NOT applied again, and its
+    removal is retried on every load (a choice is used once). -/
+initialize historyChoiceConsumedRef : IO.Ref Bool ← IO.mkRef false
+/-- Repair-ledger destinations that are not nodes of this cluster (last logged set). -/
+initialize foreignDropDestsRef : IO.Ref (List String) ← IO.mkRef []
+
+/-- Remove the person's choice (used or refused); true when confirmed. A
+    failed removal keeps the choice consumed and is retried on every load. -/
+private def removeHistoryChoice (crName ns why : String) : IO Bool := do
+  historyChosenRef.set none
+  match ← kubectl ["annotate", "flarecluster", crName, "-n", ns, "flare.gree.net/history-adopt-holder-"] with
+  | .ok _ =>
+    historyChoiceConsumedRef.set false
+    IO.eprintln s!"[flare-operator] the history-adopt-holder choice on {crName} was removed: {why}"
+    return true
+  | .error e =>
+    historyChoiceConsumedRef.set true
+    IO.eprintln s!"[flare-operator] CRITICAL: could not remove the history-adopt-holder choice on {crName} ({e}); it is NOT applied again and its removal is retried ({why})"
+    return false
+initialize historyObsAtRef : IO.Ref Nat ← IO.mkRef 0
+initialize historyCrRef : IO.Ref String ← IO.mkRef ""
+/-- (lease name, this pod's identity): every history write re-checks the lease. -/
+initialize historyLeaseRef : IO.Ref (String × String) ← IO.mkRef ("", "")
+
+private def historyCm (crName : String) : String := s!"{crName}-history"
+
+/-- (persisted text: some (some t) present / some none absent / none unreadable, resourceVersion) -/
+private def readHistory (crName ns : String) : IO (Option (Option String) × String) := do
+  match ← kubectl ["get", "configmap", historyCm crName, "-n", ns, "-o", "jsonpath={.metadata.resourceVersion}|{.data.record}"] with
+  | .ok out =>
+    match out.splitOn "|" with
+    | rv :: rest => return (some (some (String.intercalate "|" rest)), rv.trim)
+    | [] => return (none, "")
+  | .error e =>
+    if containsSubstr e "NotFound" || containsSubstr e "not found" then return (some none, "")
+    return (none, "")
+
+
+/-- Each partition's Active master as seen by the last follow probe pass: a
+    slave of a partition whose master CHANGED is read at once (a promotion
+    advances the history, its surviving slaves declare needs_rebuild — read
+    only every FLARE_FOLLOW_PROBE_INTERVAL passes before, run 38037230581). -/
+initialize probeMastersRef : IO.Ref FollowEvidence.MasterTrack ← IO.mkRef {}
+/-- (partition, last tick to read its slaves every pass) after its master
+    changed: flared's validator declares needs_rebuild ~2 s after the map, so
+    one read on the next pass could miss it. -/
+initialize probeForcedUntilRef : IO.Ref (List (Int × Nat)) ← IO.mkRef []
+
+/-- The nodes Down in the map committed at the end of the last pass (a node
+    that rejoins after it starts its NotReady window again). -/
+initialize downAtCommitRef : IO.Ref (List String) ← IO.mkRef []
+
+/-- Nodes the operator could not reach for flarei's retry count in a row
+    (StateMachine/UnreachableNode, spec 12): set once per pass before the
+    FSM, read by the pod listing as additional unhealthy keys. -/
+initialize unreachableDownRef : IO.Ref (List String) ← IO.mkRef []
+/-- When the reachability step last probed (monotonic ms; 0 = never). -/
+initialize reachProbedAtRef : IO.Ref Nat ← IO.mkRef 0
+/-- Nodes made down by unreachability (spec 12). A live flared marked Down
+    leaves Down only by re-registering, i.e. a restart (4e); once such a node
+    answers the operator again it is restarted at once instead of after the
+    stuck-down wait (E2E 41185704625: Down 5 min after the heal). -/
+initialize downByReachRef : IO.Ref (List String) ← IO.mkRef []
+/-- The nodes the latest probe round ANSWERED (a successful connect): only
+    these are "reachable again". A node missing from the failure streaks was
+    not necessarily answered — a Down node is not tracked there (41238593672:
+    a slave still cut off was restarted as reachable again, its recreated pod
+    got a new IP outside the cut, and the master it had no successor for was
+    failed over to it). -/
+initialize reachOkRef : IO.Ref (List String) ← IO.mkRef []
+/-- (node key, pod UID) of the pods the latest probe round listed -/
+initialize reachPodIdRef : IO.Ref (List (String × String)) ← IO.mkRef []
+/-- (node key, pod UID) of the pods the latest ListPods listed, for the
+    NotReady streaks (one pod incarnation each, as the reachability streaks). -/
+initialize unreadyPodIdRef : IO.Ref (List (String × String)) ← IO.mkRef []
+/-- The last reachability probe reached NO node (UnreachableNode's guard). -/
+initialize reachGuardRef : IO.Ref Bool ← IO.mkRef false
+/-- spec 13: node -> when its conflicting master claim was first seen (ms),
+    and the nodes whose claim stood for DuplicateMaster.holdMs (treated as
+    down with the unreachable ones). -/
+initialize duplicateFirstSeenRef : IO.Ref (List (String × Nat)) ← IO.mkRef []
+initialize duplicateDownRef : IO.Ref (List String) ← IO.mkRef []
+
+/-- When the store was last loaded (monotonic ms; 0 = never). -/
+initialize historyLoadedAtRef : IO.Ref Nat ← IO.mkRef 0
+
+/-- Load the persisted store (and the migration approval) for this use. -/
+private def loadHistory (crName ns : String) (partitions : Nat) : IO (Option AuthoritativeHistory.Store) := do
+  let (uid, approval, chosen) ← match ← kubectl ["get", "flarecluster", crName, "-n", ns, "-o",
+      "jsonpath={.metadata.uid}|{.metadata.annotations.flare\\.gree\\.net/history-adoption-approved}|{.metadata.annotations.flare\\.gree\\.net/history-adopt-holder}"] with
+    | .ok u =>
+      match u.trim.splitOn "|" with
+      | [a, b, c] => pure (a.trim, b.trim, c.trim)
+      | _ => pure ("", "", "")
+    | .error _ => pure ("", "", "")
+  if uid.isEmpty then return none
+  -- <uid>/<partition>/<node key or pod>: another cluster's uid is ignored; a
+  -- choice already evaluated is never applied again (its removal is retried)
+  if chosen.isEmpty then historyChoiceConsumedRef.set false
+  if !chosen.isEmpty && (← historyChoiceConsumedRef.get) then
+    discard <| removeHistoryChoice crName ns "already evaluated (retrying the removal)"
+  else
+    historyChosenRef.set (match chosen.splitOn "/" with
+      | [u, p, k] => if u == uid && !k.isEmpty then p.toNat?.map (·, k) else none
+      | _ => none)
+  let (persisted, rv) ← readHistory crName ns
+  -- a node map present (or not readable) means the cluster existed before: a
+  -- missing record is then ABSENT (migration approval needed), never a first build
+  -- (read only when the record is absent: it decides nothing otherwise)
+  let nodeMapPresent ← if persisted != some none then pure true else
+    match ← kubectl ["get", "configmap", s!"{crName}-node-map", "-n", ns, "-o", "jsonpath={.metadata.name}"] with
+    | .ok _ => pure true
+    | .error e => pure !(containsSubstr e "NotFound" || containsSubstr e "not found")
+  historyRvRef.set rv
+  historyCrRef.set crName
+  historyApprovedRef.set (approval == uid)
+  let st := AuthoritativeHistory.load uid partitions persisted nodeMapPresent
+  historyStoreRef.set (some st)
+  historyLoadedAtRef.set (← IO.monoMsNow)
+  return some st
+
+/-- Persist the store: only while THIS pod holds the lease (resourceVersion
+    alone is no leader fencing), never over a corrupt / foreign / unreadable
+    record, create or replace with the resourceVersion read with it. true only
+    when the write succeeded. -/
+private def persistHistory (crName ns : String) (st : AuthoritativeHistory.Store) : IO Bool := do
+  let (leaseName, identity) ← historyLeaseRef.get
+  let leader ← if leaseName.isEmpty then pure false else
+    match ← holdLeaseNow leaseName ns identity with
+    | .ok held => pure held
+    | .error _ => pure false
+  if !leader then
+    IO.eprintln s!"[flare-operator] CRITICAL: the authoritative history is NOT written: this pod's lease was not confirmed (another holder, or the renew failed or answered late — see the LEASE CHECK line); retried next pass"
+    return false
+  match ← historyStoreRef.get with
+  | some loaded =>
+    if !AuthoritativeHistory.writable loaded then
+      IO.eprintln s!"[flare-operator] CRITICAL: the authoritative history record is corrupt / foreign / unreadable: it is NOT overwritten (an operator inspects and deletes it; RUNBOOK #history-record)"
+      return false
+  | none => pure ()
+  -- TEST SEAM (FLARE_TEST_HISTORY_WRITE_OK_FILE): until that file exists,
+  -- every history write fails exactly as a refused API write would
+  if let some f ← IO.getEnv "FLARE_TEST_HISTORY_WRITE_OK_FILE" then
+    if !(← System.FilePath.pathExists f) then
+      IO.eprintln s!"[flare-operator] CRITICAL: the authoritative history could not be persisted (FLARE_TEST_HISTORY_WRITE_OK_FILE absent: writes refused); the change is NOT applied (decided again on the next pass)"
+      return false
+  let rv ← historyRvRef.get
+  let body := String.intercalate "\n" ((AuthoritativeHistory.serialize st).splitOn "\n" |>.map (fun l => "    " ++ l))
+  let meta := if rv.isEmpty then "" else s!"\n  resourceVersion: \"{rv}\""
+  let yaml := s!"apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: {historyCm crName}\n  namespace: {ns}{meta}\ndata:\n  record: |\n{body}\n"
+  let pid ← IO.Process.getPID
+  let path := s!"/tmp/flare-history-{pid}-{← IO.monoNanosNow}.yaml"
+  try IO.FS.writeFile path yaml catch _ => return false
+  let res ← kubectl [if rv.isEmpty then "create" else "replace", "-f", path, "-o", "jsonpath={.metadata.resourceVersion}"]
+  try IO.FS.removeFile path catch _ => pure ()
+  match res with
+  | .ok newRv =>
+    historyRvRef.set newRv.trim
+    historyStoreRef.set (some st)
+    return true
+  | .error e =>
+    IO.eprintln s!"[flare-operator] CRITICAL: the authoritative history could not be persisted ({e.take 200}); the change is NOT applied (decided again on the next pass)"
+    return false
+
+/-- Run a history step and log its duration when it took over 1 s (the
+    history reads are kubectl round trips inside the pass; a pass longer than
+    the 15 s lease fences the operator — local run 0db2229). -/
+private def timedHistory {α : Type} (what : String) (act : IO α) : IO α := do
+  let t0 ← IO.monoMsNow
+  let r ← act
+  let dt := (← IO.monoMsNow) - t0
+  if dt > 1000 then IO.eprintln s!"[flare-operator] history timing: {what} took {dt}ms"
+  return r
+
+/-- A first build: create the (empty, origin first-build) record BEFORE the
+    first node map is persisted, so a later absent record can only mean a
+    migration or a loss. Called at the start of every pass until it exists. -/
+initialize historyEnsuredRef : IO.Ref Bool ← IO.mkRef false
+private def ensureHistoryStore (crName ns : String) (partitions : Nat) : IO Bool := do
+  if ← historyEnsuredRef.get then
+    -- EVERY pass loads the record before anything classifies a candidate
+    -- (CI 0db2229, history (5): after an operator restart the store was
+    -- loaded only by observeHistory, late in the pass; a pass whose promotion
+    -- aborted returned before it, so every candidate stayed 'not recorded'
+    -- and the failover never happened). A failed load clears it: a stale
+    -- record is never used (unknown = held).
+    if (← loadHistory crName ns partitions).isNone then historyStoreRef.set none
+    return true
+  let some st ← loadHistory crName ns partitions | return false
+  let (persisted, _) ← readHistory crName ns
+  let nodeMapPresent := st.origin != "first-build"
+  let written ← match persisted with
+    | some none =>
+      if st.origin == "first-build" then
+        if ← persistHistory crName ns st then
+          IO.eprintln s!"[flare-operator] AUTHORITATIVE HISTORY: created for a first build (before the first node map)"
+          pure true
+        else pure false
+      else pure false
+    | _ => pure false
+  let ok := AuthoritativeHistory.mapMayBePersisted persisted nodeMapPresent written
+  if ok then
+    historyEnsuredRef.set true
+    registrationGateRef.set none
+  else
+    -- nothing is persisted or handed out before the record exists: the pass
+    -- returns, and `node add` is refused (no role, no map)
+    registrationGateRef.set (some "the first-build history record is not written yet")
+    IO.eprintln s!"[flare-operator] CRITICAL: the first-build history record is not written yet: this pass does not proceed (no node map is persisted, no registration answered)"
+  return ok
+
+private def seenOf (podUid : String) (reply : Option String) : AuthoritativeHistory.Seen :=
+  AuthoritativeHistory.seenOfReply podUid reply
+
+/-- A FRESH read of one node: its pod UID and its stats (never a cache). -/
+private def seeFresh (key ns : String) : IO AuthoritativeHistory.Seen := do
+  let pod := extractPodName key
+  let uid ← match ← kubectl ["get", "pod", pod, "-n", ns, "--ignore-not-found=true", "-o", "jsonpath={.metadata.uid}"] with
+    | .ok u => pure u.trim
+    | .error _ => pure ""
+  if uid.isEmpty then return .unreadable
+  let reply ← match ← Bridge.queryPodStats pod ns "stats" with
+    | .ok o => pure (some o)
+    | .error _ => pure none
+  -- the pod must still be the one read before the stats (same UID)
+  let uid2 ← match ← kubectl ["get", "pod", pod, "-n", ns, "--ignore-not-found=true", "-o", "jsonpath={.metadata.uid}"] with
+    | .ok u => pure u.trim
+    | .error _ => pure ""
+  if uid2 != uid then return .unreadable
+  return seenOf uid reply
+
+/-- A FRESH read of one node for a decision: (pod UID, the stats reply), the
+    UID read before and after (`none` = not the same pod / not readable). -/
+private def readFresh (key ns : String) : IO (Option (String × String)) := do
+  let pod := extractPodName key
+  let u1 ← match ← kubectl ["get", "pod", pod, "-n", ns, "--ignore-not-found=true", "-o", "jsonpath={.metadata.uid}"] with
+    | .ok u => pure u.trim
+    | .error _ => pure ""
+  if u1.isEmpty then return none
+  let reply ← match ← Bridge.queryPodStats pod ns "stats" with
+    | .ok o => pure (some o)
+    | .error _ => pure none
+  let u2 ← match ← kubectl ["get", "pod", pod, "-n", ns, "--ignore-not-found=true", "-o", "jsonpath={.metadata.uid}"] with
+    | .ok u => pure u.trim
+    | .error _ => pure ""
+  match reply with
+  | some r => if u1 == u2 then return some (u1, r) else return none
+  | none => return none
+
+/-- The persisted node map: (version, transition ids, its state). -/
+private def persistedNodeMap (crName ns : String) : IO (Option FlareClusterState) := do
+  match ← kubectl ["get", "configmap", s!"{crName}-node-map", "-n", ns, "-o", "jsonpath={.data.nodeMap}"] with
+  | .ok d => return some (FlareClusterState.fromNodeMapData d)
+  | .error _ => return none
+
+/-- Every pass while a partition is not settled, else every 15 s: observe each
+    copy FRESH, then apply ONLY the allowed transitions (resolve a pending
+    intent from the PERSISTED map; re-bind the holder after a normal restart;
+    the holder's proven bulk; first build / approved adoption / untracked).
+    Applied only when the write succeeded. -/
+private def observeHistory (stateRef : IO.Ref FlareClusterState) (crName ns : String) (partitions : Nat) : IO Unit := do
+  let nowMs ← IO.monoMsNow
+  let approved0 ← historyApprovedRef.get
+  let periodic := nowMs - (← historyObsAtRef.get) ≥ 15000 || (← historyObsAtRef.get) == 0
+  let urgentParts := match ← historyStoreRef.get with
+    | none => List.range partitions
+    | some st => (List.range partitions).filter fun p => AuthoritativeHistory.urgent st p approved0
+  if !periodic && urgentParts.isEmpty then return
+  if periodic then historyObsAtRef.set nowMs
+  -- the record loaded at the start of this pass (< 5 s), else a new read
+  let cached ← historyStoreRef.get
+  let loadedAt ← historyLoadedAtRef.get
+  let some st0 ← (if cached.isSome && loadedAt != 0 && (← IO.monoMsNow) - loadedAt < 5000 then pure cached
+    else loadHistory crName ns partitions) | return
+  if !AuthoritativeHistory.writable st0 then
+    IO.eprintln s!"[flare-operator] CRITICAL: the authoritative history record is not usable ({repr (st0.parts.map (·.2))}); promotions and rebuilds of its partitions are held"
+    return
+  let st ← stateRef.get
+  let now ← utcNowIso
+  let approved ← historyApprovedRef.get
+  -- this pass's partitions: every one on the 15 s period, else the urgent ones
+  let parts := if periodic then List.range partitions
+    else (List.range partitions).filter fun p => AuthoritativeHistory.urgent st0 p approved
+  let copiesOf := fun (p : Nat) => (st.nodeMap.filter fun (_, n) => n.partition == Int.ofNat p || n.lastMasterOf == Int.ofNat p).map Prod.fst
+  -- read ONLY the copies a partition's transition needs (each node at most once)
+  let wanted := parts.foldl (fun acc p => match AuthoritativeHistory.need st0 p approved with
+    | .copies => acc ++ copiesOf p
+    | .target k | .holder k => acc ++ [k]
+    | .nothing => acc) ([] : List String)
+  let mut seen : List (String × AuthoritativeHistory.Seen) := []
+  for key in wanted.eraseDups do
+    seen := seen ++ [(key, ← seeFresh key ns)]
+  let persisted ← if parts.any (fun p => (st0.intentFor p).isSome) then persistedNodeMap crName ns else pure none
+  let mut store := st0
+  let mut changes : List String := []
+  let mut chosenUsed := false
+  -- on the 15 s period: every partition WITHOUT a record, with its state, the
+  -- approval and what this pass read for it (CI 28761ff authority 29: a
+  -- partition stayed 'not recorded' and no reason was logged at all)
+  if periodic then
+    for p in List.range partitions do
+      if (st0.recorded p).isNone then
+        IO.eprintln s!"[flare-operator] history state p{p}: {repr (st0.part p)}; approved={approved}; need={repr (AuthoritativeHistory.need st0 p approved)}; read={(seen.filter fun (k, _) => (copiesOf p).contains k).map fun (k, x) => s!"{k}={match x with | .modern _ h healthy empty _ _ => s!"modern {h.masterId}/{h.epoch} healthy={healthy} empty={empty}" | .legacy => "legacy" | .unreadable => "unreadable"}"}"
+  for p in parts do
+    let copies := seen.filter fun (k, _) => (copiesOf p).contains k
+    let masterKey := (st.nodeMap.find? fun kv => kv.2.role == FlareRole.Master && kv.2.state == FlareState.Active && kv.2.partition == Int.ofNat p).map Prod.fst
+    let note := fun (c : AuthoritativeHistory.Change) (chs : List String) => match c with
+      | .recorded _ _ why => chs ++ [s!"p{p}: {why}"]
+      | .intentDropped _ why => chs ++ [s!"p{p}: intent dropped: {why}"]
+      | .held _ why => chs ++ [s!"p{p}: HELD: {why}"]
+      | .untracked _ why => chs ++ [s!"p{p}: {why}"]
+      | .none => chs
+    -- TEST SEAM (FLARE_TEST_HOLD_RESOLVE_FILE): while the file exists, pending
+    -- intents are not resolved (the window between commit and adoption)
+    let holdResolve ← match ← IO.getEnv "FLARE_TEST_HOLD_RESOLVE_FILE" with
+      | some f => System.FilePath.pathExists f
+      | none => pure false
+    match store.intentFor p with
+    | some _ =>
+      if holdResolve then
+        IO.eprintln s!"[flare-operator] TEST SEAM: intent resolution of p{p} held (FLARE_TEST_HOLD_RESOLVE_FILE)"
+    | none => pure ()
+    -- A3b (addenda 4 / 5): an intent whose target is the successor of an
+    -- open history-continuation handover belongs to that handover. While it
+    -- is open and the target does not read with the intent's binding, the
+    -- intent waits (the handover halts, or replaces the successor after its
+    -- proven stop) instead of holding the partition; once the handover
+    -- fenced the target out (a committed replica replaces it), the intent is
+    -- dropped as superseded and the replacement's own intent can begin.
+    let hos := (← handoverRef.get).entries.filter (·.partition == p)
+    let targetSeenBound := fun (i : AuthoritativeHistory.Intent) =>
+      match (seen.lookup i.target).getD .unreadable with
+      | .modern b _ _ _ _ _ => b == i.binding
+      | _ => false
+    match (if holdResolve then none else store.intentFor p) with
+    | some i =>
+      if hos.any (fun e => e.phase == .promoting && e.fencedOut == i.target) then
+        store := { store with intents := store.intents.filter (·.id != i.id) }
+        changes := changes ++ [s!"p{p}: intent dropped: {i.id}: superseded — its target {i.target} stopped (proven) and a committed replica replaces it"]
+      else if hos.any (fun e => e.successor == i.target && (e.phase == .committingReplicas || (e.phase == .promoting && e.v2.isSome)))
+          && !targetSeenBound i then
+        pure ()
+      else
+        match persisted with
+        | none => pure ()
+        | some pm =>
+          let there := (pm.lookupNode i.target).map (fun n => n.role == FlareRole.Master && n.partition == Int.ofNat p) |>.getD false
+          let (s', c) := AuthoritativeHistory.resolveIntent store i pm.nodeMapVersion pm.transitions there
+            ((seen.lookup i.target).getD .unreadable) now
+          store := s'
+          changes := note c changes
+    | none =>
+      match store.part p with
+      | some (.known r _) =>
+        -- a choice on a RECORDED partition never applies; a later loss of the
+        -- record must not find it waiting
+        if let some (cp, _) := ← historyChosenRef.get then
+          if cp == p then discard <| removeHistoryChoice crName ns s!"partition {p} has a history record (a choice applies only without one)"
+        let holderSeen := (seen.lookup r.holder).getD .unreadable
+        let (s1, c1) := AuthoritativeHistory.rebind store p r.holder holderSeen
+        store := s1
+        changes := note c1 changes
+        let (s2, c2) := AuthoritativeHistory.bulk store p r.holder holderSeen now
+        store := s2
+        changes := note c2 changes
+        let (s3, c3) := AuthoritativeHistory.seed store p r.holder holderSeen now
+        store := s3
+        changes := note c3 changes
+      | _ =>
+        -- the unique copy the map marks as the partition's last master
+        let lastMasters := (st.nodeMap.filter fun (_, n) => n.lastMasterOf == Int.ofNat p).map Prod.fst
+        let lastMaster := match lastMasters with | [k] => some k | _ => none
+        let (s', c) := AuthoritativeHistory.establish store p masterKey copies approved now lastMaster
+        -- HELD with no master: a person may name the copy to keep (RUNBOOK
+        -- #history-held-masterless); the operator never chooses by itself
+        let choice := match ← historyChosenRef.get with
+          | some (cp, k) => if cp == p then some k else none
+          | none => none
+        let chosen := choice.bind fun k => (copies.map Prod.fst).find? (fun key => key == k || key.startsWith s!"{k}.")
+        let heldMasterless := match c, masterKey with
+          | AuthoritativeHistory.Change.held _ _, none => true
+          | _, _ => false
+        let (s', c) := match heldMasterless, choice, chosen with
+          | true, some _, some k => AuthoritativeHistory.adoptChosen store p masterKey copies k now
+          | true, some k, none => (s', AuthoritativeHistory.Change.held p s!"the chosen copy {k} (history-adopt-holder) is not a copy of partition {p} (copies {copies.map Prod.fst})")
+          | _, _, _ => (s', c)
+        -- a choice is evaluated ONCE: adopted (removed after the record is
+        -- written) or refused / not applicable (removed now, with the reason)
+        if let some k := choice then
+          match heldMasterless, c with
+          | true, AuthoritativeHistory.Change.recorded _ _ _ => chosenUsed := true
+          | true, AuthoritativeHistory.Change.held _ why =>
+            IO.eprintln s!"[flare-operator] CRITICAL: the history-adopt-holder choice {k} for partition {p} was REFUSED: {why} — fix the cause and choose again (RUNBOOK #history-held-masterless)"
+            discard <| removeHistoryChoice crName ns s!"refused: {why}"
+          | _, _ =>
+            discard <| removeHistoryChoice crName ns s!"partition {p} is not held without a master (a choice applies only there)"
+        store := s'
+        changes := note c changes
+        -- no record, no master and NO migration approval: nothing is read or
+        -- adopted at all — say so (the approval is the first step)
+        if masterKey.isNone && c == .none && !approved then
+          if let some (AuthoritativeHistory.Part.unknown .absent _) := store.part p then
+            if periodic then
+              IO.eprintln s!"[flare-operator] CRITICAL: partition {p} has NO master and NO history record, and the migration approval is missing: nothing is adopted or promoted. Recovery: RUNBOOK #history-record, then #history-held-masterless"
+        -- a masterless hold is visible as CRITICAL with its reason and the
+        -- recovery procedure (on a change of reason, and every 15 s)
+        match c, masterKey with
+        | AuthoritativeHistory.Change.held _ why, none =>
+          let last := (← historyHeldLoggedRef.get).lookup p
+          if periodic || last != some why then
+            historyHeldLoggedRef.modify fun l => (p, why) :: l.filter (·.1 != p)
+            IO.eprintln s!"[flare-operator] CRITICAL: partition {p} has NO master and its history is HELD: {why}. Nothing is adopted or promoted automatically; the copies seen: {copies.map fun ((k, x) : String × AuthoritativeHistory.Seen) => s!"{k}={match x with | .modern _ h healthy empty _ _ => s!"history {h.masterId}/{h.epoch} healthy={healthy} empty={empty}" | .legacy => "legacy" | .unreadable => "unreadable"}"}; lastMasterOf={lastMasters}. Recovery: RUNBOOK #history-held-masterless"
+        | _, _ => historyHeldLoggedRef.modify fun l => l.filter (·.1 != p)
+  if store != st0 then
+    if ← persistHistory crName ns store then
+      for c in changes do IO.eprintln s!"[flare-operator] AUTHORITATIVE HISTORY: {c}"
+      -- a person's choice is used ONCE: removed after the record is written,
+      -- so a later loss never re-applies a stale choice
+      if chosenUsed then
+        discard <| removeHistoryChoice crName ns "used: the chosen copy's history is recorded"
+  else
+    for c in changes do IO.eprintln s!"[flare-operator] authoritative history (unchanged): {c}"
+
+private def handleRocksdbConfig (crd : FlareClusterView) (crName ns : String)
+    (pendingConfRef : IO.Ref (Option (String × Nat))) : IO Unit := do
+  let rocksdb := crd.spec.rocksdb
+  IO.eprintln s!"[DEBUG] handleRocksdbConfig: hasAny={rocksdb.hasAny} walTtl={rocksdb.walTtlSeconds} walSize={rocksdb.walSizeLimitMb} sync={rocksdb.syncWrites}"
+  -- replication off but snapshotPush false: the switch must reach flared
+  -- (a destination refuses pushes), so the file is written even with no
+  -- rocksdb tuning (05eee82 per-key-only 6: the switch never arrived)
+  let offPush := crd.spec.clusterReplication.snapshotPush
+  if !rocksdb.hasAny && offPush then
+    return  -- nothing to do; leave any existing ConfigMap alone
+  if crd.spec.clusterReplication.enabled then
+    return  -- handleClusterReplication will render both sections together
+  let desired := renderFlaredExtraConf rocksdb none offPush
+  -- Skip if the ConfigMap already has exactly this content (avoid SIGHUP storm).
+  match ← readFlaredExtraConf crName ns with
+  | .ok current =>
+    if current == desired then
+      return
+  | .error _ =>
+    pure ()  -- missing or unreadable; fall through and (re)create it
+  if let some secs := (← IO.getEnv "FLARE_TEST_CONF_WRITE_DELAY_SECONDS").bind (·.toNat?) then
+    let now ← IO.monoMsNow
+    match ← confWriteDelayRef.get with
+    | some (held, since) =>
+      if held != desired then
+        confWriteDelayRef.set (some (desired, now))
+        IO.eprintln s!"[flare-operator] TEST SEAM: holding the rocksdb config write back for {secs}s"
+        return
+      else if now - since < secs * 1000 then
+        return
+      else
+        confWriteDelayRef.set none
+        IO.eprintln s!"[flare-operator] TEST SEAM: releasing the held rocksdb config write"
+    | none =>
+      confWriteDelayRef.set (some (desired, now))
+      IO.eprintln s!"[flare-operator] TEST SEAM: holding the rocksdb config write back for {secs}s"
+      return
+  IO.eprintln s!"[flare-operator] reconciling rocksdb config for {crName}"
+  match ← updateFlaredRocksdbConfig crName ns rocksdb offPush with
+  | .error e =>
+    IO.eprintln s!"[flare-operator] ERROR: failed to write rocksdb config: {e}"
+  | .ok () =>
+    -- kubelet propagates the ConfigMap into the pods' mounted files
+    -- asynchronously (up to ~60-90s); a SIGHUP sent only now can make
+    -- flared re-read the OLD file and silently lose the change (observed
+    -- as G12-5's stats staying 0 despite flared's reload() being fixed).
+    -- SIGHUP immediately anyway (correct when propagation is fast), then
+    -- record the desired content as PENDING: each subsequent reconcile
+    -- tick re-checks propagation without blocking and re-signals once the
+    -- file has landed everywhere. (A synchronous wait here once stalled
+    -- the reconcile loop for minutes — never block this path.)
+    sendSighupToPods crName ns
+    pendingConfRef.set (some (desired.trim, 0))
+    IO.eprintln s!"[TRACE] RocksdbConfig: applied {rocksdb.toExtraConf.length} bytes, SIGHUP sent, verification pending"
+    if rocksdb.blockCacheSizeMb.isSome || rocksdb.writeBufferSizeMb.isSome || rocksdb.maxWriteBufferNumber.isSome then
+      IO.eprintln "[flare-operator] RocksDB memory options written to config only: running DB budgets require a planned restart/migration after file propagation; no automatic pod restart performed"
+
+/-- Order-independent equality of two master signatures ("<partition>:<server>").
+    One master per partition, so the entries are unique and a set-compare (equal
+    length + every element present) detects any failover/promotion. -/
+private def sameMasters (a b : List String) : Bool :=
+  a.length == b.length && a.all (fun x => b.contains x)
+
+/-- Reconcile flared's cluster-replication config toward the DECLARED desired
+    state in `spec.clusterReplication` (enabled + mode). Key properties:
+
+    * DECLARATIVE, no auto-advance. The USER controls the duplicate→forward
+      transition (and thus cutover timing), which differs per use case — a
+      Blue/Green move to a different cluster wants human-controlled cutover
+      (verify data landed on the target, then flip mode to forward), while a
+      partition shrink can be flipped whenever. This removes the old
+      thread-polling detector, which could not distinguish "dump finished" from
+      "dump never started" and flipped to forward before any data shipped.
+
+    * CANCEL = `enabled=false` (declarative): strips the config, SIGHUPs, phase
+      →None. Before cutover this is a clean rollback (traffic never moved).
+
+    * ABORT-ON-MASTER-CHANGE (safety). A master failover/promotion mid-migration
+      would leave the target inconsistent (dump runs on masters; the handover
+      loses in-flight/forwarded writes). The operator NEVER blocks source-cluster
+      failover — instead it fail-safe ABORTS the migration (strip config, SIGHUP,
+      phase→None, bump migration_aborted_total) when the master set changes from
+      the snapshot taken at start. Because the spec still says enabled=true, once
+      the cluster reconverges the migration auto-restarts with a fresh dump from
+      the new master (self-healing); to stop for good, set enabled=false.
+
+    migrationPhase mirrors the applied mode: None / Dumping (duplicate) /
+    Forwarding (forward). Every config write uses the propagation-confirmed
+    re-signal (pendingConfRef) so a SIGHUP never races the async kubelet mount. -/
+private def handleClusterReplication
+    (crd : FlareClusterView) (state : FlareClusterState)
+    (migrationRef : IO.Ref MigrationPhase)
+    (pendingConfRef : IO.Ref (Option (String × Nat)))
+    (masterSnapshotRef : IO.Ref (Option (List String)))
+    (driftTickRef : IO.Ref Nat)
+    (metrics : OperatorMetrics)
+    (crName ns : String) : IO Unit := do
+  let repl := crd.spec.clusterReplication
+  let rocksdb := crd.spec.rocksdb
+  driftTickRef.modify (· + 1)
+  let driftTick ← driftTickRef.get
+  let phase ← migrationRef.get
+  -- Current master set (one "<partition>:<server>" per partition master).
+  let masterSig : List String := state.getNodes.filterMap fun n =>
+    if n.role == FlareRole.Master then some s!"{n.partition}:{n.serverName}" else none
+
+  if !repl.enabled then
+    -- Disabled / cancelled: STOP flared, not just our bookkeeping (P1-4).
+    -- LEVEL-TRIGGERED, not phase-gated: the FSM also reacts to enabled=false
+    -- (computeNextReplicationPhase → PatchCRDStatus effect sets migrationRef
+    -- to .None) and runs EARLIER in the same tick, so by the time we get
+    -- here the phase guard alone is already .None and a phase-only check
+    -- skips the real work forever — flared keeps replicating on the stale
+    -- `cluster-replication = true` (caught by the disable E2E; also the
+    -- operator-restart case, where the in-memory phase is lost while the
+    -- ConfigMap still says true). Decide from the CM content itself.
+    let cmStillEnabled ← match ← readFlaredExtraConf crName ns with
+      | .ok data => pure (containsSubstr data "cluster-replication = true")
+      | .error _ => pure false
+    if phase != .None || cmStillEnabled then
+      match ← clearFlaredReplicationConfig crName ns rocksdb repl.snapshotPush with
+      | .error e =>
+        IO.eprintln s!"[flare-operator] ERROR: failed to clear replication config: {e} — retrying next tick"
+      | .ok () =>
+        sendSighupToPods crName ns
+        pendingConfRef.set none
+        masterSnapshotRef.set none
+        migrationRef.set .None
+        match ← patchFlareClusterStatus crName ns .None with
+        | .error e => IO.eprintln s!"[flare-operator] warning: failed to reset migrationPhase: {e}"
+        | .ok () => pure ()
+        IO.eprintln s!"[TRACE] ClusterReplication: {phase.toString}->None | replication disabled (config cleared, SIGHUP sent)"
+    else if repl.serverName != "" && driftTick % 12 == 0 then
+      -- Steady-state guard (~60s cadence, only for clusters that ever had
+      -- replication configured): a flared whose stop-SIGHUP was lost keeps
+      -- streaming forever with the CM already saying false. Compare the
+      -- APPLIED state from flared's own stats and nudge just the drifted
+      -- pods (pre-rc32 flared without the stat is skipped).
+      let _ ← resignalReplicationDrift crName ns "cluster-replication = false" false ""
+    return
+
+  -- ABORT-ON-MASTER-CHANGE: if we are mid-migration and the master set differs
+  -- from the snapshot taken at start, a failover/promotion happened — abort to
+  -- avoid an inconsistent target. Source-cluster failover is never blocked.
+  match ← masterSnapshotRef.get with
+  | some snap =>
+    if !sameMasters snap masterSig then
+      IO.eprintln s!"[flare-operator] WARNING: master changed during cluster replication (start={snap}, now={masterSig}) — ABORTING migration to avoid an inconsistent target (source failover is NOT blocked; migration auto-restarts once the cluster reconverges, or set enabled=false to stop)"
+      match ← clearFlaredReplicationConfig crName ns rocksdb repl.snapshotPush with
+      | .error e =>
+        IO.eprintln s!"[flare-operator] ERROR: abort could not clear replication config: {e} — retrying next tick"
+      | .ok () =>
+        sendSighupToPods crName ns
+        pendingConfRef.set none
+        masterSnapshotRef.set none
+        migrationRef.set .None
+        metrics.migrationAborted.inc
+        match ← patchFlareClusterStatus crName ns .None with
+        | .error e => IO.eprintln s!"[flare-operator] warning: failed to reset migrationPhase after abort: {e}"
+        | .ok () => pure ()
+        IO.eprintln s!"[TRACE] ClusterReplication: {phase.toString}->None | ABORTED (master changed mid-migration)"
+      return
+  | none => pure ()
+
+  -- Convergence guard ONLY when STARTING a migration (no snapshot yet), so the
+  -- captured snapshot is complete. Once migrating (snapshot present), a
+  -- missing/changed master is already handled by the abort check above, so we
+  -- must NOT block here — otherwise a mode transition (duplicate→forward) or any
+  -- tick during a brief master blip would stall in the current phase forever.
+  if (← masterSnapshotRef.get).isNone && masterSig.length != crd.spec.partitions then
+    IO.eprintln s!"[flare-operator] ClusterReplication: waiting for all {crd.spec.partitions} masters before STARTING migration (have {masterSig.length})"
+    return
+
+  -- Enabled + converged: honor the user's declared mode. "forward" only if
+  -- explicitly requested; anything else (incl. the default) means "duplicate".
+  let desiredMode := if repl.mode == "forward" then "forward" else "duplicate"
+  let desiredPhase := if desiredMode == "forward" then MigrationPhase.Forwarding else MigrationPhase.Dumping
+  let needle := s!"cluster-replication-mode = {desiredMode}"
+  -- the opt-in snapshot-push switch is part of the desired config too (a
+  -- toggle re-renders once; it is read by flared when a seed STARTS)
+  let alreadyDesired ← match ← readFlaredExtraConf crName ns with
+    | .ok data => pure (containsSubstr data needle
+        && containsSubstr data "cluster-replication-snapshot-push = false" == !repl.snapshotPush)
+    | .error _ => pure false
+  if alreadyDesired then
+    -- Config already carries the desired mode → no rewrite, no SIGHUP storm
+    -- (P1-3). Make the phase reflect it and ensure a master snapshot exists
+    -- (e.g. after an operator restart mid-migration).
+    if (← masterSnapshotRef.get).isNone then
+      masterSnapshotRef.set (some masterSig)
+    if phase != desiredPhase then
+      migrationRef.set desiredPhase
+      match ← patchFlareClusterStatus crName ns desiredPhase with
+      | .error e => IO.eprintln s!"[flare-operator] warning: failed to patch status: {e}"
+      | .ok () => pure ()
+      IO.eprintln s!"[TRACE] ClusterReplication: phase now {desiredPhase.toString} (matches applied mode={desiredMode})"
+    -- LEVEL-TRIGGER (~30s cadence): the one-shot SIGHUP after the config
+    -- write can land BEFORE the kubelet propagates the ConfigMap mount, and
+    -- the in-memory pendingConf re-signal does not survive restarts or its
+    -- own 60-tick give-up. Compare flared's APPLIED state (its
+    -- cluster_replication stats) against the desired one and nudge exactly
+    -- the drifted pods — this is what turned a lost re-signal into a
+    -- 107-minute silent stall of a migration's Duplicating phase.
+    if driftTick % 6 == 0 then
+      let nudged ← resignalReplicationDrift crName ns needle true desiredMode
+      if nudged > 0 then
+        IO.eprintln s!"[flare-operator] ClusterReplication: re-signalled {nudged} drifted pod(s) (desired mode={desiredMode})"
+    return
+  -- Desired mode not yet applied: write it, SIGHUP, register the propagation-
+  -- confirmed re-signal, and snapshot the master set as the migration baseline.
+  match ← updateFlaredReplicationConfig crName ns { repl with mode := desiredMode } rocksdb with
+  | .error e =>
+    IO.eprintln s!"[flare-operator] ERROR: failed to write replication config (mode={desiredMode}): {e}"
+    return
+  | .ok () => pure ()
+  sendSighupToPods crName ns
+  pendingConfRef.set (some (needle, 0))
+  masterSnapshotRef.set (some masterSig)
+  migrationRef.set desiredPhase
+  match ← patchFlareClusterStatus crName ns desiredPhase with
+  | .error e => IO.eprintln s!"[flare-operator] warning: failed to patch status: {e}"
+  | .ok () => pure ()
+  IO.eprintln s!"[TRACE] ClusterReplication: {phase.toString}->{desiredPhase.toString} | applied user-declared mode={desiredMode} (SIGHUP sent, propagation re-signal pending, master snapshot captured)"
+
+-- ===========================================================================
+-- Partition Reduction Detection
+-- ===========================================================================
+
+/-- Count the number of active partitions in the cluster state.
+    Returns the highest partition index + 1 (since partitions are 0-indexed). -/
+private def countActivePartitions (state : FlareClusterState) : Nat :=
+  match state.partitionMap.map Prod.fst |>.max? with
+  | none => 0
+  | some maxIdx => maxIdx + 1
+
+/-- SAF-10c: what a destination's own stats say about its continuous
+    follower. Resolved through the committed map (the master reports the
+    address it connected to). Unreadable stats yield a reading that claims
+    NO ownership. -/
+def followReadingOf (state : FlareClusterState) (dest : String) (ns : String)
+    : IO ReplicaRepair.FollowReading := do
+  match ReplicaRepair.resolveKey state dest with
+  | none => pure {}
+  | some (_, n) =>
+    match ← Bridge.queryPodStats (extractPodName n.serverName) ns "stats" with
+    | .error _ => pure {}
+    | .ok out =>
+      pure { complete := statsReplyComplete out,
+             enabled := (statNat out "repl_follow_enabled") == some 1,
+             state := statStr out "repl_follow_state",
+             appliedLsn := statNat out "repl_applied_lsn",
+             sourceEpoch := statStr out "repl_follow_source_epoch" }
+
+/-- The pod's UID: `some ""` ONLY on an empty --ignore-not-found answer (no
+    such pod); any failure is `none` (unknown). -/
+private def podUidOrAbsent (pod ns : String) : IO (Option String) := do
+  match ← kubectl ["get", "pod", pod, "-n", ns, "--ignore-not-found=true", "-o", "jsonpath={.metadata.uid}"] with
+  | .ok u => pure (some u.trim)
+  | .error _ => pure none
+
+/-- What `key` reports now about its reconstructions, for the adoption
+    decided before the demotion plan (ReplicaRepair.adoptBeforePlan). The
+    success must have copied from the node's CURRENT master in `state`. With
+    `withUid` (no flared baseline was read after the drops) the pod's UID is
+    read before and after the stats; a change in between proves nothing. -/
+private def adoptionObservationNow (state : FlareClusterState) (key ns : String) (withUid : Bool) :
+    IO ReplicaRepair.Observation := do
+  let mapped := (state.lookupNode key).map fun n => (n.role, n.state)
+  let currentMaster := (state.lookupNode key).bind fun n =>
+    (state.nodeMap.find? fun kv =>
+      kv.2.role == FlareRole.Master && kv.2.state == FlareState.Active && kv.2.partition == n.partition).map (·.1)
+  let pod := extractPodName key
+  let u0 ← if withUid then podUidOrAbsent pod ns else pure none
+  let o : ReplicaRepair.Observation ← match ← Bridge.queryPodStats pod ns "stats" with
+    | .ok out => pure { reportedVersion := statNat out "node_map_version",
+                        bootId := statNat out "reconstruction_boot_id",
+                        currentId := statNat out "reconstruction_current_id",
+                        currentState := statStr out "reconstruction_current_state",
+                        lastSuccessId := statNat out "reconstruction_last_success_id",
+                        lastSuccessSource := statStr out "reconstruction_last_success_source",
+                        currentMaster := currentMaster, mapped := mapped }
+    | .error _ => pure { mapped := mapped, currentMaster := currentMaster }
+  if !withUid then return o
+  let u1 ← podUidOrAbsent pod ns
+  pure { o with podUid := if u0 == u1 then u0 else none }
+
+/-- ADOPTION evidence for a drop just counted to `dest` (see
+    ReplicaRepair.reconstructingKeys). MUST be called AFTER the master's
+    counter was read: every reading here then postdates the drops. `state`
+    is read fresh by the caller for the same reason. While the destination
+    is reconstructing nothing more is read: such drops are never adopted. -/
+private def requestSightOf (state : FlareClusterState) (dest ns : String) : IO ReplicaRepair.RequestSight := do
+  if ReplicaRepair.destReconstructing state dest then return {}
+  let pod := match ReplicaRepair.resolveKey state dest with
+    | some (_, n) => extractPodName n.serverName
+    | none => extractPodName ((dest.splitOn ":").head?.getD dest)
+  let uid ← podUidOrAbsent pod ns
+  let (boot, cid) ← if uid.any (!·.isEmpty) then
+      match ← Bridge.queryPodStats pod ns "stats" with
+      | .ok out => pure (statNat out "reconstruction_boot_id", statNat out "reconstruction_current_id")
+      | .error _ => pure (none, none)
+    else pure (none, none)
+  -- both or neither: a half reading is no baseline
+  let (boot, cid) := if boot.isSome && cid.isSome then (boot, cid) else (none, none)
+  return { outsidePrepare := true, bootId := boot, currentId := cid, podUid := uid }
+
+/-- Detect unsafe partition reduction and warn the user.
+    Returns true if partition reduction was detected (and blocked). -/
+private def detectPartitionReduction (state : FlareClusterState) (crd : FlareClusterView)
+    (_crName : String) : IO Bool := do
+  let currentPartitions := countActivePartitions state
+  let desiredPartitions := crd.spec.partitions
+
+  if desiredPartitions < currentPartitions && currentPartitions > 0 then
+    IO.eprintln ""
+    IO.eprintln "WARNING: UNSAFE PARTITION REDUCTION DETECTED"
+    IO.eprintln "============================================="
+    IO.eprintln ""
+    IO.eprintln ("CRD specifies " ++ toString desiredPartitions ++ " partitions, but cluster has " ++ toString currentPartitions ++ " partitions")
+    IO.eprintln "Reducing partitions directly will cause DATA LOSS!"
+    IO.eprintln ""
+    IO.eprintln "To safely reduce partitions, use cluster replication:"
+    IO.eprintln "1. Create new cluster with fewer partitions"
+    IO.eprintln "2. Enable cluster replication on old cluster"
+    IO.eprintln "3. Wait for data migration to complete"
+    IO.eprintln "4. Switch application to new cluster"
+    IO.eprintln "5. Delete old cluster"
+    IO.eprintln ""
+    IO.eprintln "For detailed instructions, see: docs/PARTITION_REDUCTION.md"
+    IO.eprintln ""
+    IO.eprintln ("The operator will IGNORE this partition reduction (keeping " ++ toString currentPartitions ++ " partitions)")
+    IO.eprintln ""
+    pure true
+  else
+    pure false
+
+-- ===========================================================================
+-- Proxy Assignment Helper
+-- ===========================================================================
+
+/-- Assign roles to any Proxy nodes.
+    This triggers the C++ state machine's role shift: when flared receives a
+    topology broadcast showing Proxy → Master/Slave, it calls _shift_node_role(),
+    spawns reconstruction thread, and sends "node state ready" upon completion. -/
+private def assignProxies (state : FlareClusterState) (crd : FlareClusterView) : FlareClusterState :=
+  -- Fold over all nodes, assigning any Proxies
+  state.nodeMap.foldl (init := state) fun currentState (nodeKey, node) =>
+    if node.role == FlareRole.Proxy then
+      -- Legacy (non-FSM) path: no pod list is threaded here, so pass every
+      -- known key — the liveness filter is a no-op and behavior is
+      -- unchanged. The production FSM path passes the real pod list.
+      let (newState, _) := autoAssign currentState crd nodeKey node
+        (currentState.nodeMap.map Prod.fst)
+      newState
+    else
+      currentState
+
+-- ===========================================================================
+-- FSM IO Interpreters (Phase 3)
+-- ===========================================================================
+
+/-- The pod's incarnation now: (UID, flared restart count). -/
+private def podIdentityNow (podName ns : String) : IO (Option (String × Option Nat)) := do
+  match ← kubectl ["get", "pod", podName, "-n", ns, "-o",
+      "jsonpath={.metadata.uid}|{.status.containerStatuses[0].restartCount}"] with
+  | .ok out =>
+    match out.trim.splitOn "|" with
+    | [uid, rc] => return if uid.trim.isEmpty then none else some (uid.trim, rc.trim.toNat?)
+    | _ => return none
+  | .error _ => return none
+
+/-- R3-D: the repair source check (StatsObservation.repairSourceVerdict),
+    evaluated NOW for replica `key` against its partition's CURRENT master,
+    with the master's stats bracketed by its pod incarnation. `none` =
+    proceed. Used at demotion and again at RELEASE: a decision made at
+    demotion is not reused for a copy that happens later (CI 37493288883). -/
+private def repairVerdictNow (state : FlareClusterState) (key : String) (ns : String)
+    (partitionHint : Option Int := none) : IO (Option String) := do
+  match state.lookupNode key with
+  | none => return some "the replica is not in the map"
+  | some rn =>
+    -- A DEMOTED replica is a Proxy (partition -1): its partition is the one
+    -- the request was recorded under (CI 37526413435: reading -1 held every
+    -- repair forever as "no Active master")
+    let part := if rn.partition ≥ 0 then some rn.partition else partitionHint
+    let srcMaster := part.bind fun pt => state.nodeMap.find? (fun kv =>
+      kv.2.role == FlareRole.Master && kv.2.state == FlareState.Active && kv.2.partition == pt)
+    match srcMaster with
+    | none => return some "the partition has no Active master right now"
+    | some (_, mn) =>
+      let mPodName := extractPodName mn.serverName
+      let idBefore ← podIdentityNow mPodName ns
+      let mStats ← Bridge.queryPodStats mPodName ns "stats"
+      let rStats ← Bridge.queryPodStats (extractPodName rn.serverName) ns "stats"
+      let idAfter ← podIdentityNow mPodName ns
+      let srcStable := match idBefore, idAfter with
+        | some (u0, some r0), some (u1, some r1) => !u0.isEmpty && u0 == u1 && r0 == r1
+        | _, _ => false
+      if !srcStable then
+        return some s!"the source master's pod changed during the read ({idBefore} -> {idAfter})"
+      match mStats with
+      | .ok out =>
+        if statNat out "rocksdb_copy_identity_consistent" == some 0 then
+          return some "the source master's copy identity is inconsistent (reserved key and COPY_ID disagree): not a healthy copy to rebuild from"
+        if statNat out "rocksdb_quarantined" == some 1 then
+          return some "the source master's copy is the empty copy left by a quarantine: not a healthy copy to rebuild from"
+        let rLineage := match rStats with | .ok ro => statStr ro "rocksdb_master_id" | .error _ => none
+        let rEpoch := match rStats with | .ok ro => statStr ro "rocksdb_source_epoch" | .error _ => none
+        let rFromId := match rStats with | .ok ro => statStr ro "rocksdb_rebuilt_from_master_id" | .error _ => none
+        let rFromEpoch := match rStats with | .ok ro => statStr ro "rocksdb_rebuilt_from_epoch" | .error _ => none
+        return StatsObservation.repairSourceVerdict (StatsObservation.parseCurrItems out)
+          (statStr out "rocksdb_master_id") rLineage
+          (statStr out "rocksdb_source_epoch") rEpoch (statStr out "rocksdb_source_epoch_reason")
+          rFromId rFromEpoch
+      | .error _ => return StatsObservation.repairSourceVerdict .unknown
+
+/-- Execute a K8s API request from the FSM.
+    Maps K8sRequest to actual kubectl/K8s.Bridge calls. -/
+private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : String)
+    (stateRef : IO.Ref FlareClusterState)
+    (unreadyCyclesRef : IO.Ref (List (String × Nat)))
+    (podKeysRef : IO.Ref (List String))
+    (podAddrsRef : IO.Ref (List (String × String)))
+    (heldKeys : List String)
+    : IO K8sReconciler.K8sResponse := do
+  match req with
+  | .FetchCRD =>
+    match ← getFlareClusterCRD crName ns with
+    | .ok crd => pure (.CRDResponse (some crd))
+    | .error _ => pure (.CRDResponse none)
+  | .ListPods =>
+    match ← Bridge.listFlaredPodsE crName ns with
+    | .error e =>
+      -- Abort the cycle rather than fabricate \"zero pods\": an empty list
+      -- here reads as \"every node died\" to dead detection. NoResponse
+      -- drives the FSM into its Error terminal; the next tick retries.
+      IO.eprintln s!"[flare-operator] ERROR: pod listing failed ({e}) — aborting this reconcile cycle"
+      pure .NoResponse
+    | .ok pods =>
+      -- Convert pod names to node keys (FQDNs with port) to match nodeMap keys
+      let podKeys := pods.map Bridge.PodInfo.toNodeKey
+      -- Stuck-Down recovery reads this to answer "is there a pod to restart?".
+      -- Terminating pods are excluded: they are already on their way out (and
+      -- on a lost node they stay Terminating until the node object is
+      -- removed, so deleting them again would just repeat forever).
+      podKeysRef.set ((pods.filter (fun p => !p.terminating)).map Bridge.PodInfo.toNodeKey)
+      -- (key, ip) of pods K8s considers READY, for the operator-side
+      -- reachability probe: a node that is Ready but that WE cannot reach is
+      -- the network-partition case, invisible to every other signal.
+      podAddrsRef.set ((pods.filter (fun p => p.ready && !p.terminating)).map
+        (fun p => (Bridge.PodInfo.toNodeKey p, p.ip)))
+      -- LIVENESS BEYOND POD EXISTENCE. `podKeys` says the pod OBJECT exists,
+      -- which a segfaulted flared still satisfies (the container restarts
+      -- under the same pod name and IP) — so dead detection never fired and a
+      -- crashed master got no failover (observed live 2026-09-07). The
+      -- readiness probe is the process-level truth (it asks flared itself
+      -- whether it is Active), and K8s already requires 3 consecutive
+      -- failures before flipping a pod NotReady; require a further streak of
+      -- operator ticks on top so a slow probe under load is never mistaken
+      -- for a dead process. Prepare nodes are legitimately NotReady for the
+      -- whole reconstruction — detectDeadNodesPure excludes them by state.
+      let unreadyDeadCycles := ((← IO.getEnv "FLARE_UNREADY_DEAD_CYCLES").bind (·.toNat?)).getD 6
+      -- a NotReady streak belongs to one pod incarnation: a pod recreated
+      -- under the same name (another UID) starts it again — the old pod's
+      -- ticks made the new one dead in the second it registered
+      -- (41418772808 failover-order 8: NotReady 6 ticks fired on the
+      -- recreated pod, which then stayed down)
+      let unreadyIds := pods.map fun p => (Bridge.PodInfo.toNodeKey p, p.uid)
+      let prevUnreadyIds ← unreadyPodIdRef.get
+      unreadyPodIdRef.set unreadyIds
+      let prevUnready := FlareOperator.UnreachableNode.keepStreaksForSamePod
+        (← unreadyCyclesRef.get) prevUnreadyIds unreadyIds
+      let notReadyKeys := (pods.filter (fun p => !p.ready && !p.terminating)).map Bridge.PodInfo.toNodeKey
+      -- a node Down in the last committed map that is a member again now
+      -- (it rejoined) starts its NotReady window again
+      -- ... and one that LEFT its Active membership (Active -> Prepare through
+      -- a re-registration) since the last ListPods: the window between two
+      -- ListPods can hide the Prepare (CI 37908698742: demoted during pass A,
+      -- Active again before pass B, old streak 6 -> 7, dead again)
+      let leftActive ← leftActiveRef.modifyGet fun l => (l, [])
+      let fresh := K8sReconciler.rejoinedAfterDown (← downAtCommitRef.get) (← stateRef.get) ++ leftActive
+      let newUnready := K8sReconciler.unreadyStreaks prevUnready notReadyKeys (← stateRef.get) fresh
+      unreadyCyclesRef.set newUnready
+      -- spec 12: nodes the OPERATOR cannot reach join the same list (flarei's
+      -- retry count; a master without a reachable successor is kept, see
+      -- unhealthyMastersKept; no action at all when no node is reachable)
+      -- the verdict belongs to the pod it was probed on: a pod recreated and
+      -- registered since (another UID) is not marked down for it
+      -- (41275671570 test 8: the old pod's verdict made the new one Down 1 s
+      -- after it registered)
+      let verdictIds ← reachPodIdRef.get
+      let reachDown := (← unreachableDownRef.get).filter fun k =>
+        match verdictIds.find? (·.1 == k), pods.find? (fun p => Bridge.PodInfo.toNodeKey p == k) with
+        | some (_, u0), some p => !u0.isEmpty && u0 == p.uid
+        | _, _ => false
+      let unreachableDown := reachDown ++ (← duplicateDownRef.get).filter (!reachDown.contains ·)
+      let unhealthyKeys := (newUnready.filter (fun kv => kv.2 ≥ unreadyDeadCycles)).map Prod.fst
+        ++ unreachableDown.filter (fun k => !(newUnready.filter (fun kv => kv.2 ≥ unreadyDeadCycles)).any (·.1 == k))
+      for (k, n) in newUnready do
+        if n == unreadyDeadCycles then
+          IO.eprintln s!"[flare-operator] CRITICAL: node {k} pod is PRESENT but has been NotReady for {n} ticks -> treating it as dead (flared crashed or wedged); failover/refill will act on it"
+
+      -- Topology for zone-aware placement; [] on unlabeled clusters.
+      let nodeZones ← Bridge.listNodeZones
+      -- Terminating (deletionTimestamp) pods → graceful drain in the FSM.
+      -- a master the handover step saw alive this pass is not Terminating to
+      -- the FSM until the next pass, when its handover has started
+      let seenAlive ← handoverSeenAliveRef.get
+      let csNow ← stateRef.get
+      let activeMasters := (csNow.nodeMap.filter fun kv => kv.2.role == FlareRole.Master && kv.2.state == FlareState.Active).map Prod.fst
+      let lateMasters := Handover.drainDeferred seenAlive (Bridge.terminatingPodKeys pods) activeMasters
+      if !lateMasters.isEmpty then
+        handoverWakeRef.set true
+        IO.eprintln s!"[flare-operator] HANDOVER: Terminating master(s) {lateMasters} {if seenAlive.isNone then "were not observed by this pass's handover step (ledger or pods unreadable)" else "became Terminating after this pass's handover step"}; the drain leaves them to the next pass's handover"
+      let termKeys := (Bridge.terminatingPodKeys pods).filter (!lateMasters.contains ·)
+      -- Data-bearing probe (curr_items > 0 per pod) for the masterless
+      -- refill's empty-master guard. GATED: per-pod execs cost seconds on a
+      -- loaded node, and running them EVERY tick stretched the reconcile
+      -- past timing-sensitive windows (the drain E2E regressed: the demote
+      -- never landed inside its 25s window). Probe only on ticks where the
+      -- refill could actually act — a masterless partition exists, or a
+      -- mapped node's pod is gone (dead candidate: the failover this tick
+      -- may leave the partition masterless and the refill runs in the SAME
+      -- tick). Steady healthy ticks pay nothing; [] = "no information", the
+      -- guard's old-behavior fallback.
+      let cs ← stateRef.get
+      let csR := cs.rebuildPartitionMap
+      let masterless := csR.partitionMap.any (fun kv => kv.2.master.isNone)
+        || (csR.partitionMap.isEmpty && !csR.nodeMap.isEmpty)
+      let deadCandidate := csR.nodeMap.any (fun kv => !podKeys.contains kv.1)
+      -- A node flagged unhealthy is about to be failed over on THIS tick, and
+      -- the refill that reseats its partition runs in the same tick — so the
+      -- probe must cover that case too. It did not: `deadCandidate` only
+      -- looks for a MISSING pod object, which the D2 trigger (pod present,
+      -- NotReady) never satisfies, so the empty-master veto silently
+      -- degraded to its no-information fallback exactly when a master had
+      -- just died. Found by review, not by a test.
+      -- TEST SEAM (FLARE_TEST_STATS_BLOCK=<dir>): pod names listed in
+      -- <dir>/stats-block are treated as unreadable by the data probe.
+      let blocked ← match ← IO.getEnv "FLARE_TEST_STATS_BLOCK" with
+        | some dir =>
+          try pure (((← IO.FS.readFile s!"{dir}/stats-block").splitOn "\n").map String.trim |>.filter (· != ""))
+          catch _ => pure []
+        | none => pure []
+      let (dataKeys, emptyRead) ← if masterless || deadCandidate || !unhealthyKeys.isEmpty then
+          -- Ex-masters (lastMasterOf holders, not master now) are read even
+          -- while NotReady: see Bridge.dataPresencePodKeys.
+          Bridge.dataPresencePodKeys pods ns (cs.nodeMap.filterMap fun (k, n) =>
+            if n.lastMasterOf ≥ 0 && n.role != FlareRole.Master then some k else none) blocked
+        else
+          pure ([], [])
+      -- A KNOWN-empty reading counts only for the pod incarnation it was
+      -- taken from: the pod's UID and restart count after the probe must be
+      -- the ones listed this pass (a replaced or restarted pod is Unknown).
+      let mut knownEmpty : List String := []
+      for k in emptyRead do
+        match pods.find? (fun p => Bridge.PodInfo.toNodeKey p == k) with
+        | some p =>
+          match ← podIdentityNow p.name ns with
+          | some (u, r) =>
+            -- a missing restart count is not a match (either side)
+            let sameRestarts := match r, p.restarts with
+              | some a, some b => a == b
+              | _, _ => false
+            if !p.uid.isEmpty && u == p.uid && sameRestarts then knownEmpty := knownEmpty ++ [k]
+          | none => pure ()
+        | none => pure ()
+      if !emptyRead.isEmpty || !blocked.isEmpty then
+        IO.eprintln s!"[flare-operator] data probe: data-bearing {dataKeys}; read empty {emptyRead}, bound to an unchanged pod {knownEmpty}; blocked by test seam {blocked}" 
+      -- SAF-10c: continuous-replication eligibility (StateMachine/FollowEvidence).
+      -- Probe every non-Down Slave in WAL mode each tick (a node known to be
+      -- out of the mode only every FLARE_FOLLOW_PROBE_INTERVAL ticks, a node
+      -- never read on its first tick), and the master of every partition
+      -- that has such a slave; then classify. Non-WAL clusters pay one probe
+      -- per slave at start and one every interval; nothing else changes for
+      -- them (every list stays empty).
+      let tr ← followRef.get
+      let probeT0 ← IO.monoMsNow
+      let bounds ← followBoundsFromEnv
+      let probeInterval := ((← IO.getEnv "FLARE_FOLLOW_PROBE_INTERVAL").bind (·.toNat?)).getD 30
+      -- A change of the desired follow mode: every non-Down slave is read
+      -- each pass until it shows the new mode (bounded; see Confirm).
+      let confirmBudget := ((← IO.getEnv "FLARE_FOLLOW_CONFIRM_PASSES").bind (·.toNat?)).getD 120
+      let desiredNow ← followDesiredRef.get
+      let changedTo : Option Bool := match tr.desired, desiredNow with
+        | some d0, some d1 => if d0 != d1 then some d1 else none
+        | _, _ => none
+      let changeKeys := (cs.nodeMap.filter fun kv => kv.2.role == FlareRole.Slave && kv.2.state != FlareState.Down).map Prod.fst
+      let confirm0 := match changedTo with
+        | some d1 => FollowEvidence.startConfirm tr.confirm changeKeys d1 confirmBudget tr.tick
+        | none => tr.confirm
+      if let some d1 := changedTo then
+        IO.eprintln s!"[flare-operator] follow configuration changed to follow {if d1 then "on" else "off"} at tick {tr.tick}: confirming on {changeKeys} every pass until each shows it (at most {confirmBudget} passes)"
+      let readyPods := pods.filter (fun p => p.ready && !p.terminating)
+      let mastersNow : List (Int × FollowEvidence.MasterIdentity) := cs.nodeMap.filterMap fun (k, n) =>
+        if n.role == FlareRole.Master && n.state == FlareState.Active then
+          some (n.partition, (k, n.regEpoch, ((pods.find? (fun p => Bridge.PodInfo.toNodeKey p == k)).map (·.uid)).getD ""))
+        else none
+      let (movedNow, track) := (← probeMastersRef.get).step mastersNow
+      probeMastersRef.set track
+      let forced := ((← probeForcedUntilRef.get).filter (·.2 ≥ tr.tick)) ++ movedNow.map (·, tr.tick + 5)
+      probeForcedUntilRef.set forced
+      if !movedNow.isEmpty then
+        IO.eprintln s!"[flare-operator] master changed on partition(s) {movedNow}: their slaves are read every pass for 5 passes (a promotion's surviving slave declares needs_rebuild)"
+      let masterMoved := fun (part : Int) => forced.any (·.1 == part)
+      let mut slaveReadings : List (String × Int × Option FollowEvidence.Reading) := []
+      for (key, n) in cs.nodeMap do
+        if n.role == FlareRole.Slave && n.state != FlareState.Down then
+          match readyPods.find? (fun p => Bridge.PodInfo.toNodeKey p == key) with
+          | none => slaveReadings := slaveReadings ++ [(key, n.partition, none)]
+          | some p =>
+            if FollowEvidence.shouldProbeWith confirm0 tr.mem key tr.tick probeInterval || masterMoved n.partition then
+              let r ← match ← Bridge.queryPodStats p.name ns "stats" with
+                | .ok out => pure (followReadingFrom out)
+                | .error _ => pure ({} : FollowEvidence.Reading)
+              slaveReadings := slaveReadings ++ [(key, n.partition, some r)]
+            else
+              slaveReadings := slaveReadings ++ [(key, n.partition, none)]
+      let inModeParts : List Int := slaveReadings.filterMap fun (k, part, r?) =>
+        if (r?.bind (·.mode)) == some true || FollowEvidence.knownInMode tr.mem k then some part else none
+      -- The master's head is read from any READY pod, Terminating included.
+      -- A graceful drain happens exactly while the master pod is Terminating
+      -- (preStop window, still Ready and serving). Reading it only from
+      -- non-terminating pods left the drain with no source head, so the
+      -- follower was never proven current, the planned-promotion guard
+      -- refused every drain in this mode ("NO promotable successor"), and the
+      -- follower was promoted by dead-node failover after the pod was gone
+      -- (CI 36841064685). A Terminating SLAVE is still not read: it is not a
+      -- promotion candidate.
+      let masterPods := pods.filter (fun p => p.ready)
+      let mut masterReadings : List (Int × FollowEvidence.MasterReading) := []
+      for (key, n) in cs.nodeMap do
+        if n.role == FlareRole.Master && n.state != FlareState.Down && inModeParts.contains n.partition then
+          match masterPods.find? (fun p => Bridge.PodInfo.toNodeKey p == key) with
+          | none => pure ()
+          | some p =>
+            let m ← match ← Bridge.queryPodStats p.name ns "stats" with
+              | .ok out => pure (masterReadingFrom out)
+              | .error _ => pure ({} : FollowEvidence.MasterReading)
+            masterReadings := masterReadings ++ [(n.partition, m)]
+      let probed := (slaveReadings.filter (fun (_, _, r?) => r?.isSome)).length + masterReadings.length
+      let probeMs := (← IO.monoMsNow) - probeT0
+      if probed > 0 || probeMs > 1000 then
+        IO.eprintln s!"[flare-operator] continuous-replication probe: {probed} stats read(s) in {probeMs}ms (tick {tr.tick}; in-mode remembered: {(tr.mem.filter (·.2)).length}, out-of-mode remembered: {(tr.mem.filter (!·.2)).length})"
+      let (confirm', confirmEvents) := FollowEvidence.stepConfirm confirm0
+        (slaveReadings.map fun (k, _, r?) => (k, r?)) tr.tick
+      for ev in confirmEvents do
+        match ev with
+        | .confirmed c t =>
+          IO.eprintln s!"[flare-operator] follow configuration CONFIRMED on {c.key}: follow {if c.want then "on" else "off"} read at tick {t}, {t - c.since} pass(es) after the change (old mode read {c.oldSeen} time(s), unreadable {c.unknownSeen})"
+        | .expired c =>
+          IO.eprintln s!"[flare-operator] WARNING: follow configuration NOT confirmed on {c.key} within {confirmBudget} passes (old mode read {c.oldSeen} time(s), unreadable {c.unknownSeen}); back to re-reading it every {probeInterval} passes"
+      let (markedReadings, boots') := FollowEvidence.markProcessChanges tr.boots slaveReadings
+      let (cls, mem', judged) := FollowEvidence.classify bounds tr.mem markedReadings masterReadings
+      let (changed, summaries) := FollowEvidence.changedSummaries tr.lastSummary judged
+      for (k, summary) in changed do
+        IO.eprintln s!"[flare-operator] CONTINUOUS REPLICATION eligibility {k}: {summary}"
+      -- R3: slaves whose copy's source changed lineage or history
+      let sourceRebuild := SourceEligibility.rebuildRequests (slaveReadings.filterMap fun (k, _, r?) =>
+        r?.map fun r => (k, r.readSourceState, r.readSourceReason))
+      followRef.set { mem := mem', boots := boots', tick := tr.tick + 1, classified := cls, lastSummary := summaries,
+                      desired := desiredNow.orElse (fun _ => tr.desired), confirm := confirm',
+                      sourceRebuild := sourceRebuild }
+      -- SAF-08 GHOST SUCCESSOR: the map's Active state belongs to the
+      -- process that registered it. A pod replaced under the same name keeps
+      -- the name (so it passes every "pod exists" check) and the map entry
+      -- stays Active until the new flared registers — and every promotion
+      -- path picked successors from exactly that. Readiness is sync-gated (a
+      -- pod is Ready only once its OWN map says Active), so an Active slave
+      -- whose pod is not Ready this pass is not a promotable copy: excluded
+      -- from failover, drain, refill and the zombie guard like an unfit
+      -- follower. Cost: a slave whose readiness flaps at the moment its
+      -- master dies waits one pass.
+      podIdentityRef.set (pods.map fun p => (p.toNodeKey, (p.uid, p.restarts)))
+      let readyNow := (pods.filter (fun p => p.ready && !p.terminating)).map Bridge.PodInfo.toNodeKey
+      let notReadyActive := (cs.nodeMap.filter fun kv =>
+          kv.2.role == FlareRole.Slave && kv.2.state == FlareState.Active
+            && podKeys.contains kv.1 && !readyNow.contains kv.1).map Prod.fst
+      if !notReadyActive.isEmpty then
+        IO.eprintln s!"[flare-operator] promotion candidates withheld this pass (Active in the map but the pod is not Ready — possibly replaced under the same name and not yet registered): {notReadyActive}"
+      -- R3: on a pass where a promotion can be decided, read every Active
+      -- slave's source eligibility DIRECTLY (not the periodic follow probe):
+      -- a copy whose source changed is not promotable until re-validated.
+      let masterKeysNow := (cs.nodeMap.filter fun kv => kv.2.role == FlareRole.Master).map Prod.fst
+      let mut sourceIneligible : List String := []
+      -- spec 4/12 (FailoverOrder): the copies of the last master's history,
+      -- largest applied position first, per partition read on this pass
+      let mut failoverRanked : List String := []
+      r3WithheldRef.set []
+      promotionEvidenceRef.set []
+      promotionObservedRef.set []
+      promotionRiskPassRef.set false
+      if SourceEligibility.promotionRisk masterless deadCandidate unhealthyKeys termKeys masterKeysNow then
+        let mut readings : List (String × SourceEligibility.Reading) := []
+        let mut evidence : List (String × PromotionEvidence.Class × PromotionEvidence.Binding) := []
+        let mut heldDetail : List String := []
+        let mut observedFor : List (String × PromotionEvidence.Observed) := []
+        let mut orderCopies : List (Int × FailoverOrder.Copy) := []
+        -- decision 2026-10-08: EVERY live non-master candidate is read and
+        -- classified by reason (Prepare and NotReady ones included: a last
+        -- resort must not reach a copy nobody looked at)
+        for (key, n) in cs.nodeMap do
+          if n.role != FlareRole.Master then
+            match pods.find? (fun p => Bridge.PodInfo.toNodeKey p == key) with
+            | some p =>
+              let reply ← match ← Bridge.queryPodStats p.name ns "stats" with
+                | .ok out => pure (some out)
+                | .error _ => pure none
+              if n.role == FlareRole.Slave && n.state == FlareState.Active && readyNow.contains key then
+                readings := readings ++ [(key, SourceEligibility.classifyReply reply)]
+              let part : Int := if n.partition ≥ 0 then n.partition else n.lastMasterOf
+              -- only Active slaves are ordered: a copy in Prepare is being
+              -- rebuilt, its position proves nothing and must not weaken the
+              -- order of the copies that can be promoted
+              if let some out := reply then
+                if n.role == FlareRole.Slave && n.state == FlareState.Active then
+                  orderCopies := orderCopies ++ [(part, { key, epoch := statStr out "repl_follow_source_epoch",
+                                                          applied := statNat out "repl_applied_lsn" })]
+              let hasMaster := cs.nodeMap.any fun kv => kv.2.role == FlareRole.Master && kv.2.partition == part
+              let nPartsB ← desiredPartitionsRef.get
+              let obs : PromotionEvidence.Observed := {
+                mapPrepare := n.state == FlareState.Prepare
+                mapActive := n.state == FlareState.Active
+                podReady := readyNow.contains key
+                partitionHasMaster := hasMaster
+                lastMasterHistory := ← recordedHistory part
+                isLastMasterHolder := part ≥ 0 && n.lastMasterOf == part
+                expectedBinding := if part ≥ 0 then some (PromotionEvidence.bindingFor part.toNat nPartsB cs.partitionSize) else none
+                untrackedLastMaster := ← untrackedLastMaster cs part
+                untrackedLastMasterReadEmpty := match ← untrackedLastMaster cs part with
+                  | some lm => knownEmpty.contains lm
+                  | none => false
+                attributedRejoin := PromotionEvidence.isAttributedRejoin (n.role == FlareRole.Slave) (n.state == FlareState.Prepare) n.partition n.lastMasterOf n.formerSlaveOf }
+              let cls := PromotionEvidence.classify reply obs
+              evidence := evidence ++ [(key, cls, PromotionEvidence.bindingOf (some p.uid) reply)]
+              if !cls.promotable then heldDetail := heldDetail ++ [s!"{key}: {PromotionEvidence.r3DetailOf reply}"]
+              observedFor := observedFor ++ [(key, obs)]
+            | none => pure ()
+        for p in (orderCopies.map (·.1)).eraseDups do
+          let ord := FailoverOrder.order ((← recordedHistory p).map (·.2)) ((orderCopies.filter (·.1 == p)).map (·.2))
+          if ord.proof != .noFollower then
+            IO.eprintln s!"[flare-operator] failover order, partition {p}: {ord.describe}"
+          -- only a PROVEN order is passed on: it ranks before the recorded
+          -- holder in the refill. An unreadable one is logged above and the
+          -- existing tiers decide (NOT LOSS-FREE).
+          if ord.proof == .proven then
+            failoverRanked := failoverRanked ++ ord.ranked
+        promotionEvidenceRef.set evidence
+        promotionObservedRef.set observedFor
+        promotionRiskPassRef.set true
+        if !evidence.isEmpty then
+          IO.eprintln s!"[flare-operator] PROMOTION EVIDENCE (by reason, this pass): {evidence.map fun (k, c, b) => s!"{k}={c.label} [boot {b.bootId.getD "?"}]"}"
+        if !heldDetail.isEmpty then
+          IO.eprintln s!"[flare-operator] PROMOTION EVIDENCE readings of the copies not promotable: {heldDetail}"
+        sourceIneligible := SourceEligibility.withheld readings
+        -- decision 2026-10-07 (1): the commit refuses to promote a candidate
+        -- whose reading was UNKNOWN (failed / incomplete) on this pass,
+        -- whatever path chose it. eligible=0 keeps the earlier handling (out
+        -- of the normal paths; the masterless refill's logged last resort may
+        -- still seat it) until decided otherwise.
+        r3WithheldRef.set (readings.filterMap fun (k, r) => if r == .unknown then some k else none)
+        -- not a normal promotion: anything other than eligible / legacy /
+        -- empty is out of the normal paths (the refill's last resort may still
+        -- choose a lagging copy; the commit decides by reason)
+        let notNormal := evidence.filterMap fun (k, c, _) => if c.normal then none else some k
+        sourceIneligible := sourceIneligible ++ notNormal.filter (!sourceIneligible.contains ·)
+        -- every reading this pass, unreadable ones included: which evidence
+        -- a promotion on this pass could stand on (copy-identity 11)
+        let shown := readings.map fun (k, e) => s!"{k}={SourceEligibility.readingLabel e}"
+        IO.eprintln s!"[flare-operator] R3 readings (a promotion is possible this pass): {shown}"
+        if !sourceIneligible.isEmpty then
+          IO.eprintln s!"[flare-operator] promotion candidates withheld this pass (R3: the copy is not eligible for its partition's current source until re-validated): {sourceIneligible}"
+      -- SAF-08: a successor pinned by the empty-master self-heal ranks first
+      -- for the drain, but only while its pod is still the incarnation that
+      -- was validated; a changed pod drops the pin (and is checked again at
+      -- commit like any promotion).
+      let pins ← pinnedSuccessorRef.get
+      let mut keptPins : List (String × (String × Option Nat) × Nat) := []
+      let mut pinnedFirst : List String := []
+      for (k, sid, left) in pins do
+        let nowId := (pods.find? (fun p => Bridge.PodInfo.toNodeKey p == k)).map (fun p => (p.uid, p.restarts))
+        if nowId == some sid && left > 0 then
+          keptPins := keptPins ++ [(k, sid, left - 1)]
+          pinnedFirst := pinnedFirst ++ [k]
+        else if left > 0 then
+          IO.eprintln s!"[flare-operator] pinned successor {k} dropped: its pod is no longer the validated incarnation ({sid} -> {nowId})"
+      pinnedSuccessorRef.set keptPins
+      let ranked := pinnedFirst ++ (cls.ranked ++ failoverRanked).filter (!pinnedFirst.contains ·)
+      let nPartsHolders ← desiredPartitionsRef.get
+      pure (.PodListResponse podKeys (Bridge.podZones pods nodeZones) termKeys dataKeys unhealthyKeys heldKeys
+              (cls.unfit ++ (notReadyActive ++ sourceIneligible).filter (!cls.unfit.contains ·)) cls.unproven ranked knownEmpty
+              ((← promotionEvidenceRef.get).filterMap fun (k, c, _) => if c.promotable then none else some k)
+              (match ← historyStoreRef.get with
+                | some st => (List.range nPartsHolders).filterMap fun p =>
+                    match st.part p with
+                    | some (.known r _) => some (p, r.holder)
+                    | _ => none
+                | none => []))
+  | .PatchService =>
+    -- Service patching happens in executeEffects (PatchService effect)
+    -- This just signals completion
+    pure (.PatchResponse true)
+  | .None =>
+    pure .NoResponse
+
+/-- Execute a list of side effects from the FSM.
+    Maps FlareEffect to actual IO operations. -/
+private def executeEffects (effects : List K8sReconciler.FlareEffect)
+    (crName ns : String) (_stateRef : IO.Ref FlareClusterState)
+    (migrationRef : IO.Ref MigrationPhase) : IO Unit := do
+  for eff in effects do
+    match eff with
+    | .Log msg =>
+      IO.eprintln msg
+
+    | .PatchService svcName podName =>
+      -- Update K8s Service selector to point to the master pod
+      match ← patchClientServiceSelector svcName ns podName with
+      | .ok () => pure ()
+      | .error e => IO.eprintln s!"[flare-operator] warning: failed to patch service {svcName}: {e}"
+
+    | .UpdateConfigMap _candidate =>
+      if (← promotionAbortedRef.get) then
+        IO.eprintln "[flare-operator] node map NOT persisted this pass: its promotion was aborted (SAF-08 / history)"
+        continue
+      -- the COMMITTED map (commitChecked's result: gates applied, transition
+      -- ids attached) is the only source of what is persisted — never the
+      -- FSM's candidate (review P1-1)
+      let data := serializeNodeMap (← _stateRef.get)
+      -- Write node map to observability ConfigMap (Main.lean:174-178)
+      let cmName := s!"{crName}-node-map"
+      match ← updateFlaredConfigMap cmName ns data with
+      | .ok () =>
+        let v := (FlareClusterState.fromNodeMapData data).nodeMapVersion
+        persistedVersionRef.modify (max v)
+        markNodeMapPersisted crName ns v
+      | .error e => IO.eprintln s!"[flare-operator] warning: failed to update ConfigMap: {e}"
+
+    | .SendSighup _podNames =>
+      -- Send SIGHUP to all pods to reload replication config (Main.lean:236)
+      sendSighupToPods crName ns
+
+    | .PatchCRDStatus phase =>
+      -- Update migration phase in CRD status (Main.lean:238-241)
+      migrationRef.set phase
+      match ← patchFlareClusterStatus crName ns phase with
+      | .ok () => pure ()
+      | .error e => IO.eprintln s!"[flare-operator] warning: failed to patch CRD status: {e}"
+
+-- ===========================================================================
+-- FSM Driver Loop (Phase 4)
+-- ===========================================================================
+
+/-- Per-key merge of the FSM's computed state onto the live ref. The merge
+    logic (including the duplicate-master repair for the FSM-vs-TCP assignment
+    race) lives in the pure layer so it can be machine-checked; see
+    `K8sReconciler.mergeClusterState`. -/
+private def mergeClusterState (current ucs : FlareClusterState)
+    (rb : ReadBalanceSpec) (standbyKeys : List String) : FlareClusterState :=
+  K8sReconciler.mergeClusterState current ucs rb.master rb.slave standbyKeys
+
+/-- Commit the FSM's computed cluster state by MERGING it onto the live ref inside
+    a single atomic `modifyGet` (see `mergeClusterState`). The merge — not a version
+    compare-and-set — is what makes the write safe: a Prepare→Active transition the
+    TCP server completed after our snapshot is preserved rather than clobbered, and
+    a node registered after our snapshot is carried forward.
+    `expectedVersion` is retained for call-site compatibility but no longer gates
+    the write.
+
+    Quiescence commit: `mergeClusterState` bumps `nodeMapVersion` unconditionally,
+    and the FSM re-commits the SAME snapshot ~7×/tick (`updatedClusterState` is set
+    once at AfterDetectDead and carried — never cleared — through every downstream
+    step, each hitting a commit site). That made even a fully-converged cluster
+    advance the version +7 every tick and rebroadcast the identical node sync to
+    every pod forever.
+
+    We CANNOT simply suppress the bump whenever the nodeMap is unchanged: the
+    periodic version-advancing rebroadcast is LOAD-BEARING for reconstruction.
+    flared only re-processes a node sync whose version is strictly newer (the
+    fencing gate), and a Prepare node that has finished reconstructing needs that
+    fresh broadcast to be re-evaluated and flipped to Active. During reconstruction
+    the operator's nodeMap is unchanged tick-to-tick (the node stays Prepare in the
+    operator's view until it flips), so suppressing "unchanged" broadcasts wedges
+    the node in Prepare forever (observed live: rc19 left nodes stuck Prepare after
+    a roll; reverting restored convergence).
+
+    So: advance the version — the broadcast trigger (the `finalVersion != oldVersion`
+    gate) — when the topology actually changed OR the cluster is not yet fully at
+    rest (any node not Active: Prepare/Ready/Down still converging). Only when the
+    cluster is fully converged (every node Active) AND nothing changed do we pin the
+    version and go quiescent. This keeps the reconstruction nudge that rc18 relied
+    on while eliminating the steady-state +7/tick churn. Returns whether the version
+    advanced. -/
+private def commitClusterState (stateRef : IO.Ref FlareClusterState)
+    (_expectedVersion : Nat) (newState : FlareClusterState)
+    (rb : ReadBalanceSpec := {}) (standbyKeys : List String := [])
+    (readWithheld : List String := []) : IO Bool := do
+  stateRef.modifyGet fun current =>
+    let merged0 := mergeClusterState current newState rb standbyKeys
+    -- SAF-10c: WAL-mode followers not proven eligible for reads are out of
+    -- the read set (balance 0) whatever spec.readBalance.slave says.
+    let merged := { merged0 with nodeMap := K8sReconciler.withholdReads readWithheld merged0.nodeMap }
+    -- `partitionMap` is a pure function of `nodeMap` (rebuildPartitionMap), so
+    -- comparing `nodeMap` detects a real topology change.
+    let changed := merged.nodeMap != current.nodeMap
+    -- Fully at rest only when every node is Active. Any Prepare/Ready/Down node
+    -- means convergence is still in progress and needs the periodic rebroadcast.
+    let allActive := merged.getNodes.all (fun n => n.state == FlareState.Active)
+    if changed || !allActive then
+      (true, merged)
+    else
+      (false, { merged with nodeMapVersion := current.nodeMapVersion })
+
+/-- Test seam used by the topology-authority E2E suite to stop a reconcile
+    at one exact point: after the topology change is committed and the
+    version has advanced, and before the pre-send lease check.
+
+    `FLARE_TEST_PRESEND_BARRIER` names a directory inside the container.
+    The barrier engages only when `<dir>/arm` exists, so the test chooses
+    WHICH pass is stopped; it then announces arrival by writing
+    `<dir>/reached` (that file is the test's proof the stop position was
+    hit, not merely that time passed), disarms itself, and waits for
+    `<dir>/release`. The wait is bounded: if nothing releases it the pass
+    continues anyway, so an environment variable left set by accident
+    delays one broadcast and cannot wedge an operator.
+
+    Deliberately NOT a second implementation of the send path — the pass
+    that resumes here is the same one that goes on to check the lease and
+    broadcast. -/
+private def fileBarrier (pfx position : String) (version : Nat) : IO Unit := do
+  match ← IO.getEnv "FLARE_TEST_PRESEND_BARRIER" with
+  | none => pure ()
+  | some dir =>
+    let arm : System.FilePath := dir ++ s!"/{pfx}arm"
+    if !(← arm.pathExists) then
+      pure ()
+    else
+      let reached : System.FilePath := dir ++ s!"/{pfx}reached"
+      let release : System.FilePath := dir ++ s!"/{pfx}release"
+      IO.eprintln s!"[flare-operator] TEST BARRIER: holding {position} (v{version})"
+      try IO.FS.writeFile reached s!"{version}\n" catch _ => pure ()
+      try IO.FS.removeFile arm catch _ => pure ()
+      let mut released := false
+      for _ in [0:1200] do        -- 1200 x 100ms = 120s ceiling
+        if (← release.pathExists) then
+          released := true
+          break
+        IO.sleep 100
+      if released then
+        IO.eprintln s!"[flare-operator] TEST BARRIER: released (v{version})"
+      else
+        IO.eprintln s!"[flare-operator] TEST BARRIER: timed out after 120s; continuing (v{version})"
+      try IO.FS.removeFile release catch _ => pure ()
+      try IO.FS.removeFile reached catch _ => pure ()
+
+private def preSendBarrier (version : Nat) : IO Unit :=
+  fileBarrier "" "before the pre-send lease check" version
+
+/-- Same protocol with the `insend-` files (`insend-arm`, `insend-reached`,
+    `insend-release`): holds a pass AFTER it has decided to send — the live
+    map was checked against its snapshot — and before the first byte goes
+    out, the window in which a registration used to be answered (CI
+    38090211947). -/
+private def inSendBarrier (version : Nat) : IO Unit :=
+  fileBarrier "insend-" "after the live-map check, before the send" version
+
+/-- Publish the live committed map now, outside a pass, behind the same fences
+    as the pass's send: the lease (fail closed), the persisted version (SAF-09),
+    the publication gate and the live-map check. A send that cannot go out
+    stays pending for the next pass. Used by the ordered handover, whose
+    steps must not wait a pass for their map. True = every pod confirmed. -/
+private def publishLiveMapTo (stateRef : IO.Ref FlareClusterState)
+    (pendingBroadcastRef : IO.Ref (Option Nat)) (metrics : OperatorMetrics)
+    (leaseName identity crName ns : String) (why : String) (keys : Option (List String)) : IO Bool := do
+  let st ← stateRef.get
+  let v := st.nodeMapVersion
+  let hold : IO Bool := do
+    pendingBroadcastRef.modify fun p => some (p.getD v)
+    pure false
+  let gate ← v2Gate keys
+  if gate == .skip then
+    IO.eprintln s!"[flare-operator] topology send of v{v} ({why}) HELD: a history continuation is committing its replicas; only the prepared replicas get V2 until the successor is armed"
+    return (← hold)
+  let keys := match gate with | .only ks => some ks | _ => keys
+  let stillLeader ← match ← holdLeaseNow leaseName ns identity with
+    | .ok held => pure held
+    | .error e =>
+      IO.eprintln s!"[flare-operator] lease fence ({why}): getLease failed ({e}); v{v} held for the next pass"
+      pure false
+  if !stillLeader then
+    IO.eprintln s!"[flare-operator] LEASE FENCE ({why}): the lease was not confirmed (another holder, or the renew failed or answered late — see the LEASE CHECK line); v{v} held for retry"
+    hold
+  else
+  let persisted ← if persistedCovers (← persistedVersionRef.get) v then pure true
+    else match ← updateFlaredConfigMap s!"{crName}-node-map" ns (serializeNodeMap st) with
+      | .ok () =>
+        persistedVersionRef.modify (max v)
+        pure true
+      | .error e =>
+        IO.eprintln s!"[flare-operator] PERSIST FENCE ({why}): could not persist v{v} ({e}); held for retry"
+        pure false
+  if !persisted then hold
+  else
+  match ← tryBeginPublication v with
+  | none =>
+    IO.eprintln s!"[flare-operator] topology send of v{v} ({why}) SKIPPED: a registration is being answered; the next pass publishes the live map"
+    hold
+  | some gate =>
+    try
+      let live := (← stateRef.get).nodeMapVersion
+      if !snapshotStillLive v live then
+        IO.eprintln s!"[flare-operator] topology send of v{v} ({why}) SKIPPED: the live map moved to v{live}; the next pass publishes it"
+        hold
+      else
+        match keys with
+        | some ks =>
+          -- history continuation: the map goes to the prepared replicas only;
+          -- the full broadcast of the version stays with the handover's
+          -- promoting step (and the pass), so the pending flag is not touched
+          IO.eprintln s!"[flare-operator] topology changed ({why}): sending v{v} to {ks} only"
+          broadcastTopologyToPods crName ns v st.getNodes ks
+        | none =>
+          let pendingBefore ← pendingBroadcastRef.get
+          IO.eprintln s!"[flare-operator] topology changed ({why}): broadcasting v{v} now"
+          let confirmed ← broadcastTopologyToAllPods crName ns v st.getNodes
+          recordTopologyBroadcast metrics
+          updateNodeMapVersion metrics v
+          pendingBroadcastRef.set (pendingTopologyAfterAttempt pendingBefore v confirmed)
+          pure confirmed
+    finally
+      endPublication gate
+
+private def publishLiveMap (stateRef : IO.Ref FlareClusterState)
+    (pendingBroadcastRef : IO.Ref (Option Nat)) (metrics : OperatorMetrics)
+    (leaseName identity crName ns : String) (why : String) : IO Bool :=
+  publishLiveMapTo stateRef pendingBroadcastRef metrics leaseName identity crName ns why none
+
+/-- TEST SEAM (SAF-08): with FLARE_TEST_PROMOTION_BARRIER=<dir> and
+    <dir>/promote-arm present, a pass that is about to commit a promotion
+    writes the promoted keys to <dir>/promote-reached, consumes the arm file
+    and waits (≤ 60 s) for <dir>/promote-release. The E2E restarts or
+    replaces exactly that node while the decision is held. Unset in
+    production: one getEnv. -/
+private def promotionBarrier (keys : List String) : IO Unit := do
+  match ← IO.getEnv "FLARE_TEST_PROMOTION_BARRIER" with
+  | none => pure ()
+  | some dir =>
+    let arm : System.FilePath := dir ++ "/promote-arm"
+    if !(← arm.pathExists) then pure ()
+    else
+      try IO.FS.writeFile (dir ++ "/promote-reached") (String.intercalate "\n" keys ++ "\n") catch _ => pure ()
+      try IO.FS.removeFile arm catch _ => pure ()
+      IO.eprintln s!"[flare-operator] TEST SEAM: promotion of {keys} held before its identity check"
+      let release : System.FilePath := dir ++ "/promote-release"
+      let mut released := false
+      for _ in [0:600] do
+        if (← release.pathExists) then
+          released := true
+          break
+        IO.sleep 100
+      IO.eprintln s!"[flare-operator] TEST SEAM: promotion {if released then "released" else "timed out after 60s"}"
+      try IO.FS.removeFile release catch _ => pure ()
+      try IO.FS.removeFile (dir ++ "/promote-reached") catch _ => pure ()
+
+/-- Test seam (`FLARE_TEST_PRECOMMIT_BARRIER`, a directory; inert without
+    it): stops a pass that is about to promote AFTER its candidates were read
+    and classified and BEFORE the commit re-reads them, so a test can change a
+    candidate's state in that window. Same protocol as preSendBarrier: engages
+    only when `<dir>/arm` exists, writes the promoted keys to `<dir>/reached`,
+    disarms, waits for `<dir>/release` at most 120 s. -/
+private def preCommitBarrier (promoted : List String) : IO Unit := do
+  match ← IO.getEnv "FLARE_TEST_PRECOMMIT_BARRIER" with
+  | none => pure ()
+  | some dir =>
+    let arm : System.FilePath := dir ++ "/arm"
+    if !(← arm.pathExists) then return
+    let release : System.FilePath := dir ++ "/release"
+    IO.eprintln s!"[flare-operator] TEST BARRIER: holding before the promotion commit re-reads {promoted}"
+    try IO.FS.writeFile (dir ++ "/reached") (String.intercalate "\n" promoted ++ "\n") catch _ => pure ()
+    try IO.FS.removeFile arm catch _ => pure ()
+    for _ in [0:1200] do
+      if (← release.pathExists) then break
+      IO.sleep 100
+    IO.eprintln s!"[flare-operator] TEST BARRIER: released before the promotion commit"
+
+
+/-- SAF-08: commit the FSM's state only if every node it PROMOTES is still
+    the incarnation that was observed this pass. Readiness and stats are
+    snapshots; a flared restart or a same-name replacement after them would
+    otherwise be crowned on the old process's standing. On a mismatch the
+    whole pass is dropped (not committed, not persisted); the next pass
+    recomputes from fresh observations. -/
+private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs : FlareClusterState)
+    (rb : ReadBalanceSpec) (standby withheld : List String) (ns : String) : IO Unit := do
+  if (← promotionAbortedRef.get) then return
+  let cur ← stateRef.get
+  let promoted := (ucs.nodeMap.filter fun kv =>
+    kv.2.role == FlareRole.Master && (cur.lookupNode kv.1).map (·.role) != some FlareRole.Master).map Prod.fst
+  if !promoted.isEmpty then
+    let r3w ← r3WithheldRef.get
+    let blocked := promoted.filter r3w.contains
+    if !blocked.isEmpty then
+      IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {blocked}: its stats could not be read completely on this pass (R3 Unknown) — a copy that cannot be confirmed is not promoted; nothing from this pass is committed, the next pass reads again"
+      promotionAbortedRef.set true
+      return
+    -- decision 2026-10-08: promote only a candidate classified promotable on
+    -- THIS pass, whose pod, flared process and copy are still the ones read
+    preCommitBarrier promoted
+    let ev ← promotionEvidenceRef.get
+    -- review 2026-10-08: no pass-type bypass. The ONLY exception is the
+    -- first master of a partition no copy has held (first build, a new
+    -- partition). Any other promotion is of an existing copy and needs a
+    -- valid observation from THIS pass: the reading pass's evidence, or —
+    -- on a pass that did not read the candidates — a read and a
+    -- classification made here, at commit.
+    let riskPass ← promotionRiskPassRef.get
+    let members := cur.nodeMap.map fun (_, n) =>
+      (n.role == FlareRole.Master || n.role == FlareRole.Slave, n.partition, n.lastMasterOf)
+    let mut checked : List String := []
+    for k in promoted do
+      let part := ((ucs.lookupNode k).map (·.partition)).getD (-1)
+      let wasProxyOrNew := match cur.lookupNode k with
+        | none => true
+        | some n => n.role == FlareRole.Proxy
+      if PromotionEvidence.firstMasterOfNewPartition wasProxyOrNew members part then
+        -- no copy of the partition has been mastered (nothing of its history
+        -- to read), but the candidate's OWN copy may be a restored copy of
+        -- another partition / routing layout (restore-isolated 5): read it
+        let replyNow ← match ← Bridge.queryPodStats (extractPodName k) ns "stats" with
+          | .ok out => pure (some out)
+          | .error _ => pure none
+        let expected := PromotionEvidence.bindingFor part.toNat (← desiredPartitionsRef.get) cur.partitionSize
+        match replyNow with
+        | none =>
+          IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: the first master of partition {part}, but its copy could not be read (restore provenance unknown) — nothing from this pass is committed, the next pass reads again"
+          promotionAbortedRef.set true
+          return
+        | some out =>
+          let st := PromotionEvidence.parseStats out
+          match (if st.complete then PromotionEvidence.bindingConflict st.partitionBinding st.restoredUnverified expected else some "stats incomplete") with
+          | some why =>
+            IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: the first master of partition {part} — restore provenance: {why} — nothing from this pass is committed"
+            promotionAbortedRef.set true
+            return
+          | none =>
+            IO.eprintln s!"[flare-operator] promotion of {k}: the first master of partition {part}, which no copy has held (its own copy read: binding {st.partitionBinding.getD "-"}, restored {st.restoredUnverified.getD 0})"
+      else if !riskPass then
+        let podNow ← podIdentityNow (extractPodName k) ns
+        let ready := match ← kubectl ["get", "pod", extractPodName k, "-n", ns, "-o",
+            "jsonpath={.status.conditions[?(@.type==\"Ready\")].status}"] with
+          | .ok o => o.trim == "True"
+          | .error _ => false
+        let replyNow ← match ← Bridge.queryPodStats (extractPodName k) ns "stats" with
+          | .ok out => pure (some out)
+          | .error _ => pure none
+        let n? := cur.lookupNode k
+        let hist ← recordedHistory part
+        let nPartsB ← desiredPartitionsRef.get
+        let proven := (← handoverProvenRef.get).contains k
+          && (← handoverBindingHolds k (PromotionEvidence.bindingOf (podNow.map (·.1)) replyNow))
+        let obs : PromotionEvidence.Observed := {
+          mapPrepare := (n?.map (·.state)) == some FlareState.Prepare
+          mapActive := (n?.map (·.state)) == some FlareState.Active
+          podReady := ready
+          -- a handover's Master/Down placeholder is not a present master
+          partitionHasMaster := cur.nodeMap.any fun kv => kv.2.role == FlareRole.Master && kv.2.partition == part
+            && (!proven || kv.2.state == FlareState.Active)
+          lastMasterHistory := hist
+          isLastMasterHolder := (n?.map (·.lastMasterOf)) == some part
+          expectedBinding := if part ≥ 0 then some (PromotionEvidence.bindingFor part.toNat nPartsB cur.partitionSize) else none
+          untrackedLastMaster := ← untrackedLastMaster cur part
+          attributedRejoin := (n?.map fun n => PromotionEvidence.isAttributedRejoin (n.role == FlareRole.Slave) (n.state == FlareState.Prepare) n.partition n.lastMasterOf n.formerSlaveOf).getD false }
+        let cls := PromotionEvidence.classify replyNow obs
+        IO.eprintln s!"[flare-operator] PROMOTION EVIDENCE (read at commit, a pass that did not read the candidates): {k}={cls.label} [boot {(PromotionEvidence.bindingOf none replyNow).bootId.getD "?"}]"
+        -- A3b: a committed replica replacing a stopped successor holds the
+        -- handover's continued history (master_id, E'), not the recorded E
+        let contHist ← handoverContinuedHistoryRef.get
+        let continued := proven && match replyNow with
+          | some out => contHist.any fun (kk, m, ep) =>
+              kk == k && statStr out "rocksdb_master_id" == some m && statStr out "rocksdb_source_epoch" == some ep
+          | none => false
+        let allows := if proven then PromotionEvidence.handoverCommitAllows cls || continued else PromotionEvidence.commitTimeAllows cls
+        if continued && !PromotionEvidence.handoverCommitAllows cls then
+          IO.eprintln s!"[flare-operator] promotion of {k}: {cls.label} at commit, accepted: it holds the continued history of its handover (committed replica replacing a stopped successor)"
+        else if proven && allows && !PromotionEvidence.commitTimeAllows cls then
+          IO.eprintln s!"[flare-operator] promotion of {k}: {cls.label} at commit, accepted for an ordered handover whose drain was proven clean"
+        if podNow.isNone || !allows then
+          IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: an existing copy promoted on a pass that did not read it, read at commit as {cls.label}{if podNow.isNone then " (pod unreadable)" else ""} — nothing from this pass is committed, the next pass reads again"
+          promotionAbortedRef.set true
+          return
+        checked := checked ++ [k]
+    for k in promoted.filter (fun k => riskPass && !checked.contains k && !(PromotionEvidence.firstMasterOfNewPartition
+        (match cur.lookupNode k with | none => true | some n => n.role == FlareRole.Proxy) members
+        (((ucs.lookupNode k).map (·.partition)).getD (-1)))) do
+      let entry := ev.find? (·.1 == k)
+      let podNow ← podIdentityNow (extractPodName k) ns
+      let replyNow ← match ← Bridge.queryPodStats (extractPodName k) ns "stats" with
+        | .ok out => pure (some out)
+        | .error _ => pure none
+      let now := PromotionEvidence.bindingOf (podNow.map (·.1)) replyNow
+      let (ok, why) := PromotionEvidence.commitAllows (entry.map (·.2.1)) ((entry.map (·.2.2)).getD { podUid := none, bootId := none, copyId := none }) now
+      if !ok then
+        IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: {why} — nothing from this pass is committed, the next pass reads again"
+        promotionAbortedRef.set true
+        return
+      -- the identity alone does not keep the reason: the same process and
+      -- copy may have started a rebuild or a re-validation since it was read
+      match entry, (← promotionObservedRef.get).lookup k with
+      | some (_, passCls, _), some obs =>
+        let (ok2, why2) := PromotionEvidence.reclassifyAllows passCls (PromotionEvidence.classify replyNow obs)
+        if !ok2 then
+          IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: {why2} — nothing from this pass is committed, the next pass reads again"
+          promotionAbortedRef.set true
+          return
+      | _, _ =>
+        IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: no observation of it on this pass to classify it again — nothing from this pass is committed"
+        promotionAbortedRef.set true
+        return
+      if (entry.map (·.2.1)) == some .lagging then
+        IO.eprintln s!"[flare-operator] PROMOTION of a LAGGING copy (same history as the last master, behind it): {k} — a last resort, NOT a safe promotion; a write it never received is not in its copy (whether any exists is NOT measured)"
+    promotionBarrier promoted
+    let observed ← podIdentityRef.get
+    for k in promoted do
+      let obs := observed.lookup k
+      let now ← podIdentityNow (extractPodName k) ns
+      -- Identity needs BOTH halves observed both times: a missing restart
+      -- count on both sides is not evidence of the same process.
+      let same := match obs, now with
+        | some (u0, some r0), some (u1, some r1) => !u0.isEmpty && u0 == u1 && r0 == r1
+        | _, _ => false
+      if !same then
+        IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: its pod changed after it was observed (observed {obs}, now {now}) — a restarted or replaced copy is not promoted on the old one's standing; nothing from this pass is committed, the next pass re-decides"
+        promotionAbortedRef.set true
+        return
+  -- Copy retention §10: one rebuild per partition and one in the cluster.
+  -- A NEW Proxy -> Slave(Prepare) assignment beyond that is held (the node
+  -- stays a Proxy this pass). Rejoins over TCP and master reconstructions
+  -- are not gated (RebuildConcurrency).
+  -- R7: count what the nodes' own stats report running too (map=Active
+  -- members catching up, reconstructions the map does not show) — read only
+  -- when this pass makes a new assignment
+  let needsGate := ucs.nodeMap.any fun (k, a) => RebuildConcurrency.newAssignment (cur.lookupNode k) a
+  let (running, parkedNow) ← if needsGate then pure (RebuildConcurrency.reconcile (← parkedIdleRef.get) (← rebuildObservations cur ns))
+    else pure ([], ← parkedIdleRef.get)
+  if needsGate && !running.isEmpty then
+    IO.eprintln s!"[flare-operator] rebuild concurrency: running (or unreadable) by a fresh read: {running}; parked: {parkedNow}"
+  let gated := RebuildConcurrency.gate cur ucs 1 1 running parkedNow
+  let heldKeys := gated.held.map Prod.fst
+  if heldKeys != (← rebuildHeldRef.get) then
+    rebuildHeldRef.set heldKeys
+    for (k, why) in gated.held do
+      IO.eprintln s!"[flare-operator] REBUILD HELD: {k} stays a Proxy for now — {why} (copy retention: one rebuild per partition and per cluster)"
+  -- AUTHORITATIVE HISTORY (docs/design-authoritative-history.md), at the
+  -- commit boundary, with the store reloaded and every node read FRESH:
+  --  * a NEW rebuild assignment copies from its partition master: held unless
+  --    that master is the record's holder (its copy and history), healthy, no
+  --    intent pending, no hold, and not empty onto a copy that holds data;
+  --  * every promotion of an EXISTING copy in a tracked partition needs the
+  --    partition KNOWN, no hold, no pending intent; its intent (id, expected
+  --    version) is PERSISTED before this commit and the committed map carries
+  --    the id. A failed write, an unknown history or an unreadable binding
+  --    aborts the whole commit.
+  let crName ← historyCrRef.get
+  let nParts := ((cur.nodeMap ++ ucs.nodeMap).foldl (fun a kv => max a (kv.2.partition + 1)) (0 : Int)).toNat
+  -- The record as loaded at the start of THIS pass (ensureHistoryStore; our
+  -- own writes update it) is used for the rebuild gate; a commit that
+  -- promotes, or a copy older than 5 s, reads it again. Reading it on every
+  -- commit cost ~1 s each, 7-8 commits a pass (local run, 0db2229+timing):
+  -- passes outlasted the 15 s lease and every history write was fenced.
+  let promotes := gated.state.nodeMap.any fun kv =>
+    kv.2.role == FlareRole.Master && (cur.lookupNode kv.1).map (·.role) != some FlareRole.Master
+  let fresh := (← IO.monoMsNow) - (← historyLoadedAtRef.get) < 5000 && (← historyLoadedAtRef.get) != 0
+  let store ← if crName.isEmpty then pure none
+    else if !promotes && fresh then historyStoreRef.get
+    else timedHistory "commit: loadHistory" (loadHistory crName ns nParts)
+  let gated ← do
+    let mut nodeMap := gated.state.nodeMap
+    for (k, a) in gated.state.nodeMap do
+      if RebuildConcurrency.newAssignment (cur.lookupNode k) a && a.partition ≥ 0 then
+        let src := (gated.state.nodeMap.find? fun kv => kv.2.role == FlareRole.Master && kv.2.partition == a.partition).map Prod.fst
+        let (ok, why) ← match store, src with
+          | some st, some m =>
+            if !AuthoritativeHistory.writable st then pure (false, "the history record is not usable")
+            -- read the source FRESH only when the record decides on it (no
+            -- read for an untracked / unknown / held partition)
+            else
+              let srcSeen ← if AuthoritativeHistory.rebuildNeedsSource st a.partition.toNat then seeFresh m ns else pure .unreadable
+              pure (AuthoritativeHistory.rebuildAllowed st a.partition.toNat m srcSeen .unreadable)
+          | none, _ => pure (false, "the authoritative history could not be loaded")
+          | _, none => pure (false, "the partition has no master to rebuild from")
+        if !ok then
+          IO.eprintln s!"[flare-operator] REBUILD HELD (history): {k} is not assigned a rebuild from {src} — {why}"
+          match cur.lookupNode k with
+          | some b => nodeMap := nodeMap.map fun kv => if kv.1 == k then (k, b) else kv
+          | none => pure ()
+    pure { gated with state := FlareClusterState.rebuildPartitionMap { gated.state with nodeMap := nodeMap } }
+  let promotedFinal := (gated.state.nodeMap.filter fun kv =>
+    kv.2.role == FlareRole.Master && (cur.lookupNode kv.1).map (·.role) != some FlareRole.Master).map Prod.fst
+  let membersH := cur.nodeMap.map fun (_, n) => (n.role == FlareRole.Master || n.role == FlareRole.Slave, n.partition, n.lastMasterOf)
+  let existingH := promotedFinal.filter fun k =>
+    !PromotionEvidence.firstMasterOfNewPartition
+      (match cur.lookupNode k with | none => true | some n => n.role == FlareRole.Proxy) membersH
+      (((gated.state.lookupNode k).map (·.partition)).getD (-1))
+  let mut transitionIds : List String := []
+  if !existingH.isEmpty then
+    match store with
+    | none =>
+      IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {existingH}: the authoritative history could not be loaded — nothing from this pass is committed"
+      promotionAbortedRef.set true
+      return
+    | some st0 =>
+      let mut st := st0
+      for k in existingH do
+        let p := (((gated.state.lookupNode k).map (·.partition)).getD (-1))
+        if p < 0 then continue
+        if !st.tracked p.toNat then continue   -- untracked partition: previous behaviour
+        -- a first build's partition never recorded, every copy empty this pass
+        -- (41211110343: the first master restarted before its history was
+        -- recorded and came back a replica): seated as a first build's master
+        let copiesP := (k :: (cur.nodeMap.filter fun (_, n) =>
+            ((n.role == FlareRole.Master || n.role == FlareRole.Slave) && n.partition == p) || n.lastMasterOf == p).map Prod.fst).eraseDups
+        let mut passEvAll := (← promotionEvidenceRef.get)
+        if AuthoritativeHistory.firstBuildUnrecordedEmptyCandidate st p.toNat copiesP passEvAll then
+          -- TEST SEAM (FLARE_TEST_STALE_FIRST_BUILD_EVIDENCE, unset in
+          -- production): once per process the candidate's pass evidence is
+          -- given another boot id, as if it was read from an earlier flared
+          -- process; the commit-time comparison must refuse it
+          if ((← IO.getEnv "FLARE_TEST_STALE_FIRST_BUILD_EVIDENCE").getD "") == "1" && !(← staleFirstBuildSeamUsedRef.get) then
+            staleFirstBuildSeamUsedRef.set true
+            passEvAll := passEvAll.map fun (key, c, b) => if key == k then (key, c, { b with bootId := some "test-seam-stale" }) else (key, c, b)
+            IO.eprintln s!"[flare-operator] TEST SEAM: the pass evidence of {k} carries a stale boot id (FLARE_TEST_STALE_FIRST_BUILD_EVIDENCE)"
+          -- every copy is read again at the commit and must still be EMPTY
+          -- with the same pod UID, boot id and copy id (review of 89cf9d9)
+          let mut freshAll : List (String × PromotionEvidence.Class × PromotionEvidence.Binding) := []
+          for c in copiesP do
+            let fr ← readFresh c ns
+            let nc? := cur.lookupNode c
+            let obsC : PromotionEvidence.Observed := ((← promotionObservedRef.get).lookup c).getD {
+              mapPrepare := (nc?.map (·.state)) == some FlareState.Prepare, mapActive := (nc?.map (·.state)) == some FlareState.Active,
+              podReady := true, partitionHasMaster := false, lastMasterHistory := none }
+            freshAll := freshAll ++ [(c, PromotionEvidence.classify (fr.map (·.2)) obsC, PromotionEvidence.bindingOf (fr.map (·.1)) (fr.map (·.2)))]
+          if AuthoritativeHistory.firstBuildUnrecordedEmpty st p.toNat copiesP passEvAll freshAll then
+            IO.eprintln s!"[flare-operator] promotion of {k}: partition {p} of this first build has no recorded history and every copy reads empty this pass and again at the commit with the same pod, boot and copy ({copiesP}) — seated as a first build's master; its history is recorded from it"
+            continue
+          else
+            let fmtEv := fun (l : List (String × PromotionEvidence.Class × PromotionEvidence.Binding)) =>
+              l.map fun (key, c, b) => s!"{key}={c.label} {repr b}"
+            IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: the first build exception for partition {p} is REJECTED — a copy is not empty at the commit or its pod / boot / copy changed since this pass's reading (pass {fmtEv (passEvAll.filter fun e => copiesP.contains e.1)}; commit {fmtEv freshAll}) — nothing from this pass is committed"
+            promotionAbortedRef.set true
+            return
+        match st.part p.toNat with
+        | some (.known rec none) =>
+          -- the fresh read that makes the intent is CLASSIFIED again and bound
+          -- to the evidence that chose this candidate (review P1-5)
+          let fresh ← readFresh k ns
+          let proven := (← handoverProvenRef.get).contains k
+            && (← handoverBindingHolds k (PromotionEvidence.bindingOf (fresh.map (·.1)) (fresh.map (·.2))))
+          -- a proven handover is judged at commit alone (no pass evidence:
+          -- that was read while the old master was still the present one)
+          let passEv0 := (← promotionEvidenceRef.get).find? (·.1 == k)
+          let passEv := if proven then none else passEv0
+          let obsK0 := (← promotionObservedRef.get).lookup k
+          let obsK := if proven then none else obsK0
+          let n? := cur.lookupNode k
+          let obsNow : PromotionEvidence.Observed := obsK.getD {
+            mapPrepare := (n?.map (·.state)) == some FlareState.Prepare, mapActive := (n?.map (·.state)) == some FlareState.Active,
+            podReady := true, partitionHasMaster := false, lastMasterHistory := some (rec.hist.masterId, rec.hist.epoch) }
+          let freshCls := PromotionEvidence.classify (fresh.map (·.2)) obsNow
+          let consistent := match passEv with
+            | some (_, passCls, b0) =>
+              (PromotionEvidence.reclassifyAllows passCls freshCls).1
+                && b0 == PromotionEvidence.bindingOf (fresh.map (·.1)) (fresh.map (·.2))
+            | none => if proven then PromotionEvidence.handoverCommitAllows freshCls else PromotionEvidence.commitTimeAllows freshCls
+          -- A3b: the replacement of a stopped successor holds the handover's
+          -- continued history (master_id, E'), exactly — as at the commit read
+          let contHistI ← handoverContinuedHistoryRef.get
+          let continuedI := proven && match fresh with
+            | some (_, out) => contHistI.any fun (kk, m, ep) =>
+                kk == k && statStr out "rocksdb_master_id" == some m && statStr out "rocksdb_source_epoch" == some ep
+            | none => false
+          let consistent := consistent || continuedI
+          let seenK := match fresh with
+            | some (u, r) => seenOf u (some r)
+            | none => .unreadable
+          if !consistent then
+            IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: its fresh read at the history intent is {freshCls.label}, not the reading that chose it — nothing from this pass is committed"
+            promotionAbortedRef.set true
+            return
+          match seenK with
+          | .modern b _ true _ _ _ =>
+            let iid := s!"t{gated.state.nodeMapVersion}-p{p}-{(← IO.monoNanosNow) % 1000000}"
+            let it : AuthoritativeHistory.Intent := { id := iid, partition := p.toNat, kind := "promotion", target := k, binding := b, fromGen := rec.gen, fromHist := rec.hist, expectedVersion := gated.state.nodeMapVersion }
+            -- A3b: the pending intent of a successor the handover fenced out
+            -- (its stop proven, this copy replaces it) is superseded here, in
+            -- the same store write as the new intent: a refused promotion
+            -- ends the pass before observeHistory could drop it (42156735060)
+            let fenced := (← handoverRef.get).entries.filter fun e =>
+              e.partition == p.toNat && e.phase == .promoting && e.successor == k && !e.fencedOut.isEmpty
+            if let some old := st.intentFor p.toNat then
+              if fenced.any (·.fencedOut == old.target) then
+                IO.eprintln s!"[flare-operator] history intent {old.id} of {old.target} superseded: its stop is proven and {k} replaces it"
+                st := { st with intents := st.intents.filter (·.id != old.id) }
+            match AuthoritativeHistory.beginIntent st it with
+            | some st' =>
+              st := st'
+              transitionIds := transitionIds ++ [iid]
+            | none =>
+              IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: partition {p} already has a pending history intent — nothing from this pass is committed"
+              promotionAbortedRef.set true
+              return
+          | _ =>
+            IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: its fresh copy at the history intent is not a modern, HEALTHY copy (unreadable / legacy / unhealthy) — nothing from this pass is committed"
+            promotionAbortedRef.set true
+            return
+        | some (.known _ (some hold)) =>
+          IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: partition {p} is HELD ({hold}) — RUNBOOK #history-held"
+          promotionAbortedRef.set true
+          return
+        | other =>
+          IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: partition {p}'s authoritative history is {match other with | some (.unknown c w) => s!"{c.label} ({w})" | _ => "not recorded"} — held (never treated as a first build or as empty)"
+          promotionAbortedRef.set true
+          return
+      if !transitionIds.isEmpty then
+        if !(← persistHistory crName ns st) then
+          IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {existingH}: the history intent could not be persisted — nothing from this pass is committed"
+          promotionAbortedRef.set true
+          return
+        IO.eprintln s!"[flare-operator] AUTHORITATIVE HISTORY: promotion intent(s) {transitionIds} persisted for {existingH} (before the map commit)"
+  -- the last 16 ids, but NEVER an id whose intent is still pending (dropping
+  -- it would make a real commit look like it never happened)
+  let pendingIds := ((← historyStoreRef.get).map (fun st => st.intents.map (·.id))).getD []
+  let gated := { gated with state := { gated.state with transitions := AuthoritativeHistory.keepTransitions (cur.transitions ++ transitionIds) pendingIds } }
+  -- TEST SEAM (FLARE_TEST_POSTINTENT_BARRIER, a directory; inert without it):
+  -- stop AFTER the intent is persisted and BEFORE the map commit (an operator
+  -- restart in this window must leave the intent provably uncommitted)
+  if !transitionIds.isEmpty then
+    if let some dir ← IO.getEnv "FLARE_TEST_POSTINTENT_BARRIER" then
+      let arm : System.FilePath := dir ++ "/arm"
+      if ← arm.pathExists then
+        IO.eprintln s!"[flare-operator] TEST BARRIER: holding after the history intent {transitionIds}, before the map commit"
+        try IO.FS.writeFile (dir ++ "/reached") (String.intercalate "\n" transitionIds ++ "\n") catch _ => pure ()
+        try IO.FS.removeFile arm catch _ => pure ()
+        for _ in [0:1200] do
+          if ← (System.FilePath.mk (dir ++ "/release")).pathExists then break
+          IO.sleep 100
+  let promotedNow := (gated.state.nodeMap.filter fun kv =>
+    kv.2.role == FlareRole.Master && (cur.lookupNode kv.1).map (·.role) != some FlareRole.Master).map Prod.fst
+  if !promotedNow.isEmpty then
+    let observed ← podIdentityRef.get
+    IO.eprintln s!"[flare-operator] PROMOTION committed: {promotedNow.map fun k => s!"{k} (pod incarnation observed {observed.lookup k})"}"
+  let _ ← commitClusterState stateRef ver gated.state rb standby withheld
+  pure ()
+
+/-- FSM driver loop helper.
+    The FSM measure proves termination, but Lean can't see it through IO. -/
+private partial def runReconcileFSMLoop
+    (s : K8sReconciler.FlareReconcileState)
+    (stateRef : IO.Ref FlareClusterState)
+    (migrationRef : IO.Ref MigrationPhase)
+    (graceCyclesRef : IO.Ref Nat)
+    (trippedRef : IO.Ref Bool)
+    (drainBlockedRef : IO.Ref Nat)
+    (unreadyCyclesRef : IO.Ref (List (String × Nat)))
+    (podKeysRef : IO.Ref (List String))
+    (podAddrsRef : IO.Ref (List (String × String)))
+    (heldKeys : List String)
+    (crName ns : String) : IO Unit := do
+  if K8sReconciler.flareReconcileTerminalBool s.reconcileStep then
+    -- Record whether the breaker HELD during this pass (for hysteresis input
+    -- next cycle + the flare_operator_circuit_breaker_tripped gauge). NOT the
+    -- terminal step alone: a tripped pass that performed a masterless
+    -- RecoveryRefill ends in Done, yet must still count as tripped so the
+    -- reset keeps requiring healthy% ≥ resetThresholdPercent.
+    trippedRef.set (s.breakerHeld || s.reconcileStep == .EmergencyPaused)
+    -- CRITICAL drain-guard signal for the flare_operator_drain_no_successor
+    -- gauge (draining masters kept because no promotable successor exists).
+    drainBlockedRef.set s.drainBlockedCount
+    -- what the refill saw this pass, for the masterless CRITICAL summary
+    refillSeenRef.set (s.livePodKeys, s.dataBearingKeys, s.knownEmptyKeys)
+    -- Terminal state reached
+    match s.reconcileStep with
+    | .Done =>
+      -- Success: update refs for next cycle
+      graceCyclesRef.set s.graceCycles
+      if let some phase := s.nextMigrationPhase then
+        migrationRef.set phase
+      pure ()
+    | .Error msg =>
+      -- Error: log and gracefully exit (operator restarts FSM next tick)
+      IO.eprintln s!"[flare-operator] FSM error: {msg}"
+      pure ()
+    | .EmergencyPaused =>
+      -- Circuit breaker tripped and nothing was refillable this pass. The FSM
+      -- is rebuilt from Init next tick, so the breaker re-evaluates every 5s:
+      -- masterless-refill recovery runs via RecoveryRefill as returning nodes
+      -- register, and the trip auto-resets once healthy% reaches the reset
+      -- threshold (autoResetEnabled=false keeps it held until pod restart).
+      IO.eprintln "[flare-operator] ⚠️  Operator in EMERGENCY PAUSE state (failover/reassignment paused; masterless-refill recovery active)"
+      IO.eprintln "[flare-operator] ⚠️  Surviving nodes continue serving traffic"
+      pure ()
+    | _ =>
+      -- Other terminal states (shouldn't happen)
+      pure ()
+  else
+    -- Non-terminal: get current cluster state and transition
+    let cs ← stateRef.get
+    let csVersion := cs.nodeMapVersion
+    let (newState, reqOpt, effects) := K8sReconciler.flareReconcileCore .NoResponse s cs
+
+    -- Execute side effects
+    executeEffects effects crName ns stateRef migrationRef
+
+    -- Execute K8s request if present
+    match reqOpt with
+    | some req =>
+      let resp ← executeK8sRequest req crName ns stateRef unreadyCyclesRef podKeysRef podAddrsRef heldKeys
+      let cs2 ← stateRef.get
+      let cs2Version := cs2.nodeMapVersion
+      let (nextState, nextReqOpt, moreEffects) := K8sReconciler.flareReconcileCore resp newState cs2
+      executeEffects moreEffects crName ns stateRef migrationRef
+
+      -- Update cluster state if FSM produced a new one (merge onto the live ref so
+      -- a TCP-driven Prepare→Active is preserved; see commitClusterState).
+      if let some ucs := nextState.updatedClusterState then
+        let rb := (nextState.cachedCrd.map (·.spec.readBalance)).getD {}
+        commitChecked stateRef cs2Version ucs rb nextState.standbyNodeKeys (← followRef.get).classified.readWithheld ns
+
+      -- CRITICAL FIX: Check if FSM issued another request.
+      -- If yes, nextState is in a "waiting for response" state and must NOT be called
+      -- with .NoResponse. We need to execute the request first.
+      match nextReqOpt with
+      | some nextReq =>
+        -- FSM issued another request - execute it before recursing
+        let nextResp ← executeK8sRequest nextReq crName ns stateRef unreadyCyclesRef podKeysRef podAddrsRef heldKeys
+        let cs3 ← stateRef.get
+        let cs3Version := cs3.nodeMapVersion
+        let (finalState, _, finalEffects) := K8sReconciler.flareReconcileCore nextResp nextState cs3
+        executeEffects finalEffects crName ns stateRef migrationRef
+        if let some ucs := finalState.updatedClusterState then
+          let rb := (finalState.cachedCrd.map (·.spec.readBalance)).getD {}
+          commitChecked stateRef cs3Version ucs rb finalState.standbyNodeKeys (← followRef.get).classified.readWithheld ns
+        runReconcileFSMLoop finalState stateRef migrationRef graceCyclesRef trippedRef drainBlockedRef unreadyCyclesRef podKeysRef podAddrsRef heldKeys crName ns
+      | none =>
+        -- No new request - safe to recurse (nextState is in an "action" state)
+        runReconcileFSMLoop nextState stateRef migrationRef graceCyclesRef trippedRef drainBlockedRef unreadyCyclesRef podKeysRef podAddrsRef heldKeys crName ns
+    | none =>
+      -- No request: update cluster state if FSM produced one and continue
+      if let some ucs := newState.updatedClusterState then
+        let rb := (newState.cachedCrd.map (·.spec.readBalance)).getD {}
+        commitChecked stateRef csVersion ucs rb newState.standbyNodeKeys (← followRef.get).classified.readWithheld ns
+      runReconcileFSMLoop newState stateRef migrationRef graceCyclesRef trippedRef drainBlockedRef unreadyCyclesRef podKeysRef podAddrsRef heldKeys crName ns
+
+/-- Run the FSM-driven reconcile loop.
+    Repeatedly calls flareReconcileCore, executing requests/effects until Done/Error.
+    Implements requirement #5: Error states don't crash the operator; they're logged
+    and the FSM restarts from Init on the next tick. -/
+private def runReconcileDriver (stateRef : IO.Ref FlareClusterState)
+    (migrationRef : IO.Ref MigrationPhase) (graceCyclesRef : IO.Ref Nat)
+    (trippedRef : IO.Ref Bool)
+    (drainBlockedRef : IO.Ref Nat)
+    (unreadyCyclesRef : IO.Ref (List (String × Nat)))
+    (podKeysRef : IO.Ref (List String))
+    (podAddrsRef : IO.Ref (List (String × String)))
+    (heldKeys : List String)
+    (crName ns : String) : IO Unit := do
+  promotionAbortedRef.set false
+  -- Wall-clock grace: the FSM keeps skipping dead detection and drain while
+  -- graceCycles > 0, and reads it as remaining seconds + 1.
+  let graceS ← startupGraceSeconds
+  let elapsedS := ((← IO.monoMsNow) - (← leaderSinceMsRef.get)) / 1000
+  let remaining := if elapsedS < graceS then graceS - elapsedS else 0
+  let prevGrace ← graceCyclesRef.get
+  graceCyclesRef.set (if remaining > 0 then remaining + 1 else 0)
+  if remaining == 0 && prevGrace > 0 then
+    IO.eprintln s!"[flare-operator] grace period over after {elapsedS}s: dead-node detection and graceful drain active"
+  let initialGrace ← graceCyclesRef.get
+  let initialPhase ← migrationRef.get
+  let waitS ← failoverWaitSeconds
+  let holdExpired ← masterlessExpired (← stateRef.get) waitS
+  let initialState : K8sReconciler.FlareReconcileState := {
+    graceCycles := initialGrace,
+    followHoldEnabled := waitS > 0,
+    followHoldExpiredParts := holdExpired,
+    currentMigrationPhase := initialPhase,
+    -- Seed the breaker hysteresis from the persistent ref: FSM state
+    -- resets every tick, so "was tripped last cycle" must ride in here.
+    wasTripped := (← trippedRef.get)
+  }
+
+  runReconcileFSMLoop initialState stateRef migrationRef graceCyclesRef trippedRef drainBlockedRef unreadyCyclesRef podKeysRef podAddrsRef heldKeys crName ns
+
+-- ===========================================================================
+-- FSM-Driven Reconcile (Complete with safety checks and metrics)
+-- ===========================================================================
+
+/-- Prepare-stuck watchdog threshold in reconcile cycles (5s each): 720 ≈ 1h.
+    Deliberately high by default (a 100GB+ dataset legitimately rebuilds for
+    hours); override with --prepare-stuck-cycles on small clusters where
+    minutes of Prepare already means "parked forever" (observed live: a
+    lost activation op). -/
+private def prepareStuckThresholdCycles : Nat := 720
+
+/-- The replica repair ledger's node keys, or `none` while the ledger is
+    unavailable (its status read failed and the in-memory ledger is only the
+    empty default): callers that must not act on a slave under repair treat
+    `none` as "cannot tell" and fail closed (review of 7738d8f). A request
+    not yet resolved to a node counts too (`ReplicaRepair.pendingNodeKeys`). -/
+private def repairKeysIfAvailable (availableRef : IO.Ref Bool) (ledgerRef : IO.Ref ReplicaRepair.Ledger)
+    (stateRef : IO.Ref FlareClusterState) : IO (Option (List String)) := do
+  if !(← availableRef.get) then return none
+  return some (ReplicaRepair.pendingNodeKeys (← ledgerRef.get) (← stateRef.get))
+
+/-- 2c. OPERATOR-SIDE REACHABILITY (spec 12, 2026-10-31), once per pass before
+    the FSM. Every Ready pod's flared port is probed (flarei: 1 s timeout, 5 s
+    interval, 3 failures in a row). The pure verdict (StateMachine/
+    UnreachableNode) names the nodes to treat as down and trips the GUARD when
+    NO probed node is reachable: then the operator's own side (k8s API,
+    network) is suspect and nothing is flagged. -/
+private def runReachabilityStep (crName ns : String) (stateRef : IO.Ref FlareClusterState)
+    (unreachCyclesRef : IO.Ref (List (String × Nat))) : IO Unit := do
+  -- flarei's interval between probes, NOT one per pass: passes run every
+  -- ~100 ms while a handover is in flight, and three failures there would
+  -- mark a node down in well under a second. Between probes the last
+  -- verdict (unreachableDownRef) stands.
+  let now ← IO.monoMsNow
+  let last ← reachProbedAtRef.get
+  if last != 0 && now - last < FlareOperator.UnreachableNode.monitorIntervalSec * 1000 then return
+  -- the probes go to the pods of a FRESH, successful listing of this pass
+  -- (review of ae8ac49: the driver's address list is the previous pass's; a
+  -- recreated pod's old IP fails and would mark the live node down). No
+  -- listing: no probe, no streak moves and no down decision this round.
+  -- TEST SEAM (FLARE_TEST_REACH_LIST_FAIL_FILE, unset in production): while
+  -- the named file exists the listing is treated as failed
+  let listFail ← match ← IO.getEnv "FLARE_TEST_REACH_LIST_FAIL_FILE" with
+    | some f => System.FilePath.pathExists f
+    | none => pure false
+  let listing ← if listFail then pure (.error "TEST SEAM: listing failure (FLARE_TEST_REACH_LIST_FAIL_FILE)") else Bridge.listFlaredPodsE crName ns
+  let pods ← match listing with
+    | .ok ps => pure ps
+    | .error e =>
+      IO.eprintln s!"[flare-operator] reachability: pod listing failed ({e}) — no probe and no down decision this round"
+      unreachableDownRef.set []
+      reachOkRef.set []
+      return
+  reachProbedAtRef.set now
+  let live := pods.filter (fun p => p.ready && !p.terminating && !p.ip.isEmpty)
+  let probeAddrs := live.map fun p => (Bridge.PodInfo.toNodeKey p, p.ip)
+  -- a streak belongs to one pod incarnation: a new pod UID under the key
+  -- starts it again (its failures were the old pod's)
+  let ids := live.map fun p => (Bridge.PodInfo.toNodeKey p, p.uid)
+  let prevIds ← reachPodIdRef.get
+  reachPodIdRef.set ids
+  unreachCyclesRef.modify fun l => FlareOperator.UnreachableNode.keepStreaksForSamePod l prevIds ids
+  let probeTasks ← probeAddrs.mapM fun (_, ip) =>
+    IO.asTask (prio := .dedicated) (Server.probeNodeReachable ip 12121 FlareOperator.UnreachableNode.monitorReadTimeoutMs)
+  -- a node marked down as unreachable is NotReady once it applies that map
+  -- (its readiness needs `active`), so the Ready filter above leaves it out;
+  -- it is probed too, for "reachable again" only (no streak, no verdict):
+  -- else it waited the whole stuck-down time (41275671570: ~13.5 min)
+  let downByReach ← downByReachRef.get
+  let backAddrs := (pods.filter fun p => !p.ready && !p.terminating && !p.ip.isEmpty
+      && downByReach.contains (Bridge.PodInfo.toNodeKey p)).map fun p => (Bridge.PodInfo.toNodeKey p, p.ip)
+  let backTasks ← backAddrs.mapM fun (_, ip) =>
+    IO.asTask (prio := .dedicated) (Server.probeNodeReachable ip 12121 FlareOperator.UnreachableNode.monitorReadTimeoutMs)
+  let mut probed : List (String × Bool) := []
+  for ((key, _), t) in probeAddrs.zip probeTasks do
+    let ok ← match ← IO.wait t with
+      | .ok b => pure b
+      | .error _ => pure true
+    probed := probed ++ [(key, ok)]
+  let mut backOk : List String := []
+  for ((key, _), t) in backAddrs.zip backTasks do
+    match ← IO.wait t with
+    | .ok true => backOk := backOk ++ [key]
+    | _ => pure ()
+  reachOkRef.set ((probed.filter (·.2)).map (·.1) ++ backOk)
+  let reachVerdict := FlareOperator.UnreachableNode.step (← unreachCyclesRef.get) probed (← stateRef.get)
+  unreachCyclesRef.set reachVerdict.streaks
+  -- a master waits while every Active slave of its partition is failing
+  -- probes too (no reachable successor yet; UnreachableNode.deferMasterDown)
+  let stNow ← stateRef.get
+  let deferred := reachVerdict.down.filter (FlareOperator.UnreachableNode.deferMasterDown stNow reachVerdict.streaks ·)
+  if !deferred.isEmpty then
+    IO.eprintln s!"[flare-operator] UNREACHABLE: master(s) {deferred} not marked down this round: every Active slave of the partition is failing operator probes too (no reachable successor yet)"
+  let reachVerdict := { reachVerdict with down := reachVerdict.down.filter (!deferred.contains ·) }
+  unreachableDownRef.set reachVerdict.down
+  downByReachRef.modify fun l => l ++ reachVerdict.down.filter (!l.contains ·)
+  reachGuardRef.set reachVerdict.guardTripped
+  if reachVerdict.guardTripped then
+    IO.eprintln s!"[flare-operator] CRITICAL: the operator cannot reach ANY of the {probed.length} flare node(s) it probed — treated as a k8s API / network problem on the operator's side: NO node is marked down and no master is promoted (alert only) until a node answers"
+  for k in reachVerdict.down do
+    match (← stateRef.get).lookupNode k with
+    | some n =>
+      if n.role == FlareRole.Master then
+        IO.eprintln s!"[flare-operator] UNREACHABLE: master {k} failed {FlareOperator.UnreachableNode.monitorThreshold} consecutive operator probes — marked down if a reachable slave of its partition can be promoted, otherwise kept as master (see the CRITICAL line that names it)"
+      else
+        IO.eprintln s!"[flare-operator] UNREACHABLE: {k} ({repr n.role}) failed {FlareOperator.UnreachableNode.monitorThreshold} consecutive operator probes — marked down (proxy); the rebuild path builds another copy"
+    | none => pure ()
+
+set_option maxRecDepth 4096 in
+/-- FSM-driven reconcile loop with partition reduction safety check and metrics.
+    This is the production-ready version that wraps runReconcileDriver.
+
+    LEASE FENCE / dual-leader window: the lease is renewed at the top of each
+    outer loop iteration, but a reconcile that outlives the 15s lease (slow
+    kubectl, many effects) keeps issuing writes until the NEXT iteration
+    notices the loss — during which a new leader may already be active. The
+    K8s-side writes are level-triggered and idempotent (the new leader
+    re-issues them within one 5s tick), so the damaging stale write is the
+    TCP topology broadcast to flared nodes. We therefore re-verify lease
+    holdership immediately before broadcasting and skip it if lost. Residual
+    window: a broadcast already in flight when the lease flips — bounded by
+    one broadcast duration, and corrected by the new leader's next tick. -/
+private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.Ref FlareClusterView)
+    (migrationRef : IO.Ref MigrationPhase) (graceCyclesRef : IO.Ref Nat)
+    (trippedRef : IO.Ref Bool)
+    (prepareCyclesRef : IO.Ref (List (String × Nat)))
+    (unreadyCyclesRef : IO.Ref (List (String × Nat)))
+    (podKeysRef : IO.Ref (List String))
+    (podAddrsRef : IO.Ref (List (String × String)))
+    (unreachCyclesRef : IO.Ref (List (String × Nat)))
+    (reachSlotRef : IO.Ref Nat)
+    (ledgerRef : IO.Ref ReplicaRepair.Ledger)
+    (ledgerAvailableRef : IO.Ref Bool)
+    (ledgerDirtyRef : IO.Ref Bool)
+    (episodesRef : IO.Ref (List SyncEvidence.Episode))
+    (pendingBroadcastRef : IO.Ref (Option Nat))
+    (topologyAuditRef : IO.Ref TopologyObservation.Audit)
+    (downCyclesRef : IO.Ref (List (String × Nat)))
+    (emptyMasterStreakRef : IO.Ref (List (String × Nat)))
+    (probeSlotRef : IO.Ref Nat)
+    (pendingConfRef : IO.Ref (Option (String × Nat)))
+    (masterSnapshotRef : IO.Ref (Option (List String)))
+    (driftTickRef : IO.Ref Nat)
+    (metrics : OperatorMetrics) (leaseName identity : String)
+    (crName ns : String) : IO Unit := do
+  -- 1. Fetch CRD (handled by FSM, but we need it early for partition reduction check)
+  match ← getFlareClusterCRD crName ns with
+  | .error e =>
+    IO.eprintln s!"[flare-operator] warning: failed to fetch CRD: {e}"
+    return
+  | .ok crd =>
+    -- 1a. Detect CRD spec changes (for debugging)
+    let prevCrd ← crdRef.get
+    if prevCrd.spec.partitions != crd.spec.partitions ||
+       prevCrd.spec.replicas != crd.spec.replicas then
+      IO.eprintln s!"[flare-operator] CRD changed: partitions {prevCrd.spec.partitions}→{crd.spec.partitions}, replicas {prevCrd.spec.replicas}→{crd.spec.replicas}"
+    crdRef.set crd
+    desiredPartitionsRef.set crd.spec.partitions
+    -- the authoritative history exists BEFORE the first node map is persisted
+    if !(← timedHistory "ensureHistoryStore" (ensureHistoryStore crName ns crd.spec.partitions)) then return
+    followDesiredRef.set (some (crd.spec.rocksdb.replFollowEnabled.getD false))
+    metrics.partitionsDesired.set crd.spec.partitions.toFloat
+
+    -- 1b. Detect unsafe partition reduction (safety check BEFORE running FSM)
+    let state ← stateRef.get
+    let partitionReductionDetected ← detectPartitionReduction state crd crName
+    if partitionReductionDetected then
+      -- Skip this reconcile cycle to prevent unsafe partition reduction
+      return
+
+  -- 2. Run the FSM driver
+  let oldVersion := (← stateRef.get).nodeMapVersion
+
+  -- 2a'. LEDGER FAULT TOLERANCE (item 4). If the ledger could not be read,
+  -- retry now and hold every repair action until it can; if the last save
+  -- failed, retry the save even though nothing changed since.
+  if !(← ledgerAvailableRef.get) then
+    match ← Bridge.readRepairLedger crName ns with
+    | .ok (some l) =>
+      ledgerRef.set l; ledgerAvailableRef.set true
+      IO.eprintln s!"[flare-operator] replica repair ledger RECOVERED from status: {l.summary}"
+    | .ok none =>
+      ledgerAvailableRef.set true
+      IO.eprintln "[flare-operator] replica repair ledger: status has none; starting with baselines"
+    | .error e =>
+      IO.eprintln s!"[flare-operator] WARNING: replica repair ledger still unavailable ({e}); repairs and drop accounting HELD this pass"
+  if (← ledgerDirtyRef.get) && (← ledgerAvailableRef.get) then
+    match ← Bridge.writeRepairLedger crName ns (← ledgerRef.get) with
+    | .ok _ => ledgerDirtyRef.set false; IO.eprintln "[flare-operator] replica repair ledger persisted on retry"
+    | .error e => IO.eprintln s!"[flare-operator] WARNING: replica repair ledger still unsaved ({e}); will retry next pass"
+
+  -- 2a. REPLICA REPAIR, part 1 (SC-03 / SAF-02, SAF-05). Act on the ledger
+  -- BEFORE the FSM runs, so a demotion is part of what this pass commits
+  -- and sends, and the demoted node is held out of THIS pass's assignment.
+  -- The decisions are pure (StateMachine/ReplicaRepair.lean); this block
+  -- resolves, gates, applies demotions to stateRef and persists.
+  let heldKeys : List String ← do
+    let ledgerAvailable ← ledgerAvailableRef.get
+    if !ledgerAvailable then
+      IO.eprintln "[flare-operator] replica repair: ledger unavailable; holding all repair actions this pass"
+      pure []
+    else
+      let led0 ← ledgerRef.get
+      let preState ← stateRef.get
+      let (led1, voided) := ReplicaRepair.resolve led0 preState
+      -- drops counted to a destination that is NOT a node of this cluster
+      -- (cross-cluster replication forwards to the other cluster's nodes):
+      -- nothing here can repair it and the other cluster's operator never
+      -- reads this master's counter — say so (on a change of the set)
+      let foreign := (led1.entries.filter fun (e : ReplicaRepair.Entry) =>
+        e.nodeKey.isNone && (ReplicaRepair.resolveKey preState e.dest).isNone).map fun e => s!"{e.dest} ({e.drops} drop(s) by {e.masterKey})"
+      if foreign != (← foreignDropDestsRef.get) then
+        foreignDropDestsRef.set foreign
+        if !foreign.isEmpty then
+          IO.eprintln s!"[flare-operator] CRITICAL: writes were dropped to destination(s) outside this cluster: {foreign} — typically cross-cluster replication; NOT repaired automatically by this operator or the destination's. See RUNBOOK #foreign-drops"
+      -- SAF-10c: a follower that declared needs_rebuild (history purged
+      -- past its position, source epoch changed, integrity failure) takes
+      -- the rebuild path even though no drop was counted for it — requested
+      -- EVERY pass from this pass's classification, against its partition's
+      -- current master, so the plan below can act on it at once.
+      let mut led1 := led1
+      let ftr ← followRef.get
+      let rebuildAsks := (ftr.classified.needsRebuild.map fun (k, w) => (k, w, "the follower declared needs_rebuild"))
+        ++ (ftr.sourceRebuild.filter (fun (k, _) => !ftr.classified.needsRebuild.any (·.1 == k))).map fun (k, w) =>
+            (k, w, "R3: the replica reported that its copy's source changed lineage or history (needs_rebuild)")
+      for (key, why, who) in rebuildAsks do
+        match preState.lookupNode key with
+        | some n =>
+          if n.role == FlareRole.Slave then
+            match preState.nodeMap.find? (fun kv =>
+                kv.2.role == FlareRole.Master && kv.2.state == FlareState.Active && kv.2.partition == n.partition) with
+            | some (mKey, _) =>
+              let (led', added) := ReplicaRepair.requestRebuild led1 mKey key
+              if added then
+                led1 := led'
+                metrics.replicaRepairRequested.inc
+                IO.eprintln s!"[flare-operator] REPLICA REPAIR requested by the replica: {key} — {who} ({why}); it takes the rebuild path (demote → hold → reseat → reconstruction) under master {mKey}"
+            | none => pure ()
+        | none => pure ()
+      for e in voided do
+        IO.eprintln s!"[flare-operator] CRITICAL: replica repair VOIDED for {e.dest}: it is now a MASTER, so the {e.drops} write(s) master {e.masterKey} dropped to it are missing on a primary and demotion cannot recover them"
+        metrics.replicaRepairVoided.inc
+      -- Gate from the LAST committed map (this pass has not run yet) and the
+      -- breaker's last verdict. A gated request is HELD, not consumed.
+      let crdNow ← crdRef.get
+      let masterless := (List.range crdNow.spec.partitions).any fun pIdx =>
+        !(preState.nodeMap.any fun kv =>
+          kv.2.role == FlareRole.Master && kv.2.state == FlareState.Active
+            && kv.2.partition == Int.ofNat pIdx)
+      let tripped ← trippedRef.get
+      let resyncOnDrop := ((← IO.getEnv "FLARE_RESYNC_ON_DROP").map (· != "0")).getD true
+      let gate : Option String :=
+        if !resyncOnDrop then some "resync disabled (FLARE_RESYNC_ON_DROP=0)"
+        else if tripped then some "circuit breaker held"
+        else if masterless then some "a partition has no Active master"
+        else none
+      -- A Slave in Prepare is reconstructing from its master: demoting it
+      -- breaks that reconstruction (CI 41278035134). Its request is held,
+      -- not consumed: closed by that reconstruction when it began after the
+      -- drops (adopted in part 2), otherwise demoted once the node is Active
+      -- (see ReplicaRepair.reconstructingKeys).
+      -- A Prepare shorter than the time between two passes is seen only as
+      -- Slave/Active: its adoption is decided HERE, before the plan, or the
+      -- plan would demote it first (review of a549080, P1).
+      let mut adoptObs : List (String × ReplicaRepair.Observation) := []
+      if gate.isNone then
+        for e in led1.entries do
+          match e.nodeKey with
+          | some k =>
+            let mapped := (preState.lookupNode k).map fun n => (n.role, n.state)
+            if e.phase == .requested && e.adoptable && !e.owned
+                && mapped == some (FlareRole.Slave, FlareState.Active) then
+              adoptObs := adoptObs ++ [(e.dest, ← adoptionObservationNow preState k ns (e.bootAtRequest.isNone))]
+          | none => pure ()
+      let (ledA, adoptClosed, adoptFinishing) := ReplicaRepair.adoptBeforePlan led1 adoptObs
+      led1 := ledA
+      for e in adoptClosed do
+        metrics.replicaRepairCompleted.inc
+        IO.eprintln s!"[flare-operator] REPLICA REPAIR COMPLETE (adopted): {e.nodeKey.getD e.dest} is Slave/Active; the reconstruction that began after the drops (newer than #{e.currentIdAtRequest.getD 0}, boot {e.bootAtRequest.getD 0}) SUCCEEDED from its current master; {e.drops} dropped write(s) recovered without a demotion (decided before the demotion plan)"
+      for k in adoptFinishing do
+        IO.eprintln s!"[flare-operator] replica repair DEFERRED for {k}: Slave/Active, but the reconstruction that began after the drops is still finishing; no demotion"
+      let (led2, acts) := ReplicaRepair.plan led1 gate.isNone (gate.getD "")
+        (ReplicaRepair.reconstructingKeys preState ++ adoptFinishing)
+      let mut led3 := led2
+      for (rKey, e) in acts do
+        let cs ← stateRef.get
+        match cs.lookupNode rKey with
+        | some rn =>
+          if rn.role == FlareRole.Slave && rn.state == FlareState.Prepare then
+            IO.eprintln s!"[flare-operator] replica repair DEFERRED for {rKey}: it is reconstructing (Slave/Prepare) — a demotion now would break that reconstruction; the request stays pending until it is Active"
+          else if rn.role == FlareRole.Slave then
+            -- SAF-08: the copy is rebuilt from the partition's CURRENT
+            -- master, which need not be the one that counted the drops. Read
+            -- it now; defer unless it is known to hold data.
+            let srcMaster := cs.nodeMap.find? (fun kv =>
+              kv.2.role == FlareRole.Master && kv.2.state == FlareState.Active && kv.2.partition == rn.partition)
+            -- The source's stats are bracketed by its incarnation (UID and
+            -- flared restart count): a source that restarted or was replaced
+            -- during the read is not evidence.
+            let verdict ← match srcMaster with
+              | none => pure (some "the partition has no Active master right now")
+              | some (_, mn) =>
+                let mPodName := extractPodName mn.serverName
+                let idBefore ← podIdentityNow mPodName ns
+                let mStats ← Bridge.queryPodStats mPodName ns "stats"
+                let rStats ← Bridge.queryPodStats (extractPodName rn.serverName) ns "stats"
+                let idAfter ← podIdentityNow mPodName ns
+                let srcStable := match idBefore, idAfter with
+                  | some (u0, some r0), some (u1, some r1) => !u0.isEmpty && u0 == u1 && r0 == r1
+                  | _, _ => false
+                if !srcStable then
+                  pure (some s!"the source master's pod changed during the read ({idBefore} -> {idAfter})")
+                else match mStats with
+                  | .ok out =>
+                    if statNat out "rocksdb_copy_identity_consistent" == some 0 then
+                      pure (some "the source master's copy identity is inconsistent (reserved key and COPY_ID disagree): not a healthy copy to rebuild from")
+                    else if statNat out "rocksdb_quarantined" == some 1 then
+                      pure (some "the source master's copy is the empty copy left by a quarantine: not a healthy copy to rebuild from")
+                    else
+                    let rLineage := match rStats with | .ok ro => statStr ro "rocksdb_master_id" | .error _ => none
+                    let rEpoch := match rStats with | .ok ro => statStr ro "rocksdb_source_epoch" | .error _ => none
+                    let rFromId := match rStats with | .ok ro => statStr ro "rocksdb_rebuilt_from_master_id" | .error _ => none
+                    let rFromEpoch := match rStats with | .ok ro => statStr ro "rocksdb_rebuilt_from_epoch" | .error _ => none
+                    pure (StatsObservation.repairSourceVerdict (StatsObservation.parseCurrItems out)
+                      (statStr out "rocksdb_master_id") rLineage
+                      (statStr out "rocksdb_source_epoch") rEpoch (statStr out "rocksdb_source_epoch_reason")
+                      rFromId rFromEpoch)
+                  | .error _ => pure (StatsObservation.repairSourceVerdict .unknown)
+            match verdict with
+            | some why =>
+              IO.eprintln s!"[flare-operator] replica repair DEFERRED for {rKey}: {why} (source {(srcMaster.map (·.1)).getD "none"}); the request stays pending"
+            | none =>
+              -- Atomic re-check and demote: a TCP registration may have
+              -- replaced the entry since it was read above (SAF-08).
+              -- ...and the SOURCE must still be the master that was checked:
+              -- same key, same registration (a restarted master re-registers).
+              let srcKey := srcMaster.map (·.1)
+              let srcEpoch := srcMaster.map (·.2.regEpoch)
+              let applied ← stateRef.modifyGet fun cur =>
+                let srcNow := cur.nodeMap.find? (fun kv =>
+                  kv.2.role == FlareRole.Master && kv.2.state == FlareState.Active && kv.2.partition == rn.partition)
+                let sourceSame := srcNow.map (·.1) == srcKey && srcNow.map (·.2.regEpoch) == srcEpoch
+                match cur.lookupNode rKey with
+                | some rn2 =>
+                  if sourceSame && rn2.role == FlareRole.Slave && rn2.state != FlareState.Prepare
+                      && rn2.partition == rn.partition && rn2.regEpoch == rn.regEpoch then
+                    let v := cur.nodeMapVersion + 1
+                    let demoted : FlareNode :=
+                      { rn2 with role := FlareRole.Proxy, state := FlareState.Active, partition := -1, formerSlaveOf := -1 }
+                    (some v, { (cur.addNode rKey demoted) with nodeMapVersion := v })
+                  else (none, cur)
+                | none => (none, cur)
+              match applied with
+              | some v =>
+                led3 := ReplicaRepair.markDemoted led3 e.dest v
+                metrics.replicaResyncs.inc
+                IO.eprintln s!"[flare-operator] REPLICA REPAIR: demoting {rKey} to a live proxy at v{v} — master {e.masterKey} dropped {e.drops} write(s) to it; rebuild source {(srcMaster.map (·.1)).getD "?"} holds data. Held out of assignment until it reports v{v}; then re-seated as Slave/Prepare so flared reconstructs"
+              | none =>
+                IO.eprintln s!"[flare-operator] replica repair: {rKey} or its source master changed (re-registered, re-assigned, failed over, or the replica began reconstructing) while the demotion was being decided; leaving the request pending"
+          else
+            IO.eprintln s!"[flare-operator] replica repair: {rKey} is no longer a Slave; leaving the request pending"
+        | none =>
+          IO.eprintln s!"[flare-operator] replica repair: {rKey} is not in the map right now; leaving the request pending"
+      for e in led3.entries do
+        let prevHold := (led0.entries.find? (·.dest == e.dest)).bind (·.hold)
+        if e.hold.isSome && prevHold != e.hold then
+          IO.eprintln s!"[flare-operator] replica repair HELD for {e.nodeKey.getD e.dest}: {e.hold.getD ""} — the request is retained and runs when the gate opens"
+      ledgerRef.set led3
+      persistLedger crName ns led0 led3 metrics ledgerDirtyRef
+      pure (ReplicaRepair.heldKeys led3)
+
+  -- the lease, renewed and confirmed now (the handover's fast loop and a
+  -- rolling delete act between the leader loop's renewals)
+  let leaseHeldNow : IO Bool := do
+    match ← holdLeaseNow leaseName ns identity with
+    | .ok held => pure held
+    | .error _ => pure false
+  passLeaseLostRef.set false
+
+  -- 2b. ORDERED HANDOVER of planned master switches (before the FSM, like
+  -- the repair demotions above): its successors are held like repairs.
+  let handoverHeld ← runHandovers crName ns stateRef (← ledgerRef.get)
+    (publishLiveMap stateRef pendingBroadcastRef metrics leaseName identity crName ns)
+    (fun proven ucs => do
+      -- the pass's own aborts start afresh (runReconcileDriver resets it too)
+      promotionAbortedRef.set false
+      -- judged by a read at commit, not the previous pass's evidence (the
+      -- pass resets this flag when it reads again)
+      promotionRiskPassRef.set false
+      handoverProvenRef.set (proven.map (·.1)).toList
+      -- the incarnation the commit's identity check compares with: the pod
+      -- the drain was proven against (same UID), read now — a fresh operator
+      -- has no pass observation yet (local kind 2026-10-28, S7: "observed
+      -- none" refused the promotion after a restart)
+      if let some (k, uid) := proven then
+        match ← podIdentityNow (extractPodName k) ns with
+        | some (u, rc) =>
+          if !uid.isEmpty && u == uid then
+            podIdentityRef.modify fun l => (k, (u, rc)) :: l.filter (·.1 != k)
+        | none => pure ()
+      try
+        -- standby keys are the pass's; [] here only affects read balances
+        -- until the next pass's commit
+        commitChecked stateRef ucs.nodeMapVersion ucs (← crdRef.get).spec.readBalance [] (← followRef.get).classified.readWithheld ns
+      finally
+        handoverProvenRef.set []
+      pure !(← promotionAbortedRef.get))
+    (do ensureServiceRouting (← stateRef.get) crName ns)
+    leaseHeldNow
+    (fun why ks => publishLiveMapTo stateRef pendingBroadcastRef metrics leaseName identity crName ns why (some ks))
+    leaseName identity
+  if ← passLeaseLostRef.get then
+    IO.eprintln "[flare-operator] PASS STOPPED: the lease was not renewed during the handover; no FSM step, rolling or send this pass"
+    return
+  let heldKeys := heldKeys ++ handoverHeld.filter (fun k => !heldKeys.contains k)
+  -- 2c. CORDON MOVE: a pod on a cordoned node is moved off, one at a time;
+  -- the pod it empties (and a master's successor) is held out of assignment
+  let moveHeld ← runNodeMoves crName ns stateRef (← ledgerRef.get) metrics leaseHeldNow
+  if ← passLeaseLostRef.get then
+    IO.eprintln "[flare-operator] PASS STOPPED: the lease was not confirmed during the cordon move; no FSM step, rolling or send this pass"
+    return
+  let heldKeys := heldKeys ++ moveHeld.filter (fun k => !heldKeys.contains k)
+  nodeGuardRepairRef.set ((← ledgerRef.get).entries.filterMap (·.nodeKey))
+
+  runReachabilityStep crName ns stateRef unreachCyclesRef
+
+  let drainBlockedRef ← IO.mkRef 0
+  runReconcileDriver stateRef migrationRef graceCyclesRef trippedRef drainBlockedRef unreadyCyclesRef podKeysRef podAddrsRef heldKeys crName ns
+  -- A0: the operator replaces the pods not on the StatefulSet's update
+  -- revision, one at a time, while the cluster is stable
+  let busyNow := !(← ledgerRef.get).entries.isEmpty || (← handoverActiveRef.get) || !heldKeys.isEmpty
+    -- any unfinished move, a stuck one too (risk B13: a stuck move lets the
+    -- next cordon move start, but rolling stays paused as before)
+    || (← nodeMoveLedgerCacheRef.get).moves.any (!·.finished)
+  runRolling crName ns stateRef (← crdRef.get).spec.replicas busyNow leaseHeldNow
+  runServingLabels crName ns stateRef
+  if ← passLeaseLostRef.get then
+    IO.eprintln "[flare-operator] PASS STOPPED: the lease could not be confirmed before a rolling delete; no send this pass"
+    return
+  -- the map this pass read and committed is the guard's input from now on
+  nodeGuardInitRef.set true
+  metrics.circuitBreakerTripped.set (if ← trippedRef.get then 1.0 else 0.0)
+  -- CRITICAL drain-guard gauge: >0 pages a human — a draining master has no
+  -- promotable successor and its partition dies with the pod (see RUNBOOK
+  -- #drain-no-successor). Gauge semantics: reflects the LAST completed pass,
+  -- clears once the doomed pod is gone (the key stops being Terminating).
+  metrics.drainNoSuccessor.set (← drainBlockedRef.get).toFloat
+
+  -- 3. THE topology send. Single path on purpose (SC-01 / SAF-01).
+  --
+  -- It reads `stateRef` AFTER commitClusterState, so what goes on the wire
+  -- is the COMMITTED, merged map — the one the at-most-one-master property
+  -- is proved about (SC-02). The FSM used to emit a BroadcastTopology
+  -- effect as well, executed before the commit and without any leadership
+  -- check; that path published the FSM's own unmerged snapshot and has
+  -- been removed.
+  --
+  -- What the lease check below does and does not buy:
+  --   * It prevents a send that STARTS after a confirmed loss, and it
+  --     fails closed — a lease read error also suppresses the send.
+  --   * It cannot close the check/send race. The lease can be lost between
+  --     the read and the first packet, or while the broadcast is in
+  --     flight, and nothing here can retract what is already on the wire.
+  --   * The real bound on a stale leader is RECIPIENT-side: flared ignores
+  --     a node map whose version is not newer than its own
+  --     (cluster::reconstruct_node). That fences only a recipient which has
+  --     ALREADY observed the newer generation. A pod that missed the new
+  --     leader's broadcast — restarted, unreachable at the time, or simply
+  --     never sent to — has nothing to compare against and will accept the
+  --     old leader's map. Per-node applied-generation tracking is SAF-09.
+  -- Both halves are exercised by the topology-authority E2E suite.
+  let finalState ← stateRef.get
+  let finalVersion := finalState.nodeMapVersion
+  -- One fresh observation per pass: bounded work rather than an N-pod
+  -- serial stats sweep. UID checks bracket the reply; never carry evidence
+  -- across a same-name replacement. This affects delivery only, not health.
+  let audit ← topologyAuditRef.get
+  let auditKeys := finalState.nodeMap.map (·.1)
+  -- TEST SEAM (SAF-09, startup-republish E2E). Unset in production, this is
+  -- one getEnv. The audit can mark a behind recipient as pending, which is a
+  -- second way to republish; the startup-republish test turns it off so the
+  -- only remaining reason to send in a fresh process is the startup seed.
+  let auditOff := (← IO.getEnv "FLARE_TEST_TOPOLOGY_AUDIT_OFF").isSome
+  if auditOff then
+    IO.eprintln "[flare-operator] TEST SEAM: topology audit disabled (FLARE_TEST_TOPOLOGY_AUDIT_OFF)"
+  else if auditKeys.isEmpty then
+    topologyAuditRef.set {}
+  else
+    let key := auditKeys[audit.next % auditKeys.length]!
+    -- spec 13: a node whose duplicate master claim is pending is read EVERY
+    -- pass besides the round robin, so the claim is judged after holdMs and
+    -- not after a full audit round (41222065256: ~68 s for 6 nodes; the
+    -- round robin advances only on its own key)
+    -- so is a node marked down as unreachable that answers again: back from
+    -- a partition it may still claim the master it lost (41253435088: with 9
+    -- nodes its first round-robin sample came ~100 s after the heal)
+    let reachOkNow ← reachOkRef.get
+    let backFromCut := (← downByReachRef.get).filter fun k => reachOkNow.contains k
+    let pendingDup := (((← duplicateFirstSeenRef.get).map (·.1)) ++ backFromCut).eraseDups.filter fun k => k != key && auditKeys.contains k
+    for (k, isRR) in (key, true) :: pendingDup.map (·, false) do
+      let key := k
+      let pod := extractPodName key
+      let (before, after, reply) ← Bridge.topologyProbe pod ns
+      let version := reply.bind TopologyObservation.reportedVersion
+      let verdict := TopologyObservation.judge finalVersion before after version
+      let sample : TopologyObservation.Sample := {
+        nodeKey := key, uid := after, reportedVersion := version
+        observedAtMs := ← IO.monoMsNow
+        verdict := verdict }
+      if isRR then topologyAuditRef.set (TopologyObservation.record audit auditKeys sample)
+      IO.eprintln s!"[TopologyAudit] node={key} uid={after} desired={finalVersion} reported={version} verdict={verdict.label}"
+      -- spec 13: a master claim the committed map gives to ANOTHER node; it is
+      -- re-sent the map below (behind) and treated as down if the claim still
+      -- stands after DuplicateMaster.holdMs. Not while no node is reachable.
+      if !(← reachGuardRef.get) then
+        -- only on a map version OTHER than the committed one (behind or
+        -- ahead): on the current map its view is the operator's own
+        let conflict := match verdict with
+          | .unknown => none
+          | .current => some false
+          | .behind | .ahead => (reply.bind DuplicateMaster.ownClaim).map (DuplicateMaster.conflicts finalState key)
+        let seenBefore := (← duplicateFirstSeenRef.get).any (·.1 == key)
+        let (fs, down) := DuplicateMaster.step (← duplicateFirstSeenRef.get) key conflict (← IO.monoMsNow)
+        duplicateFirstSeenRef.set fs
+        if conflict == some true && !seenBefore then
+          IO.eprintln s!"[flare-operator] CRITICAL: {key} claims to be a MASTER the committed map v{finalVersion} gives to another node (reports v{version}); the map is re-sent, and it is treated as down if the claim still stands in {DuplicateMaster.holdMs / 1000} s"
+        if down && !((← duplicateDownRef.get).contains key) then
+          duplicateDownRef.modify (· ++ [key])
+          -- a live flared marked Down leaves Down only by re-registering: it is
+          -- restarted as soon as it answers (4e), which also hands it the
+          -- current map (41200694530: Down 9 min until the stuck-down wait)
+          downByReachRef.modify fun l => if l.contains key then l else l ++ [key]
+          IO.eprintln s!"[flare-operator] DUPLICATE MASTER: {key} still claims a master the committed map gives to another node after {DuplicateMaster.holdMs / 1000} s -> treated as down (proxy); the map's master is kept"
+        if conflict == some false && (← duplicateDownRef.get).contains key then
+          duplicateDownRef.modify (·.filter (· != key))
+          IO.eprintln s!"[flare-operator] DUPLICATE MASTER: {key} no longer claims a conflicting master role"
+      match verdict with
+      | .behind =>
+        pendingBroadcastRef.modify fun p => some (p.getD finalVersion)
+      | .ahead =>
+        IO.eprintln s!"[TopologyAudit] CRITICAL: recipient {key} reports newer authority than committed v{finalVersion}; the map generation is not changed for it (a duplicate master claim is judged separately, see DUPLICATE MASTER)"
+      | .unknown | .current => pure ()
+  let observed := TopologyObservation.summarize (← topologyAuditRef.get) auditKeys
+    finalVersion (← IO.monoMsNow) 60000
+  metrics.topologyBehindNodes.set observed.behind.toFloat
+  metrics.topologyAheadNodes.set observed.ahead.toFloat
+  metrics.topologyUnknownNodes.set observed.unknown.toFloat
+  -- RETRY A SUPPRESSED SEND. Suppression used to be terminal: the committed
+  -- version had already advanced, so the next pass found nothing to send and
+  -- the map never reached the nodes until some unrelated change moved the
+  -- version again. Carry a flag instead, and let a later pass that does hold
+  -- the lease publish the CURRENT committed map, which subsumes whatever was
+  -- suppressed.
+  --
+  -- Scope, because it is easy to over-read: this covers suppression that the
+  -- process SURVIVES — a lease read failure, a momentarily foreign holder.
+  -- It cannot cover a real takeover, because losing the lease ends the
+  -- process ("LOST LEASE -- exiting"); there the next leader republishes
+  -- from its own committed state on startup, and whether that reaches a node
+  -- still depends on its version being newer (SAF-09).
+  -- `some v` = a committed send was suppressed OR lacked confirmation from
+  -- at least one listed target. Kept as the earliest outstanding version;
+  -- retries always send the latest committed map, not a queued stale map.
+  let pendingBefore ← pendingBroadcastRef.get
+  -- A node held by the replica-repair ledger has not yet reported the map
+  -- that demoted it; re-send the current map every pass until it does.
+  -- flared accepts an equal version (only an OLDER one is ignored), so a
+  -- node that missed the push catches up on the next one.
+  if !heldKeys.isEmpty && finalVersion == oldVersion && pendingBefore.isNone then
+    IO.eprintln s!"[flare-operator] re-sending v{finalVersion}: replica repair holds {heldKeys.length} node(s) that have not confirmed the map yet"
+  -- KEEP BROADCASTING UNTIL A COMMITTED ACTIVE STATE IS CONFIRMED. A node's
+  -- activation reaches the operator over TCP (activate_node) and updates the
+  -- committed map directly — out of band from this loop. If that lands while
+  -- the map is otherwise at rest, commitClusterState sees "every node Active"
+  -- and pins the version, so the active map is NEVER broadcast back; flared
+  -- keeps its local state at prepare, waits for the map to echo its
+  -- activation, and retries activate_node (once rejected as "not allowed"
+  -- for an Active node; now acknowledged without change, Reconciler
+  -- IDEMPOTENT RE-ACTIVATION). Before that fix, ~30 failures made it
+  -- deactivate itself to Down. Result on a busy cluster: a reconstructed
+  -- replica wedged Down, its partition down to one copy. A pod is only
+  -- Ready once flared's OWN map says it is active (the sync-gated probe), so
+  -- an Active-in-the-map node whose pod is NOT Ready has not applied the
+  -- map. Re-broadcast the current map (flared reprocesses an equal version)
+  -- until it has. Bounded: the node either applies it and goes Ready, or is
+  -- marked Down by dead detection — both clear the condition.
+  let readyKeys := (← podAddrsRef.get).map (·.1)
+  let unconfirmedActive := finalState.nodeMap.filter (fun kv =>
+    (kv.2.role == FlareRole.Master || kv.2.role == FlareRole.Slave)
+      && kv.2.state == FlareState.Active && !readyKeys.contains kv.1)
+  if !unconfirmedActive.isEmpty && finalVersion == oldVersion && pendingBefore.isNone && heldKeys.isEmpty then
+    IO.eprintln s!"[flare-operator] re-sending v{finalVersion}: {unconfirmedActive.length} node(s) are Active in the map but their pods are not Ready yet (activation not applied locally)"
+  let triggers : BroadcastTriggers := {
+    versionMoved := finalVersion != oldVersion
+    pending := pendingBefore
+    repairHeld := heldKeys.length
+    activeNotReady := unconfirmedActive.length }
+  -- addendum 11: while a history continuation commits its replicas the
+  -- live map holds V2 and no fleet-wide send may carry it (the audit's
+  -- "behind" resends, the retry flag and every other trigger end up here);
+  -- the flag stays, the send follows once the successor is armed
+  let v2Held := (← v2Gate none) == .skip
+  if triggers.any && v2Held then
+    IO.eprintln s!"[flare-operator] topology broadcast of v{finalVersion} HELD ({triggers.label}): a history continuation is committing its replicas; only the prepared replicas get V2 until the successor is armed"
+    pendingBroadcastRef.modify fun p => match p with | some v => some v | none => some finalVersion
+  else if triggers.any then
+    -- TEST SEAM (SAF-01 / CHECK-01). Unset in production, this is one
+    -- getEnv and nothing else.
+    --
+    -- The acceptance scenario for SC-01 is "an old reconcile resumes after
+    -- a lease takeover and must not send". Stopping the process at an
+    -- arbitrary moment cannot produce it: the send is gated on the version
+    -- having advanced, so a pass frozen during the tick sleep resumes into
+    -- the loop's own lease renewal and exits before this branch, and a pass
+    -- frozen after the check below is the in-flight race this change
+    -- documents as NOT closed. The only position that exercises the fence
+    -- is here — committed, version advanced, check not yet made — so the
+    -- test needs to name it rather than guess it.
+    --
+    -- One-shot and bounded by construction: it engages only while an `arm`
+    -- file exists, disarms itself immediately, and gives up waiting after
+    -- the timeout so a stale environment variable can never wedge a real
+    -- operator.
+    preSendBarrier finalVersion
+    let stillLeader ← do
+      match ← holdLeaseNow leaseName ns identity with
+      | .ok held => pure held
+      | .error e =>
+        IO.eprintln s!"[flare-operator] lease fence: getLease failed ({e}); skipping broadcast this tick"
+        pure false
+    -- SAF-09 persist fence: never send a version the durable record does
+    -- not hold, so a later leader always starts above anything a node has
+    -- seen. Normally the FSM wrote it earlier in this pass; this write only
+    -- happens when that one failed or the version moved after it.
+    let persisted ← if !stillLeader then pure true
+      else if persistedCovers (← persistedVersionRef.get) finalVersion then pure true
+      else
+        match ← updateFlaredConfigMap s!"{crName}-node-map" ns (serializeNodeMap finalState) with
+        | .ok () =>
+          persistedVersionRef.modify (max finalVersion)
+          pure true
+        | .error e =>
+          IO.eprintln s!"[flare-operator] PERSIST FENCE: could not persist v{finalVersion} ({e}); suppressing the broadcast, held for retry"
+          pure false
+    if !persisted then
+      pendingBroadcastRef.modify fun p => match p with | some v => some v | none => some finalVersion
+    else if !stillLeader then
+      IO.eprintln s!"[flare-operator] LEASE FENCE: the lease was not confirmed (another holder, or the renew failed or answered late — see the LEASE CHECK line) — suppressing topology broadcast (v{oldVersion} → v{finalVersion}); held for retry once authority returns"
+      pendingBroadcastRef.modify fun p => match p with | some v => some v | none => some finalVersion
+    else
+      -- PublicationGate: from here until the send ends no registration is
+      -- answered (they wait for it), so the check below stays true for the
+      -- whole send. CI 38090211947 hit the window this closes.
+      match ← tryBeginPublication finalVersion with
+      | none =>
+        IO.eprintln s!"[flare-operator] topology send of v{finalVersion} SKIPPED: a registration is being answered; the next pass publishes the live map"
+        pendingBroadcastRef.modify fun p => match p with | some v => some v | none => some finalVersion
+      | some gate =>
+        try
+          -- the snapshot read at the top of this step must still be the live
+          -- map: a registration (TCP server) answered before the gate closed
+          -- advanced it otherwise, and the snapshot would remove the new node
+          -- from its own map (snapshotStillLive)
+          let liveVersion := (← stateRef.get).nodeMapVersion
+          if !snapshotStillLive finalVersion liveVersion then
+            IO.eprintln s!"[flare-operator] topology send of v{finalVersion} SKIPPED: the live map moved to v{liveVersion} during this pass (a concurrent registration); the older snapshot would remove the new node from its own map — the next pass publishes the live map"
+            pendingBroadcastRef.modify fun p => match p with | some v => some v | none => some finalVersion
+          else
+            -- Logged whenever a suppressed send is outstanding, whether or not
+            -- the version also moved: the published map subsumes the withheld
+            -- one either way, and the line names the withheld version so a test
+            -- can tie this send to that suppression. It does NOT claim the send
+            -- would not have happened without the flag — when the version moved
+            -- as well, it would have.
+            if let some suppressedV := pendingBefore then
+              IO.eprintln s!"[flare-operator] retrying an unconfirmed topology send (pending v{suppressedV}; publishing v{finalVersion})"
+            IO.eprintln s!"[flare-operator] broadcast trigger: {triggers.label}"
+            IO.eprintln s!"[flare-operator] topology changed (v{oldVersion} → v{finalVersion}), broadcasting"
+            inSendBarrier finalVersion
+            let confirmed ← broadcastTopologyToAllPods crName ns finalVersion finalState.getNodes
+            recordTopologyBroadcast metrics
+            updateNodeMapVersion metrics finalVersion
+            -- Re-read the lease AFTER the send. This cannot prevent the race
+            -- above, but it turns it from invisible into an incident record: if
+            -- we lost leadership during the broadcast, someone reading these
+            -- logs needs to know a stale map may have gone out.
+            match ← getLease leaseName ns with
+            | .ok l =>
+              if l.holderIdentity != identity then
+                IO.eprintln s!"[flare-operator] CRITICAL: lease holder changed to '{l.holderIdentity}' DURING a topology broadcast (v{finalVersion}); a map may have been published without authority. Recipients that already saw a newer version rejected it; others did not."
+            | .error e =>
+              IO.eprintln s!"[flare-operator] warning: could not confirm lease ownership after broadcasting v{finalVersion}: {e}"
+            -- registrations wait for this send (PublicationGate); a `node state`
+            -- activation is not held and can still move the live map while the
+            -- send is out — made visible (with what moved it), not prevented.
+            let afterVersion := (← stateRef.get).nodeMapVersion
+            if !snapshotStillLive finalVersion afterVersion then
+              let moves ← tcpMapMovesBetween finalVersion afterVersion
+              let src := if moves.isEmpty then "no TCP report recorded for it — moved by this process" else "; ".intercalate moves
+              IO.eprintln s!"[flare-operator] WARNING: the live map moved to v{afterVersion} DURING the send of v{finalVersion}: {src}. The next pass publishes v{afterVersion}"
+            pendingBroadcastRef.set (pendingTopologyAfterAttempt pendingBefore finalVersion confirmed)
+            if !confirmed then
+              IO.eprintln s!"[flare-operator] topology delivery unconfirmed (v{finalVersion}); retained for retry through the lease fence"
+        finally
+          endPublication gate
+
+  -- 4. Update node counts
+  updateNodeCounts metrics finalState
+
+  -- 4b. Prepare-stuck watchdog (alert-only). A node whose reconstruction
+  -- stalls stays in Prepare forever: it is deliberately excluded from dead
+  -- node detection, so nothing else will ever surface it. Track how many
+  -- consecutive reconcile cycles each node has been in Prepare and raise a
+  -- log warning + the flare_operator_nodes_prepare_stuck gauge past the
+  -- threshold. NO automatic demotion: a 100GB+ dataset legitimately
+  -- reconstructs for hours, and demoting it would abort a healthy rebuild.
+  let prevCycles ← prepareCyclesRef.get
+  let prepareNodes := finalState.nodeMap.filter (fun kv => kv.2.state == FlareState.Prepare)
+  let newCycles := prepareNodes.map (fun (key, _) =>
+    (key, ((prevCycles.lookup key).getD 0) + 1))
+  prepareCyclesRef.set newCycles
+  -- Env override for small clusters, where minutes of Prepare already
+  -- means "parked forever" (inject via the chart's `env:` values).
+  let threshold := ((← IO.getEnv "FLARE_PREPARE_STUCK_CYCLES").bind (·.toNat?)).getD
+    prepareStuckThresholdCycles
+  let stuck := newCycles.filter (fun kv => kv.2 > threshold)
+  metrics.prepareStuckCount.set stuck.length.toFloat
+  for (key, cycles) in stuck do
+    -- Log at the first crossing, then roughly every 10 minutes — not every tick.
+    if cycles == threshold + 1 || cycles % 120 == 0 then
+      IO.eprintln s!"[flare-operator] WARNING: node {key} has been in Prepare for {cycles} cycles (~{cycles * 5 / 60} min). Reconstruction may have stalled; check that pod's flared logs. No automatic action is taken."
+
+  -- PREPARE ACTIVATION EVIDENCE (SC-04 / SAF-03). flared reports
+  -- "reconstruction complete" (Prepare→Active) as a ONE-SHOT TCP event; if
+  -- the operator misses it (mid-roll leader swap, a hung loop, a dropped
+  -- connection) the node sits Prepare forever: the sync-gated readiness
+  -- probe reads the operator's own broadcast back — circular — so the pod
+  -- stays NotReady and StatefulSet rolls block behind it (observed live: a
+  -- slave with the FULL dataset stuck Prepare for 7h27m). Repair by
+  -- re-deriving the transition — but only from evidence bound to THIS
+  -- Prepare episode (StateMachine/SyncEvidence.lean): the node's OWN node
+  -- map says it is active, a reconstruction completed in its process, its
+  -- lineage matches the master's, the master (key and lineage) did not
+  -- change while we watched, and its cursor is not ahead of the master's
+  -- head. LSN proximity used to be the whole test; it is now only reported.
+  -- flared's re-announce ("map says prepare but I am active") is the first
+  -- line for a lost event; this is the second. Lag-gated by cycles so a
+  -- node still reconstructing is never even examined.
+  let repairAfter := ((← IO.getEnv "FLARE_PREPARE_REPAIR_CYCLES").bind (·.toNat?)).getD 36
+  let masterOfPartition := fun (part : Int) =>
+    finalState.nodeMap.find? fun kv =>
+      kv.2.role == FlareRole.Master && kv.2.state == FlareState.Active && kv.2.partition == part
+  let current : List (String × String) := finalState.nodeMap.filterMap fun (key, node) =>
+    if node.role == FlareRole.Slave && node.state == FlareState.Prepare then
+      (masterOfPartition node.partition).map fun (mKey, _) => (key, mKey)
+    else none
+  let mut episodes := SyncEvidence.reconcileEpisodes (← episodesRef.get) current
+  for (key, cycles) in newCycles do
+    if cycles >= repairAfter && cycles % 12 == 0 then
+      match episodes.find? (·.nodeKey == key), finalState.lookupNode key with
+      | some ep, some node =>
+        match masterOfPartition node.partition with
+        | some (mKey, masterNode) =>
+          let slavePod := extractPodName node.serverName
+          let sOut ← Bridge.queryPodStats slavePod ns "stats"
+          let mOut ← Bridge.queryPodStats (extractPodName masterNode.serverName) ns "stats"
+          let reading : SyncEvidence.Reading := match sOut, mOut with
+            | .ok so, .ok mo =>
+              { bootId := statNat so "reconstruction_boot_id",
+                currentId := statNat so "reconstruction_current_id",
+                currentState := statStr so "reconstruction_current_state",
+                lastSuccessId := statNat so "reconstruction_last_success_id",
+                lastSuccessSource := statStr so "reconstruction_last_success_source",
+                slaveMasterId := statStr so "rocksdb_master_id",
+                slaveLsn := statNat so "rocksdb_repl_last_lsn",
+                masterId := statStr mo "rocksdb_master_id",
+                masterSeq := statNat mo "rocksdb_latest_sequence_number",
+                -- Backend from the MASTER's reply, and only if that reply was
+                -- complete: "no rocksdb_ key in a truncated reply" is not
+                -- "this backend has no lineage".
+                masterIsRocksdb := if statsReplyComplete mo then some (hasSubstr mo "rocksdb_") else none }
+            | _, _ => { }
+          let (ep', verdict) := SyncEvidence.judge ep mKey reading
+          episodes := episodes.map fun e => if e.nodeKey == key then ep' else e
+          match verdict with
+          | .activate why =>
+            -- SAF-08: the evidence was read from ONE flared process; make
+            -- sure that process is still the one being activated. Re-read
+            -- its boot id now, and apply only if the map entry was not
+            -- re-registered meanwhile (a restarted flared re-registers as
+            -- Slave/Prepare with a new regEpoch and is reconstructing).
+            let bootNow ← match ← Bridge.queryPodStats slavePod ns "stats" with
+              | .ok so2 => pure (statNat so2 "reconstruction_boot_id")
+              | .error _ => pure none
+            let crdNow ← crdRef.get
+            let ev := Flare.FlareEvent.NodeState node.serverName node.serverPort FlareState.Active
+            let resp ← if bootNow.isNone || bootNow != reading.bootId then
+                pure (Flare.FlareResponse.ServerError s!"the slave's flared process changed or is unreadable since the evidence was read (boot {reading.bootId} -> {bootNow})")
+              else stateRef.modifyGet fun cs =>
+                if (cs.lookupNode key).map (·.regEpoch) != some node.regEpoch then
+                  (Flare.FlareResponse.ServerError "the node re-registered since the evidence was read", cs)
+                else
+                  let (ns', r) := Reconciler.reconcileStep cs crdNow ev
+                  (r, ns')
+            match resp with
+            | .OK =>
+              IO.eprintln s!"[flare-operator] PREPARE-REPAIR: {key} stuck Prepare {cycles} cycles; {why} -> re-derived Prepare→Active under master {mKey}"
+              episodes := episodes.filter (·.nodeKey != key)
+            | .ServerError msg =>
+              IO.eprintln s!"[flare-operator] prepare-repair: {key}: evidence sufficient ({why}) but NOT activating: {msg}; leaving Prepare"
+            | _ =>
+              IO.eprintln s!"[flare-operator] prepare-repair: {key}: evidence sufficient ({why}) but reconcileStep rejected the re-derived activation; leaving Prepare"
+          | .wait reason =>
+            IO.eprintln s!"[flare-operator] prepare-repair: {key} stuck Prepare {cycles} cycles, NOT activating: {reason}"
+          | .sourceChanged reason =>
+            IO.eprintln s!"[flare-operator] prepare-repair: {key}: {reason}; episode restarted, a NEW completion is required before activation"
+            episodes := episodes.map fun e => if e.nodeKey == key then e.restart mKey else e
+        | none => pure ()
+      | _, _ => pure ()
+  episodesRef.set episodes
+
+  -- Shared safety gates for the two paths below that DELETE pods, plus the
+  -- per-partition masterless gauge. Counting the partitions themselves is
+  -- the honest version of "is a partition unserved": the cluster-wide
+  -- desired-minus-active-masters arithmetic behind FlareMasterMissing can be
+  -- offset by a stale master parked at an out-of-range partition index.
+  let crdForGates ← crdRef.get
+  let masterlessIdxs := (List.range crdForGates.spec.partitions).filter (fun pIdx =>
+    !(finalState.nodeMap.any (fun kv =>
+        kv.2.role == FlareRole.Master && kv.2.state == FlareState.Active
+          && kv.2.partition == Int.ofNat pIdx)))
+  metrics.masterlessPartitions.set masterlessIdxs.length.toFloat
+  -- CRITICAL per masterless partition (decision 2026-10-16), also when there
+  -- is no candidate or every one is forbidden; on change or every 60 s
+  do
+    let nowMs ← IO.monoMsNow
+    let classes := (← promotionEvidenceRef.get).map fun (k, c, _) => (k, c.label)
+    let (live, data, empty) ← refillSeenRef.get
+    let prev ← masterlessLogRef.get
+    let mut next : List (Nat × (String × Nat)) := []
+    for p in masterlessIdxs do
+      let summary := K8sReconciler.masterlessSummary finalState p classes live data empty
+      if K8sReconciler.masterlessLogDue (prev.lookup p) summary nowMs 60000 then
+        IO.eprintln s!"[flare-operator] CRITICAL: partition {p} has NO master (flare_operator_partitions_masterless): {summary}. Writes to it fail until a copy is seated or recovered by hand. See RUNBOOK #failover-lag-hold and #history-held-masterless"
+        next := next ++ [(p, (summary, nowMs))]
+      else
+        next := next ++ ((prev.lookup p).map (fun e => (p, e))).toList
+    masterlessLogRef.set next
+  let allPartitionsMastered := masterlessIdxs.isEmpty
+  let breakerTripped ← trippedRef.get
+  -- Deleting a pod on a tmpfs cluster erases that node's copy, so NEITHER
+  -- self-heal may act while a partition is already unserved or while the
+  -- blast-radius breaker says the cluster is in a mass-failure regime.
+  let podDeletionAllowed := allPartitionsMastered && !breakerTripped
+
+  -- 4d. EMPTY-MASTER SELF-HEAL. rc55 prevents MINTING an empty master, but
+  -- one already seated is a stable fixed point: nothing re-evaluates a
+  -- sitting master's data (observed live: a rolled-empty ex-master served 0
+  -- keys over a slave holding 15.8M — writes proxied into it, reads missed).
+  -- Detect it from ground truth (curr_items probes, one burst per ~5 min)
+  -- and heal through the PROVEN drain path: gracefully delete the empty
+  -- master's pod — the drain guard demotes it and promotes the data-bearing
+  -- Active slave, and the pod returns as a slave and reseeds. Guards:
+  -- requires an Active data-bearing slave in the SAME partition, and the
+  -- condition must persist 3 consecutive probes (~15 min) before acting.
+  -- 2b. REPLICA REPAIR, part 2: advance the ledger from what the nodes
+  -- themselves report — their applied node_map_version (confirms the
+  -- demotion) and their reconstruction_completed counter (confirms the
+  -- rebuild). Runs every pass while anything is pending; one `stats` exec
+  -- per pending replica, nothing when the ledger is empty.
+  do
+    let ledgerAvailable ← ledgerAvailableRef.get
+    if ledgerAvailable then
+      let led0 ← ledgerRef.get
+      if !led0.entries.isEmpty then
+        let mut obs : List (String × ReplicaRepair.Observation) := []
+        for e in led0.entries do
+          match e.nodeKey with
+          | none => pure ()
+          | some k =>
+            let mapped := (finalState.lookupNode k).map fun n => (n.role, n.state)
+            -- The success must have copied from the node's CURRENT master.
+            let currentMaster := (finalState.lookupNode k).bind fun n =>
+              (finalState.nodeMap.find? fun kv =>
+                kv.2.role == FlareRole.Master && kv.2.state == FlareState.Active && kv.2.partition == n.partition).map (·.1)
+            let o : ReplicaRepair.Observation ← do
+              match ← Bridge.queryPodStats (extractPodName k) ns "stats" with
+              | .ok out => pure { reportedVersion := statNat out "node_map_version",
+                                  bootId := statNat out "reconstruction_boot_id",
+                                  currentId := statNat out "reconstruction_current_id",
+                                  currentState := statStr out "reconstruction_current_state",
+                                  lastSuccessId := statNat out "reconstruction_last_success_id",
+                                  lastSuccessSource := statStr out "reconstruction_last_success_source",
+                                  currentMaster := currentMaster, mapped := mapped }
+              | .error _ => pure { mapped := mapped, currentMaster := currentMaster }
+            -- ADOPTION without a flared baseline: the pod's UID, the same
+            -- before and after the stats (else the reading proves nothing)
+            let o ← if e.phase == .requested && e.adoptable && !e.owned && e.bootAtRequest.isNone
+                && mapped == some (FlareRole.Slave, FlareState.Prepare) then do
+                let pod := extractPodName k
+                let u0 ← podUidOrAbsent pod ns
+                let o2 : ReplicaRepair.Observation ← match ← Bridge.queryPodStats pod ns "stats" with
+                  | .ok out => pure { o with bootId := statNat out "reconstruction_boot_id",
+                                             currentId := statNat out "reconstruction_current_id",
+                                             currentState := statStr out "reconstruction_current_state",
+                                             lastSuccessId := statNat out "reconstruction_last_success_id",
+                                             lastSuccessSource := statStr out "reconstruction_last_success_source" }
+                  | .error _ => pure { o with bootId := none }
+                let u1 ← podUidOrAbsent pod ns
+                pure { o2 with podUid := if u0 == u1 then u0 else none }
+              else pure o
+            -- R3-D: the release (demoted → re-seated → reconstruction) is
+            -- decided AGAIN against the master as it is now; a deferral holds
+            -- the replica demoted (its copy kept) instead of releasing it
+            let o ← match e.phase with
+              | .demoted _ =>
+                let hint := (finalState.lookupNode e.masterKey).map (·.partition) |>.filter (· ≥ 0)
+                match ← repairVerdictNow finalState k ns hint with
+                | some why =>
+                  IO.eprintln s!"[flare-operator] REPLICA REPAIR release HELD for {k}: the source check at release defers ({why}); the replica stays demoted with its copy"
+                  pure { o with reportedVersion := none }
+                | none => pure o
+              | _ => pure o
+            obs := obs ++ [(e.dest, o)]
+        -- SAF-10c: owned entries first. The follower's own reading decides:
+        -- applied past the bar while `following` → closed WITHOUT a rebuild;
+        -- needs_rebuild (or the mode off) → handed over to the ordinary path.
+        let mut ownedReadings : List (String × ReplicaRepair.FollowReading) := []
+        for e in led0.entries do
+          if e.owned then
+            ownedReadings := ownedReadings ++ [(e.dest, ← followReadingOf finalState e.dest ns)]
+        let (ledOwned, ownedSteps) := ReplicaRepair.advanceOwnedAll led0 ownedReadings
+        for (e, st) in ownedSteps do
+          let who := e.nodeKey.getD e.dest
+          match st with
+          | .closed =>
+            metrics.replicaRepairCompleted.inc
+            IO.eprintln s!"[flare-operator] REPLICA REPAIR CLOSED by continuous replication: {who} applied past {e.mustReach.getD 0} while following; the {e.drops} dropped write(s) are covered and no reconstruction was needed"
+          | .handedOver =>
+            IO.eprintln s!"[flare-operator] REPLICA REPAIR handed over: {who}'s follower explicitly no longer owns it (needs_rebuild or mode off); the demote → hold → reseat path takes it from here"
+          | .keep => pure ()
+        -- The master's drop counters, read on EVERY pass while a repair is in
+        -- flight for one of its destinations: the slot observation below runs
+        -- every 300 s, and forward-window-steps 38043715395 completed a repair
+        -- 26 s after its only reading — 35 later drops (one after the
+        -- catch-up's end) were never seen, so the late-drop requeue could not
+        -- fire. A master that cannot be read holds its destinations this pass
+        -- (no completion without a fresh count).
+        let mut ledFresh := ledOwned
+        let mut unreadMasters : List String := []
+        -- requests that gained drops just now: their observation above was
+        -- read BEFORE these drops, so it must not adopt or close them
+        let mut grownDests : List String := []
+        for mKey in ((ledOwned.entries.filter fun (e : ReplicaRepair.Entry) => !e.owned && e.phase != .requested).map (·.masterKey)).eraseDups do
+          match ← Bridge.queryPodStats (extractPodName mKey) ns "stats" with
+          | .ok mo =>
+            let drops := (mo.splitOn "\n").filterMap fun line =>
+              match (line.trim.splitOn " ").filter (· != "") with
+              | ["STAT", k, v] =>
+                if k.startsWith "proxy_write_dropped[" && k.endsWith "]" then
+                  match v.trim.toNat? with
+                  | some n => some ((k.drop "proxy_write_dropped[".length).dropRight 1, n)
+                  | none => none
+                else none
+              | _ => none
+            let (l1, newDrops, _) := ReplicaRepair.observe ledFresh mKey drops (statNat mo "reconstruction_boot_id")
+            let mut l2 := l1
+            for (dest, d) in newDrops do
+              let sight ← requestSightOf (← stateRef.get) dest ns
+              l2 := ReplicaRepair.request l2 mKey dest d sight
+              grownDests := grownDests ++ [dest]
+              metrics.replicaRepairRequested.inc
+              IO.eprintln s!"[flare-operator] REPLICA REPAIR: master {mKey} dropped {d} more write(s) to {dest} while a repair is in flight (its counter is read every pass until the repair completes)"
+            ledFresh := l2
+          | .error _ =>
+            unreadMasters := unreadMasters ++ [mKey]
+        let heldDests := (ledFresh.entries.filter fun (e : ReplicaRepair.Entry) => unreadMasters.contains e.masterKey).map (·.dest)
+        if !heldDests.isEmpty then
+          IO.eprintln s!"[flare-operator] REPLICA REPAIR: the master's drop counter could not be read for {heldDests}; their repair does not advance this pass (no completion without a fresh count)"
+        let staleObs := (ledFresh.entries.filter fun (e : ReplicaRepair.Entry) =>
+          grownDests.contains e.dest && e.phase == .requested).map (·.dest)
+        let (led1, steps) := ReplicaRepair.advance ledFresh (obs.filter fun (d, _) => !heldDests.contains d && !staleObs.contains d)
+        for (e, st) in steps do
+          let who := e.nodeKey.getD e.dest
+          match st with
+          | .released =>
+            metrics.replicaRepairStarted.inc
+            IO.eprintln s!"[flare-operator] REPLICA REPAIR: {who} confirmed the demotion ({e.phase}); released to assignment — the next pass re-seats it as Slave/Prepare and flared reconstructs"
+          | .completed =>
+            metrics.replicaRepairCompleted.inc
+            IO.eprintln s!"[flare-operator] REPLICA REPAIR COMPLETE: {who} is Slave/Active; a reconstruction newer than the one current at reseat (#{e.currentIdAtReseat.getD 0}, boot {e.bootIdAtReseat.getD 0}) SUCCEEDED from its current master; {e.drops} dropped write(s) recovered"
+          | .completedRequeued =>
+            -- Item 3: drops kept arriving after the reconstruction began; the
+            -- copy may not hold them. The first repair is complete, and the
+            -- increment is already back in the ledger as a fresh request.
+            metrics.replicaRepairCompleted.inc
+            metrics.replicaRepairRequested.inc
+            IO.eprintln s!"[flare-operator] REPLICA REPAIR COMPLETE (with late drops): {who} reconstructed, but {e.drops - e.dropsAtReseat} write(s) were dropped to it after the reconstruction began and may not be in the copy — REQUEUED as a new request"
+          | .voided =>
+            metrics.replicaRepairVoided.inc
+            IO.eprintln s!"[flare-operator] CRITICAL: replica repair VOIDED for {who}: it became a MASTER while under repair; the {e.drops} write(s) it missed are now missing on a primary"
+          | .adopted =>
+            -- not a demotion resync and not a release: nothing was started
+            IO.eprintln s!"[flare-operator] REPLICA REPAIR ADOPTED: {who} began reconstructing (Slave/Prepare) after master {e.masterKey}'s {e.drops} dropped write(s) to it were recorded outside Prepare; that reconstruction copies them, so it is the repair — no demotion, no extra rebuild. Closes on a success newer than the reading taken after the drops"
+          | .adoptedCompleted =>
+            metrics.replicaRepairCompleted.inc
+            IO.eprintln s!"[flare-operator] REPLICA REPAIR COMPLETE (adopted): {who} is Slave/Active; the reconstruction that began after the drops (newer than #{(e.currentIdAtReseat <|> e.currentIdAtRequest).getD 0}, boot {(e.bootIdAtReseat <|> e.bootAtRequest).getD 0}) SUCCEEDED from its current master; {e.drops} dropped write(s) recovered without a demotion"
+          | .adoptionLapsed =>
+            IO.eprintln s!"[flare-operator] REPLICA REPAIR adoption lapsed for {who}: it is Slave/Active without a success newer than the baseline from its current master; the {e.drops} dropped write(s) take the ordinary repair path (demote → reseat → reconstruction)"
+          | .adoptionUnproven =>
+            IO.eprintln s!"[flare-operator] REPLICA REPAIR not adopted for {who}: it is reconstructing, but nothing read after the drops proves this reconstruction began after them; held while Prepare, then the ordinary repair path once Active"
+          | .none => pure ()
+        ledgerRef.set led1
+        persistLedger crName ns led0 led1 metrics ledgerDirtyRef
+
+  -- DROPPED REPLICA WRITES → the repair ledger (SC-03), from the
+  -- MASTER's stats alone. This must not depend on the replica's
+  -- stats being readable: an unreadable replica hid the master's
+  -- drop counter for the whole partition (found by the SAF-10d
+  -- stats-fetch-failure scenario), so a drop seen while the replica
+  -- could not be probed was never even recorded.
+  let observeDrops : String → String → IO Unit := fun mKey mo => do
+    -- DROPPED REPLICA WRITES → the repair ledger (SC-03). The master
+    -- reports, per destination, how many replica writes it gave up
+    -- forwarding; live replication has no per-write acknowledgement,
+    -- so this is the only signal that a replica is quietly behind.
+    -- Here we only OBSERVE: deltas become repair requests. What
+    -- happens to a request — hold, demote, confirm, re-seat,
+    -- complete — is decided in StateMachine/ReplicaRepair.lean and
+    -- applied in parts 1 and 2 of this pass. A counter that went
+    -- DOWN is a restarted master whose count is entirely new drops.
+    let drops := (mo.splitOn "\n").filterMap fun line =>
+      match (line.trim.splitOn " ").filter (· != "") with
+      | ["STAT", k, v] =>
+        if k.startsWith "proxy_write_dropped[" && k.endsWith "]" then
+          let dest := (k.drop "proxy_write_dropped[".length).dropRight 1
+          match v.trim.toNat? with
+          | some n => some (dest, n)
+          | none => none
+        else none
+      | _ => none
+    -- Item 4: no accounting on a ledger we could not read.
+    if (← ledgerAvailableRef.get) then
+      let led0 ← ledgerRef.get
+      -- counters are bound to the master's flared PROCESS (boot id)
+      let mBoot := statNat mo "reconstruction_boot_id"
+      let (led1, newDrops, firstSeen) := ReplicaRepair.observe led0 mKey drops mBoot
+      for dest in firstSeen do
+        IO.eprintln s!"[flare-operator] REPLICA REPAIR (first observation): master {mKey} (boot {mBoot}) already reports dropped writes to {dest} at the ledger's first observation — when they happened, and whether anything repaired them since, is unknown; recorded as a POSSIBLY UNREPAIRED request (same ownership and gates as any request, no immediate demotion)"
+      let mut led2 := led1
+      for (dest, d) in newDrops do
+        metrics.replicaRepairRequested.inc
+        -- adoption evidence, read now: after the master's counter
+        let sight ← requestSightOf (← stateRef.get) dest ns
+        led2 := ReplicaRepair.request led2 mKey dest d sight
+        -- SAF-10c: if the destination runs a continuous follower, the
+        -- follower OWNS this repair (design §5.4). Record the request,
+        -- hold it with a visible reason and the position it must
+        -- reach — the master's latest sequence now, which the dropped
+        -- write is at or below — and start no reconstruction. The
+        -- reading is the destination's own stats, never an
+        -- assumption; unreadable stats do not claim ownership.
+        let fr ← followReadingOf finalState dest ns
+        let bar := statNat mo "rocksdb_latest_sequence_number"
+        let barEpoch := statStr mo "rocksdb_source_epoch"
+        match ReplicaRepair.ownershipAtRequest fr with
+        | some true =>
+          led2 := ReplicaRepair.holdOwned led2 dest bar barEpoch
+          IO.eprintln s!"[flare-operator] REPLICA REPAIR requested and HELD: master {mKey} dropped {d} more write(s) to {dest}; that replica's continuous follower ({fr.state.getD "?"}) owns the repair — it must apply past {bar.getD 0} in epoch {barEpoch.getD "?"} before this closes; no reconstruction is started"
+        | none =>
+          -- Unknown is Unknown: neither demote nor close. Hold with
+          -- the reason and let a readable pass decide.
+          led2 := ReplicaRepair.holdOwned led2 dest bar barEpoch "follower state unknown (stats unreadable)"
+          IO.eprintln s!"[flare-operator] REPLICA REPAIR requested and HELD: master {mKey} dropped {d} more write(s) to {dest}; its follower state could not be read — held until it can (no demotion on an unreadable probe)"
+        | some false =>
+          IO.eprintln s!"[flare-operator] REPLICA REPAIR requested: master {mKey} dropped {d} more write(s) to {dest} — that replica is behind and nothing else repairs it"
+      -- (A follower's needs_rebuild declaration is requested in the
+      -- per-pass ledger step, not here: this block runs once per
+      -- probe slot, 300 s by default, which delayed the rebuild of a
+      -- replica that cannot resume by up to five minutes — CI
+      -- 37268848902.)
+      if !led0.initialized then
+        IO.eprintln s!"[flare-operator] replica repair ledger initialized from {mKey}: {drops.length} destination counter(s) recorded; {firstSeen.length} with drops kept as possibly unrepaired requests"
+      ledgerRef.set led2
+      persistLedger crName ns led0 led2 metrics ledgerDirtyRef
+  -- every pass (not only on the 300 s probe slot): a drop recorded by a
+  -- master is a replica that is now behind; reading it once per slot left a
+  -- rejoined replica Active without 126 acknowledged writes for the rest of
+  -- forward-window-steps S3 (38046122938) — no request, no rebuild
+  let slotNow := (← IO.monoMsNow) / max 1000 (((← IO.getEnv "FLARE_STATS_PROBE_INTERVAL_MS").bind (·.toNat?)).getD 300000)
+  if slotNow == (← probeSlotRef.get) then
+    for (mKey, mNode) in finalState.nodeMap do
+      if mNode.role == FlareRole.Master && mNode.state == FlareState.Active then
+        match ← Bridge.queryPodStats (extractPodName mNode.serverName) ns "stats" with
+        | .ok mo => observeDrops mKey mo
+        | .error e => IO.eprintln s!"[flare-operator] master {mKey} stats unreadable this pass ({e}): its drop counter is read again next pass"
+  -- Stats probe cadence. 5 minutes in production; the harness shortens it
+  -- (FLARE_STATS_PROBE_INTERVAL_MS) so a repair can be watched in minutes.
+  let probeIntervalMs := max 1000 (((← IO.getEnv "FLARE_STATS_PROBE_INTERVAL_MS").bind (·.toNat?)).getD 300000)
+  let probeSlot := (← IO.monoMsNow) / probeIntervalMs
+  if probeSlot != (← probeSlotRef.get) then
+    probeSlotRef.set probeSlot
+    let streaks ← emptyMasterStreakRef.get
+    let mut newStreaks : List (String × Nat) := []
+    -- Largest divergence seen in THIS round; published once below so the
+    -- gauge reflects the latest probe rather than an all-time high-water
+    -- mark that could never recover.
+    let mut maxKeyGap : Float := 0.0
+    for (mKey, mNode) in finalState.nodeMap do
+      if mNode.role == FlareRole.Master && mNode.state == FlareState.Active then
+        -- an Active slave of the same partition to compare against / promote,
+        -- none with a replica repair pending (it missed the master's writes)
+        -- (none while the ledger is unavailable: fail closed)
+        let repairKeys ← repairKeysIfAvailable ledgerAvailableRef ledgerRef stateRef
+        match StatsObservation.selfHealComparand finalState mNode.partition repairKeys with
+        | some (sKey, sNode) =>
+          let mOut ← Bridge.queryPodStats (extractPodName mNode.serverName) ns "stats"
+          let sOut ← Bridge.queryPodStats (extractPodName sNode.serverName) ns "stats"
+          match mOut, sOut with
+          | .ok mo, .ok so =>
+            observeDrops mKey mo
+            let items := fun (out : String) =>
+              ((out.splitOn "
+" |>.filterMap fun line =>
+                match (line.trim.splitOn " ").filter (· != "") with
+                | ["STAT", "curr_items", v] => v.trim.toNat?
+                | _ => none).head?).getD 0
+            -- Both counts are already in hand: record the divergence while
+            -- we are here (no extra probe). Coarse by construction — equal
+            -- counts do not prove equal content — but a persistent gap is
+            -- the only cheap signal that live proxy replication has been
+            -- losing writes (nothing else compares the copies).
+            let mi := items mo
+            let si := items so
+            if mi > 0 then
+              let gap := (if mi > si then mi - si else si - mi).toFloat / mi.toFloat
+              if gap > maxKeyGap then
+                maxKeyGap := gap
+              if gap > 0.001 then
+                IO.eprintln s!"[flare-operator] replica divergence: master {mKey} has {mi} keys, slave has {si} ({(gap * 100.0).toString.take 5}% apart) — live replication has no per-write ack, so a gap here means writes were dropped or expired only on one side"
+            -- EMPTY-MASTER decision, typed (SC-05 / SAF-04). `items` returns
+            -- 0 for a missing curr_items line as readily as for a real zero;
+            -- a truncated stats reply must NOT read as "empty, delete it".
+            -- StatsObservation makes an unreadable count `unknown`, and the
+            -- verdict deletes only on a KNOWN 0 master with a KNOWN nonzero
+            -- successor.
+            let mObs := StatsObservation.parseCurrItems mo
+            let sObs := StatsObservation.parseCurrItems so
+            match StatsObservation.emptyMasterVerdict mObs sObs with
+            | .act =>
+              let streak := ((streaks.lookup mKey).getD 0) + 1
+              newStreaks := newStreaks ++ [(mKey, streak)]
+              IO.eprintln s!"[flare-operator] WARNING: master {mKey} is EMPTY (0 keys) while an Active slave holds {sObs} keys (streak {streak}/3)"
+              if streak ≥ 3 && podDeletionAllowed then
+                -- SAF-06 REVALIDATION (item 5). The streak decision rests on a
+                -- snapshot; between it and the delete a resync may have
+                -- demoted the successor, the pod may have been REPLACED
+                -- under the same name, or leadership lost. Re-check
+                -- everything in an order that closes those windows:
+                --   1. the target pod's UID before the stats read,
+                --   2. FRESH stats for master and successor,
+                --   3. the UID again (same pod observed?),
+                --   4. the live map AFTER the stats (any change during the
+                --      reads is now visible),
+                --   5. the leader lease,
+                -- and delete through a UID-checked path so a pod replaced
+                -- after step 3 is not deleted either. One pure gate decides.
+                let mPod := extractPodName mNode.serverName
+                let sPod := extractPodName sNode.serverName
+                let uidBefore ← Bridge.podUid mPod ns
+                -- SAF-08: the SURVIVING copy is bracketed too: its stats
+                -- must come from one incarnation (same UID, same flared
+                -- restart count) or "the successor holds data" is not
+                -- evidence about the copy that will be promoted.
+                let sIdBefore ← podIdentityNow sPod ns
+                let freshM ← Bridge.queryPodStats mPod ns "stats"
+                let freshS ← Bridge.queryPodStats sPod ns "stats"
+                let sIdAfter ← podIdentityNow sPod ns
+                let uidAfter ← Bridge.podUid mPod ns
+                let liveState ← stateRef.get
+                let mNow := match freshM with | .ok o => StatsObservation.parseCurrItems o | .error _ => .unknown
+                let sNow := match freshS with | .ok o => StatsObservation.parseCurrItems o | .error _ => .unknown
+                let dataBearing := match sNow with | .known n => if n > 0 then [sKey] else [] | .unknown => []
+                let verdictNow := StatsObservation.emptyMasterVerdict mNow sNow
+                -- the repair ledger re-read AFTER the fresh stats: a repair
+                -- opened for the successor in this pass (its drops counted)
+                -- makes it no successor (4a52e0d empty-source)
+                -- (availability re-checked too: unavailable = no delete)
+                let repairNow ← repairKeysIfAvailable ledgerAvailableRef ledgerRef stateRef
+                let successorClean := StatsObservation.successorRepairClean repairNow sKey
+                if !successorClean then
+                  IO.eprintln s!"[flare-operator] EMPTY-MASTER SELF-HEAL: successor {sKey} has a replica repair pending (it missed the master's writes) or the repair ledger is unavailable; not deleting {mPod}"
+                let successorOk := StatsObservation.successorStillValid liveState mKey sKey dataBearing
+                  && successorClean
+                -- SAF-10c: if the survivor is a continuous-replication
+                -- follower, it must be proven current from the SAME fresh
+                -- stats (following the master's history, fresh, within the
+                -- promotion lag bound). Not in the mode = no constraint.
+                -- Unknown = not proven = no delete.
+                let survivorVerdict := FollowEvidence.judge .survive (← followBoundsFromEnv)
+                  (match freshS with | .ok o => followReadingFrom o | .error _ => {})
+                  (match freshM with | .ok o => masterReadingFrom o | .error _ => {})
+                let survivorFollowOk := match survivorVerdict with
+                  | .notInMode _ | .eligible _ => true
+                  | _ => false
+                let uidStable := match uidBefore, uidAfter with | some a, some b => a == b | _, _ => false
+                let succStable := match sIdBefore, sIdAfter with
+                  | some (u0, some r0), some (u1, some r1) => !u0.isEmpty && u0 == u1 && r0 == r1
+                  | _, _ => false
+                if !succStable then
+                  IO.eprintln s!"[flare-operator] EMPTY-MASTER SELF-HEAL: successor {sKey} changed during the revalidation reads (incarnation {sIdBefore} -> {sIdAfter}); not deleting"
+                let holdsLease ← do
+                  match ← holdLeaseNow leaseName ns identity with
+                  | .ok held => pure held
+                  | .error _ => pure false
+                match StatsObservation.deleteGate verdictNow successorOk survivorFollowOk (uidStable && succStable) holdsLease, uidBefore with
+                | .ok (), some uid =>
+                  IO.eprintln s!"[flare-operator] EMPTY-MASTER SELF-HEAL: revalidated (master still empty, successor {sKey} still an Active data-bearing slave, continuous replication {survivorVerdict.label}: {survivorVerdict.reason}, pod UID {uid} stable, lease held); gracefully deleting {mPod} — the drain path hands mastership to the slave and the pod reseeds as a slave"
+                  match ← Bridge.deletePodWithUidPrecondition mPod ns uid with
+                  | .ok () =>
+                    newStreaks := newStreaks.filter (·.1 != mKey)
+                    -- pin the validated successor for the drain that follows
+                    match sIdAfter with
+                    | some sid =>
+                      pinnedSuccessorRef.modify fun l => (sKey, sid, 24) :: l.filter (·.1 != sKey)
+                      IO.eprintln s!"[flare-operator] EMPTY-MASTER SELF-HEAL: successor {sKey} pinned (incarnation {sid}) for the drain of {mPod}"
+                    | none => pure ()
+                  | .error e =>
+                    -- Refused (409/404) is definitive; a timeout/transport
+                    -- error is NOT "not deleted". Either way the streak is kept
+                    -- and the next probe re-observes the pod from scratch (if it
+                    -- was in fact deleted it is no longer an empty master).
+                    IO.eprintln s!"[flare-operator] empty-master self-heal delete not confirmed: {e}"
+                | .ok (), none =>
+                  IO.eprintln s!"[flare-operator] EMPTY-MASTER SELF-HEAL ABORTED: no readable UID for {mPod}; not deleting by name alone"
+                  newStreaks := newStreaks.filter (·.1 != mKey)
+                | .error why, _ =>
+                  IO.eprintln s!"[flare-operator] EMPTY-MASTER SELF-HEAL ABORTED at revalidation: {why} (master now {mNow}, successor {sKey} now {sNow}) — NOT deleting {mPod}"
+                  newStreaks := newStreaks.filter (·.1 != mKey)
+            | .skip reason =>
+              -- Not empty, or the observation was not clear enough to act on.
+              -- Clear any streak: an unknown or nonzero reading breaks it.
+              if StatsObservation.parseCurrItems mo == StatsObservation.Items.unknown then
+                IO.eprintln s!"[flare-operator] empty-master check: master {mKey} item count unreadable this pass — {reason}; streak reset"
+              newStreaks := newStreaks.filter (·.1 != mKey)
+          | .ok mo, .error e =>
+            IO.eprintln s!"[flare-operator] replica {sKey} stats unreadable this pass ({e}); the master's drop counter is still observed"
+            observeDrops mKey mo
+            newStreaks := newStreaks.filter (·.1 != mKey)
+          | _, _ => pure ()
+        | none => pure ()
+    emptyMasterStreakRef.set newStreaks
+    metrics.replicaKeyDelta.set maxKeyGap
+
+  -- 4e. LIVENESS metrics + STUCK-DOWN recovery. A node leaves Down only by
+  -- RE-REGISTERING, which needs a fresh flared process: while the committed
+  -- map says Down the readiness probe keeps failing (it asks flared for its
+  -- own Active state), so the loop is closed by a restart and nothing else.
+  -- The tcpSocket liveness probe covers a dead or hung port, but a flared
+  -- that still answers while marked Down would sit there forever — including
+  -- one the new unhealthy detection just demoted. So restart it here, under
+  -- hard gates: a demoted (Proxy) Down node, pod present, for minutes, with
+  -- EVERY partition already holding an Active master (never delete the last
+  -- data-bearing copy — on tmpfs that IS the data), breaker not tripped, and
+  -- at most one pod per tick.
+  let podKeysNow ← podKeysRef.get
+  let unreadyNow ← unreadyCyclesRef.get
+  let unreadyDeadCycles := ((← IO.getEnv "FLARE_UNREADY_DEAD_CYCLES").bind (·.toNat?)).getD 6
+  metrics.unhealthyNodes.set (unreadyNow.filter (fun kv => kv.2 ≥ unreadyDeadCycles)).length.toFloat
+  downAtCommitRef.set ((finalState.nodeMap.filter fun kv => kv.2.state == FlareState.Down).map Prod.fst)
+  let downPresent := finalState.nodeMap.filter (fun kv =>
+    kv.2.state == FlareState.Down && podKeysNow.contains kv.1)
+  metrics.stuckDownNodes.set downPresent.length.toFloat
+  let prevDown ← downCyclesRef.get
+  let newDown := downPresent.map (fun kv => (kv.1, ((prevDown.lookup kv.1).getD 0) + 1))
+  downCyclesRef.set newDown
+  let downRestartCycles := ((← IO.getEnv "FLARE_DOWN_RESTART_CYCLES").bind (·.toNat?)).getD 60
+  if downRestartCycles > 0 then
+    if podDeletionAllowed then
+      -- a node made down by unreachability that answers again (no streak,
+      -- no guard) restarts after 3 passes, not the stuck-down wait
+      -- (never while no node is reachable: the guard resets every streak)
+      let streaksNow ← unreachCyclesRef.get
+      let guardNow ← reachGuardRef.get
+      let downByReach ← downByReachRef.get
+      let reachOk ← reachOkRef.get
+      let reachableAgain := if guardNow then []
+        else downByReach.filter fun k => reachOk.contains k && !(streaksNow.any (·.1 == k))
+      match newDown.find? (fun kv => kv.2 ≥ (if reachableAgain.contains kv.1 then 3 else downRestartCycles)) with
+      | some (key, cycles) =>
+        match finalState.lookupNode key with
+        | some node =>
+          -- TEST SEAM (spec 13 E2E): a pod the map is withheld from
+          -- (FLARE_TEST_BROADCAST_SKIP_FILE) is not restarted either — a
+          -- restart would hand it the map by re-registration. Unset in
+          -- production: one getEnv.
+          let skipped ← match ← IO.getEnv "FLARE_TEST_BROADCAST_SKIP_FILE" with
+            | some f =>
+              try
+                let l := ((← IO.FS.readFile f).splitOn "\n").map String.trim
+                pure (l.contains (extractPodName node.serverName))
+              catch _ => pure false
+            | none => pure false
+          if skipped then
+            IO.eprintln s!"[flare-operator] TEST SEAM: not restarting {key} (the map is withheld from it)"
+          else if node.role == FlareRole.Proxy then
+            let podName := extractPodName node.serverName
+            IO.eprintln s!"[flare-operator] STUCK-DOWN RECOVERY: {key} has been Down with its pod present for {cycles} ticks (~{cycles * 5} s); every partition has an Active master, so restarting {podName} to force a clean re-registration (it will rejoin via Prepare and catch up)"
+            let dupDown := (← duplicateDownRef.get).contains key
+            if reachableAgain.contains key then
+              let reason := if dupDown then "for a duplicate master claim (it claimed a master the committed map gives to another node)"
+                else "as unreachable, or for a duplicate master claim that has since ended"
+              IO.eprintln s!"[flare-operator] REACHABLE AGAIN: {key} was marked down {reason}; it answers again, so it is restarted now to re-register (not after the stuck-down wait)"
+            match ← Bridge.deletePodGraceful podName ns with
+            | .ok () =>
+              downCyclesRef.set (newDown.filter (fun kv => kv.1 != key))
+              downByReachRef.modify (·.filter (· != key))
+              -- a duplicate master claim was the old process's: the
+              -- re-registered one must not be marked dead for it again
+              -- (41222065256: Down ~10 min after its restart, until the
+              -- audit read it again)
+              duplicateDownRef.modify (·.filter (· != key))
+              duplicateFirstSeenRef.modify (·.filter (·.1 != key))
+            | .error e => IO.eprintln s!"[flare-operator] stuck-down recovery: failed to delete {podName}: {e}"
+        | none => pure ()
+      | none => pure ()
+
+  -- 4f. OPERATOR-SIDE REACHABILITY alerts. The probing and the down decision
+  -- run once per pass before the FSM (step 2c, StateMachine/UnreachableNode);
+  -- here only the standing alert is raised, ~every 30 s.
+  let reachSlot := (← IO.monoMsNow) / 30000
+  if reachSlot != (← reachSlotRef.get) then
+    reachSlotRef.set reachSlot
+    for (key, streak) in (← unreachCyclesRef.get) do
+      if streak ≥ 1 then
+        IO.eprintln s!"[flare-operator] CRITICAL: node {key} is READY but the OPERATOR cannot connect to it ({streak} consecutive probes, ~{streak * FlareOperator.UnreachableNode.monitorIntervalSec}s). Topology pushes are not landing — that node is running on a stale map. At {FlareOperator.UnreachableNode.monitorThreshold} probes it is treated as down (a master only if a reachable successor exists). See RUNBOOK #node-unreachable"
+    metrics.unreachableNodes.set (← unreachCyclesRef.get).length.toFloat
+  -- spec 12: the guard's "alert only" (no node reachable) as a gauge, every pass
+  metrics.noNodeReachable.set (if (← reachGuardRef.get) then 1.0 else 0.0)
+  -- spec 13: claims pending and nodes down for one, every pass (a key no
+  -- longer in the node map is dropped first)
+  let (fsPruned, downPruned) := DuplicateMaster.prune (← stateRef.get) (← duplicateFirstSeenRef.get) (← duplicateDownRef.get)
+  duplicateFirstSeenRef.set fsPruned
+  duplicateDownRef.set downPruned
+  metrics.duplicateMasterClaims.set (← duplicateFirstSeenRef.get).length.toFloat
+  metrics.duplicateMasterDown.set (← duplicateDownRef.get).length.toFloat
+
+  -- 5. Handle rocksdb config propagation + cluster replication migration
+  let crd ← crdRef.get
+  handleRocksdbConfig crd crName ns pendingConfRef
+  -- 5-. Copy retention §7: explicit approvals to discard one named copy
+  processCopyDiscardApprovals crName ns
+  -- §10: parked rebuilds give back their cluster slot; resume one when free
+  refreshParkedRebuilds stateRef crName ns (← repairKeysIfAvailable ledgerAvailableRef ledgerRef stateRef)
+  -- the partitions' authoritative history: observed, transitions only
+  timedHistory "observeHistory" (observeHistory stateRef crName ns crd.spec.partitions)
+  handleClusterReplication crd (← stateRef.get) migrationRef pendingConfRef masterSnapshotRef driftTickRef metrics crName ns
+
+  -- 5a. Blue/green migrations (FlareMigration CRs whose spec.source is this
+  -- cluster). One pure-FSM step per tick; all destructive transitions sit
+  -- behind explicit spec approvals (machine-checked in Migration/Types.lean).
+  try
+    Migration.Controller.tick crName ns
+  catch e =>
+    IO.eprintln s!"[migration] tick error: {e}"
+
+  -- 5b'. Migration-provisioned SELF-RETIRE (post-migration handoff). When
+  -- this operator was created by a FlareMigration (marker env) and a
+  -- HELM-managed successor operating the SAME cluster is Ready, delete our
+  -- own Deployment+Service NOW: keeping the {cr}-operator-lease parked the
+  -- successor pair in standby, so the index Service had no leader endpoint
+  -- and the re-pointed StatefulSet crashlooped on "failed to connect to
+  -- index server" (observed live; the crashloop kills then corrupted a
+  -- replica's DB). Self-deletion releases the lease within one expiry.
+  if (← IO.getEnv "FLARE_MIGRATION_PROVISIONED").isSome then
+    try
+      let successors ← kubectl ["get", "pods", "-n", ns,
+        "-l", "app.kubernetes.io/name=flare-operator",
+        "-o", "jsonpath={range .items[*]}{.status.conditions[?(@.type==\"Ready\")].status}|{.spec.containers[0].args}{\"\\n\"}{end}"]
+      match successors with
+      | .error _ => pure ()
+      | .ok out =>
+        let found := out.splitOn "\n" |>.any fun line =>
+          let parts := line.splitOn "|"
+          match parts with
+          | [ready, argsStr] =>
+            -- args are rendered as a JSON array; require the exact adjacent
+            -- pair ["--cluster-name","<our cr>"] so a name that happens to
+            -- be a substring of another arg can't false-positive.
+            ready.trim == "True"
+              && (argsStr.splitOn s!"--cluster-name\",\"{crName}\"").length > 1
+          | _ => false
+        if found then
+          IO.eprintln s!"[migration] helm successor for '{crName}' is Ready -> SELF-RETIRING (deleting {crName}-operator Deployment+Service; the lease hands over within one expiry)"
+          let _ ← kubectl ["delete", "deployment", s!"{crName}-operator", "-n", ns, "--ignore-not-found"]
+          let _ ← kubectl ["delete", "service", s!"{crName}-operator", "-n", ns, "--ignore-not-found"]
+    catch e =>
+      IO.eprintln s!"[migration] self-retire check error: {e}"
+  -- Publish the migration phase/desired to Prometheus (-> Grafana Cloud).
+  let migPhase ← migrationRef.get
+  let phaseNum : Float := match migPhase with
+    | .None => 0.0 | .Dumping => 1.0 | .Forwarding => 2.0
+  let desiredNum : Float :=
+    if !crd.spec.clusterReplication.enabled then 0.0
+    else if crd.spec.clusterReplication.mode == "forward" then 2.0 else 1.0
+  updateMigrationMetrics metrics phaseNum desiredNum
+
+  -- 5b. Pending-config re-signal (see handleRocksdbConfig): one non-blocking
+  -- propagation check per tick; SIGHUP again once the mounted files caught
+  -- up. Give up with a loud warning after ~5 minutes of ticks.
+  match ← pendingConfRef.get with
+  | none => pure ()
+  | some (needle, ticks) =>
+    if ← Bridge.confLandedOnAllPods crName ns needle then
+      sendSighupToPods crName ns
+      pendingConfRef.set none
+      IO.eprintln s!"[flare-operator] config propagation confirmed after {ticks + 1} tick(s), SIGHUP re-sent"
+    else if ticks >= 60 then
+      pendingConfRef.set none
+      IO.eprintln s!"[flare-operator] WARNING: extra.conf update not observed on all pods after {ticks + 1} ticks — giving up re-signal; config may be applied only partially"
+    else
+      pendingConfRef.set (some (needle, ticks + 1))
+
+-- ===========================================================================
+-- Main Reconcile Loop (Legacy - for comparison/fallback)
+-- ===========================================================================
+
+
+private def getHostname : IO String := do
+  let result ← IO.Process.output { cmd := "hostname", args := #[] }
+  return result.stdout.trim
+
+/-- Try to acquire or renew the leader lease.
+    Returns true if this instance is (or became) the leader. -/
+private def tryAcquireOrRenew (leaseName ns identity : String) : IO Bool := do
+  match ← getLease leaseName ns with
+  | .error _ =>
+    -- Lease not found or transient error. Try to create.
+    match ← createLease leaseName ns identity leaseDurationSeconds with
+    | .ok () => return true
+    | .error _ => return false
+  | .ok lease =>
+    if lease.holderIdentity == identity then
+      -- We hold it, renew
+      match ← renewLease leaseName ns identity with
+      | .ok () => return true
+      | .error _ => return false
+    else if lease.expired then
+      -- Expired, try to take over
+      match ← acquireLease leaseName ns identity lease.holderIdentity lease.resourceVersion leaseDurationSeconds (lease.transitions + 1) with
+      | .ok () => return true
+      | .error _ => return false
+    else
+      return false  -- another pod holds a valid lease
+
+-- ===========================================================================
+-- Entry Point
+-- ===========================================================================
+
+/-- Set this pod's `flare.gree.net/role` label (leader/standby). The index
+    Service selects `role=leader`, so this label — not readiness — is what
+    routes flared's index traffic to the elected leader. Best-effort by
+    design: callers decide how loudly to react, and the leader loop
+    re-asserts it every tick so a transient API failure self-heals. -/
+private def setRoleLabel (identity ns role : String) : IO Bool := do
+  match ← Kubectl.kubectl ["label", "pod", identity,
+      s!"flare.gree.net/role={role}", "--overwrite", "-n", ns] with
+  | .ok _ => return true
+  | .error e =>
+    IO.eprintln s!"[flare-operator] WARNING: failed to label pod {identity} role={role}: {e}"
+    return false
+
+/-- Main entry point. Two-phase leader election:
+    Phase 1 (follower): Try to acquire the lease, completely passive.
+    Phase 2 (leader): Run TCP server + reconcile loop, renew lease each iteration. -/
+def main (args : List String) : IO Unit := do
+  let (ns, port, interval, clusterNameArg) := parseArgs args
+  let identity ← getHostname
+
+  IO.eprintln s!"[flare-operator] starting (namespace={ns}, port={port}, interval={interval}s, identity={identity})"
+
+  -- Discover FlareCluster CRs (or use --cluster-name if provided)
+  let crName ← do
+    match clusterNameArg with
+    | some name =>
+      IO.eprintln s!"[flare-operator] managing FlareCluster '{name}' (from --cluster-name)"
+      pure name
+    | none =>
+      match ← listFlareClusters ns with
+      | .error e =>
+        IO.eprintln s!"[flare-operator] warning: could not list FlareClusters: {e}"
+        pure "flare"
+      | .ok [] =>
+        IO.eprintln s!"[flare-operator] no FlareCluster CR found, using default name 'flare'"
+        pure "flare"
+      | .ok ((name, _) :: _) =>
+        IO.eprintln s!"[flare-operator] managing FlareCluster '{name}'"
+        pure name
+
+  -- 1-operator = 1-namespace/1-cluster is a hard design assumption: this
+  -- process serves the flarei protocol for exactly ONE FlareCluster. A CR
+  -- with any other name in this namespace is silently ignored by design —
+  -- but silence misleads (the chart's README once told users to create a
+  -- differently-named CR that nothing would ever manage; external review
+  -- P1-1). Say it loudly at startup.
+  match ← listFlareClusters ns with
+  | .error _ => pure ()
+  | .ok crs =>
+    for (otherName, _) in crs do
+      if otherName != crName then
+        IO.eprintln s!"[flare-operator] WARNING: FlareCluster '{otherName}' exists in namespace '{ns}' but this operator only manages '{crName}' (clusterName in the helm values). It will be IGNORED — deploy a second operator release or fix clusterName."
+
+  let leaseName := s!"{crName}-operator-lease"
+  historyLeaseRef.set (leaseName, identity)
+
+  -- The health server must be up BEFORE the follower loop: a standby
+  -- replica (replicaCount > 1) blocks in phase 1 indefinitely, and with no
+  -- /healthz listener the liveness probe kills it every failure window —
+  -- an exit-137 crashloop observed on the first 2-replica deployment.
+  -- While waiting for the lease: /healthz 200 (alive), /readyz 503 (not
+  -- leader), which keeps the standby out of the Service but out of the
+  -- kubelet's gun.
+  -- Ports are env-configurable so the chart's values actually take effect
+  -- (they previously only changed the containerPort declarations while the
+  -- servers stayed hardcoded — ServiceMonitor got connection refused;
+  -- external review P2-6). The chart injects FLARE_*_PORT from its values.
+  let healthPort := (((← IO.getEnv "FLARE_HEALTH_PORT").bind (·.toNat?)).getD 8080).toUInt16
+  let metricsPort := (((← IO.getEnv "FLARE_METRICS_PORT").bind (·.toNat?)).getD 9090).toUInt16
+  let healthStatus ← HealthStatus.new
+  startHealthServerBackground healthStatus { port := healthPort }
+  IO.eprintln s!"[flare-operator] health check server started on port {healthPort} (leader=false)"
+
+  -- Pod labels survive container restarts: a crashed ex-leader would keep
+  -- routing index traffic to itself while it is back in the follower loop.
+  -- Reset to standby before ever trying for the lease.
+  let _ ← setRoleLabel identity ns "standby"
+
+  -- ═══════════════════════════════════════════════════════════════════════
+  -- PHASE 1: Follower loop — try to become leader
+  -- ═══════════════════════════════════════════════════════════════════════
+  IO.eprintln s!"[flare-operator] phase 1: attempting to acquire lease '{leaseName}'"
+  let mut isLeader := false
+  while !isLeader do
+    isLeader ← tryAcquireOrRenew leaseName ns identity
+    if !isLeader then
+      IO.sleep (interval * 1000).toUInt32
+
+  IO.eprintln s!"[flare-operator] phase 2: acquired lease, entering leader mode"
+
+  -- ═══════════════════════════════════════════════════════════════════════
+  -- PHASE 2: Leader mode — run TCP server + reconcile loop
+  -- ═══════════════════════════════════════════════════════════════════════
+
+  healthStatus.setLeader true  -- We just acquired the lease
+  IO.eprintln s!"[flare-operator] health status: leader=true"
+
+  -- Claim the index traffic: the Service selects role=leader. Loud on
+  -- failure (a leader without the label serves nobody); the reconcile loop
+  -- re-asserts the label every tick until it sticks.
+  if !(← setRoleLabel identity ns "leader") then
+    IO.eprintln s!"[flare-operator] ERROR: leader label not set — index Service will not route here yet"
+
+  -- Initialize metrics
+  let metrics ← initMetrics
+  IO.eprintln s!"[flare-operator] metrics initialized"
+
+  -- Start metrics HTTP server in background
+  startMetricsServerBackground metrics crName { port := metricsPort }
+  IO.eprintln s!"[flare-operator] metrics server started on port {metricsPort}"
+
+  -- Initialize shared state
+  let stateRef ← IO.mkRef FlareClusterState.default
+
+  -- A0 stage 6b: the node-guard webhook (plain HTTP on 127.0.0.1; the
+  -- chart's sidecar terminates TLS). Leader only: its Service selects the
+  -- leader pod.
+  if (← IO.getEnv "FLARE_NODE_GUARD") == some "on" then
+    let port := ((← IO.getEnv "FLARE_WEBHOOK_PORT").bind (·.toNat?)).getD 9444
+    Server.WebhookServer.serveBackground port.toUInt16 (nodeGuardAnswer crName ns leaseName identity stateRef)
+    IO.eprintln s!"[flare-operator] node guard webhook serving on 127.0.0.1:{port}"
+    -- the break-glass receipt key (created once, never replaced)
+    discard <| Fence.ensureKey ns
+
+  -- SAF-09 (review 2026-10-05): running the operator and initialising a data
+  -- cluster are separate. With NO FlareCluster (a confirmed NotFound) the
+  -- operator WAITS: it keeps its lease and reports Ready (an operator
+  -- installed before its cluster, e.g. the chart's own smoke deploy), but it
+  -- makes no node-map decision, serves no index and controls nothing.
+  -- "No CR and no pods" is NOT "nothing to lose": PVCs with old data can
+  -- outlive both. Only once the CR exists is the persisted map, the history
+  -- and the first-build approval examined. A failed read is never taken for
+  -- absence: the operator stays not-Ready and keeps retrying.
+  let mut crPresent := false
+  let mut waitingLogged := false
+  while !crPresent do
+    -- Health follows EVERY observation; only the log line is de-duplicated
+    -- (review 2026-10-05: NotFound -> error -> NotFound left it not-Ready).
+    match ← kubectl ["get", "flarecluster", crName, "-n", ns, "-o", "jsonpath={.metadata.uid}"] with
+    | .ok uid =>
+      if uid.trim.isEmpty then
+        healthStatus.setLeader true     -- not Ready: no usable observation
+        IO.eprintln s!"[flare-operator] FlareCluster {crName}: read returned no UID; retrying (not treated as absent)"
+      else crPresent := true
+    | .error e =>
+      if (e.splitOn "(NotFound)").length > 1 then
+        healthStatus.setLeader false    -- Ready while waiting (no index to serve)
+        if !waitingLogged then
+          IO.eprintln s!"[flare-operator] WAITING: FlareCluster {crName} does not exist; the operator is running (Ready) but initialises and controls nothing until it does"
+          waitingLogged := true
+      else
+        healthStatus.setLeader true     -- not Ready: the TCP index is not up
+        IO.eprintln s!"[flare-operator] FlareCluster {crName} could not be read ({e}); retrying — NOT treated as absent"
+    if !crPresent then
+      IO.sleep 5000
+      if !(← tryAcquireOrRenew leaseName ns identity) then
+        IO.eprintln "[flare-operator] LOST LEASE while waiting for the FlareCluster -- exiting"
+        IO.Process.exit 1
+  if waitingLogged then
+    IO.eprintln s!"[flare-operator] FlareCluster {crName} appeared: examining its persisted map, history and first-build approval before taking control"
+  healthStatus.setLeader true
+
+  -- SAF-09: load the persisted node map, telling a failed read, invalid
+  -- content, an actual loss and a first build apart
+  -- (StateMachine/NodeMapRecovery). Before, every failure "started fresh".
+  let cmName := s!"{crName}-node-map"
+  let reset := (← IO.getEnv "FLARE_NODE_MAP_RESET") == some "1"
+  let mut nmAttempt := 0
+  let mut nmSettled := false
+  while !nmSettled do
+    nmAttempt := nmAttempt + 1
+    let read := NodeMapRecovery.classifyRead (← readFlaredConfigMap cmName ns)
+    -- Evidence is only needed when the map is not a valid one.
+    let needsHistory := match read with
+      | .present d => d.trim.isEmpty || (NodeMapRecovery.validate d).toOption.isNone
+      | .notFound => true
+      | .failed _ => false
+    let (hist, approved) ← if needsHistory then nodeMapHistory crName ns s!"{crName}-operator-lease"
+      else pure (NodeMapRecovery.History.unknown "not needed: the map is valid", false)
+    match NodeMapRecovery.decide read hist reset approved with
+    | .load loaded =>
+      -- MIGRATION: maps persisted by pre-thread operators load every node at
+      -- the shared default 16, which collapses flared's per-destination proxy
+      -- pools into one (misrouted forwards/relays). Re-number duplicates once;
+      -- the version bump makes flared adopt the corrected channels.
+      let loaded := loaded.normalizeThreadTypes
+      let loaded := loaded.rebuildPartitionMap
+      stateRef.set loaded
+      IO.eprintln s!"[flare-operator] loaded {loaded.nodeMap.length} nodes from ConfigMap (resuming at broadcast version {loaded.nodeMapVersion})"
+      nmSettled := true
+    | .fresh why =>
+      IO.eprintln s!"[flare-operator] node map: starting fresh — {why}"
+      -- a fresh start answers no `node add` until the first pass has written
+      -- the first-build history record (ensureHistoryStore opens the gate)
+      registrationGateRef.set (some "a fresh start: the first-build history record is not written yet")
+      nmSettled := true
+    | .retry why =>
+      if nmAttempt >= 12 then
+        IO.eprintln s!"[flare-operator] CRITICAL: node map still undecided after {nmAttempt} attempts ({why}); exiting so the pod restarts and tries again — NOT starting from an empty map"
+        IO.Process.exit 2
+      IO.eprintln s!"[flare-operator] node map: retrying in 5 s (attempt {nmAttempt}/12) — {why}"
+      IO.sleep 5000
+    | .halt why =>
+      IO.eprintln s!"[flare-operator] CRITICAL: {why}"
+      IO.Process.exit 3
+
+  -- FENCING: fold the leadership generation (Lease spec.leaseTransitions,
+  -- bumped on every takeover) into the broadcast version space:
+  --   version := max(resumed, generation * 2^32)
+  -- flared already ignores any node sync whose version is not newer than
+  -- the last it accepted, and that counter is persisted across our own
+  -- restarts — so with generation as the high bits, EVERY broadcast from a
+  -- deposed leader (lower generation ⇒ lower version, whatever its
+  -- counter) is rejected by any flared that has heard the new leader.
+  -- The dual-leader window (a hung iteration outliving the lease; an ack
+  -- landing on a dying leader) loses its ability to influence flared maps
+  -- — no wire-format change, old flared gets the fence for free. The low
+  -- 32 bits allow ~95 years of ticks per generation before overflow.
+  --
+  -- SAF-09: the generation is also kept strictly above the persisted
+  -- record's (startupGeneration). `transitions` restarts from 0 when the
+  -- Lease is deleted, so on its own it let a new leader rank BELOW versions
+  -- an earlier leader had already issued.
+  let resumed := (← stateRef.get).nodeMapVersion
+  persistedVersionRef.set resumed
+  let transitions ← match ← getLease leaseName ns with
+    | .error e =>
+      IO.eprintln s!"[flare-operator] WARNING: could not read lease generation ({e}); generation taken from the persisted record alone"
+      pure 0
+    | .ok lease => pure lease.transitions
+  let gen := startupGeneration transitions resumed
+  let cur ← stateRef.get
+  stateRef.set { cur with nodeMapVersion := startupVersion transitions resumed }
+  IO.eprintln s!"[flare-operator] leadership generation {gen} (lease transitions {transitions}, persisted generation {resumed / generationUnit}) — broadcast versions fenced at ≥ {startupVersion transitions resumed}"
+  -- Fetch CRD BEFORE starting TCP server so META returns correct partition-size
+  -- from the very first request. Without this, flared nodes connecting early
+  -- would get partition-size=1 and operate in single-partition mode permanently.
+  let initialCrd ← do
+    match ← getFlareClusterCRD crName ns with
+    | .ok crd =>
+      IO.eprintln s!"[flare-operator] fetched CRD: partitions={crd.spec.partitions}, replicas={crd.spec.replicas}"
+      pure crd
+    | .error e =>
+      IO.eprintln s!"[flare-operator] warning: could not fetch CRD on startup: {e}, retrying..."
+      -- Retry up to 10 times with 2s delay — CRD must be available before serving META
+      -- Sentinel spec while the CR is missing: partitions = 0 makes every
+      -- assignment function a natural no-op (nothing to need a master or
+      -- slave), so early registrations park as proxies instead of being
+      -- MISASSIGNED against a fabricated 1x1 layout. The reconcile loop
+      -- refetches every tick and swaps the real spec in as soon as the CR
+      -- exists; the FSM then assigns the parked proxies correctly.
+      let mut result : FlareClusterView := {
+        metadata := { name := some crName, «namespace» := some ns }
+        spec := { partitions := 0, replicas := 0 }
+      }
+      let mut fetched := false
+      for _ in List.range 10 do
+        IO.sleep 2000
+        match ← getFlareClusterCRD crName ns with
+        | .ok crd =>
+          IO.eprintln s!"[flare-operator] fetched CRD on retry: partitions={crd.spec.partitions}, replicas={crd.spec.replicas}"
+          result := crd
+          fetched := true
+          break
+        | .error _ => pure ()
+      if !fetched then
+        -- Not fatal: an operator legitimately starts before its CR exists
+        -- (fresh install order). With the 0-partition sentinel nothing can
+        -- be misassigned in the meantime — but say so every startup, and
+        -- the reconcile loop will keep retrying each tick.
+        IO.eprintln s!"[flare-operator] WARNING: no FlareCluster spec yet — parking registrations as proxies until it appears (refetching every tick)"
+      pure result
+  let crdRef ← IO.mkRef initialCrd
+  -- Always start from None phase - operator manages migration state internally
+  -- Restore the migration phase from CR status: an operator restart during
+  -- an active migration must not forget it (the previous version always
+  -- started at None, so a restart mid-Dumping silently orphaned the
+  -- migration — external review P1-4).
+  let restoredPhase ← Bridge.readMigrationPhase crName ns
+  if restoredPhase != MigrationPhase.None then
+    IO.eprintln s!"[flare-operator] restored migrationPhase={restoredPhase.toString} from CR status"
+  let migrationRef ← IO.mkRef restoredPhase
+
+  -- Startup grace period: skip dead node detection for the first N reconcile cycles
+  -- to let all pods register via TCP and appear in the K8s ready list.
+  --
+  -- Production sizing: 24 cycles × 5s = 120s.  RocksDB-backed nodes with large
+  -- datasets (100 GB+) can take 30-60s just to open the database and send the
+  -- initial `node add`.  The previous value of 6 cycles (30s) was too aggressive
+  -- for production workloads — nodes that hadn't registered yet would be invisible
+  -- to the operator (not in nodeMap), and once the grace period expired, the
+  -- operator would start assigning roles to the subset that *had* registered,
+  -- potentially causing unnecessary partition rebalancing.
+  --
+  -- Note: this grace period only affects dead-node detection at startup.
+  -- Nodes in Prepare state (actively reconstructing) are separately protected
+  -- by detectDeadNodes regardless of the grace period.
+  let graceCyclesRef ← IO.mkRef (1 : Nat)
+  leaderSinceMsRef.set (← IO.monoMsNow)
+  let prepareCyclesRef ← IO.mkRef ([] : List (String × Nat))
+  let unreadyCyclesRef ← IO.mkRef ([] : List (String × Nat))
+  let podKeysRef ← IO.mkRef ([] : List String)
+  let podAddrsRef ← IO.mkRef ([] : List (String × String))
+  let unreachCyclesRef ← IO.mkRef ([] : List (String × Nat))
+  let reachSlotRef ← IO.mkRef (0 : Nat)
+  -- Replica-repair ledger (SC-03 / SAF-05): restored from the FlareCluster
+  -- status so a repair in flight, and the drop counters it is judged
+  -- against, survive this process.
+  -- Prepare episodes for the activation-evidence repair (SC-04 / SAF-03).
+  let episodesRef ← IO.mkRef ([] : List SyncEvidence.Episode)
+  -- Item 4: "no ledger" and "could not read the ledger" are different.
+  -- Starting from an empty ledger over a pending request would lose it and
+  -- re-baseline the counters, so a failed read leaves the ledger UNAVAILABLE:
+  -- no repair action and no drop accounting run until a read succeeds
+  -- (retried here briefly, then at the top of every pass).
+  let ledgerRef ← IO.mkRef ({} : ReplicaRepair.Ledger)
+  let ledgerAvailableRef ← IO.mkRef false
+  let ledgerDirtyRef ← IO.mkRef false
+  for attempt in [0:15] do
+    if !(← ledgerAvailableRef.get) then
+      match ← Bridge.readRepairLedger crName ns with
+      | .ok (some l) =>
+        ledgerRef.set l; ledgerAvailableRef.set true
+        IO.eprintln s!"[flare-operator] replica repair ledger restored from status: {l.summary} ({l.counters.length} counter(s))"
+      | .ok none =>
+        ledgerAvailableRef.set true
+        IO.eprintln "[flare-operator] replica repair ledger: nothing in status, starting fresh (first observation will record baselines only)"
+      | .error e =>
+        IO.eprintln s!"[flare-operator] replica repair ledger read failed (attempt {attempt + 1}/15): {e}"
+        IO.sleep 2000
+  if !(← ledgerAvailableRef.get) then
+    IO.eprintln "[flare-operator] WARNING: replica repair ledger UNAVAILABLE at start; repair actions and drop accounting are HELD until a read succeeds — never starting from an empty ledger over a possibly pending request"
+  -- Do not rely on an in-memory pending flag surviving the old process.
+  -- Republish the current committed map on startup through the same fence.
+  let pendingBroadcastRef ← IO.mkRef (some (← stateRef.get).nodeMapVersion)
+  let topologyAuditRef ← IO.mkRef ({} : TopologyObservation.Audit)
+  let downCyclesRef ← IO.mkRef ([] : List (String × Nat))
+  let emptyMasterStreakRef ← IO.mkRef ([] : List (String × Nat))
+  let probeSlotRef ← IO.mkRef (0 : Nat)
+  -- Persistent breaker-trip flag (input to the reset hysteresis).
+  let trippedRef ← IO.mkRef false
+  let pendingConfRef ← IO.mkRef (none : Option (String × Nat))
+  let driftTickRef ← IO.mkRef (0 : Nat)
+  -- Master set captured when a cluster-replication migration starts; a change
+  -- mid-migration triggers a fail-safe abort (see handleClusterReplication).
+  let masterSnapshotRef ← IO.mkRef (none : Option (List String))
+
+  -- TEST SEAM (flare-bug-first-build-node-add-timeout E2E). Unset in
+  -- production: one getEnv. FLARE_TEST_POOL_BUSY=<n> occupies the shared task
+  -- pool at start with n tasks that sleep 60 s each, the way blocked accept
+  -- loops did: a server handler on that pool would not run until a worker
+  -- frees up, past flared's 1 s read timeout. The servers run on dedicated
+  -- threads, so registration must not notice.
+  if let some n := (← IO.getEnv "FLARE_TEST_POOL_BUSY").bind String.toNat? then
+    IO.eprintln s!"[flare-operator] TEST SEAM: occupying the shared task pool with {n} task(s) sleeping 60 s"
+    for _ in [0:n] do
+      let _ ← IO.asTask (prio := .default) (IO.sleep 60000)
+  -- Start TCP server in background (using Server.TcpServer)
+  let _ ← IO.asTask (prio := .dedicated) do
+    try
+      startServerFromRefs port stateRef crdRef
+    catch e =>
+      IO.eprintln s!"[flare-operator] TCP server error: {e}"
+
+  -- Mark TCP server as ready for health checks
+  healthStatus.setTcpServerReady true
+  IO.eprintln s!"[flare-operator] TCP server marked ready for health checks"
+
+  -- Reconcile loop with lease renewal
+  while true do
+    -- Renew lease each iteration
+    let renewed ← tryAcquireOrRenew leaseName ns identity
+    if !renewed then
+      IO.eprintln s!"[flare-operator] LOST LEASE -- exiting"
+      healthStatus.setLeader false  -- Update health status before exit
+      -- Best-effort step-down: stop attracting index traffic before the
+      -- replacement leader labels itself. If the API is unreachable this
+      -- fails too — the pod exits and the boot-time reset covers it.
+      let _ ← setRoleLabel identity ns "standby"
+      -- This has to END THE PROCESS, and `throw` did not. The generated C
+      -- `main` runs `lean_finalize_task_manager()` before it reports an
+      -- uncaught error, and that call waits for every outstanding task —
+      -- the TCP, health and metrics servers here, none of which return. The
+      -- result was a pod that logged "exiting", kept passing /healthz
+      -- (process-alive only) and /readyz (a non-leader is "ready"), owned no
+      -- lease and ran no reconcile loop, for ever: with one replica a
+      -- leaderless cluster, with two a silent loss of the standby. Found by
+      -- the SAF-01 takeover test (CHECK-01), which forces exactly this path
+      -- and then requires recovery. `exit` terminates regardless of threads.
+      (← IO.getStderr).flush
+      IO.Process.exit 1
+    -- Self-healing label assert: a leader whose label patch failed (or was
+    -- stripped externally) reclaims the index Service every tick.
+    let _ ← setRoleLabel identity ns "leader"
+
+    -- Time the reconcile loop
+    let startTime ← IO.monoMsNow
+    try
+      -- Use FSM-driven reconcile (complete implementation with all 5 requirements)
+      reconcileOnceFSM stateRef crdRef migrationRef graceCyclesRef trippedRef prepareCyclesRef unreadyCyclesRef podKeysRef podAddrsRef unreachCyclesRef reachSlotRef ledgerRef ledgerAvailableRef ledgerDirtyRef episodesRef pendingBroadcastRef topologyAuditRef downCyclesRef emptyMasterStreakRef probeSlotRef pendingConfRef masterSnapshotRef driftTickRef metrics leaseName identity crName ns
+    catch e =>
+      IO.eprintln s!"[flare-operator] reconcile error: {e}"
+    let endTime ← IO.monoMsNow
+    let durationMs := endTime - startTime
+    let durationSeconds := durationMs.toFloat / 1000.0
+    recordReconcileDuration metrics durationSeconds
+
+    -- Log reconcile duration and cluster summary for production debugging.
+    -- Only log when duration > 1s (to avoid noise in normal operation) or
+    -- every 12th cycle (~60s at 5s interval) as a heartbeat.
+    let state ← stateRef.get
+    let nodeCount := state.nodeMap.length
+    let masterCount := state.nodeMap.filter (fun (_, n) => n.role == FlareRole.Master) |>.length
+    let slaveCount := state.nodeMap.filter (fun (_, n) => n.role == FlareRole.Slave) |>.length
+    let downCount := state.nodeMap.filter (fun (_, n) => n.state == FlareState.Down) |>.length
+    let prepareCount := state.nodeMap.filter (fun (_, n) => n.state == FlareState.Prepare) |>.length
+    if durationMs > 1000 then
+      IO.eprintln s!"[flare-operator] reconcile slow: {durationMs}ms (nodes={nodeCount} M={masterCount} S={slaveCount} D={downCount} P={prepareCount})"
+
+    -- NOTE: the operator no longer scrapes/re-exports flared stats. Each
+    -- flared serves its own /metrics (PodMonitor scrapes pods directly), so
+    -- data-plane observability does not share the control plane's fate.
+
+    -- a running handover is stepped every pass: no full interval between
+    -- its steps (Th is 10 s; the default interval is 5 s)
+    -- a registration that demoted a node (an empty new incarnation of a
+    -- master, Slave/Prepare now) ends the wait: until that map is sent, its
+    -- replicas still take the new empty process for their master (998dc30
+    -- rc56 upgrade: 9 s later the replica had declared needs_rebuild)
+    let sleepMs := if (← handoverActiveRef.get) then 200 else interval * 1000
+    -- ... and so does a Terminating master left to the next pass's
+    -- handover (handoverWakeRef)
+    for _ in [0:sleepMs / 100] do
+      if (← handoverWakeRef.modifyGet fun w => (w, false)) then break
+      IO.sleep 100
+      if !(← leftActiveRef.get).isEmpty then break
+
+end FlareOperator
+
+def main (args : List String) : IO Unit :=
+  FlareOperator.main args

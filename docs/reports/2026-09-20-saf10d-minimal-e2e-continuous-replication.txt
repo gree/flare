@@ -1,0 +1,177 @@
+# SAF-10d — minimal acceptance E2E for continuous WAL replication (RocksDB), isolated kind cluster
+# suite: flare_operator/FlareOperator/E2E/Tests/ContinuousReplication.lean   (flare_e2e --filter continuous-replication)
+# host: local kind cluster flare-e2e (single node, arm64); images rebuilt from this branch: flare-node-rocksdb:test, flare-operator:test
+# flags for this suite ONLY (extra.conf on every flared pod): repl-identity-forward = true, repl-follow-enabled = true; replica read balance 0
+# date: 2026-09-20
+
+=== run 1 (working tree at dfe6e5e + the suite; first execution on a real cluster) ===
+ok 1 precondition: extra.conf carries both flags; every flared pod reports repl_follow_enabled=1; the P0 slave's read balance is 0
+ok 2 normal following: 30 writes to the master; replica applied 30 forwarded changes THROUGH THE COMMON RULE (repl_forward_applied=30);
+     follower state=following; applied_lsn=34 == master latest 34; source_epoch=2:7b8f0ee7-...
+ok 3 cut (iptables REJECT both directions on the kind node): on the master created 10, updated 5, deleted 5 (all accepted);
+     master counted 2 dropped forwarded writes; master latest=54 items=35; replica items=30 applied_lsn=34 (unchanged) state=disconnected;
+     replica pod uid=530d8a73-..., reconstruction_started=1. NEW WRITES STOPPED HERE.
+ok 4 heal, with no new writes: replica RESUMED from applied_lsn=34 (the position at the cut) and reached 54 (the master's position at the cut)
+     while following; items master=35 replica=35; the 5 updated keys read the NEW value on the replica; the 10 created keys are present
+     on the replica; reconstruction_started 1→1 (NO rebuild); pod uid unchanged (NO recreation); last_reason none.
+     wal_applied=2, wal_skipped=81 — see the note below.
+ok 5 ledger: the operator logged the drop as "owns the repair" (held, no demotion), then "REPLICA REPAIR CLOSED by continuous replication";
+     no "demoting" and no "handed over" line; status.replicaRepairs emptied.
+not ok 6 operator stats fetch failure: HARNESS — revoking pods/exec by removing it left rule[5] with an empty resources list, which the API
+     refuses ("resource rules must supply at least one resource"). The scenario itself did not run. Fixed for run 2 by replacing the
+     resource with an inert name and restoring the exact original list.
+
+NOTE on run 1's wal_applied=2: only the 2 forwarded writes that had EXHAUSTED their retries were carried by the WAL path; the other 18
+staged operations were still in the master's forwarding retry queue when the link healed and landed by forwarding, after which the WAL
+re-delivered them and the rule skipped them (wal_skipped=81 includes metadata-family entries). The acceptance claims hold either way,
+but for the evidence to show the WAL path recovering the gap, run 2 lets the retries settle before healing.
+
+
+=== run 2 (flared/operator images from dfe6e5eaab49298d56852b76c0f8d423ca40eaa7; suite as committed right after this run; raw: docs/reports/2026-09-20-saf10d-run2-raw.log) ===
+command: cd flare_operator && .lake/build/bin/flare_e2e --filter continuous-replication      RESULT: PASS (Tests: 6, Failures: 0)
+ok 1 precondition: extra.conf carries both flags; every flared pod reports repl_follow_enabled=1; the P0 slave's read balance is 0.
+ok 2 normal following: 30 writes; replica repl_forward_applied=30 (common rule); state=following; applied_lsn=34 == master latest 34;
+     source_epoch=2:eda678c0-...
+ok 3 cut (iptables REJECT both directions): created 10/10, updated 5/5, deleted 5/5 on the master; first drop counted after 20s;
+     the suite then waited until proxy_write_dropped stopped increasing (10s quiet window) — settled at 2 dropped writes;
+     master latest=54 items=35; replica items=30 applied_lsn=34 (unchanged) state=disconnected; pod uid=2824ee6a-..., reconstruction_started=1.
+     NEW WRITES STOPPED HERE.
+ok 4 heal, no new writes: replica RESUMED from applied_lsn=34 and reached 54 after 5s while following; reason none;
+     items master=35 replica=35; the 5 updated keys read the NEW value and the 10 created keys are present on the replica (direct reads);
+     reconstruction_started 1→1 (NO rebuild); pod uid unchanged (NO recreation). wal_applied=17, wal_skipped=79.
+     Reading: 17 of the 20 staged changes were carried by the WAL path this time (run 1: 2 of 20). The remaining 3 are inferred to have
+     landed by late forwarding after the heal and then been SKIPPED by the rule when the WAL re-delivered them; the suite does not
+     capture repl_forward_applied/skipped after the heal, so that split is inferred, not measured. Follow-up: capture both counters.
+     Note on the drop counter: only 2 of the 20 forwarded ops exhausted their retries within the quiet window — the per-destination
+     forwarding queue drains slowly under REJECT, so "settled" is a heuristic, not proof that the queue was empty.
+ok 5 ledger: "REPLICA REPAIR requested and HELD ... owns the repair" logged at once; "REPLICA REPAIR CLOSED by continuous replication"
+     20s later; no "demoting" and no "handed over" line; status.replicaRepairs persisted empty.
+ok 6 operator stats fetch failure: ClusterRole rule 5 resources ["pods/exec"] → ["pods/e2e-revoked-exec"] (exact original list restored
+     afterwards); link cut again; the master counted new drops (was 4); the operator held the entry with reason
+     "follower state unknown (stats unreadable)" and did NOT demote while blind; link healed while still blind (replica caught up by WAL);
+     pods/exec restored → the entry CLOSED by position; reconstruction_started 1→1; pod uid unchanged.
+
+What this run does NOT show (scope of the minimal E2E): repeated cuts, mid-batch disconnect / crash at an apply boundary, retention
+overrun (lsn_purged → rebuild), stale-source refusal (epoch_mismatch), operator restart with an owned entry, the read/promotion/deletion
+eligibility (SAF-10c, not implemented yet — replica read balance was forced to 0), lock-hold/starvation measurement, and every coexistence
+scenario beyond "forwarded landed first, WAL re-delivery skipped". Those remain for the full acceptance suite (design §7 T1–T17).
+Evidence status: SAF-10b/10c code ran once on a real (single-node kind, arm64) cluster and behaved as specified; nothing promoted to
+`verified` — author-run, single revision, no reviewer assessment yet.
+
+=== run 3 (operator image from c96246c — SAF-10c eligibility + follower-declared rebuild; flared image from dfe6e5e; suite with tests 7-9 added; raw: docs/reports/2026-09-20-saf10d-run3-raw.log) ===
+command: cd flare_operator && .lake/build/bin/flare_e2e --filter continuous-replication      RESULT: FAIL (Tests: 9, Failures: 4)
+ok 1-5 as in run 2 (following 30 forwarded; cut 10/5/5 with 2 drops; heal resumed 34→54, wal_applied=17; ledger held then CLOSED).
+not ok 6 operator stats fetch failure — HARNESS: revoking pods/exec globally also blinds the operator to the MASTER's drop counter
+     (both stats reads go through exec), so no request was ever made ("held-as-unknown=false; ledger holds: <empty>"). Run 2 had
+     passed this test only because RBAC propagation lagged long enough for the master read to succeed. Fixed for run 4: the rule
+     re-grants pods/exec restricted by resourceNames to the master pod only. (Run 4 still failed this test — see run 4.)
+not ok 7 bulk operation: flush_all advanced the master's epoch (2:… → 3:…), the follower declared needs_rebuild (epoch_mismatch)
+     within 15 s — CORRECT — but no rebuild ran: reconstruction_started stayed 1, the node stayed Slave/Prepare, follower idle
+     ("stopped"). The "requested by the follower" line was not logged because a repair entry ALREADY existed from the drop the
+     operator observed once exec was restored after test 6 (drop path took the entry; the follower-declared request is
+     idempotent per node). ROOT CAUSE found from run 4's flared log (see run 4): a flared thread-lifecycle bug in the follower
+     handler — fixed in 325a2f8.
+not ok 8 read eligibility — consequence of 7 (follower idle → unfit → withheld; correct behaviour for that state).
+not ok 9 failover: the follower WAS promoted (35 s) although unfit/idle (masterless refill's data-bearing last resort — by design),
+     but the test read the source epoch immediately and found it unchanged; flared applies the promotion on its next accepted
+     map. Test fixed to wait for the epoch to advance; the FSM now also logs a last-resort promotion of an unfit follower.
+
+=== run 4 (operator 05ac279, flared dfe6e5e; 12 tests; raw: docs/reports/2026-09-20-saf10d-run4-raw.log) === RESULT: FAIL (Tests: 12, Failures: 7)
+ok 1-5. not ok 6: even with exec allowed on the MASTER only (resourceNames, verified to work in a scratch namespace), no request was
+made → operator defect: the drop observation required the REPLICA's stats read too (fixed eb2ba17). not ok 7: the replica's own log
+showed slave→proxy (follower stopped), active→prepare, proxy→slave and then NOTHING — no reconstruction handler ran → flared defect:
+the follower thread had returned to the pool on needs_rebuild and the later shutdown killed it while pooled; the reconstruction was
+triggered on a dead thread (fixed 325a2f8). Tests 8-12 failed as consequences of 7 (replica idle/unfit).
+
+=== run 5 (operator eb2ba17, flared 325a2f8 — both fixes; 12 tests; raw: docs/reports/2026-09-20-saf10d-run5-raw.log) === RESULT: FAIL (Tests: 12, Failures: 1)
+ok 1-5 as before.
+ok 6 stats fetch failure, replica-only: HELD "follower state unknown (stats unreadable)"; not demoted; CLOSED after the probe returned;
+     reconstruction_started 1→1; pod uid unchanged.
+not ok 7 bulk operation: flush_all advanced the epoch (2:… → 3:…); needs_rebuild (epoch_mismatch) within seconds; the node WAS
+     rebuilt in place (reconstruction_started 1→2, pod uid unchanged) and came back FOLLOWING the new epoch; post-flush writes
+     arrived (10 = 10). The single failing assertion: the "requested by the follower" log line was not found in a 1500-line tail
+     within 120 s, so whether the request came from the follower's declaration or from a residual drop could not be shown
+     (a repair entry from test 6 had still been pending 20 s into the test). Test changed to take the evidence from the persisted
+     ledger entry (drops = 0 ⇒ follower-declared) with a wider log tail; rerun pending.
+ok 8 read eligibility: slave=50 → replica balance 50 while following; 0 under the cut (eligibility logged); 50 again after healing.
+ok 9 repeated cuts: 3 cycles, each converged from its position (111→111, 121→133, 133→145); sampled rewritten/deleted keys correct on
+     the replica; reconstruction_started 2→2; pod uid unchanged; wal_applied=28 forward_applied=66; ledger empty.
+ok 10 operator restart during a cut: the owned hold survived the restart (status.replicaRepairs: owned by continuous replication);
+     converged after the heal; closed; no rebuild; pod uid unchanged.
+ok 11 failover: master pod deleted → follower promoted (NOT LOSS-FREE line absent: it was ranked/proven on the tick the master
+     vanished) → epoch advanced 3:… → 4:… → the ex-master returned, rebuilt and FOLLOWED the new epoch; items 38 = 38.
+ok 12 initial copy under load: third replica joined by snapshot while 27 batches × 20 keys were written; following epoch 4:…;
+     items 588 = 588; the last key written during the copy present.
+
+=== run 6 (operator eb2ba17, flared 325a2f8; suite 50a696d; raw: docs/reports/2026-09-20-saf10d-run6-raw.log) === RESULT: FAIL (Tests: 12, Failures: 1)
+Same 11 passes as run 5. not ok 7 again only on the request-path assertion, now with the decisive evidence: the persisted ledger entry
+for the replica read "drops=2, phase reseated" — the DROP PATH had requested the rebuild (two forwarded ops, refused by the replica
+whose session was still the old epoch, were retried and counted as drops within seconds of flush_all), so the follower-declared
+request was an idempotent no-op. Both paths lead to the same demote → reseat → reconstruction; the node was rebuilt in place and
+followed the new epoch, post-flush writes arrived. The test now accepts either path and records which fired; the follower-declared
+path on its own (no drop ever counted) stays pinned by flare_unit (requestRebuild + plan).
+
+=== run 7 (operator eb2ba17, flared 325a2f8, suite 27eef78; raw: docs/reports/2026-09-20-saf10d-run7-raw.log) === RESULT: PASS (Tests: 12, Failures: 0)
+command: cd flare_operator && .lake/build/bin/flare_e2e --filter continuous-replication
+All 12 pass. Test 7: the request was again filed by the drop path (entry drops=2 "requested"; the master's counter went to 6 while the
+stale-session replica refused forwards), the node was rebuilt in place (reconstruction_started 1→2) and followed the new epoch.
+Test 9: three cycles converged from their positions; wal_applied=27, forward_applied=77; no rebuild; pod unchanged.
+Test 11: promoted follower's epoch advanced; ex-master rebuilt and followed. Test 12: 28 batches during the copy; 618 = 618.
+
+=== regression run 1 on the same images (raw: docs/reports/2026-09-20-saf10-regression-run1-raw.log) ===
+command: flare_e2e --filter replica-repair,failover,read-balance,prepare-evidence,operator-restart      RESULT: FAIL (30 tests, 6 failures)
+failover PASS; read-balance PASS; prepare-evidence PASS.
+operator-restart: tests 18-19 FAIL ("no P0 master after restart" on the node view read shortly after the restart).
+replica-repair: tests 23-26 FAIL — the repair never recorded COMPLETE within 300/360 s; 24-26 cascaded on the non-empty ledger.
+Common signature, absent from the 2026-09-16 passing run: "reconcile slow: 18000–31000 ms" on EVERY tick of a 2-node tch cluster.
+The SAF-10c operator changes are the suspect (per-tick probing or the restructured stats pass); the operator was instrumented
+with a per-tick probe timing line and the replica-repair suite is being rerun to locate the cost. Not resolved at this point.
+
+=== regression run 2 (operator 2379cff — follower-reading completeness + END-terminated probes; raw: docs/reports/2026-09-20-saf10-regression-run2-raw.log) ===
+command: flare_e2e --filter replica-repair,operator-restart,failover,read-balance,prepare-evidence      RESULT: PASS (30 tests, 0 failures)
+Root causes of regression run 1: (1) ReplicaRepair.FollowReading treated a COMPLETE stats reply without follower keys (tch) as
+unreadable, so every drop on a tch replica was held as "follower state unknown" and never repaired (replica-repair 3-6);
+(2) Bridge.queryPodStats waited out a 3 s timeout per probe, so with the extra per-node probes a 2-node reconcile took 18-31 s,
+the stats pass ran every tick and the restarted operator was too slow to re-serve its map before the flared pods' readiness
+failed (operator-restart 18-19). Both fixed in 2379cff: probes now take ~0.5 s ("continuous-replication probe: 2 stats read(s)
+in 1117ms"); the slowest tick in this run was 7710 ms (24 "reconcile slow" lines over 5 suites, all during repairs/restarts).
+
+=== run 8 (operator 2379cff, flared 325a2f8; raw: docs/reports/2026-09-20-saf10d-run8-raw.log) === RESULT: PASS (Tests: 12, Failures: 0)
+command: cd flare_operator && .lake/build/bin/flare_e2e --filter continuous-replication
+Second consecutive full pass. Test 7 this time: the FOLLOWER-DECLARED request won the race (persisted entry drops=0, "requested")
+— with fast probes the operator saw needs_rebuild before any refused forward was counted; rebuilt in place, followed the new epoch.
+Test 9: wal_applied=15 forward_applied=89, no rebuild. Test 11: epoch advanced to 4:…; ex-master rebuilt and followed.
+Test 12: 24 batches during the copy; items equal.
+Revision under test for the register: operator/suite 2379cff5cc28ca160e2076ad2d9c690b0c90d417 (flared sources unchanged since 325a2f8ad0b071f2c52fd43d70b063562631bf39).
+
+=== run 9 (operator 2379cff, flared 325a2f8; suite 94691b2 — PVC-backed, 13 tests with T4 crash; raw: docs/reports/2026-09-20-saf10d-run9-raw.log) === RESULT: FAIL (Tests: 13, Failures: 3)
+ok 1-10 (test 7 again requested by the follower-declared path, entry drops=0).
+not ok 11 replica crash: under the cut 300 created / 5 updated / 5 deleted (master 165→475); healed; flared killed -9 from the kind
+     node 300 ms later (killed=1); the container restarted once on its PVC (restartCount 0→1, pod UID unchanged); the new process
+     reported reconstruction_completed=1, wal_fallback_to_dump=0 (no full dump), state following, applied 475 = master latest —
+     but curr_items master=343, replica=291 (52 fewer) and the test timed out on item equality.
+not ok 12, 13 cascaded: after the failover the new master (the crashed node) read 291/301 while the ex-master read 343/353, and the
+     newcomer that copied the new master by SNAPSHOT counted 833 against the master's 781 — 52 MORE keys than its source.
+DIAGNOSIS: the 52 keys are present; the COUNT is wrong. storage_rocksdb::open seeded curr_items from rocksdb.estimate-num-keys,
+which does not see keys that exist only in the WAL (the swap_in_snapshot code already documents this); after a crash the unflushed
+tail is recovered from the WAL but not counted. The newcomer's exact scan at its snapshot swap counted the same data correctly
+(833), and the ex-master's exact count (353) matches. Fix: open() now seeds the counter by an exact scan of the data family
+(boot-time O(n), duration logged); cutter test_reopen_counts_wal_only_keys_exactly pins it. This is a pre-existing observation
+defect that the SAF-10d crash scenario exposed; it affects every count-based comparison (replica divergence gauge, empty-master
+guard, the acceptance suite's own assertions). Rerun pending (run 10).
+
+=== run 10 (operator 2379cff, flared d9d1285 — exact count seed at open; suite d9d1285; raw: docs/reports/2026-09-20-saf10d-run10-raw.log) === RESULT: PASS (Tests: 13, Failures: 0)
+command: cd flare_operator && .lake/build/bin/flare_e2e --filter continuous-replication
+ok 11 replica crash (T4): 300 created / 5 updated / 5 deleted under the cut (master 165→475); healed; flared killed -9 from the node
+     300 ms later; container restarted once (restartCount 0→1, pod UID unchanged); new process: reconstruction_completed=1 (the
+     operator's rejoin re-seated the node and the reconstruction ran INCREMENTALLY from the cursor), wal_fallback_to_dump=0 (no full
+     dump), following, applied 475 = master latest; items 343 = 343; updated keys carry the new value, deleted keys are absent,
+     the first/last/middle created keys present; ledger closed the drops by position.
+ok 12: promoted follower's epoch advanced; the ex-master (PVC, old history) rebuilt and followed; items 343 = 343.
+ok 13: newcomer copied under load (20 batches × 20); items 753 = 753 (exact counts on both sides now).
+Unit: docs/reports/2026-09-20-saf10-rocksdb-unit-count-seed.txt (31 tests, 515 assertions, pass, incl. test_reopen_counts_wal_only_keys_exactly).
+Revision under test: flared/suite d9d12852a24d8d0e998e1c9faf55202d8e0138c4, operator 2379cff5cc28ca160e2076ad2d9c690b0c90d417.
+
+=== regression, RocksDB-backed suites, on the node image with the exact count seed (flared d9d1285; raw: docs/reports/2026-09-20-saf10-regression-rocksdb-run1-raw.log) ===
+command: flare_e2e --filter pvc-data-survival,snapshot-push-seed,backup-restore,wal-incremental-sync,wal-purged-fallback,orphan-scan-purge
+RESULT: PASS (30 tests, 0 failures; 3 pre-existing SKIPs: WAL not purged within the TTL window, no orphan keys produced).

@@ -1,0 +1,629 @@
+{{- /*
+  FlareCluster + FlareMigration CRDs. Gated by crds.install so a dedicated
+  "flare-crds" release can own them (crds.install=true, operator.enabled=false,
+  cluster.enabled=false → CRDs only) while every instance app sets
+  crds.install=false. Moved out of the Helm crds/ dir on purpose: crds/ is
+  install-once / never-upgraded / values-blind, which cannot express single
+  ownership. As templates they upgrade with the chart; the keep + Prune=false
+  annotations below stop any owner’s teardown from deleting them.
+  See docs/RUNBOOK.md#multi-cluster-crd-ownership. */}}
+{{- if .Values.crds.install }}
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: flareclusters.flare.gree.net
+  annotations:
+    # A CRD is cluster-scoped and SHARED by every flare instance; deleting it
+    # cascade-deletes ALL FlareCluster/FlareMigration CRs cluster-wide. Protect
+    # it from automatic deletion so no single owner's lifecycle can take it
+    # down: helm never prunes it on uninstall, ArgoCD never prunes it on sync/
+    # app-deletion. Remove it deliberately (kubectl) only when retiring flare
+    # from the whole cluster.
+    "helm.sh/resource-policy": keep
+    argocd.argoproj.io/sync-options: Prune=false
+spec:
+  group: flare.gree.net
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required:
+                - partitions
+                - replicas
+              properties:
+                partitions:
+                  type: integer
+                  minimum: 1
+                  description: Number of data partitions
+                replicas:
+                  type: integer
+                  minimum: 1
+                  description: "Replication factor (1 = master only, 2 = master + 1 slave, etc.)"
+                clusterReplication:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                    serverName:
+                      type: string
+                      description: Destination cluster service FQDN
+                    port:
+                      type: integer
+                      description: Destination flared port
+                    mode:
+                      type: string
+                      enum: [duplicate, forward]
+                      default: duplicate
+                    concurrency:
+                      type: integer
+                      default: 2
+                    snapshotPush:
+                      type: boolean
+                      description: >-
+                        Opt-in false: a cross-cluster seed never uses a
+                        snapshot push — per-key merge dump only, the
+                        destination keeps its own history. Unset/true renders
+                        nothing (unchanged). In-cluster replica snapshots are
+                        not affected. Needs a flared that knows
+                        cluster-replication-snapshot-push (an older flared
+                        rejects a config with an unknown key). Read when a
+                        seed starts.
+                readBalance:
+                  type: object
+                  description: >-
+                    Declarative read-routing policy. flared distributes reads
+                    by balance weight; the operator normalizes every committed
+                    node map to this policy (manual balance edits are
+                    reverted — change this spec instead, applies in seconds).
+                  properties:
+                    master:
+                      type: integer
+                      default: 100
+                    slave:
+                      type: integer
+                      default: 0
+                    standby:
+                      type: array
+                      description: >-
+                        Nodes forced to balance 0 and promoted only as a last
+                        resort. Match by pod name (STS ordinal, stable) or
+                        by zone.
+                      items:
+                        type: object
+                        properties:
+                          podName:
+                            type: string
+                          zone:
+                            type: string
+                rocksdb:
+                  type: object
+                  description: >-
+                    RocksDB storage backend tuning. Fields map 1:1 to flared's
+                    rocksdb-* ini options and are only emitted into the
+                    cluster ConfigMap when explicitly set. See
+                    ROCKSDB_REPLICATION.md for semantics.
+                  properties:
+                    blockCacheSizeMb:
+                      type: integer
+                      minimum: 1
+                      maximum: 1048576
+                      description: Block cache size in MiB (rocksdb-block-cache-size-mb). Requires flared restart; not a total memory limit.
+                    writeBufferSizeMb:
+                      type: integer
+                      minimum: 1
+                      maximum: 1048576
+                      description: Per-memtable size in MiB (rocksdb-write-buffer-size-mb). Requires flared restart; each column family has write buffers.
+                    maxWriteBufferNumber:
+                      type: integer
+                      minimum: 2
+                      maximum: 2147483647
+                      description: Maximum write buffers per column family (rocksdb-max-write-buffer-number). Requires flared restart.
+                    walTtlSeconds:
+                      type: integer
+                      minimum: 0
+                      description: WAL retention time in seconds (rocksdb-wal-ttl-seconds)
+                    walSizeLimitMb:
+                      type: integer
+                      minimum: 0
+                      description: WAL size cap in megabytes (rocksdb-wal-size-limit-mb)
+                    syncWrites:
+                      type: boolean
+                      description: Force sync=true on every write (rocksdb-sync-writes)
+                    resyncFailureThreshold:
+                      type: integer
+                      minimum: 1
+                      description: Consecutive resync failures before self-demote
+                    walMaxBatchBytes:
+                      type: integer
+                      minimum: 0
+                      description: Per-WriteBatch size ceiling for WAL replication
+                    walSyncBwlimit:
+                      type: integer
+                      minimum: 0
+                      description: Bandwidth cap (KB/s) for WAL-sync streaming
+                    walSyncInterval:
+                      type: integer
+                      minimum: 0
+                      description: Inter-batch delay (usec) for WAL-sync streaming
+                    snapshotBwlimit:
+                      type: integer
+                      minimum: 0
+                      description: Bandwidth cap (KB/s) for serving snapshot-bootstrap streams (rocksdb-snapshot-bwlimit; sender-side, 0 = unlimited)
+                    flushAllEnabled:
+                      type: boolean
+                      description: Administrative gate for the unauthenticated flush_all op (flared flush-all-enabled; false = refuse with SERVER_ERROR; hot-toggleable)
+                    replIdentityForward:
+                      type: boolean
+                      description: >-
+                        Continuous replication: forward writes with their
+                        source identity (flared repl-identity-forward).
+                        Enable on every node before replFollowEnabled.
+                    replFollowEnabled:
+                      type: boolean
+                      description: >-
+                        Continuous replication: run a WAL follower on each
+                        active RocksDB slave (flared repl-follow-enabled;
+                        dynamic). Declare here: the operator rewrites
+                        extra.conf from this spec.
+                    maxTotalThreadQueue:
+                      type: integer
+                      minimum: 0
+                      description: >-
+                        Upper bound on queued proxy requests (forwards to
+                        replicas included); 0 = unbounded. At the bound a
+                        forward is dropped and counted, and the follower
+                        fills it from the WAL (flared max-total-thread-queue)
+                    noreplyWindowLimit:
+                      type: integer
+                      minimum: 0
+                      description: >-
+                        Pipeline forwards to replicas, N-1 without waiting for
+                        a reply (flared noreply-window-limit; 0 = off). A
+                        failure inside the window is not counted as a drop:
+                        enable only with replFollowEnabled.
+                    replFollowPollIntervalUsec:
+                      type: integer
+                      minimum: 1000
+                      description: Follower poll interval in microseconds (flared repl-follow-poll-interval-usec)
+                    clientIdleTimeoutSeconds:
+                      type: integer
+                      minimum: 1
+                      description: >-
+                        Idle timeout of the client connections flared accepts,
+                        in seconds (flared client-idle-timeout; unset =
+                        net_read_timeout, 600; hot-toggleable, removing it goes
+                        back to 600). A cordon move waits for the moved pod's
+                        connections to close, so an idle persistent client
+                        delays it by up to this long. Shorter closes idle
+                        clients sooner; a client behind a load balancer that
+                        forgets a half-closed connection may then wait in
+                        close().
+                    readUnavailableError:
+                      type: boolean
+                      description: >-
+                        Answer SERVER_ERROR instead of a miss when a get
+                        cannot be served (forward to the master failed, no
+                        partition, enqueue or storage error). Enable where
+                        flare is the primary store (flared
+                        read-unavailable-error; default false; hot-toggleable)
+                    backupKeep:
+                      type: integer
+                      minimum: 1
+                      description: >-
+                        On-disk named backups (checkpoints) retained under
+                        data-dir/backups/ (rocksdb-backup-keep; flared default
+                        7, dynamic). On tmpfs the checkpoints live in RAM and
+                        hardlink-pin compacted-away SSTs — set 1-2 there or
+                        they balloon past the live DB size and OOM the pod.
+                    rebuildReserveBytes:
+                      type: integer
+                      minimum: 0
+                      description: >-
+                        Copy retention: bytes kept free besides the staging
+                        copy while a replica rebuilds (compaction, WAL
+                        catch-up, quarantine). UNSET = staged rebuilds STOP
+                        (stats rebuild_blocked=reserve_unset); there is no
+                        default until the R7 load test measures one. A
+                        rebuild needs the source's copy size plus this free
+                        under the data dir (on tmpfs also within the memory
+                        limit). flared rocksdb-rebuild-reserve-bytes, dynamic.
+                circuitBreaker:
+                  type: object
+                  description: >-
+                    Blast-radius circuit breaker for AZ-level failures. When
+                    the dead fraction reaches tripThresholdPercent the
+                    operator pauses failover/reassignment; with hysteresis it
+                    resumes only after the healthy fraction reaches
+                    resetThresholdPercent (anti-flap: resetThresholdPercent
+                    must exceed 100 - tripThresholdPercent, otherwise the
+                    defaults are used).
+                  properties:
+                    enabled:
+                      type: boolean
+                      description: Enable the breaker (default true)
+                    tripThresholdPercent:
+                      type: integer
+                      minimum: 0
+                      maximum: 100
+                      description: Dead-node percentage that trips the breaker (default 50)
+                    resetThresholdPercent:
+                      type: integer
+                      minimum: 0
+                      maximum: 100
+                      description: Healthy percentage required to auto-reset (default 80)
+                    autoResetEnabled:
+                      type: boolean
+                      description: >-
+                        Auto-resume when healthy capacity returns (default
+                        true). false holds the trip until an operator restart.
+                    minUnavailableToTrip:
+                      type: integer
+                      minimum: 1
+                      description: >-
+                        Fewest unavailable nodes that can trip the breaker
+                        (default 2): a single failed node never pauses
+                        failover, so 1 master + 1 slave clusters fail over.
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum: [Pending, Running, Degraded, Error]
+                nodeMapVersion:
+                  type: integer
+                readyNodes:
+                  type: integer
+                totalNodes:
+                  type: integer
+                migrationPhase:
+                  type: string
+                  enum: [None, Dumping, Forwarding]
+                handovers:
+                  description: |
+                    Ordered handovers of planned master switches (flare-lossless-handover):
+                    per partition, the old master, the successor, the phase
+                    (requested / demoting / draining / promoting / done / aborted) and the
+                    node map versions of the demote, promote and rollback maps.
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                handoverApprovals:
+                  description: |
+                    The approval ids of consumed handover-fenced break-glass values,
+                    the newest 64 (an id is refused again only within these; the
+                    safety comes from the hid and the successor binding).
+                  type: array
+                  items:
+                    type: string
+                handoverStops:
+                  description: |
+                    Kubelet-confirmed stops of flared pods the node guard recorded
+                    while a history-continuation handover could still promote them
+                    (docs/design-handover-history-continuation.md addendum 5):
+                    [{key, uid, at}], the newest 16. Only such a record proves a
+                    silent successor's process stopped; NotFound or another UID
+                    does not (force delete, a partitioned node).
+                  type: array
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                replicaRepairs:
+                  description: |
+                    Replica-repair ledger (SC-03): reconstruction requests
+                    pending for replicas whose master dropped writes to them,
+                    plus the last-seen drop counters. Written by the operator
+                    and read back on start, so a repair survives an operator
+                    restart and counters are not re-baselined.
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                nodeMoves:
+                  description: |
+                    Cordon moves (flare-cordon-proactive-move): the pods of cordoned
+                    Nodes the operator moves off, one at a time. `moves[]` holds
+                    {id, generation, node, pod, podUid, key, role, partition, phase,
+                    successor, reason, held, attempts, admittedUid, restored, stuck,
+                    stuckMs, startedMs, phaseMs, releasedMs, unservedMs}; unservedMs is
+                    how long the move waited in unserved before its release; phase is pending, handingOver,
+                    proxied, unserved, released, deleted, resyncing, done or cancelled.
+                    `stuck` = past the phase deadline (nodeReplacement.unservedTimeoutSeconds
+                    / resyncTimeoutSeconds): no longer the running move, never released.
+                    `blocked[]` lists the pods that cannot be moved now (fewer real
+                    copies than nodeReplacement.minCopies, no successor) with the
+                    reason. Written only by the operator and the node guard (its
+                    `admitted` record), always as a compare-and-swap on this value;
+                    read back on start, so a move survives an operator restart.
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Partitions
+          type: integer
+          jsonPath: .spec.partitions
+        - name: Replicas
+          type: integer
+          jsonPath: .spec.replicas
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Ready
+          type: integer
+          jsonPath: .status.readyNodes
+        - name: Migration
+          type: string
+          jsonPath: .status.migrationPhase
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+  scope: Namespaced
+  names:
+    plural: flareclusters
+    singular: flarecluster
+    kind: FlareCluster
+    shortNames:
+      - fc
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: flaremigrations.flare.gree.net
+  annotations:
+    # A CRD is cluster-scoped and SHARED by every flare instance; deleting it
+    # cascade-deletes ALL FlareCluster/FlareMigration CRs cluster-wide. Protect
+    # it from automatic deletion so no single owner's lifecycle can take it
+    # down: helm never prunes it on uninstall, ArgoCD never prunes it on sync/
+    # app-deletion. Remove it deliberately (kubectl) only when retiring flare
+    # from the whole cluster.
+    "helm.sh/resource-policy": keep
+    argocd.argoproj.io/sync-options: Prune=false
+spec:
+  group: flare.gree.net
+  names:
+    kind: FlareMigration
+    listKind: FlareMigrationList
+    plural: flaremigrations
+    singular: flaremigration
+    shortNames: ["fmig"]
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Source
+          type: string
+          jsonPath: .spec.source
+        - name: Target
+          type: string
+          jsonPath: .spec.target.name
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Progress
+          type: string
+          jsonPath: .status.progress
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: ["source", "target"]
+              properties:
+                source:
+                  type: string
+                  description: >
+                    Name of the FlareCluster to migrate FROM (same namespace).
+                    The operator managing this cluster runs the migration.
+                target:
+                  type: object
+                  required: ["name"]
+                  properties:
+                    name:
+                      type: string
+                      description: Name for the new FlareCluster (same namespace).
+                    partitions:
+                      type: integer
+                      default: 1
+                    replicas:
+                      type: integer
+                      default: 3
+                      description: Replicas PER PARTITION (master + N-1 slaves). Default 3, like cluster.replicas; keep it at least nodeReplacement.minCopies or every cordon move of the target is blocked.
+                    persistenceSize:
+                      type: string
+                      default: "10Gi"
+                      description: PVC size per target pod.
+                    drainSeconds:
+                      type: integer
+                      default: 60
+                paused:
+                  type: boolean
+                  default: false
+                  description: >
+                    Freeze the migration at its current phase. No actions are
+                    taken while true; flip back to false to resume.
+                approveForward:
+                  type: boolean
+                  default: false
+                  description: >
+                    OBSOLETE and NOT accepted: a boolean is not a
+                    verification. The operator only reports that it is set.
+                    Use forwardApproval.
+                forwardApproval:
+                  type: string
+                  description: >
+                    Gate for the forward switch (Duplicating -> Forwarding),
+                    the first client-visible step: from then on the source
+                    proxies every client read and write to the target, and
+                    abort is refused. The approval line verification V
+                    (scripts/flare_verify_copy.py) prints for a MATCH only:
+                    v=1|verdict=MATCH|verified_at=..|attempt=<status.attemptId>|src=..|dst=..
+                    The operator re-reads every source and target partition
+                    master at the switch and again after forward mode is
+                    applied, and refuses another attempt, a changed pod UID,
+                    process start, master id, copy id, epoch or sequence
+                    number, an unreadable master, or a verification older
+                    than an hour. Required IN ADDITION to the operator's own
+                    evidence (counts converged, this attempt's seed
+                    completed, no loss counter moved). Writes stay stopped
+                    from the capture until AwaitingCutover (RUNBOOK
+                    #migration-forward-gate).
+                approveCutover:
+                  type: boolean
+                  default: false
+                  description: >
+                    Human gate for the point of no return. The migration parks
+                    in AwaitingCutover until this is true; cutover flips the
+                    external Service selector to the target cluster.
+                approveRetire:
+                  type: boolean
+                  default: false
+                  description: >
+                    Human gate for deleting the SOURCE cluster's StatefulSet
+                    and FlareCluster CR (PVCs are always left in place).
+                abort:
+                  type: boolean
+                  default: false
+                  description: >
+                    Roll the migration back: stop replication, delete the
+                    target cluster. Refused once the forward switch was
+                    issued (Forwarding and later): the target then holds
+                    acknowledged writes the source does not.
+                externalService:
+                  type: string
+                  default: ""
+                  description: >
+                    Name of the client-facing Service whose selector is
+                    flipped to the target at cutover. Empty = no Service to
+                    flip (cutover is a no-op marker).
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                message:
+                  type: string
+                progress:
+                  type: string
+                sourceKeys:
+                  type: integer
+                targetKeys:
+                  type: integer
+                convergedTicks:
+                  type: integer
+                forwardApprovalConsumed:
+                  type: string
+                  description: >
+                    The forwardApproval a forward switch was issued with
+                    (one use: the same line is refused again).
+                attemptId:
+                  type: string
+                  description: >
+                    Id of this attempt (CR uid / hash of attemptBaseline),
+                    minted when duplication is enabled. A V approval must
+                    name it.
+                attemptBaseline:
+                  type: string
+                  description: >
+                    Source masters' counters read before duplication was
+                    enabled (pod, pod UID, start time, replicating, loss,
+                    seed_completed, seed state). The forward gate compares
+                    against it; a restart or reset makes the loss Unknown.
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: flarecopydiscardapprovals.flare.gree.net
+  annotations:
+    "helm.sh/resource-policy": keep
+    argocd.argoproj.io/sync-options: Prune=false
+spec:
+  group: flare.gree.net
+  names:
+    kind: FlareCopyDiscardApproval
+    listKind: FlareCopyDiscardApprovalList
+    plural: flarecopydiscardapprovals
+    singular: flarecopydiscardapproval
+    shortNames: ["fcda"]
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Operation
+          type: string
+          jsonPath: .spec.operation
+        - name: Copy
+          type: string
+          jsonPath: .spec.copyId
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Reason
+          type: string
+          jsonPath: .status.reason
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: >
+            Copy retention (docs/design-copy-retention.md §7): an explicit,
+            ONE-SHOT approval to discard ONE named copy on ONE pod. It never
+            replaces a copy and never approves an old-source procedure. The
+            operator managing the cluster with spec.clusterUID relays it to
+            the pod with spec.podUID; flared records spec.requestId before
+            deleting anything and never runs the same request id twice.
+          properties:
+            spec:
+              type: object
+              required: ["clusterUID", "podUID", "copyId", "requestId", "operation", "expiresAt"]
+              properties:
+                clusterUID:
+                  type: string
+                  description: metadata.uid of the FlareCluster.
+                podUID:
+                  type: string
+                  description: metadata.uid of the flared pod (a replaced pod does not match).
+                copyId:
+                  type: string
+                  description: >
+                    The copy to discard ("<uuid>:<generation>", stats
+                    rocksdb_copy_id, or the COPY_ID of a retained copy, or the
+                    id in a quarantine-<id> directory name).
+                requestId:
+                  type: string
+                  description: Unique per approval; a repeat is answered from flared's record.
+                operation:
+                  type: string
+                  enum: ["discard-retained", "discard-quarantine", "discard-before-copy"]
+                expiresAt:
+                  type: string
+                  format: date-time
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  description: Pending | Applied | Refused | Expired | Failed | Unknown
+                reason:
+                  type: string
+                attempt:
+                  type: integer
+                observedAt:
+                  type: string
+                decidedAt:
+                  type: string
+{{- end }}

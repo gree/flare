@@ -1,0 +1,68 @@
+# Build flared with --enable-k8s-operator for use with the Lean 4 operator
+FROM --platform=linux/x86_64 ubuntu:noble AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+
+RUN apt-get update && apt-get install -y \
+    git \
+    build-essential \
+    autoconf \
+    automake \
+    libtool \
+    libboost-all-dev \
+    libhashkit-dev \
+    libtokyocabinet-dev \
+    libkyotocabinet-dev \
+    uuid-dev \
+    pkg-config \
+    zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+# Copy ONLY the C++ build inputs (autotools files, src/, test/). With the
+# whole repository here, any docs or Lean change invalidated this layer and
+# forced a full C++ rebuild on every CI leg; now the CI layer cache is reused
+# while these inputs are unchanged. A file the build needs but that is not
+# listed fails the build loudly rather than producing a stale image.
+COPY autogen.sh configure.ac Makefile.am config.guess config.sub depcomp install-sh missing mkinstalldirs \
+     AUTHORS ChangeLog COPYING INSTALL NEWS /build/flare/
+COPY src/ /build/flare/src/
+COPY test/ /build/flare/test/
+
+RUN cd /build/flare \
+    && ./autogen.sh \
+    && ./configure --enable-k8s-operator \
+    && make -j"$(nproc)" \
+    && make install DESTDIR=/build/install
+
+# Stage 2: Minimal runtime image
+FROM --platform=linux/x86_64 ubuntu:noble
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+    libboost-program-options1.83.0 \
+    libboost-regex1.83.0 \
+    libboost-serialization1.83.0 \
+    libboost-thread1.83.0 \
+    libboost-system1.83.0 \
+    libhashkit2 \
+    libtokyocabinet9 \
+    libkyotocabinet16v5 \
+    libuuid1 \
+    zlib1g \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/install/usr/local/ /usr/local/
+# The RESTORE hook (restore provenance check before the live copy is
+# replaced); the chart and the E2E harness both call this same script.
+COPY scripts/flare-restore-hook /usr/local/bin/flare-restore-hook
+
+# flared listens on 12121 by default
+EXPOSE 12121
+
+# FLARE_OPERATOR_HOST and FLARE_OPERATOR_PORT are set at deployment time
+# to point flared at the Lean 4 operator instead of flarei
+
+ENTRYPOINT ["/usr/local/bin/flared"]

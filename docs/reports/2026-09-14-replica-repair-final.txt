@@ -1,0 +1,19 @@
+# replica-repair suite (SAF-02/05/06) after the read-before-delete reorder of the deadline test — harness only, operator image unchanged
+# tested revision: 22fd1483ce76cdacd4ea6954f06dd324ab151219
+# host: local kind cluster flare-e2e (single node, arm64); harness operator memory limit 1Gi
+# command: cd flare_operator && .lake/build/bin/flare_e2e --filter replica-repair
+# date: 2026-09-14
+# note: test 8 now reads the black hole's /tmp/accepted byte count BEFORE deleting its pod. Observed: server accepted 517 bytes (TLS ClientHello reached the black hole), curl exit 28 (timeout) after 3330ms — curl's --connect-timeout 3 covers the TLS handshake, so the accepted-but-silent connection times out at the connect phase, inside the 20s wall.
+
+# === Suite: replica-repair ===
+# black-hole delete returned in 3330ms; server accepted 517 byte(s):  | 000 | curl_exit=28 | 
+# Tests: 8, Failures: 0
+# RESULT: PASS
+ok 1 - control: writes to the master replicate to the slave
+ok 2 - cut link: the master drops replica writes and the operator requests a repair
+ok 3 - the repair runs: held as proxy, confirmed, re-seated, reconstructed; keys recovered without another drop
+ok 4 - SAF-05: a drop seen while resync is disabled is held, survives an operator restart, and is repaired once the gate opens
+ok 5 - SAF-05: a ledger save that fails is marked unsaved, retried every pass, lands when allowed, and survives a restart
+ok 6 - SAF-05: a corrupt ledger is held as unavailable, never replaced by an empty one; the drop seen meanwhile is recovered once it is readable
+ok 7 - SAF-06: the delete carries the observed pod UID as an API precondition; a same-name pod with another UID is refused by the apiserver
+ok 8 - SAF-06: the UID-precondition delete has a deadline — a server that accepts and never answers returns within it

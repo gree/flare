@@ -1,0 +1,43 @@
+# === Suite: continuous-replication-scale ===
+# Deploying cluster 'cont-repl-scale' in namespace 'flare-cont-repl-scale'
+# Waiting for: namespace flare-cont-repl-scale not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-cont-repl-scale (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap cont-repl-scale-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting 50s grace period for operator reconciliation...
+# chunk at 4440000 failed: kubectl failed (exit 1): command terminated with exit code 1
+
+# chunk at 4460000 failed: kubectl failed (exit 1): command terminated with exit code 1
+
+# chunk at 4480000 failed: kubectl failed (exit 1): command terminated with exit code 1
+
+# chunk at 4500000 failed: kubectl failed (exit 1): command terminated with exit code 1
+
+# chunk at 4520000 failed: kubectl failed (exit 1): command terminated with exit code 1
+
+# chunk at 4540000 failed: kubectl failed (exit 1): command terminated with exit code 1
+
+# chunk at 4560000 failed: kubectl failed (exit 1): command terminated with exit code 1
+
+# chunk at 4580000 failed: kubectl failed (exit 1): command terminated with exit code 1
+
+# chunk at 4600000 failed: kubectl failed (exit 1): command terminated with exit code 1
+
+# chunk at 4620000 failed: kubectl failed (exit 1): command terminated with exit code 1
+
+# chunk at 4640000 failed: kubectl failed (exit 1): command terminated with exit code 1
+
+# chunk at 4660000 failed: kubectl failed (exit 1): command terminated with exit code 1
+
+# chunk at 4680000 failed: kubectl failed (exit 1): command terminated with exit code 1
+
+# chunk at 4700000 failed: kubectl failed (exit 1): command terminated with exit code 1
+

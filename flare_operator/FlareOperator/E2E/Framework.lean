@@ -1,0 +1,176 @@
+/-
+  E2E/Framework.lean - Test runner framework with TAP output
+
+  Provides TestCase, TestSuite, TAP output, CLI filtering,
+  and a main entry point for running E2E tests.
+-/
+
+namespace FlareOperator.E2E
+
+/-- Single test result -/
+inductive TestResult where
+  | pass
+  | fail (reason : String)
+  | skip (reason : String)
+  deriving Repr
+
+/-- A test case: name + IO action returning result -/
+structure TestCase where
+  name : String
+  run : IO TestResult
+
+/-- A test suite: group of tests with shared setup/teardown -/
+structure TestSuite where
+  name : String
+  setup : IO Unit
+  teardown : IO Unit
+  tests : List TestCase
+  /-- Diagnostics hook: runs BEFORE teardown when any test in the suite
+      failed (and also when SKIP diagnostics are wanted — the hook decides).
+      Suites tear their per-namespace operator down immediately, so the CI
+      end-of-run log dump finds nothing; this is the only point where the
+      failing suite's operator/flared logs still exist. -/
+  onFailure : IO Unit := pure ()
+  /-- Runs after EVERY test with its TAP index (pass or fail): e.g. a log
+      snapshot, so a pod replaced by a later test does not take the logs of
+      an earlier failure with it (manual run 37900698596). -/
+  afterEach : Nat → IO Unit := fun _ => pure ()
+
+/-- A TAP result line, flushed at once and echoed to stderr (CI 37731207056:
+    stdout was buffered and every result of a run killed by its time limit
+    was lost; e2e.log carries stderr). -/
+def emitResult (line : String) : IO Unit := do
+  IO.println line
+  (← IO.getStdout).flush
+  IO.eprintln s!"# RESULT {line}"
+
+/-- Run a single suite, TAP output to stderr, return (total, failures) -/
+def runSuite (suite : TestSuite) (startIndex : Nat) : IO (Nat × Nat) := do
+  IO.eprintln s!"# === Suite: {suite.name} ==="
+  try
+    suite.setup
+  catch e =>
+    IO.eprintln s!"# Setup failed: {e}"
+    -- Mark all tests as failed
+    let mut idx := startIndex
+    for tc in suite.tests do
+      idx := idx + 1
+      emitResult s!"not ok {idx} - {tc.name} # setup failed"
+    try suite.teardown catch _ => pure ()
+    return (suite.tests.length, suite.tests.length)
+
+  let mut total := 0
+  let mut failures := 0
+  let mut idx := startIndex
+  for tc in suite.tests do
+    idx := idx + 1
+    total := total + 1
+    try
+      let result ← tc.run
+      match result with
+      | .pass =>
+        emitResult s!"ok {idx} - {tc.name}"
+      | .fail reason =>
+        emitResult s!"not ok {idx} - {tc.name}"
+        IO.eprintln s!"#   reason: {reason}"
+        failures := failures + 1
+      | .skip reason =>
+        emitResult s!"ok {idx} - {tc.name} # SKIP {reason}"
+    catch e =>
+      emitResult s!"not ok {idx} - {tc.name}"
+      IO.eprintln s!"#   exception: {e}"
+      failures := failures + 1
+    try suite.afterEach idx catch e => IO.eprintln s!"# afterEach hook failed: {e}"
+
+  if failures > 0 then
+    try
+      IO.eprintln s!"# --- diagnostics for failing suite '{suite.name}' ---"
+      suite.onFailure
+    catch e =>
+      IO.eprintln s!"# diagnostics hook failed: {e}"
+
+  try
+    suite.teardown
+  catch e =>
+    IO.eprintln s!"# Teardown failed: {e}"
+
+  return (total, failures)
+
+/-- Count total tests across all suites -/
+def totalTests (suites : List TestSuite) : Nat :=
+  suites.foldl (fun acc s => acc + s.tests.length) 0
+
+/-- Run multiple suites. Supports --filter <names> to run a subset —
+    a comma-separated list of suite names, so CI can shard the (serial,
+    multi-hour) run across parallel matrix jobs with explicitly balanced
+    groups. A single name behaves as before. Every name must be a suite:
+    an unknown one fails the run before anything runs (it was dropped
+    silently, and a run reported PASS without the suite asked for). -/
+def runAll (suites : List TestSuite) (filter : Option String) : IO UInt32 := do
+  let wanted : List String := match filter with
+    | none => []
+    | some f => (f.splitOn ",").map (·.trim) |>.filter (· ≠ "")
+  let unknown := wanted.filter (fun w => !suites.any (·.name == w))
+  if !unknown.isEmpty then
+    IO.eprintln s!"# Error: no suite named {unknown}"
+    IO.eprintln "# Available suites:"
+    for s in suites do
+      IO.eprintln s!"#   {s.name}"
+    return 1
+  let filtered := match filter with
+    | none => suites
+    | some _ => suites.filter (fun s => wanted.contains s.name)
+  if filtered.isEmpty then
+    match filter with
+    | some f =>
+      IO.eprintln s!"# Error: no suite matching '{f}'"
+      IO.eprintln "# Available suites:"
+      for s in suites do
+        IO.eprintln s!"#   {s.name}"
+      return 1
+    | none =>
+      IO.eprintln "# No test suites found"
+      return 1
+
+  let total := totalTests filtered
+  IO.println s!"1..{total}"
+
+  let mut grandTotal := 0
+  let mut grandFailures := 0
+  let mut startIdx := 0
+  for suite in filtered do
+    let (t, f) ← runSuite suite startIdx
+    grandTotal := grandTotal + t
+    grandFailures := grandFailures + f
+    startIdx := startIdx + t
+
+  IO.eprintln s!"# Tests: {grandTotal}, Failures: {grandFailures}"
+  if grandFailures > 0 then
+    IO.eprintln "# RESULT: FAIL"
+    return 1
+  else
+    IO.eprintln "# RESULT: PASS"
+    return 0
+
+/-- Parse CLI args: --filter <name>, --list -/
+private def parseE2EArgs (args : List String) : Option String × Bool :=
+  let rec go (args : List String) (filter : Option String) (listMode : Bool)
+      : Option String × Bool :=
+    match args with
+    | [] => (filter, listMode)
+    | "--filter" :: v :: rest => go rest (some v) listMode
+    | "--list" :: rest => go rest filter true
+    | _ :: rest => go rest filter listMode
+  go args none false
+
+/-- Main entry point: parse args, run filtered or all suites -/
+def e2eMain (suites : List TestSuite) (args : List String) : IO UInt32 := do
+  let (filter, listMode) := parseE2EArgs args
+  if listMode then
+    IO.println "Available test suites:"
+    for s in suites do
+      IO.println s!"  {s.name} ({s.tests.length} tests)"
+    return 0
+  runAll suites filter
+
+end FlareOperator.E2E

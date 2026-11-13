@@ -26,10 +26,19 @@
  *
  *	$Id$
  */
+#include <cstring>
+#include <sys/stat.h>
+#include <unistd.h>
+#include "signal_interrupt.h"
 #include "flared.h"
 #include "connection_tcp.h"
+#include "queue_proxy_write.h"
 #include "handler_alarm.h"
+#include "handler_metrics.h"
+#include "handler_reaper.h"
+#include "handler_storage_check.h"
 #include "handler_request.h"
+#include "op_repl_snapshot_push.h"
 #ifdef ENABLE_MYSQL_REPLICATION
 # include "handler_mysql_replication.h"
 #endif
@@ -42,9 +51,27 @@
 #ifdef HAVE_LIBKYOTOCABINET
 #include "storage_kch.h"
 #endif
+#ifdef HAVE_LIBROCKSDB
+#include "storage_rocksdb.h"
+#endif
+
+#ifdef ENABLE_K8S_OPERATOR
+# include <cstdlib>
+#endif
 
 namespace gree {
 namespace flare {
+
+namespace {
+bool flared_k8s_build() {
+#ifdef ENABLE_K8S_OPERATOR
+	return true;
+#else
+	return false;
+#endif
+}
+}	// anonymous namespace
+
 
 // This variable is set by main thread.
 static volatile sig_atomic_t reload_request = 0;
@@ -79,9 +106,9 @@ void sa_hup_handler(int sig) {
  *	signal handler (SIGUSR1)
  */
 void sa_usr1_handler(int sig) {
-	log_notice("received signal [SIGUSR1]", 0);
-
-	// just interrupting -> nothing to do
+	// just interrupting -> nothing to do. Async-signal-safe only: no logging
+	// (it allocated and locked inside the handler; see signal_interrupt.h)
+	sigusr1_interrupt_handler(sig);
 }
 // }}}
 
@@ -95,13 +122,30 @@ flared::flared():
 		_req_thread_pool(NULL),
 		_other_thread_pool(NULL),
 		_cluster(NULL),
-		_storage(NULL) {
+		_storage(NULL),
+		_drain_baseline_set(false),
+		_drain_dropped0(0),
+		_drain_failed0(0) {
 }
 
 /**
  *	dtor for flared
  */
 flared::~flared() {
+	// Tear cluster_replication down FIRST, while its thread pool and the
+	// cluster are still alive. _cluster_replication is a shared_ptr member;
+	// left to itself it is destroyed only AFTER this dtor body returns, at
+	// which point _other_thread_pool (the pool it holds as _thread_pool) has
+	// already been delete'd below — so ~cluster_replication()->stop() would
+	// walk a freed thread pool and abort with "pure virtual method called".
+	// Stopping and releasing it here, before those deletes, keeps every
+	// pointer it touches valid. stop() is a no-op when replication was never
+	// started; when it was, this is the only place it can be stopped safely.
+	if (this->_cluster_replication) {
+		this->_cluster_replication->stop();
+		this->_cluster_replication.reset();
+	}
+
 	delete this->_storage;
 	this->_storage = NULL;
 
@@ -174,17 +218,22 @@ int flared::startup(int argc, char **argv) {
 	}
 
 	// application objects
-	connection_tcp::read_timeout = ini_option_object().get_net_read_timeout() * 1000;		// -> msec
+	// In K8s operator mode the read timeout of the connections flared opens is
+	// 30 s unless net-read-timeout is set explicitly (faster failover
+	// detection); accepted connections (clients) use net_read_timeout. The
+	// same rule on reload.
+	connection_tcp::read_timeout = connection_tcp::effective_read_timeout_ms(flared_k8s_build(),
+		ini_option_object().is_net_read_timeout_set(), ini_option_object().get_net_read_timeout());
+	connection_tcp::accepted_read_timeout = connection_tcp::effective_accepted_read_timeout_ms(ini_option_object().get_net_read_timeout(),
+		ini_option_object().get_client_idle_timeout());
+	log_notice("  client idle timeout:    %d ms", connection_tcp::accepted_read_timeout);
 	this->_server = new server();
 	this->_server->set_back_log(ini_option_object().get_back_log());
-	if (this->_server->listen(ini_option_object().get_server_port()) < 0) {
+#ifndef ENABLE_K8S_OPERATOR
+	if (this->_listen() < 0) {
 		return -1;
 	}
-	if (ini_option_object().get_server_socket().empty() == false) {
-		if (this->_server->listen(ini_option_object().get_server_socket()) < 0) {
-			return -1;
-		}
-	}
+#endif
 
 	this->_thread_index = new AtomicCounter(1);
 	this->_req_thread_pool = new thread_pool(ini_option_object().get_thread_pool_size(), ini_option_object().get_stack_size(), this->_thread_index);
@@ -196,14 +245,60 @@ int flared::startup(int argc, char **argv) {
 	this->_cluster->set_proxy_concurrency(ini_option_object().get_proxy_concurrency());
 	this->_cluster->set_reconstruction_interval(ini_option_object().get_reconstruction_interval());
 	this->_cluster->set_reconstruction_bwlimit(ini_option_object().get_reconstruction_bwlimit());
+	this->_cluster->set_repl_identity_forward(ini_option_object().is_repl_identity_forward());
+	this->_cluster->set_wal_follow_limits(ini_option_object().get_wal_follow_max_batches(),
+		ini_option_object().get_wal_follow_max_bytes(), ini_option_object().get_wal_follow_poll_interval_usec(),
+		ini_option_object().get_wal_follow_batch_delay_usec());
+	this->_cluster->set_wal_follow_enabled(ini_option_object().is_wal_follow_enabled());
 	this->_cluster->set_replication_type(ini_option_object().get_replication_type());
 	this->_cluster->set_max_total_thread_queue(ini_option_object().get_max_total_thread_queue());
+	this->_cluster->set_read_unavailable_error(ini_option_object().is_read_unavailable_error());
 	this->_cluster->set_noreply_window_limit(ini_option_object().get_noreply_window_limit());
+	queue_proxy_write::hold_window_ms = ini_option_object().get_proxy_forward_hold_msec();
+	this->_cluster->set_master_wait_ms(ini_option_object().get_master_wait_msec());
 	this->_cluster->add_proxy_event_listener(this->_cluster_replication);
+#ifdef ENABLE_K8S_OPERATOR
+	// In K8s operator mode, override the index server address from environment
+	// variables if set. This allows the operator pod's Service ClusterIP to be
+	// injected via K8s downward API or ConfigMap, so flared connects to the
+	// Lean 4 operator instead of the legacy flarei.
+	{
+		vector<cluster::index_server> k8s_index_servers = ini_option_object().get_index_servers();
+		const char* op_host = std::getenv("FLARE_OPERATOR_HOST");
+		const char* op_port = std::getenv("FLARE_OPERATOR_PORT");
+		if (op_host != NULL && op_port != NULL) {
+			k8s_index_servers.clear();
+			cluster::index_server s;
+			s.index_server_name = string(op_host);
+			s.index_server_port = atoi(op_port);
+			k8s_index_servers.push_back(s);
+			log_notice("K8s operator mode: using operator at %s:%d as index server",
+				op_host, atoi(op_port));
+		}
+		if (this->_cluster->startup_node(k8s_index_servers,
+																		 ini_option_object().get_proxy_prior_netmask()) < 0) {
+			return -1;
+		}
+		// Listen only AFTER the registration reply was applied. A node-map
+		// send that reached this process earlier — connected into the listen
+		// backlog while `node add` waited — was applied once the running loop
+		// started, i.e. AFTER the registration reply (held as version 0), so
+		// the older map won (topology-authority test 8, CI 38098999795 with
+		// the operator's PublicationGate). Refused instead, that send stays
+		// unconfirmed and the operator's next pass publishes the live map.
+		if (this->_listen() < 0) {
+			return -1;
+		}
+	}
+#else
 	if (this->_cluster->startup_node(ini_option_object().get_index_servers(),
 																	 ini_option_object().get_proxy_prior_netmask()) < 0) {
 		return -1;
 	}
+#endif
+	// R3: re-validates the read source of this node's copy (idle unless the
+	// node is a slave with a validated copy)
+	this->_cluster->start_source_validator();
 
 	storage::type t = storage::type_tch;
 	storage::type_cast(ini_option_object().get_storage_type(), t);
@@ -245,6 +340,37 @@ int flared::startup(int argc, char **argv) {
 				ini_option_object().get_storage_dfunit());
 		break;
 	#endif
+	#ifdef HAVE_LIBROCKSDB
+	case storage::type_rocksdb:
+		{
+			storage_rocksdb* rdb = new storage_rocksdb(ini_option_object().get_data_dir(),
+					ini_option_object().get_mutex_slot(),
+					ini_option_object().get_storage_cache_size(),
+					ini_option_object().get_rocksdb_block_cache_size_mb(),
+					ini_option_object().get_rocksdb_write_buffer_size_mb(),
+					ini_option_object().get_rocksdb_max_write_buffer_number(),
+					ini_option_object().get_rocksdb_wal_ttl_seconds(),
+					ini_option_object().get_rocksdb_wal_size_limit_mb(),
+					ini_option_object().is_rocksdb_sync_writes());
+			rdb->set_resync_failure_threshold(
+				ini_option_object().get_rocksdb_resync_failure_threshold());
+			rdb->set_wal_max_batch_bytes(
+				ini_option_object().get_rocksdb_wal_max_batch_bytes());
+			rdb->set_max_total_wal_size_mb(
+				ini_option_object().get_rocksdb_max_total_wal_size_mb());
+			rdb->set_wal_sync_bwlimit(
+				ini_option_object().get_rocksdb_wal_sync_bwlimit());
+			rdb->set_wal_sync_interval(
+				ini_option_object().get_rocksdb_wal_sync_interval());
+			rdb->set_backup_keep(
+				ini_option_object().get_rocksdb_backup_keep());
+			rdb->set_rebuild_reserve_bytes(ini_option_object().get_rocksdb_rebuild_reserve_bytes());
+			rdb->set_snapshot_bwlimit(
+				ini_option_object().get_rocksdb_snapshot_bwlimit());
+			this->_storage = rdb;
+		}
+		break;
+	#endif
 	default:
 		log_err("unknown storage type [%s]", ini_option_object().get_storage_type().c_str());
 		return -1;
@@ -254,11 +380,44 @@ int flared::startup(int argc, char **argv) {
 	}
 	this->_storage->set_listener(this);
 	this->_cluster->set_storage(this->_storage);
+	// A restarted node's very first map can already assign it a role (the
+	// operator re-registers it onto its old partition); the shift was
+	// deferred until the storage exists — run it now or the node sits in
+	// prepare forever.
+	this->_cluster->run_boot_shift();
 
 	// creating alarm thread in advance
 	shared_thread th_alarm = this->_other_thread_pool->get(thread_pool::thread_type_alarm);
 	handler_alarm* h_alarm = new handler_alarm(th_alarm);
 	th_alarm->trigger(h_alarm);
+
+	// background expire crawler (master-only; deletes past-expire keys so their
+	// space is reclaimed and the deletes replicate through the WAL to slaves).
+	// It self-gates on role each cycle, so it is safe to start unconditionally;
+	// on non-rocksdb backends and non-master roles it simply no-ops.
+	shared_thread th_reaper = this->_other_thread_pool->get(thread_pool::thread_type_reaper);
+	handler_reaper* h_reaper = new handler_reaper(th_reaper, this->_cluster, this->_storage);
+	th_reaper->trigger(h_reaper);
+
+	// background storage integrity verifier (opt-in via storage-check-interval;
+	// latches rocksdb_corrupted for alerting — recovery is owned by
+	// reconstruction self-heal / the operator). Safe to start unconditionally:
+	// a zero interval makes it idle, and it no-ops on non-rocksdb backends.
+	shared_thread th_storage_check = this->_other_thread_pool->get(thread_pool::thread_type_storage_check);
+	handler_storage_check* h_storage_check = new handler_storage_check(th_storage_check, this->_cluster, this->_storage);
+	th_storage_check->trigger(h_storage_check);
+
+	// native Prometheus /metrics endpoint: every node exports its own metrics,
+	// so observability shares the node's fault domain instead of a central
+	// collector's (a collector outage is indistinguishable from a real outage
+	// during triage — see handler_metrics.h)
+	if (ini_option_object().get_metrics_server_port() > 0) {
+		shared_thread th_metrics = this->_other_thread_pool->get(thread_pool::thread_type_metrics);
+		handler_metrics* h_metrics = new handler_metrics(th_metrics,
+				ini_option_object().get_metrics_server_port(),
+				ini_option_object().get_server_port());
+		th_metrics->trigger(h_metrics);
+	}
 
 	time_watcher_object = new time_watcher();
 	time_watcher_observer::set_threshold_warn_msec(ini_option_object().get_storage_access_watch_threshold_warn_msec());
@@ -281,6 +440,8 @@ int flared::startup(int argc, char **argv) {
 	cluster_replication::mode m = cluster_replication::mode_duplicate;
 	if (cluster_replication::mode_cast(ini_option_object().get_cluster_replication_mode(), m) >= 0) {
 		this->_cluster_replication->set_mode(m);
+		this->_cluster_replication->set_snapshot_push(ini_option_object().is_cluster_replication_snapshot_push());
+		op_repl_snapshot_push::accept_push = ini_option_object().is_cluster_replication_snapshot_push();
 	} else {
 		return -1;
 	}
@@ -309,8 +470,15 @@ int flared::run() {
 	for (;;) {
 		if (this->_shutdown_request) {
 			log_notice("shutdown request accepted -> breaking running loop", 0);
+			// the drain's baseline is the moment the stop was requested: a
+			// forward dropped or refused while the request threads finish
+			// is part of this stop (review of 10f5f57)
+			this->_note_drain_baseline();
 			log_notice("send shutdown message to index server", 0);
 			this->_server->close(); /* prevent this node from responding */
+			// Stop following before telling the index we are leaving, so no
+			// batch is applied onto a node that is shutting down.
+			this->_cluster->stop_wal_follower();
 			if (this->_cluster->shutdown_node()) {
 				log_warning("failed to send shutdown message", 0);
 			}
@@ -356,6 +524,21 @@ int flared::run() {
 }
 
 /**
+ *	open the listening sockets (port, and the unix socket when configured)
+ */
+int flared::_listen() {
+	if (this->_server->listen(ini_option_object().get_server_port()) < 0) {
+		return -1;
+	}
+	if (ini_option_object().get_server_socket().empty() == false) {
+		if (this->_server->listen(ini_option_object().get_server_socket()) < 0) {
+			return -1;
+		}
+	}
+	return 0;
+}
+
+/**
  *	flared application reload procs
  */
 int flared::reload() {
@@ -369,8 +552,15 @@ int flared::reload() {
 	singleton<logger>::instance().close();
 	singleton<logger>::instance().open(this->_ident, ini_option_object().get_log_facility(), ini_option_object().get_log_stderr());
 
-	// net_read_timeout
-	connection_tcp::read_timeout = ini_option_object().get_net_read_timeout() * 1000;	// -> msec
+	// net_read_timeout — the SAME rule as at startup (this used to apply
+	// net_read_timeout unconditionally: a SIGHUP in the k8s build turned the
+	// 30 s read timeout into 600 s)
+	connection_tcp::read_timeout = connection_tcp::effective_read_timeout_ms(flared_k8s_build(),
+		ini_option_object().is_net_read_timeout_set(), ini_option_object().get_net_read_timeout());
+	connection_tcp::accepted_read_timeout = connection_tcp::effective_accepted_read_timeout_ms(ini_option_object().get_net_read_timeout(),
+		ini_option_object().get_client_idle_timeout());
+	log_notice("  read timeout:           %d ms", connection_tcp::read_timeout);
+	log_notice("  client idle timeout:    %d ms", connection_tcp::accepted_read_timeout);
 
 	//  index_servers
 	this->_cluster->set_index_servers(ini_option_object().get_index_servers());
@@ -383,6 +573,35 @@ int flared::reload() {
 
 	// reconstruction_bwlimit
 	this->_cluster->set_reconstruction_bwlimit(ini_option_object().get_reconstruction_bwlimit());
+	this->_cluster->set_repl_identity_forward(ini_option_object().is_repl_identity_forward());
+	this->_cluster->set_wal_follow_limits(ini_option_object().get_wal_follow_max_batches(),
+		ini_option_object().get_wal_follow_max_bytes(), ini_option_object().get_wal_follow_poll_interval_usec(),
+		ini_option_object().get_wal_follow_batch_delay_usec());
+	this->_cluster->set_wal_follow_enabled(ini_option_object().is_wal_follow_enabled());
+
+#ifdef HAVE_LIBROCKSDB
+	// RocksDB WAL streaming limits are runtime-tunable. Push the reloaded
+	// values onto the live storage instance. These setters only update
+	// plain members read per-batch by the WAL sync path, so no DB reopen
+	// is needed. DB-reopen-required rocksdb options are ignored here on
+	// purpose; ini_option::reload() already warned that a restart is needed.
+	if (this->_storage != NULL && this->_storage->get_type() == storage::type_rocksdb) {
+		storage_rocksdb* rdb = static_cast<storage_rocksdb*>(this->_storage);
+		rdb->set_resync_failure_threshold(
+			ini_option_object().get_rocksdb_resync_failure_threshold());
+		rdb->set_wal_max_batch_bytes(
+			ini_option_object().get_rocksdb_wal_max_batch_bytes());
+		rdb->set_wal_sync_bwlimit(
+			ini_option_object().get_rocksdb_wal_sync_bwlimit());
+		rdb->set_wal_sync_interval(
+			ini_option_object().get_rocksdb_wal_sync_interval());
+		rdb->set_backup_keep(
+			ini_option_object().get_rocksdb_backup_keep());
+		rdb->set_rebuild_reserve_bytes(ini_option_object().get_rocksdb_rebuild_reserve_bytes());
+		rdb->set_snapshot_bwlimit(
+			ini_option_object().get_rocksdb_snapshot_bwlimit());
+	}
+#endif
 
 	// replication_type
 	this->_cluster->set_replication_type(ini_option_object().get_replication_type());
@@ -395,12 +614,15 @@ int flared::reload() {
 
 	// max_total_thread_queue
 	this->_cluster->set_max_total_thread_queue(ini_option_object().get_max_total_thread_queue());
+	this->_cluster->set_read_unavailable_error(ini_option_object().is_read_unavailable_error());
 
 	// re-setup resource limit (do not care about return value here)
 	this->_set_resource_limit();
 
 	// noreply_window_limit
 	this->_cluster->set_noreply_window_limit(ini_option_object().get_noreply_window_limit());
+	queue_proxy_write::hold_window_ms = ini_option_object().get_proxy_forward_hold_msec();
+	this->_cluster->set_master_wait_ms(ini_option_object().get_master_wait_msec());
 
 	time_watcher_object->stop();
 	time_watcher_observer::set_threshold_warn_msec(ini_option_object().get_storage_access_watch_threshold_warn_msec());
@@ -410,9 +632,26 @@ int flared::reload() {
 	}
 
 	// cluster replication
+	// TEST SEAM (E2E only, review 2026-10-12): while the file named by
+	// FLARE_TEST_RELOAD_REPL_HOLD_FILE exists, a reload leaves THIS pod's
+	// cluster replication exactly as it is — one pod of a source keeps the
+	// old mode while the others switch, the mixed-mode window of a forward
+	// switch made deterministic (ConfigMap propagation per pod otherwise).
+	{
+		const char* hold = getenv("FLARE_TEST_RELOAD_REPL_HOLD_FILE");
+		struct stat hsb;
+		if (hold != NULL && hold[0] != '\0' && stat(hold, &hsb) == 0) {
+			log_warning("reload: cluster replication left unchanged (mode %s): held by FLARE_TEST_RELOAD_REPL_HOLD_FILE (test seam)",
+					cluster_replication::mode_cast(this->_cluster_replication->get_mode()).c_str());
+			log_notice("process successfully reloaded", 0);
+			return 0;
+		}
+	}
 	cluster_replication::mode m = cluster_replication::mode_duplicate;
 	if (cluster_replication::mode_cast(ini_option_object().get_cluster_replication_mode(), m) >= 0) {
 		this->_cluster_replication->set_mode(m);
+		this->_cluster_replication->set_snapshot_push(ini_option_object().is_cluster_replication_snapshot_push());
+		op_repl_snapshot_push::accept_push = ini_option_object().is_cluster_replication_snapshot_push();
 		if (ini_option_object().is_cluster_replication()) {
 			string cl_repl_server_name = ini_option_object().get_cluster_replication_server_name();
 			int cl_repl_server_port = ini_option_object().get_cluster_replication_server_port();
@@ -426,7 +665,16 @@ int flared::reload() {
 
 			this->_cluster_replication->start(cl_repl_server_name, cl_repl_server_port, cl_repl_concurrency,
 				   this->_storage, this->_cluster);
-		} else {
+		} else if (this->_cluster_replication->is_started()) {
+			// Only stop what was actually started. reload() runs on every
+			// SIGHUP, and the operator SIGHUPs a lot during churn (rolling
+			// restart); calling stop() unconditionally drove
+			// _stop_dump_replication over a recycling/tearing-down thread
+			// set and crashed flared with "pure virtual method called"
+			// (observed on a rolling restart, bug #15). Guarding on
+			// is_started() matches the start-side reconfigure branch above
+			// and makes a disabled-replication reload a no-op instead of a
+			// repeated teardown.
 			this->_cluster_replication->stop();
 		}
 	}
@@ -441,7 +689,37 @@ int flared::reload() {
  */
 int flared::shutdown() {
 	log_notice("shutting down active, and pool threads...", 0);
+	// A request being executed (on a proxy, a client write being forwarded
+	// to its master) is finished and answered before its thread is
+	// interrupted: threads close their client connection after the current
+	// request, and the interrupt waits (bounded) until none is executing
+	// (review of cf27570). An idle connection is closed by the interrupt;
+	// its client reconnects (through the Service) for its next request.
+	//
+	// One budget for both waits (review of 09624ee): a client write may be
+	// waiting on a forward held for up to proxy-forward-hold-msec (sync
+	// replication), so the budget is at least that hold plus 5 s; the pod's
+	// terminationGracePeriodSeconds must cover the preStop window plus it.
+	const int budget_ms = flared::shutdown_budget_ms(ini_option_object().get_shutdown_forward_drain_msec(),
+		ini_option_object().get_proxy_forward_hold_msec());
+	struct timespec t0;
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	handler_request::set_stop_after_request(true);
+	this->_wait_requests(budget_ms);
 	this->_req_thread_pool->shutdown();
+	// No client request runs any more, so no new forward is made. The ones
+	// still queued to replicas carry writes a client was told STORED: keep
+	// the forwarding threads (other pool) running until they are sent, within
+	// a bound (NODE-OPS-LOSSLESS-PLAN L2). What is left at the bound is
+	// abandoned and counted, as before.
+	{
+		struct timespec t1;
+		clock_gettime(CLOCK_MONOTONIC, &t1);
+		const long long used = (static_cast<long long>(t1.tv_sec) - t0.tv_sec) * 1000 + (static_cast<long long>(t1.tv_nsec) - t0.tv_nsec) / 1000000;
+		// at least 1 ms: a budget of 0 means "do not wait" (NOT confirmed)
+		const long long left = budget_ms - used;
+		this->_drain_forwards(budget_ms <= 0 ? 0 : (left > 0 ? static_cast<int>(left) : 1));
+	}
 	this->_other_thread_pool->shutdown();
 	log_notice("all threads are successfully shutdown", 0);
 
@@ -451,6 +729,89 @@ int flared::shutdown() {
 	this->_clear_pid();
 
 	return 0;
+}
+
+/**
+ *	wait (at most `msec`) until no client request is being executed
+ */
+void flared::_wait_requests(int msec) {
+	struct timespec t0;
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	for (;;) {
+		const uint64_t n = stats_object->get_requests_in_progress();
+		struct timespec t1;
+		clock_gettime(CLOCK_MONOTONIC, &t1);
+		const long long elapsed = (static_cast<long long>(t1.tv_sec) - t0.tv_sec) * 1000 + (static_cast<long long>(t1.tv_nsec) - t0.tv_nsec) / 1000000;
+		if (n == 0) {
+			log_notice("no client request in progress at shutdown (waited %lld msec)", elapsed);
+			return;
+		}
+		if (msec <= 0 || elapsed >= msec) {
+			log_err("shutdown: %llu client request(s) still in progress after %lld msec — their threads are interrupted (the clients get no answer)",
+				static_cast<unsigned long long>(n), elapsed);
+			return;
+		}
+		usleep(10 * 1000);
+	}
+}
+
+/**
+ *	wait (at most `msec`) until no in-cluster forward to a replica exists
+ */
+void flared::_note_drain_baseline() {
+	if (this->_drain_baseline_set) {
+		return;
+	}
+	stats_object->get_proxy_write_failed(this->_drain_failed0);
+	this->_drain_dropped0 = stats_object->get_proxy_write_dropped();
+	this->_drain_baseline_set = true;
+}
+
+void flared::_drain_forwards(int msec) {
+	// "in flight = 0" means every forward item ended — delivered, refused or
+	// dropped — not that it was delivered (review of 8d64aaf). The drain is
+	// lossless only if no forward to a replica was dropped or refused since
+	// the stop was requested, nothing is left when it ends, and it ended
+	// within the bound. A bound of 0 does not wait: anything still queued
+	// makes the drain NOT confirmed (review of 10f5f57).
+	this->_note_drain_baseline();
+	const uint64_t failed0 = this->_drain_failed0;
+	const uint64_t dropped0 = this->_drain_dropped0;
+	uint64_t total = 0;
+	stats_object->get_repl_in_flight(total);
+	struct timespec t0;
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	long long elapsed = 0;
+	if (total > 0 && msec > 0) {
+		log_notice("in-cluster forwards in flight at shutdown: %llu -> waiting up to %d msec for them to end", static_cast<unsigned long long>(total), msec);
+		for (;;) {
+			usleep(20 * 1000);
+			stats_object->get_repl_in_flight(total);
+			struct timespec t1;
+			clock_gettime(CLOCK_MONOTONIC, &t1);
+			elapsed = (static_cast<long long>(t1.tv_sec) - t0.tv_sec) * 1000 + (static_cast<long long>(t1.tv_nsec) - t0.tv_nsec) / 1000000;
+			if (total == 0 || elapsed >= msec) {
+				break;
+			}
+		}
+	}
+	if (total > 0) {
+		map<string, uint64_t> left = stats_object->get_repl_in_flight(total);
+		for (map<string, uint64_t>::const_iterator it = left.begin(); it != left.end(); it++) {
+			log_err("shutdown: %llu in-cluster forward(s) to %s still in flight after %lld msec (bound %d msec) — they are abandoned (counted as dropped)",
+				static_cast<unsigned long long>(it->second), it->first.c_str(), elapsed, msec);
+		}
+	}
+	uint64_t failed1 = 0;
+	stats_object->get_proxy_write_failed(failed1);
+	const uint64_t dropped1 = stats_object->get_proxy_write_dropped();
+	if (total > 0 || dropped1 != dropped0 || failed1 != failed0) {
+		log_err("shutdown forward drain NOT LOSSLESS: %s; since the stop was requested %llu forward(s) dropped and %llu refused by a replica (after %lld msec)",
+			total > 0 ? "forwards were still queued when the drain ended" : "every forward ended, but not all were delivered",
+			static_cast<unsigned long long>(dropped1 - dropped0), static_cast<unsigned long long>(failed1 - failed0), elapsed);
+	} else {
+		log_notice("shutdown forward drain lossless: every in-cluster forward was delivered (after %lld msec; none dropped or refused since the stop was requested)", elapsed);
+	}
 }
 
 /**
@@ -562,6 +923,55 @@ int flared::_set_signal_handler() {
 
 // {{{ ::main (entry point)
 int main(int argc, char **argv) {
+	// OFFLINE mode: `flared --analyze-checkpoint <dir>` opens a RocksDB
+	// checkpoint READ-ONLY and streams `key,expire,ttl,size` CSV to stdout,
+	// one row per live key, then exits — no server, no writes. For keyspace /
+	// expire / value-length analysis against an S3 backup checkpoint, OFF the
+	// serving cluster. See docs/BACKUP_RESTORE.md.
+	for (int i = 1; i + 1 < argc; i++) {
+		// OFFLINE: `flared --checkpoint-binding <dir>` prints the partition
+		// binding a RocksDB directory (checkpoint or live copy) carries —
+		// "binding <v1 ...|->" and "restored_unverified <0|1>" — read-only.
+		// The restore hook compares the backup's with the live copy's BEFORE
+		// it replaces anything (docs/BACKUP_RESTORE.md). Exit 0 read, 2 not.
+		if (strcmp(argv[i], "--checkpoint-binding") == 0) {
+#ifdef HAVE_LIBROCKSDB
+			std::string b;
+			bool ru = false;
+			if (gree::flare::storage_rocksdb::checkpoint_binding(argv[i + 1], b, ru) < 0) {
+				fprintf(stderr, "checkpoint-binding: %s could not be read\n", argv[i + 1]);
+				return 2;
+			}
+			printf("binding %s\nrestored_unverified %d\n", b.empty() ? "-" : b.c_str(), ru ? 1 : 0);
+			return 0;
+#else
+			fprintf(stderr, "flared built without RocksDB; --checkpoint-binding unavailable\n");
+			return 2;
+#endif
+		}
+		// OFFLINE: `flared --dump-checkpoint <dir>` writes the checkpoint's
+		// keys and values in the `dump` framing (verification V capture;
+		// read-only, never connects to a server). Exit 0 complete, 1 not.
+		if (strcmp(argv[i], "--dump-checkpoint") == 0) {
+#ifdef HAVE_LIBROCKSDB
+			gree::flare::storage_rocksdb st(argv[i + 1], 1, 0);
+			return st.dump_checkpoint(argv[i + 1], stdout) == 0 ? 0 : 1;
+#else
+			fprintf(stderr, "flared built without RocksDB; --dump-checkpoint unavailable\n");
+			return 1;
+#endif
+		}
+		if (strcmp(argv[i], "--analyze-checkpoint") == 0) {
+#ifdef HAVE_LIBROCKSDB
+			gree::flare::storage_rocksdb st(argv[i + 1], 1, 0);
+			return st.analyze_checkpoint(argv[i + 1], stdout) == 0 ? 0 : 1;
+#else
+			fprintf(stderr, "flared built without RocksDB; --analyze-checkpoint unavailable\n");
+			return 1;
+#endif
+		}
+	}
+
 	gree::flare::flared& f = gree::flare::singleton<gree::flare::flared>::instance();
 	f.set_ident("flared");
 

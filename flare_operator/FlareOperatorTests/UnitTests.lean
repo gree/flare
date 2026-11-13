@@ -1,0 +1,3439 @@
+/-
+  UnitTests.lean — executable checks for the pure decision code.
+
+  `lake build flare_unit && .lake/build/bin/flare_unit` runs them; a non-zero
+  exit means a failure, and the register records the run like any other
+  check (CHECK-03b). These are not proofs and not end-to-end evidence: they
+  pin the decisions of StateMachine/ReplicaRepair.lean on the cases the
+  E2E harness cannot stage deterministically — a master whose counter reset,
+  a destination that resolves to nothing or to a master, a request held by
+  a gate and released later, a completion that must not be accepted on a
+  re-announced Active alone.
+
+  Kept as many small definitions on purpose: one large `do` block of checks
+  made the elaborator crawl.
+-/
+import Lean.Data.Json
+import FlareOperator.Migration.Provision
+import FlareOperator.Migration.Types
+import FlareOperator.Server.TopologyBroadcast
+import FlareOperator.Server.PublicationGate
+import FlareOperator.StateMachine.TopologyObservation
+import FlareOperator.Metrics.Prometheus
+import FlareOperator.StateMachine.ReplicaRepair
+import FlareOperator.StateMachine.SyncEvidence
+import FlareOperator.StateMachine.StatsObservation
+import FlareOperator.StateMachine.FollowEvidence
+import FlareOperator.StateMachine.K8sReconciler
+import FlareOperator.StateMachine.NodeMapRecovery
+import FlareOperator.K8s.Bridge
+import FlareOperator.E2E.TraceMatch
+import FlareOperator.E2E.Helpers
+import FlareOperator.E2E.PromotionTimeline
+import FlareOperator.StateMachine.SourceEligibility
+import FlareOperator.StateMachine.RebuildConcurrency
+import FlareOperator.StateMachine.RedundantCopy
+import FlareOperator.StateMachine.HistoryContinuation
+import FlareOperator.StateMachine.AuthoritativeHistory
+import FlareOperator.StateMachine.CopyDiscardApproval
+import FlareOperator.StateMachine.PromotionEvidence
+import FlareOperatorTests.UnitTestsHandover
+import FlareOperatorTests.UnitTestsRolling
+import FlareOperatorTests.UnitTestsNodeGuard
+import FlareOperatorTests.UnitTestsFailover
+import FlareOperatorTests.UnitTestsNodeMove
+import FlareOperatorTests.UnitTestsFence
+
+open FlareOperator.K8s
+open FlareOperator.ReplicaRepair
+
+namespace FlareOperator.UnitTests
+
+structure Ctx where
+  failures : IO.Ref (List String)
+  count : IO.Ref Nat
+
+def check (ctx : Ctx) (name : String) (ok : Bool) : IO Unit := do
+  ctx.count.modify (· + 1)
+  if ok then IO.println s!"ok - {name}"
+  else
+    IO.println s!"not ok - {name}"
+    ctx.failures.modify (· ++ [name])
+
+def node (role : FlareRole) (state : FlareState) (partition : Int) (name : String) : FlareNode :=
+  { serverName := name, serverPort := 12121, role := role, state := state, partition := partition }
+
+def slaveKey : String := "n1.svc:12121"
+def masterKey : String := "n0.svc:12121"
+
+def state : FlareClusterState :=
+  { nodeMap := [(masterKey, node .Master .Active 0 "n0.svc"), (slaveKey, node .Slave .Active 0 "n1.svc")],
+    nodeMapVersion := 10 }
+
+def promoted : FlareClusterState :=
+  { nodeMap := [(masterKey, node .Slave .Active 0 "n0.svc"), (slaveKey, node .Master .Active 0 "n1.svc")],
+    nodeMapVersion := 10 }
+
+def empty : Ledger := {}
+
+/-- Ledger after the first observation of 7 drops to the slave (requested as
+    possibly unrepaired since review 2026-10-06; the counter is recorded). -/
+def l1 : Ledger := (observe empty masterKey [(slaveKey, 7)]).1
+
+def drops (l : Ledger) (m : String) (obs : List (String × Nat)) : List (String × Nat) :=
+  (observe l m obs).2.1
+
+def checkObserve (ctx : Ctx) : IO Unit := do
+  check ctx "first observation of a non-zero count is a POSSIBLY UNREPAIRED request (no longer a silent baseline)"
+    (drops empty masterKey [(slaveKey, 7)] == [(slaveKey, 7)] && l1.initialized == true)
+  check ctx "an increase attributes the delta"
+    (drops l1 masterKey [(slaveKey, 10)] == [(slaveKey, 3)])
+  check ctx "unchanged attributes nothing"
+    (drops l1 masterKey [(slaveKey, 7)] == [])
+  check ctx "a counter that went DOWN is a reset: the new count is all new drops"
+    (drops l1 masterKey [(slaveKey, 2)] == [(slaveKey, 2)])
+  check ctx "a reset to zero (fresh master, no drops yet) attributes nothing"
+    (drops l1 masterKey [(slaveKey, 0)] == [])
+  check ctx "a destination first seen on an INITIALIZED ledger counts fully"
+    (drops l1 masterKey [("n2.svc:12121", 4)] == [("n2.svc:12121", 4)])
+  check ctx "counters are keyed per master: another master's first sighting also counts"
+    (drops l1 "other:12121" [(slaveKey, 1)] == [(slaveKey, 1)])
+
+/-- One request for the slave, 3 drops. -/
+def l2 : Ledger := request l1 masterKey slaveKey 3
+
+def firstPhase (l : Ledger) : Option Phase := l.entries.head?.map (·.phase)
+def firstDrops (l : Ledger) : Option Nat := l.entries.head?.map (·.drops)
+def firstNodeKey (l : Ledger) : Option String := l.entries.head?.bind (·.nodeKey)
+def firstHold (l : Ledger) : Option String := l.entries.head?.bind (·.hold)
+def firstCurrentIdAtReseat (l : Ledger) : Option Nat := l.entries.head?.bind (·.currentIdAtReseat)
+
+def checkRequestResolve (ctx : Ctx) : IO Unit := do
+  check ctx "a request is recorded once per destination"
+    (l2.entries.length == 1 && firstPhase l2 == some .requested)
+  let l2b := request l2 masterKey slaveKey 2
+  check ctx "more drops on the same destination extend the entry, not duplicate it"
+    (l2b.entries.length == 1 && firstDrops l2b == some 5)
+  let (l3, voided) := resolve l2 state
+  check ctx "a destination matching a Slave resolves to its key"
+    (voided.isEmpty && firstNodeKey l3 == some slaveKey)
+  let (l3u, voidedU) := resolve (request l1 masterKey "ghost.svc:12121" 1) state
+  check ctx "an unmatched destination stays requested and unresolved"
+    (voidedU.isEmpty && l3u.entries.length == 1 && firstNodeKey l3u == none)
+  let (l3v, voidedV) := resolve l2 promoted
+  check ctx "a destination that is now a MASTER is voided, not demoted"
+    (voidedV.length == 1 && l3v.entries.isEmpty)
+  check ctx "resolution accepts the bare host as well as host:port"
+    ((resolveKey state "n1.svc").map (·.1) == some slaveKey)
+
+/-- Resolved request. -/
+def l3 : Ledger := (resolve l2 state).1
+/-- Held by a closed gate. -/
+def lHeld : Ledger := (plan l3 false "breaker held").1
+/-- Gate opened: the action list and the cleared ledger. -/
+def opened : Ledger × List (String × Entry) := plan lHeld true ""
+/-- Demoted at version 11. -/
+def lDem : Ledger := markDemoted opened.1 slaveKey 11
+
+def checkGate (ctx : Ctx) : IO Unit := do
+  check ctx "a gated request is HELD with its reason and produces no action"
+    ((plan l3 false "breaker held").2.isEmpty && firstHold lHeld == some "breaker held")
+  check ctx "a held request is not excluded from assignment (only a demoted one is)"
+    (heldKeys lHeld == [])
+  check ctx "when the gate opens the held request becomes an action and the hold clears"
+    (opened.2.map (·.1) == [slaveKey] && firstHold opened.1 == none)
+  check ctx "a demoted node is held out of assignment"
+    (heldKeys lDem == [slaveKey] && firstPhase lDem == some (.demoted 11))
+  check ctx "plan does not act twice on a demoted entry"
+    ((plan lDem true "").2.isEmpty)
+
+/-- An observation carrying flared's completion record. -/
+def obs (v : Option Nat) (boot cid : Option Nat) (st : Option String) (lsid : Option Nat)
+    (src master : Option String) (m : Option (FlareRole × FlareState)) : Observation :=
+  { reportedVersion := v, bootId := boot, currentId := cid, currentState := st,
+    lastSuccessId := lsid, lastSuccessSource := src, currentMaster := master, mapped := m }
+
+def stepsOf (l : Ledger) (o : Observation) : List Step :=
+  (advance l [(slaveKey, o)]).2.map (·.2)
+
+/-- Released after confirming version 11; at that moment flared was in
+    process boot 100 with reconstruction #1 (its boot one) succeeded from the
+    master, and 3 drops were attributed. -/
+def relObs : Observation := obs (some 11) (some 100) (some 1) (some "succeeded") (some 1) (some masterKey) (some masterKey) (some (.Proxy, .Active))
+def lRel : Ledger := (advance lDem [(slaveKey, relObs)]).1
+
+/-- SAF-10c: a destination whose continuous follower owns the repair. -/
+def ownEp : String := "3:abc"
+def following (applied : Nat) (epoch : String := ownEp) : FollowReading :=
+  { complete := true, enabled := true, state := some "following", appliedLsn := some applied, sourceEpoch := some epoch }
+def disconnected : FollowReading := { complete := true, enabled := true, state := some "disconnected", appliedLsn := some 5, sourceEpoch := some ownEp }
+def rebuild : FollowReading := { complete := true, enabled := true, state := some "needs_rebuild", appliedLsn := some 5, sourceEpoch := some ownEp }
+def unreadable : FollowReading := {}
+/-- A complete reply from a flared without a follower (tch): not in the mode. -/
+def noFollower : FollowReading := { complete := true }
+
+def checkFollowOwnership (ctx : Ctx) : IO Unit := do
+  check ctx "the mode on and following/initial_sync/disconnected/error own; needs_rebuild, idle, off and unreadable do not"
+    (ownedByFollower (following 1) && ownedByFollower disconnected
+      && ownedByFollower { enabled := true, state := some "error" }
+      && ownedByFollower { enabled := true, state := some "initial_sync" }
+      && !ownedByFollower rebuild
+      && !ownedByFollower { enabled := true, state := some "idle" }
+      && !ownedByFollower { enabled := false, state := some "following" }
+      && !ownedByFollower unreadable)
+  check ctx "a COMPLETE reply without follower keys (tch, older flared) is NOT unreadable: not owned, ordinary repair"
+    (!noFollower.unreadable && ownershipAtRequest noFollower == some false
+      && (advanceOwned { dest := slaveKey, masterKey := masterKey, nodeKey := some slaveKey, owned := true } noFollower).2 == .handedOver)
+  check ctx "at request time an unreadable follower is Unknown: neither owned nor not-owned"
+    (ownershipAtRequest unreadable == none && ownershipAtRequest (following 1) == some true
+      && ownershipAtRequest rebuild == some false)
+  let lReq := request l1 masterKey slaveKey 3
+  let lOwn := holdOwned lReq slaveKey (some 100) (some ownEp)
+  let e := lOwn.entries.head?
+  check ctx "holding records ownership, a visible reason, the bar and its epoch"
+    ((e.map (·.owned)) == some true && (e.bind (·.hold)) == some "owned by continuous replication"
+      && (e.bind (·.mustReach)) == some 100 && (e.bind (·.barEpoch)) == some ownEp)
+  check ctx "a later drop in the same epoch raises the bar and never lowers it; a new epoch replaces it"
+    (((holdOwned lOwn slaveKey (some 150) (some ownEp)).entries.head?.bind (·.mustReach)) == some 150
+      && ((holdOwned lOwn slaveKey (some 50) (some ownEp)).entries.head?.bind (·.mustReach)) == some 100
+      && ((holdOwned lOwn slaveKey (some 7) (some "4:new")).entries.head?.bind (·.mustReach)) == some 7
+      && ((holdOwned lOwn slaveKey (some 7) (some "4:new")).entries.head?.bind (·.barEpoch)) == some "4:new")
+  let lRes := (resolve lOwn state).1
+  check ctx "an owned request is never planned for demotion while the gate is open"
+    ((plan lRes true "").2 == [] && ((plan lRes true "").1.entries.head?.bind (·.hold)) == some "owned by continuous replication")
+  let lUnk := (resolve (holdOwned lReq slaveKey (some 100) (some ownEp) "follower state unknown (stats unreadable)") state).1
+  check ctx "a request held on an unreadable follower is not demoted either"
+    ((plan lUnk true "").2 == [])
+  check ctx "following at 99 keeps; following at 100 closes without a rebuild"
+    ((advanceOwnedAll lRes [(slaveKey, following 99)]).2 == []
+      && (advanceOwnedAll lRes [(slaveKey, following 100)]).2.map (·.2) == [.closed]
+      && (advanceOwnedAll lRes [(slaveKey, following 100)]).1.entries == [])
+  check ctx "a BIGGER position in ANOTHER epoch does not close: it is a different number line"
+    ((advanceOwnedAll lRes [(slaveKey, following 100000 "9:other")]).2 == []
+      && ((advanceOwnedAll lRes [(slaveKey, following 100000 "9:other")]).1.entries.head?.map (·.owned)) == some true)
+  check ctx "a disconnected follower's position is not trusted for closing, but ownership continues"
+    ((advanceOwnedAll lRes [(slaveKey, disconnected)]).2 == []
+      && ((advanceOwnedAll lRes [(slaveKey, disconnected)]).1.entries.head?.map (·.owned)) == some true)
+  check ctx "a TRANSIENT stats failure keeps the hold and hands nothing over (no rebuild on a probe hiccup)"
+    ((advanceOwnedAll lRes [(slaveKey, unreadable)]).2 == []
+      && ((advanceOwnedAll lRes [(slaveKey, unreadable)]).1.entries.head?.map (·.owned)) == some true
+      && ((advanceOwnedAll lRes [(slaveKey, unreadable)]).1.entries.head?.bind (·.hold)) == some "follower state unknown (stats unreadable)"
+      && (plan (advanceOwnedAll lRes [(slaveKey, unreadable)]).1 true "").2 == [])
+  check ctx "after the hiccup a readable pass resumes: following past the bar closes"
+    ((advanceOwnedAll (advanceOwnedAll lRes [(slaveKey, unreadable)]).1 [(slaveKey, following 100)]).2.map (·.2) == [.closed])
+  check ctx "needs_rebuild hands the entry to the ordinary path, keeping its drops and node key"
+    ((advanceOwnedAll lRes [(slaveKey, rebuild)]).2.map (·.2) == [.handedOver]
+      && ((advanceOwnedAll lRes [(slaveKey, rebuild)]).1.entries.head?.map (·.owned)) == some false
+      && ((advanceOwnedAll lRes [(slaveKey, rebuild)]).1.entries.head?.map (·.drops)) == some 3
+      && (plan (advanceOwnedAll lRes [(slaveKey, rebuild)]).1 true "").2.length == 1)
+  check ctx "an owned entry with no recorded bar stays owned and is not closed by position"
+    ((advanceOwnedAll (holdOwned lReq slaveKey none none) [(slaveKey, following 1000)]).2 == []
+      && ((advanceOwnedAll (holdOwned lReq slaveKey none none) [(slaveKey, following 1000)]).1.entries.head?.map (·.owned)) == some true)
+  check ctx "ownership, bar and epoch survive the status round trip (an operator restart)"
+    (match Ledger.fromJson? (Ledger.toJson lRes) with
+      | some back => back == lRes && (back.entries.head?.map (·.owned)) == some true
+                     && (back.entries.head?.bind (·.mustReach)) == some 100
+                     && (back.entries.head?.bind (·.barEpoch)) == some ownEp
+      | none => false)
+
+/-- The slave is reconstructing (Slave/Prepare) — e.g. a recreated pod in
+    its boot reconstruction (CI 41278035134). -/
+def rebuilding : FlareClusterState :=
+  { nodeMap := [(masterKey, node .Master .Active 0 "n0.svc"), (slaveKey, node .Slave .Prepare 0 "n1.svc")],
+    nodeMapVersion := 10 }
+
+def checkReconstructingDefer (ctx : Ctx) : IO Unit := do
+  check ctx "reconstructingKeys: a Slave in Prepare only (Slave/Active, masters and proxies are not)"
+    (reconstructingKeys rebuilding == [slaveKey] && reconstructingKeys state == [])
+  -- (1) a request against a reconstructing destination is not demoted, kept
+  -- with its drops and a visible hold, and only a NEWER successful
+  -- reconstruction after a later reseat closes it
+  let lRb := (resolve l2 rebuilding).1
+  let (lDef, actsDef) := plan lRb true "" (reconstructingKeys rebuilding)
+  check ctx "a request against a Slave/Prepare destination is NOT demoted; it stays requested with its drops and a visible hold"
+    (actsDef.isEmpty && firstPhase lDef == some .requested && firstDrops lDef == some 3
+      && firstNodeKey lDef == some slaveKey && firstHold lDef == some reconstructingHold
+      && heldKeys lDef == [])
+  -- the in-progress (boot) reconstruction succeeding does not close it: a
+  -- drop may have happened after its dump passed the key
+  let bootDone := obs (some 10) (some 500) (some 1) (some "succeeded") (some 1) (some masterKey) (some masterKey) (some (.Slave, .Active))
+  let (lAfterBoot, stBoot) := advance lDef [(slaveKey, bootDone)]
+  check ctx "the deferred request is NOT closed by the reconstruction that was in progress when it was deferred"
+    (stBoot.isEmpty && firstPhase lAfterBoot == some .requested && firstDrops lAfterBoot == some 3)
+  let lMore := request lDef masterKey slaveKey 2
+  check ctx "more drops while deferred extend the same request"
+    (lMore.entries.length == 1 && firstDrops lMore == some 5
+      && (plan lMore true "" (reconstructingKeys rebuilding)).2.isEmpty)
+  -- once Active (no longer reconstructing) the ordinary path demotes it
+  let (lAct, actsAct) := plan lAfterBoot true "" (reconstructingKeys state)
+  check ctx "once the destination is Active the deferred request is demoted as usual and the hold clears"
+    (actsAct.map (·.1) == [slaveKey] && firstHold lAct == none)
+  let lDem2 := markDemoted lAct slaveKey 11
+  let lRel2 := (advance lDem2 [(slaveKey, obs (some 11) (some 500) (some 1) (some "succeeded") (some 1) (some masterKey) (some masterKey) (some (.Proxy, .Active)))]).1
+  check ctx "after the reseat the boot reconstruction's success (#1, same boot) is not completion; a NEWER success (#2) is"
+    (firstPhase lRel2 == some .reseated
+      && stepsOf lRel2 (obs (some 12) (some 500) (some 1) (some "succeeded") (some 1) (some masterKey) (some masterKey) (some (.Slave, .Active))) == []
+      && stepsOf lRel2 (obs (some 12) (some 500) (some 2) (some "succeeded") (some 2) (some masterKey) (some masterKey) (some (.Slave, .Active))) == [.completed])
+  -- (2) an Active slave is demoted exactly as before (with or without the list)
+  check ctx "a request against a Slave/Active destination still demotes (reconstructing list empty or naming other nodes)"
+    ((plan l3 true "" (reconstructingKeys state)).2.map (·.1) == [slaveKey]
+      && (plan l3 true "" ["other.svc:12121"]).2.map (·.1) == [slaveKey]
+      && (plan l3 true "").2.map (·.1) == [slaveKey])
+  -- (3) unknown / unresolved / gated: fail closed — kept, never demoted, never dropped
+  let lUnres := request l1 masterKey "ghost.svc:12121" 4
+  let (lU, actsU) := plan (resolve lUnres rebuilding).1 true "" (reconstructingKeys rebuilding)
+  check ctx "an unresolved destination (not a Slave in the map) is kept as a request and not acted on"
+    (actsU.isEmpty && (lU.entries.find? (·.dest == "ghost.svc:12121")).map (·.phase) == some .requested
+      && (lU.entries.find? (·.dest == "ghost.svc:12121")).map (·.drops) == some 4)
+  let (lG, actsG) := plan lRb false "breaker held" (reconstructingKeys rebuilding)
+  check ctx "a closed gate on a reconstructing destination holds it with the gate reason and keeps it"
+    (actsG.isEmpty && firstPhase lG == some .requested && firstHold lG == some "breaker held")
+  let lOwnRb := (resolve (holdOwned l2 slaveKey (some 100) (some ownEp) "follower state unknown (stats unreadable)") rebuilding).1
+  let (lO, actsO) := plan lOwnRb true "" (reconstructingKeys rebuilding)
+  check ctx "an entry held on an unreadable follower keeps its own hold on a reconstructing node (still no demotion)"
+    (actsO.isEmpty && firstHold lO == some "follower state unknown (stats unreadable)")
+  check ctx "a deferred request survives the status round trip (an operator restart) as a request"
+    (match Ledger.fromJson? (Ledger.toJson lDef) with
+      | some back => back == lDef && firstPhase back == some .requested
+      | none => false)
+
+/-- What `requestSightOf` returns for a destination that is NOT
+    reconstructing: flared's reading (boot, latest reconstruction id) taken
+    after the drops, and its pod UID. -/
+def sightOut (boot cid : Option Nat) (uid : Option String := some "uid-old") : RequestSight :=
+  { outsidePrepare := true, bootId := boot, currentId := cid, podUid := uid }
+
+/-- A resolved request for 3 drops recorded with `sight`. -/
+def requestedWith (sight : RequestSight) : Ledger :=
+  (resolve (request l1 masterKey slaveKey 3 sight) state).1
+
+/-- The slave reconstructing (Prepare), with flared's completion record and
+    (optionally) its pod UID. -/
+def prepObs (boot cid : Nat) (st : String) (lsid : Nat) (uid : Option String := none) : Observation :=
+  { reportedVersion := some 10, bootId := some boot, currentId := some cid, currentState := some st,
+    lastSuccessId := some lsid, lastSuccessSource := some masterKey, currentMaster := some masterKey,
+    mapped := some (.Slave, .Prepare), podUid := uid }
+
+/-- The slave Active, with flared's completion record. -/
+def activeObs (boot cid : Nat) (st : String) (lsid : Nat) (src : String := masterKey) : Observation :=
+  { reportedVersion := some 10, bootId := some boot, currentId := some cid, currentState := some st,
+    lastSuccessId := some lsid, lastSuccessSource := some src, currentMaster := some masterKey,
+    mapped := some (.Slave, .Active) }
+
+/-- The slave reconstructing, its stats unreadable. -/
+def prepUnreadable : Observation :=
+  { reportedVersion := some 10, currentMaster := some masterKey, mapped := some (.Slave, .Prepare) }
+
+def firstAdoptable (l : Ledger) : Option Bool := l.entries.head?.map (·.adoptable)
+def firstBootIdAtReseat (l : Ledger) : Option Nat := l.entries.head?.bind (·.bootIdAtReseat)
+def actKeys (l : Ledger) (reconstructing : List String) : List String :=
+  (plan l true "" reconstructing).2.map (·.1)
+def advanced (l : Ledger) (o : Observation) : Ledger := (advance l [(slaveKey, o)]).1
+
+/-- Survives the status round trip unchanged. -/
+def roundTrips (l : Ledger) : Bool :=
+  match Ledger.fromJson? (Ledger.toJson l) with
+  | some back => back == l
+  | none => false
+
+/-- (a) recorded while Slave/Active (process 100, last reconstruction #1). -/
+def adoptA : Ledger := requestedWith (sightOut (some 100) (some 1))
+/-- ...planned while it reconstructs (#2), then adopted. -/
+def adoptA1 : Ledger := (plan adoptA true "" (reconstructingKeys rebuilding)).1
+def adoptA2 : Ledger := advanced adoptA1 (prepObs 100 2 "running" 1)
+/-- Same pod, Prepare seen before flared began the new handler (#1 still current). -/
+def adoptS : Ledger := advanced adoptA (prepObs 100 1 "succeeded" 1)
+def adoptSL : Ledger := advanced adoptS (activeObs 100 1 "succeeded" 1)
+
+def checkAdoptRecordedOutside (ctx : Ctx) : IO Unit := do
+  check ctx "a request recorded outside Prepare is adoptable with the reading taken after the drops"
+    (firstAdoptable adoptA == some true
+      && (adoptA.entries.head?.bind (·.bootAtRequest)) == some 100
+      && (adoptA.entries.head?.bind (·.currentIdAtRequest)) == some 1)
+  check ctx "adoption: while Prepare the request is not demoted"
+    ((plan adoptA true "" (reconstructingKeys rebuilding)).2.isEmpty)
+  check ctx "adoption: recorded outside Prepare, later Slave/Prepare → ADOPTED, baseline = the reading after the drops"
+    (stepsOf adoptA1 (prepObs 100 2 "running" 1) == [.adopted]
+      && firstPhase adoptA2 == some .adopted && firstCurrentIdAtReseat adoptA2 == some 1)
+  check ctx "an adopted entry is not held out of assignment"
+    (heldKeys adoptA2 == [])
+
+def checkAdoptNeverDemoted (ctx : Ctx) : IO Unit := do
+  check ctx "an adopted entry is not demoted while Prepare"
+    (actKeys adoptA2 (reconstructingKeys rebuilding) == [])
+  check ctx "an adopted entry is not demoted in the pass that first sees it Active"
+    (actKeys adoptA2 (reconstructingKeys state) == [])
+  check ctx "an adopted entry is not acted on with the gate closed"
+    ((plan adoptA2 false "breaker held").2.isEmpty)
+  check ctx "an adopted entry waits while Prepare"
+    (stepsOf adoptA2 (prepObs 100 2 "running" 1) == [])
+  check ctx "an adopted entry waits while Active with its newer handler still running"
+    (stepsOf adoptA2 (activeObs 100 2 "running" 1) == [])
+
+def checkAdoptCompletes (ctx : Ctx) : IO Unit := do
+  check ctx "adoption: the adopted reconstruction's success (newer than the baseline, from the current master) CLOSES the request"
+    (stepsOf adoptA2 (activeObs 100 2 "succeeded" 2) == [.adoptedCompleted])
+  check ctx "adoption: the closed request leaves the ledger"
+    ((advanced adoptA2 (activeObs 100 2 "succeeded" 2)).entries.isEmpty)
+  check ctx "adoption: a success from another source does not close it; the request returns to the ordinary path"
+    (stepsOf adoptA2 (activeObs 100 2 "succeeded" 2 "nX.svc:12121") == [.adoptionLapsed])
+
+def checkAdoptSamePod (ctx : Ctx) : IO Unit := do
+  check ctx "same pod: Prepare seen before flared began the handler still adopts with the post-drop baseline (#1)"
+    (stepsOf adoptA (prepObs 100 1 "succeeded" 1) == [.adopted] && firstCurrentIdAtReseat adoptS == some 1)
+  check ctx "same pod: Active with no reconstruction newer than the baseline lapses"
+    (stepsOf adoptS (activeObs 100 1 "succeeded" 1) == [.adoptionLapsed])
+  check ctx "same pod: a lapsed adoption is requested again, not adoptable, drops kept"
+    (firstPhase adoptSL == some .requested && firstAdoptable adoptSL == some false && firstDrops adoptSL == some 3)
+  check ctx "same pod: a lapsed adoption is demoted as usual"
+    (actKeys adoptSL (reconstructingKeys state) == [slaveKey])
+  check ctx "same pod: the newer reconstruction (#2) closes the adopted entry"
+    (stepsOf adoptS (activeObs 100 2 "succeeded" 2) == [.adoptedCompleted])
+
+/-- (b) recorded while ALREADY reconstructing. -/
+def adoptB : Ledger := requestedWith {}
+def adoptB2 : Ledger := advanced adoptB (prepObs 100 2 "running" 1)
+
+def checkAdoptRecordedInPrepare (ctx : Ctx) : IO Unit := do
+  check ctx "recorded while already Slave/Prepare: not adoptable and deferred"
+    (firstAdoptable adoptB == some false && actKeys adoptB (reconstructingKeys rebuilding) == [])
+  check ctx "recorded while already Slave/Prepare: not adopted when observed in Prepare"
+    (stepsOf adoptB (prepObs 100 2 "running" 1) == [] && firstPhase adoptB2 == some .requested)
+  check ctx "recorded while already Slave/Prepare: that reconstruction's success does not close it"
+    (stepsOf adoptB2 (activeObs 100 2 "succeeded" 2) == [])
+  check ctx "recorded while already Slave/Prepare: demoted once Active"
+    (actKeys adoptB2 (reconstructingKeys state) == [slaveKey])
+
+/-- (c) recorded outside Prepare, then more drops while Prepare. -/
+def adoptC : Ledger := request adoptA masterKey slaveKey 2 {}
+/-- ...or more drops during an ADOPTED reconstruction. -/
+def adoptCa : Ledger := request adoptA2 masterKey slaveKey 2 {}
+
+def checkAdoptGrowth (ctx : Ctx) : IO Unit := do
+  check ctx "drops that grow while Prepare clear adoption (drops added up)"
+    (firstAdoptable adoptC == some false && firstDrops adoptC == some 5)
+  check ctx "drops that grow while Prepare: not adopted when observed in Prepare"
+    (stepsOf adoptC (prepObs 100 2 "running" 1) == [])
+  check ctx "drops that grow while Prepare: the reconstruction's success does not close it"
+    (stepsOf adoptC (activeObs 100 2 "succeeded" 2) == [])
+  check ctx "drops that grow while Prepare: deferred while Prepare, demoted once Active"
+    (actKeys adoptC (reconstructingKeys rebuilding) == [] && actKeys adoptC (reconstructingKeys state) == [slaveKey])
+  check ctx "drops that grow during an ADOPTED reconstruction return it to requested, not adoptable"
+    (firstPhase adoptCa == some .requested && firstAdoptable adoptCa == some false && firstDrops adoptCa == some 5)
+  check ctx "drops that grow during an ADOPTED reconstruction: its success no longer closes it; demoted once Active"
+    (stepsOf adoptCa (activeObs 100 2 "succeeded" 2) == [] && actKeys adoptCa (reconstructingKeys state) == [slaveKey])
+
+/-- (d) recreated pod: the old pod was read after the drops (boot 100, #7). -/
+def adoptD : Ledger := requestedWith (sightOut (some 100) (some 7))
+def adoptD1 : Ledger := advanced adoptD (prepObs 200 1 "running" 0)
+/-- No pod existed when the drops were read. -/
+def adoptDu : Ledger := requestedWith (sightOut none none (some ""))
+def adoptDu1 : Ledger := advanced adoptDu (prepObs 200 1 "running" 0 (some "uid-new"))
+/-- The old pod existed but flared could not be read. -/
+def adoptDo : Ledger := requestedWith (sightOut none none (some "uid-old"))
+
+def checkAdoptRecreatedPod (ctx : Ctx) : IO Unit := do
+  check ctx "recreated pod (old pod read after the drops): adopted against the old boot"
+    (stepsOf adoptD (prepObs 200 1 "running" 0) == [.adopted])
+  check ctx "recreated pod (old pod read after the drops): its boot reconstruction #1 (counter restarted) closes it"
+    (stepsOf adoptD1 (activeObs 200 1 "succeeded" 1) == [.adoptedCompleted])
+  check ctx "recreated pod (no pod when the drops were read): adopted with baseline (its boot, 0)"
+    (stepsOf adoptDu (prepObs 200 1 "running" 0 (some "uid-new")) == [.adopted]
+      && firstCurrentIdAtReseat adoptDu1 == some 0 && firstBootIdAtReseat adoptDu1 == some 200)
+  check ctx "recreated pod (no pod when the drops were read): its first success closes it"
+    (stepsOf adoptDu1 (activeObs 200 1 "succeeded" 1) == [.adoptedCompleted])
+  check ctx "old pod unreadable when the drops were read: a pod with another UID adopts"
+    (stepsOf adoptDo (prepObs 200 1 "running" 0 (some "uid-new")) == [.adopted])
+  check ctx "old pod unreadable when the drops were read: the same UID (or an unread UID) cannot be ordered"
+    (stepsOf adoptDo (prepObs 200 1 "running" 0 (some "uid-old")) == [.adoptionUnproven]
+      && stepsOf adoptDo (prepObs 200 1 "running" 0) == [.adoptionUnproven])
+  check ctx "an unproven adoption is no longer adoptable"
+    (firstAdoptable (advanced adoptDo (prepObs 200 1 "running" 0 (some "uid-old"))) == some false)
+  check ctx "an unreadable reconstructing node decides nothing yet"
+    (stepsOf adoptDo prepUnreadable == [])
+  check ctx "an owned (follower) request is never adopted"
+    (stepsOf (holdOwned adoptA slaveKey (some 100) (some ownEp)) (prepObs 100 2 "running" 1) == [])
+
+def checkAdoptShortPrepare (ctx : Ctx) : IO Unit := do
+  check ctx "a Prepare shorter than one pass: an adoptable request seen only Active with a success newer than the baseline closes directly"
+    (stepsOf adoptA (activeObs 100 2 "succeeded" 2) == [.adoptedCompleted]
+      && (advanced adoptA (activeObs 100 2 "succeeded" 2)).entries.isEmpty)
+  check ctx "a Prepare shorter than one pass: a recreated pod's first success (another boot) closes it directly"
+    (stepsOf adoptD (activeObs 200 1 "succeeded" 1) == [.adoptedCompleted])
+
+def checkAdoptShortPrepareGuards (ctx : Ctx) : IO Unit := do
+  check ctx "seen only Active: a success not newer than the baseline does not close it (the ordinary path demotes it)"
+    (stepsOf adoptA (activeObs 100 1 "succeeded" 1) == [] && actKeys adoptA (reconstructingKeys state) == [slaveKey])
+  check ctx "seen only Active: a request recorded in Prepare, or grown in Prepare, is never closed directly"
+    (stepsOf adoptB (activeObs 100 2 "succeeded" 2) == [] && stepsOf adoptC (activeObs 100 2 "succeeded" 2) == [])
+  check ctx "seen only Active: a success from another source, or without a flared baseline, does not close it"
+    (stepsOf adoptA (activeObs 100 2 "succeeded" 2 "nX.svc:12121") == []
+      && stepsOf adoptDu (activeObs 200 1 "succeeded" 1) == [])
+
+/-- Part 1 with the gate open, as Main runs it: the adoption decided
+    before the plan, then the plan with the finishing keys held out. -/
+def beforePlan (l : Ledger) (o : Observation) : Ledger × List Entry × List String :=
+  adoptBeforePlan l [(slaveKey, o)]
+def demotedAfter (l : Ledger) (o : Observation) : List String :=
+  let (l', _, fin) := beforePlan l o
+  actKeys l' (reconstructingKeys state ++ fin)
+
+def checkAdoptBeforePlan (ctx : Ctx) : IO Unit := do
+  check ctx "gate open, Prepare ended between passes: closed before the plan, nothing demoted"
+    ((beforePlan adoptA (activeObs 100 2 "succeeded" 2)).2.1.length == 1
+      && (beforePlan adoptA (activeObs 100 2 "succeeded" 2)).1.entries.isEmpty
+      && demotedAfter adoptA (activeObs 100 2 "succeeded" 2) == [])
+  check ctx "gate open, recreated pod already Active with a later boot's success: not demoted"
+    (demotedAfter adoptD (activeObs 200 1 "succeeded" 1) == [])
+  check ctx "gate open, no flared baseline: a pod with another UID already Active closes it"
+    (demotedAfter adoptDu ({ activeObs 200 1 "succeeded" 1 with podUid := some "uid-new" }) == [])
+  check ctx "gate open, Active while the newer handler is still running: held, not demoted"
+    ((beforePlan adoptA (activeObs 100 2 "running" 1)).2.2 == [slaveKey]
+      && demotedAfter adoptA (activeObs 100 2 "running" 1) == [])
+  check ctx "gate open, Active with no newer success: demoted by the ordinary path"
+    (demotedAfter adoptA (activeObs 100 1 "succeeded" 1) == [slaveKey]
+      && demotedAfter adoptA (activeObs 100 2 "succeeded" 2 "nX.svc:12121") == [slaveKey])
+  check ctx "gate open, not adoptable (recorded or grown in Prepare): demoted, not closed"
+    (demotedAfter adoptB (activeObs 100 2 "succeeded" 2) == [slaveKey]
+      && demotedAfter adoptC (activeObs 100 2 "succeeded" 2) == [slaveKey])
+  check ctx "pending repair keys: a request opened this pass (not yet resolved) already names its node; an unknown destination is listed as is"
+    ((request ({} : Ledger) masterKey slaveKey 3).entries.all (·.nodeKey.isNone)
+      && (pendingNodeKeys (request ({} : Ledger) masterKey slaveKey 3) state).contains slaveKey
+      && pendingNodeKeys (request ({} : Ledger) masterKey "nX.svc:12121" 3) state == ["nX.svc:12121"])
+
+/-- A status entry written before adoption existed. -/
+def preAdoptionStatus : Lean.Json :=
+  let entry := Lean.Json.mkObj [("dest", Lean.Json.str slaveKey), ("masterKey", Lean.Json.str masterKey),
+    ("phase", Lean.Json.mkObj [("kind", Lean.Json.str "requested")]), ("drops", Lean.Json.num 3),
+    ("nodeKey", Lean.Json.str slaveKey), ("dropsAtReseat", Lean.Json.num 0)]
+  Lean.Json.mkObj [("initialized", Lean.Json.bool true), ("counters", Lean.Json.arr #[]),
+    ("entries", Lean.Json.arr #[entry])]
+
+def preAdoptionLedger : Option Ledger := Ledger.fromJson? preAdoptionStatus
+def restartedAdopted : Option Ledger := Ledger.fromJson? (Ledger.toJson adoptA2)
+
+def checkAdoptPersistence (ctx : Ctx) : IO Unit := do
+  check ctx "adoption evidence survives the status round trip"
+    (roundTrips adoptA && roundTrips adoptDu && roundTrips adoptC)
+  check ctx "the adopted phase and its baseline survive the status round trip"
+    (roundTrips adoptA2 && roundTrips adoptDu1)
+  check ctx "a status written before adoption existed reads back NOT adoptable"
+    ((preAdoptionLedger.bind firstAdoptable) == some false)
+  check ctx "a status written before adoption existed: Prepare does not adopt it (7be3ca6 behaviour)"
+    ((preAdoptionLedger.map fun l => stepsOf l (prepObs 100 2 "running" 1)) == some []
+      && (preAdoptionLedger.map fun l => actKeys l (reconstructingKeys rebuilding)) == some [])
+  check ctx "an adoption in flight survives an operator restart (ledger from status)"
+    ((restartedAdopted.bind firstPhase) == some .adopted
+      && (restartedAdopted.map fun l => actKeys l (reconstructingKeys state)) == some [])
+  check ctx "after an operator restart the adopted reconstruction's success closes it"
+    ((restartedAdopted.map fun l => stepsOf l (activeObs 100 2 "succeeded" 2)) == some [.adoptedCompleted])
+
+def checkAdvanceHold (ctx : Ctx) : IO Unit := do
+  let old := obs (some 10) (some 100) (some 1) (some "succeeded") (some 1) (some masterKey) (some masterKey) (some (.Proxy, .Active))
+  check ctx "a node still reporting the OLD version stays held"
+    (stepsOf lDem old == [] && heldKeys (advance lDem [(slaveKey, old)]).1 == [slaveKey])
+  check ctx "a node reporting the demotion version is released, recording boot id, current id and drops at reseat"
+    (stepsOf lDem relObs == [.released] && heldKeys lRel == []
+      && firstPhase lRel == some .reseated
+      && (lRel.entries.head?.bind (·.bootIdAtReseat)) == some 100
+      && (lRel.entries.head?.bind (·.currentIdAtReseat)) == some 1
+      && (lRel.entries.head?.map (·.dropsAtReseat)) == some 3)
+  let unread := obs none none none none none none none (some (.Proxy, .Active))
+  check ctx "unreadable stats change nothing (fail closed: stay held)"
+    (stepsOf lDem unread == [] && heldKeys (advance lDem [(slaveKey, unread)]).1 == [slaveKey])
+
+/-- Same process (boot 100), reconstruction #2 succeeded from the master. -/
+def doneObs : Observation := obs (some 12) (some 100) (some 2) (some "succeeded") (some 2) (some masterKey) (some masterKey) (some (.Slave, .Active))
+
+def checkAdvanceComplete (ctx : Ctx) : IO Unit := do
+  check ctx "Slave/Prepare is in progress, not complete"
+    (stepsOf lRel (obs (some 12) (some 100) (some 2) (some "running") (some 1) (some masterKey) (some masterKey) (some (.Slave, .Prepare))) == [])
+  check ctx "Slave/Active with NO reconstruction newer than the reseat one (same boot, same id) is NOT completion (re-announced Active)"
+    (stepsOf lRel (obs (some 12) (some 100) (some 1) (some "succeeded") (some 1) (some masterKey) (some masterKey) (some (.Slave, .Active))) == [])
+  check ctx "a newer reconstruction still RUNNING is not completion"
+    (stepsOf lRel (obs (some 12) (some 100) (some 2) (some "running") (some 1) (some masterKey) (some masterKey) (some (.Slave, .Active))) == [])
+  check ctx "a newer reconstruction that FAILED is not completion (last success is still #1)"
+    (stepsOf lRel (obs (some 12) (some 100) (some 2) (some "failed") (some 1) (some masterKey) (some masterKey) (some (.Slave, .Active))) == [])
+  check ctx "a newer success from a DIFFERENT source than the current master is not completion"
+    (stepsOf lRel (obs (some 12) (some 100) (some 2) (some "succeeded") (some 2) (some "old-master:12121") (some masterKey) (some (.Slave, .Active))) == [])
+  check ctx "a newer reconstruction that SUCCEEDED from the current master completes and removes the entry"
+    (stepsOf lRel doneObs == [.completed] && (advance lRel [(slaveKey, doneObs)]).1.entries.isEmpty)
+  -- Review item 3 (second round): failed then succeeded — #2 failed, #3 succeeded.
+  check ctx "failure then success: #3 succeeded after #2 failed → completion (cumulative counters would never match)"
+    (stepsOf lRel (obs (some 12) (some 100) (some 3) (some "succeeded") (some 3) (some masterKey) (some masterKey) (some (.Slave, .Active))) == [.completed])
+  -- Review item 4: restart whose counters equal the reseat baseline exactly.
+  check ctx "restart with IDENTICAL counters (new boot 200, #1 succeeded == baseline #1) completes: the boot id tells the processes apart"
+    (stepsOf lRel (obs (some 12) (some 200) (some 1) (some "succeeded") (some 1) (some masterKey) (some masterKey) (some (.Slave, .Active))) == [.completed])
+  check ctx "restart whose boot reconstruction is still running is not completion"
+    (stepsOf lRel (obs (some 12) (some 200) (some 1) (some "running") (some 0) (some masterKey) (some masterKey) (some (.Slave, .Active))) == [])
+  -- Late drops after the reseat are requeued as exactly the increment.
+  let lLate := request lRel masterKey slaveKey 2     -- 3 → 5 while reseated
+  let (lReq, stLate) := advance lLate [(slaveKey, doneObs)]
+  check ctx "late drops after the reseat: completion requeues exactly the increment as a fresh request"
+    (stLate.map (·.2) == [.completedRequeued] && firstPhase lReq == some .requested
+      && firstDrops lReq == some 2 && (lReq.entries.head?.bind (·.currentIdAtReseat)) == none
+      && firstNodeKey lReq == some slaveKey)
+  -- forward-window-steps 38043715395: the drop counter read on the pass that
+  -- decides completion (Main reads it every pass while a repair is in flight)
+  -- turns a would-be completion into a requeue; no reading = no step at all
+  let (lObs, newD, _) := observe lRel masterKey [(slaveKey, 1000)] none
+  let lObs2 := newD.foldl (fun l (d, n) => request l masterKey d n) lObs
+  check ctx "repair in flight: drops observed on the completing pass requeue it (late drop after the catch-up's end); an entry with no observation this pass does not advance"
+    (!newD.isEmpty && ((advance lObs2 [(slaveKey, doneObs)]).2.map (·.2)) == [.completedRequeued]
+      && (advance lRel []).2.isEmpty && (advance lRel []).1.entries.length == lRel.entries.length)
+  -- boundaries of the drop accounting (review 2026-10-10, after 38046122938):
+  -- every case ends in a REQUEST for the dest, never in silence
+  let reqDrops := fun (l : Ledger) => (l.entries.find? (·.dest == slaveKey)).map (·.drops)
+  let feed := fun (l : Ledger) (n : Nat) (boot : Option Nat) =>
+    let (l1, nd, _) := observe l masterKey [(slaveKey, n)] boot
+    nd.foldl (fun acc (d, k) => request acc masterKey d k) l1
+  -- (1) read at 37, the repair completes on that reading, the 38th drop lands
+  --     after the read: the next pass's read re-creates the request
+  let l37 := feed { lRel with counters := [], entries := [], initialized := true } 37 (some 7)
+  let lClosed := (advance (feed lRel 0 (some 7)) [(slaveKey, doneObs)]).1
+  let lAfter := feed (feed lClosed 37 (some 7)) 38 (some 7)
+  check ctx "drop accounting (1): a drop after the reading that completed the repair is requested on the next reading (the closed entry is re-created with the increment)"
+    (reqDrops l37 == some 37 && lClosed.entries.isEmpty && reqDrops lAfter == some 38)
+  -- (2) the master's flared restarts (new boot): its counter restarts at 0
+  --     and counts up — those are new drops, not a decrease to ignore
+  let lBoot := feed (feed { lRel with counters := [], entries := [], initialized := true } 37 (some 7)) 5 (some 8)
+  check ctx "drop accounting (2): a master restart (new boot id, counter 37 -> 5) attributes the 5 new drops; the old process's counter is forgotten"
+    (reqDrops lBoot == some 42 && !(lBoot.counters.any fun (k, _) => k.endsWith "|7"))
+  -- (3) the ledger write to status FAILED and the operator restarted: the
+  --     ledger read back is OLDER (counter 30) or EMPTY (never initialized)
+  let lOld := feed { lRel with counters := [(counterKey masterKey slaveKey (some 7), 30)], entries := [], initialized := true } 38 (some 7)
+  let (lEmpty0, _, firstE) := observe ({} : Ledger) masterKey [(slaveKey, 38)] (some 7)
+  check ctx "drop accounting (3): after a lost status write the older ledger requests the difference (8); an empty ledger keeps all 38 as a POSSIBLY UNREPAIRED request (first sighting), never a baseline"
+    (reqDrops lOld == some 8 && firstE == [slaveKey] && lEmpty0.initialized)
+  -- (4) a drop right after the ledger emptied (all entries closed)
+  let lEmptyEntries := { lRel with entries := [], counters := [(counterKey masterKey slaveKey (some 7), 37)], initialized := true }
+  check ctx "drop accounting (4): one drop right after the last entry closed creates a new request of 1"
+    (reqDrops (feed lEmptyEntries 38 (some 7)) == some 1)
+  check ctx "a node that became MASTER while reseated is voided"
+    (stepsOf lRel (obs (some 12) (some 100) (some 2) (some "succeeded") (some 2) (some masterKey) (some masterKey) (some (.Master, .Active))) == [.voided])
+  let lNoBase : Ledger := { lRel with entries := lRel.entries.map fun e => { e with bootIdAtReseat := none, currentIdAtReseat := none } }
+  let (lNB, stNB) := advance lNoBase [(slaveKey, doneObs)]
+  check ctx "with no baseline the first readable record becomes the baseline; nothing completes yet"
+    (stNB.isEmpty && (lNB.entries.head?.bind (·.currentIdAtReseat)) == some 2)
+
+def lFull : Ledger :=
+  let l := markDemoted (request l1 masterKey slaveKey 3) slaveKey 11
+  { l with entries := l.entries.map fun e => { e with nodeKey := some slaveKey, hold := some "x" } }
+
+def checkJson (ctx : Ctx) : IO Unit := do
+  check ctx "ledger survives a JSON round trip"
+    (Ledger.fromJson? lFull.toJson == some lFull)
+  check ctx "an empty ledger round-trips"
+    (Ledger.fromJson? empty.toJson == some empty)
+  -- Review item 2 (second round): a PARTIALLY corrupt ledger must fail as a
+  -- whole, never load as a smaller valid ledger that silently lost a request.
+  let good := Lean.Json.mkObj [("dest", Lean.Json.str slaveKey), ("masterKey", Lean.Json.str masterKey),
+                               ("phase", Lean.Json.mkObj [("kind", Lean.Json.str "requested")]), ("drops", Lean.Json.num 3)]
+  let noMaster := Lean.Json.mkObj [("dest", Lean.Json.str "x:12121"),
+                                   ("phase", Lean.Json.mkObj [("kind", Lean.Json.str "requested")]), ("drops", Lean.Json.num 1)]
+  let mk := fun (entries : List Lean.Json) (counters : List Lean.Json) =>
+    Lean.Json.mkObj [("initialized", Lean.Json.bool true), ("counters", Lean.Json.arr counters.toArray),
+                     ("entries", Lean.Json.arr entries.toArray)]
+  check ctx "strict parse: a valid entry loads"
+    ((Ledger.fromJson? (mk [good] [])).map (·.entries.length) == some 1)
+  check ctx "strict parse: an entry missing masterKey fails the WHOLE ledger (not an empty ledger)"
+    (Ledger.fromJson? (mk [noMaster] []) == none)
+  check ctx "strict parse: one valid + one invalid entry fails the whole ledger"
+    (Ledger.fromJson? (mk [good, noMaster] []) == none)
+  check ctx "strict parse: a malformed counter fails the whole ledger"
+    (Ledger.fromJson? (mk [good] [Lean.Json.mkObj [("key", Lean.Json.str "m|d")]]) == none)
+  check ctx "strict parse: an unknown phase kind fails the whole ledger"
+    (Ledger.fromJson? (mk [Lean.Json.mkObj [("dest", Lean.Json.str "y:1"), ("masterKey", Lean.Json.str "m"), ("phase", Lean.Json.mkObj [("kind", Lean.Json.str "bogus")])]] []) == none)
+
+-- ── SyncEvidence (SAF-03) ────────────────────────────────────────────
+
+open FlareOperator.SyncEvidence in
+def ep : Episode := { nodeKey := slaveKey, masterKey := masterKey }
+
+open FlareOperator.SyncEvidence in
+def rd (boot cid : Option Nat) (st : Option String) (lsid : Option Nat) (src : Option String)
+    (sId mId : Option String) (sLsn mSeq : Option Nat) (rocks : Option Bool) : Reading :=
+  { bootId := boot, currentId := cid, currentState := st, lastSuccessId := lsid, lastSuccessSource := src,
+    slaveMasterId := sId, masterId := mId, slaveLsn := sLsn, masterSeq := mSeq, masterIsRocksdb := rocks }
+
+-- A good RocksDB record: #1 succeeded from the master, lineage A, cursor seeded.
+open FlareOperator.SyncEvidence in
+def goodR : Reading := rd (some 100) (some 1) (some "succeeded") (some 1) (some masterKey) (some "A") (some "A") (some 990) (some 1000) (some true)
+
+open FlareOperator.SyncEvidence in
+def isActivate : Verdict → Bool | .activate _ => true | _ => false
+open FlareOperator.SyncEvidence in
+def isWait : Verdict → Bool | .wait _ => true | _ => false
+open FlareOperator.SyncEvidence in
+def isSourceChanged : Verdict → Bool | .sourceChanged _ => true | _ => false
+
+open FlareOperator.SyncEvidence in
+def checkEpisodes (ctx : Ctx) : IO Unit := do
+  let e1 := reconcileEpisodes [] [(slaveKey, masterKey)]
+  check ctx "a Slave/Prepare node under an Active master starts an episode"
+    (e1.map (·.nodeKey) == [slaveKey] && e1.map (·.cycles) == [0])
+  let e2 := reconcileEpisodes e1 [(slaveKey, masterKey)]
+  check ctx "the same source keeps the episode and counts the pass"
+    (e2.map (·.cycles) == [1])
+  let e3 := reconcileEpisodes e2 [(slaveKey, "other:12121")]
+  check ctx "a different master between passes restarts the episode"
+    (e3.map (·.masterKey) == ["other:12121"] && e3.map (·.cycles) == [0] && e3.map (·.masterId) == [none])
+  check ctx "a node no longer Slave/Prepare ends its episode"
+    ((reconcileEpisodes e2 []).isEmpty)
+
+open FlareOperator.SyncEvidence in
+def checkJudgeRefusals (ctx : Ctx) : IO Unit := do
+  check ctx "a changed master key is a source change, not a wait"
+    (isSourceChanged (judge ep "other:12121" goodR).2)
+  let (pinned, _) := judge ep masterKey goodR
+  check ctx "the master lineage is pinned at first sight"
+    (pinned.masterId == some "A")
+  check ctx "a changed master lineage is a source change"
+    (isSourceChanged (judge pinned masterKey { goodR with slaveMasterId := some "B", masterId := some "B" }).2)
+  check ctx "an unreadable record is refused"
+    (isWait (judge ep masterKey { goodR with currentId := none }).2)
+  check ctx "no reconstruction in this process (#0) is refused even with a near cursor"
+    (isWait (judge ep masterKey { goodR with currentId := some 0, lastSuccessId := some 0, currentState := some "none", slaveLsn := some 999 }).2)
+  check ctx "the latest reconstruction RUNNING is refused (past success is not the current copy)"
+    (isWait (judge ep masterKey { goodR with currentId := some 2, currentState := some "running", lastSuccessId := some 1 }).2)
+  check ctx "the latest reconstruction FAILED after an earlier success is refused (store may be partial)"
+    (isWait (judge ep masterKey { goodR with currentId := some 2, currentState := some "failed", lastSuccessId := some 1 }).2)
+  check ctx "the latest reconstruction ABORTED is refused"
+    (isWait (judge ep masterKey { goodR with currentId := some 2, currentState := some "aborted", lastSuccessId := some 1 }).2)
+  check ctx "a success from a DIFFERENT source than the current master is refused"
+    (isWait (judge ep masterKey { goodR with lastSuccessSource := some "former:12121" }).2)
+  check ctx "reviewer input (round 1): same lineage, slave LSN 0, master 10000 → refused (cursor not seeded)"
+    (isWait (judge ep masterKey { goodR with slaveLsn := some 0, masterSeq := some 10000 }).2)
+  check ctx "a lineage mismatch is refused"
+    (isWait (judge ep masterKey { goodR with slaveMasterId := some "Z" }).2)
+  check ctx "a cursor AHEAD of the head is refused"
+    (isWait (judge ep masterKey { goodR with slaveLsn := some 1001 }).2)
+  check ctx "RocksDB with lineage missing → refused (truncated reply)"
+    (isWait (judge ep masterKey { goodR with slaveMasterId := none, masterId := none }).2)
+  check ctx "RocksDB with cursor missing → refused"
+    (isWait (judge ep masterKey { goodR with slaveLsn := none, masterSeq := none }).2)
+  check ctx "an INCOMPLETE master stats reply (backend unknown) is refused"
+    (isWait (judge ep masterKey { goodR with masterIsRocksdb := none }).2)
+
+open FlareOperator.SyncEvidence in
+def checkJudgeAcceptance (ctx : Ctx) : IO Unit := do
+  check ctx "RocksDB: latest #1 succeeded from the current master, lineage matches, cursor seeded → activate"
+    (isActivate (judge ep masterKey goodR).2)
+  check ctx "a FAR-behind but seeded cursor does not block (proximity is not the test)"
+    (isActivate (judge ep masterKey { goodR with slaveLsn := some 10, masterSeq := some 1000000 }).2)
+  check ctx "non-RocksDB backend (complete reply, no rocksdb keys) activates on the record alone"
+    (isActivate (judge ep masterKey (rd (some 100) (some 1) (some "succeeded") (some 1) (some masterKey) none none none none (some false))).2)
+  -- Review item 3 (second round): "failure then success" — #1 failed, #2 succeeded.
+  check ctx "failure then success: #2 succeeded after #1 failed → activate (counters 2/1 would have said IN FLIGHT)"
+    (isActivate (judge ep masterKey { goodR with currentId := some 2, lastSuccessId := some 2 }).2)
+  check ctx "abort then success: #2 succeeded after #1 was aborted → activate"
+    (isActivate (judge ep masterKey { goodR with currentId := some 2, lastSuccessId := some 2, currentState := some "succeeded" }).2)
+  check ctx "after a restart, the new process's own #1 success activates"
+    (isActivate (judge ep masterKey { goodR with bootId := some 200 }).2)
+  let (afterChange, v1) := judge (ep.restart masterKey) masterKey { goodR with lastSuccessSource := some "old:12121", slaveMasterId := some "OLD", masterId := some "NEW" }
+  check ctx "after a source change a success from the OLD master is refused"
+    (isWait v1)
+  check ctx "once a success from the new master (matching lineage) is recorded it activates"
+    (isActivate (judge afterChange masterKey { goodR with currentId := some 2, lastSuccessId := some 2, slaveMasterId := some "NEW", masterId := some "NEW" }).2)
+
+-- ── StatsObservation (SAF-04 / SAF-06) ───────────────────────────────
+
+open FlareOperator.StatsObservation in
+def isAct : EmptyMasterVerdict → Bool | .act => true | _ => false
+open FlareOperator.StatsObservation in
+def isSkip : EmptyMasterVerdict → Bool | .skip _ => true | _ => false
+
+open FlareOperator.StatsObservation in
+def checkStatsObservation (ctx : Ctx) : IO Unit := do
+  -- parse
+  check ctx "a well-formed curr_items line parses to known"
+    (parseCurrItems "STAT curr_items 42\r\nEND" == Items.known 42)
+  check ctx "a blank reply (dropped/reset connection) is unknown, not known 0"
+    (parseCurrItems "" == Items.unknown)
+  check ctx "a reply that omits curr_items is unknown"
+    (parseCurrItems "STAT cmd_get 5\r\nEND" == Items.unknown)
+  check ctx "a non-numeric curr_items is unknown"
+    (parseCurrItems "STAT curr_items nan" == Items.unknown)
+  check ctx "a genuine zero is known 0, distinct from unknown"
+    (parseCurrItems "STAT curr_items 0" == Items.known 0 && Items.known 0 != Items.unknown)
+  -- verdict
+  check ctx "known-0 master with a known data-bearing slave → act"
+    (isAct (emptyMasterVerdict (Items.known 0) (Items.known 15)))
+  check ctx "a nonzero master is never empty"
+    (isSkip (emptyMasterVerdict (Items.known 3) (Items.known 15)))
+  check ctx "an UNKNOWN master is never treated as empty (the SAF-04 defect)"
+    (isSkip (emptyMasterVerdict Items.unknown (Items.known 15)))
+  check ctx "a known-0 master with an UNKNOWN slave does not delete (no confirmed successor)"
+    (isSkip (emptyMasterVerdict (Items.known 0) Items.unknown))
+  check ctx "both empty → skip (nothing to hand over)"
+    (isSkip (emptyMasterVerdict (Items.known 0) (Items.known 0)))
+  -- successor revalidation over the live map
+  let mk := masterKey
+  let sk := slaveKey
+  check ctx "successor still valid when it is a data-bearing Active slave in the master's partition"
+    (successorStillValid state mk sk [sk])
+  check ctx "successor INVALID when it is not in the data-bearing set (a resync just demoted its data)"
+    (successorStillValid state mk sk [] == false)
+  let demotedState : FlareClusterState :=
+    { state with nodeMap := [(mk, node .Master .Active 0 "n0.svc"), (sk, node .Proxy .Active (-1) "n1.svc")] }
+  check ctx "successor INVALID when it was demoted to Proxy in the same tick"
+    (successorStillValid demotedState mk sk [sk] == false)
+  let noMaster : FlareClusterState :=
+    { state with nodeMap := [(mk, node .Slave .Active 0 "n0.svc"), (sk, node .Slave .Active 0 "n1.svc")] }
+  check ctx "successor INVALID when the target is no longer an Active master (leadership lost)"
+    (successorStillValid noMaster mk sk [sk] == false)
+  -- 4a52e0d empty-source: a slave under replica repair missed the master's
+  -- writes (deletes dropped towards it); it is no comparand / successor
+  let threeState : FlareClusterState :=
+    { state with nodeMap := [(mk, node .Master .Active 0 "n0.svc"), (sk, node .Slave .Active 0 "n1.svc"),
+                             ("n2:12121", node .Slave .Active 0 "n2.svc")] }
+  check ctx "self-heal comparand: a slave with a replica repair pending is skipped; another clean slave is taken; none when all are under repair"
+    ((selfHealComparand state 0 (some [])).map (·.1) == some sk
+      && (selfHealComparand state 0 (some [sk])).isNone
+      && (selfHealComparand threeState 0 (some [sk])).map (·.1) == some "n2:12121"
+      && (selfHealComparand threeState 1 (some [])).isNone)
+  check ctx "self-heal comparand (review of 7738d8f): an unavailable repair ledger gives no comparand, with or without a repair it might hold (fail closed)"
+    ((selfHealComparand state 0 none).isNone && (selfHealComparand threeState 0 none).isNone)
+  check ctx "self-heal successor gate (review of 698d77b): unavailable ledger → not clean; its own repair → not clean; another replica's repair → clean (a clean comparand exists); no repairs → clean"
+    (successorRepairClean none sk == false
+      && successorRepairClean (some [sk]) sk == false
+      && successorRepairClean (some ["n2:12121"]) sk == true
+      && (selfHealComparand threeState 0 (some ["n2:12121"])).map (·.1) == some sk
+      && successorRepairClean (some []) sk == true)
+
+def okB : Except String Unit → Bool | .ok _ => true | .error _ => false
+
+open FlareOperator.StatsObservation in
+def checkDeleteGate (ctx : Ctx) : IO Unit := do
+  let ok := EmptyMasterVerdict.act
+  check ctx "delete gate: fresh verdict act, successor valid, UID stable, lease held → delete"
+    (okB (deleteGate ok true true true true))
+  check ctx "delete gate: operator LOST THE LEASE → refuse (item 5)"
+    (okB (deleteGate ok true true true false) == false)
+  check ctx "delete gate: target pod UID changed across the observation (replaced) → refuse"
+    (okB (deleteGate ok true true false true) == false)
+  check ctx "delete gate: successor invalid on the post-read map → refuse"
+    (okB (deleteGate ok false true true true) == false)
+  check ctx "delete gate: fresh verdict is skip → refuse regardless of the rest"
+    (okB (deleteGate (.skip "unknown") true true true true) == false)
+  check ctx "delete gate: refusal reasons name the failing check"
+    (match deleteGate ok true true true false with | .error r => (r.splitOn "lease").length > 1 | .ok _ => false)
+
+
+-- ===========================================================================
+-- SAF-10c: FollowEvidence — purpose-specific eligibility, Unknown handling,
+-- failover ranking; and the FSM-side shaping / read withholding.
+-- ===========================================================================
+
+def fb : FollowEvidence.Bounds := {}   -- fresh 5 s, read lag 1000, promotion lag 100
+def fm : FollowEvidence.MasterReading := { complete := true, epoch := some "2:abc", head := some 1000 }
+def fmUnreadable : FollowEvidence.MasterReading := {}
+def fmNoEpoch : FollowEvidence.MasterReading := { complete := true, head := some 1000 }
+
+/-- A follower reading: `st` state, `applied` position, `seenAgo` seconds
+    since the master's position was observed (node clock 1000). -/
+def fr (st : String) (applied : Nat) (seenAgo : Nat := 0) (ep : String := "2:abc")
+    : FollowEvidence.Reading :=
+  { complete := true, enabled := some true, state := some st, sourceEpoch := some ep,
+    appliedLsn := some applied, sourceLsn := some 1000, sourceObservedAt := some (1000 - seenAgo),
+    lastProgressAt := some 1000, nodeTime := some 1000 }
+def frOff : FollowEvidence.Reading := { complete := true, enabled := some false, state := some "idle" }
+def frCut : FollowEvidence.Reading := {}
+def frNoState : FollowEvidence.Reading := { complete := true, enabled := some true }
+
+def judgeR (r : FollowEvidence.Reading) (m : FollowEvidence.MasterReading := fm) :=
+  FollowEvidence.judge .read fb r m
+def judgeP (r : FollowEvidence.Reading) (m : FollowEvidence.MasterReading := fm) :=
+  FollowEvidence.judge .promote fb r m
+def hasWord (v : FollowEvidence.Verdict) (w : String) : Bool := (v.reason.splitOn w).length > 1
+
+def checkFollowJudge (ctx : Ctx) : IO Unit := do
+  check ctx "an unreadable reply is Unknown for reads and promotion (never healthy, never unfit)"
+    ((judgeR frCut).isUnknown && (judgeP frCut).isUnknown
+      && FollowEvidence.unfitReason frCut (some "2:abc") == none)
+  check ctx "a complete reply with the mode off is not-in-mode: this module has no say"
+    (match judgeR frOff, judgeP frOff with | .notInMode _, .notInMode _ => true | _, _ => false)
+  check ctx "a complete reply in the mode without a state is Unknown"
+    ((judgeR frNoState).isUnknown)
+  check ctx "following, same epoch, fresh, caught up: eligible for reads and promotion"
+    ((judgeR (fr "following" 1000)).isEligible && (judgeP (fr "following" 1000)).isEligible)
+  check ctx "disconnected is ineligible (not unfit): resuming is the follower's job, but nothing is proven"
+    (!(judgeR (fr "disconnected" 1000)).isEligible && !(judgeR (fr "disconnected" 1000)).isUnknown
+      && FollowEvidence.unfitReason (fr "disconnected" 1000) (some "2:abc") == none)
+  check ctx "following another epoch is ineligible AND unfit (a copy of another history)"
+    (hasWord (judgeR (fr "following" 1000 0 "1:old")) "another history"
+      && (FollowEvidence.unfitReason (fr "following" 1000 0 "1:old") (some "2:abc")).isSome)
+  check ctx "a stale observation (6 s > 5 s) is ineligible; 5 s is still fresh"
+    (hasWord (judgeR (fr "following" 1000 6)) "stale" && (judgeR (fr "following" 1000 5)).isEligible)
+  check ctx "clock rollback cannot turn an old observation into fresh evidence"
+    ((judgeR { fr "following" 1000 with sourceObservedAt := some 1001 }).isUnknown)
+  check ctx "lag 500: within the read bound (1000) but over the promotion bound (100)"
+    ((judgeR (fr "following" 500)).isEligible && hasWord (judgeP (fr "following" 500)) "bound")
+  check ctx "lag exactly at the promotion bound is eligible"
+    ((judgeP (fr "following" 900)).isEligible)
+  check ctx "an applied position AHEAD of the master's head is ineligible (another sequence space)"
+    (hasWord (judgeR (fr "following" 1100)) "ahead")
+  check ctx "an unreadable master, or a master without a source epoch, makes the verdict Unknown"
+    ((judgeR (fr "following" 1000) fmUnreadable).isUnknown && (judgeR (fr "following" 1000) fmNoEpoch).isUnknown)
+  check ctx "needs_rebuild, initial_sync and idle are unfit; following the master's epoch is not"
+    ((FollowEvidence.unfitReason (fr "needs_rebuild" 1000) (some "2:abc")).isSome
+      && (FollowEvidence.unfitReason (fr "initial_sync" 1000) (some "2:abc")).isSome
+      && (FollowEvidence.unfitReason (fr "idle" 1000) (some "2:abc")).isSome
+      && FollowEvidence.unfitReason (fr "following" 1000) (some "2:abc") == none)
+  check ctx "survival uses the promotion bound"
+    ((FollowEvidence.judge .survive fb (fr "following" 900) fm).isEligible
+      && !(FollowEvidence.judge .survive fb (fr "following" 500) fm).isEligible)
+
+def cNodes : List (String × Int × Option FollowEvidence.Reading) :=
+  [("a", 0, some (fr "following" 900)), ("b", 0, some (fr "following" 1000)),
+   ("c", 0, some (fr "disconnected" 1000)), ("d", 0, some (fr "needs_rebuild" 1000)),
+   ("e", 0, some frOff), ("f", 0, some frCut), ("g", 0, none)]
+
+def cls1 := FollowEvidence.classify fb [] cNodes [(0, fm)]
+
+def checkFollowClassify (ctx : Ctx) : IO Unit := do
+  check ctx "ranked = proven-current followers, highest applied position first"
+    (cls1.1.ranked == ["b", "a"])
+  check ctx "disconnected and never-observed nodes are unproven; only needs_rebuild is unfit"
+    (cls1.1.unproven == ["c", "f", "g"] && cls1.1.unfit == ["d"]
+      && cls1.1.readWithheld == ["c", "d", "f", "g"])
+  check ctx "operator cold start withholds unknown replicas but preserves explicit non-WAL policy"
+    (!cls1.1.readWithheld.contains "e" && cls1.1.readWithheld.contains "f"
+      && cls1.1.readWithheld.contains "g" && cls1.1.unproven.contains "f")
+  let recovered := FollowEvidence.classify fb cls1.2.1
+    [("f", 0, some (fr "following" 1000)), ("g", 0, some frOff)] [(0, fm)]
+  check ctx "fresh catch-up or confirmed non-WAL mode restores eligibility after cold-start withholding"
+    (recovered.1.readWithheld == [] && recovered.1.ranked == ["f"])
+  let cutAgain := FollowEvidence.classify fb recovered.2.1
+    [("f", 0, some frCut), ("g", 0, none)] [(0, fm)]
+  check ctx "a recovered WAL follower is withheld on the next stats failure without marking its copy unfit"
+    (cutAgain.1.readWithheld == ["f"] && cutAgain.1.unfit == [])
+  check ctx "the mode memory records what was readable: a-d in the mode, e out, f and g unchanged"
+    (cls1.2.1.lookup "a" == some true && cls1.2.1.lookup "d" == some true
+      && cls1.2.1.lookup "e" == some false && cls1.2.1.lookup "f" == none && cls1.2.1.lookup "g" == none)
+  let cls2 := FollowEvidence.classify fb [("f", true), ("g", true)] cNodes [(0, fm)]
+  check ctx "a node remembered in the mode that is unreadable or not probed is Unknown: unproven and withheld, never unfit"
+    (cls2.1.unproven.contains "f" && cls2.1.unproven.contains "g"
+      && cls2.1.readWithheld.contains "f" && cls2.1.readWithheld.contains "g"
+      && !cls2.1.unfit.contains "f" && !cls2.1.unfit.contains "g")
+  let cls3 := FollowEvidence.classify fb [] cNodes []
+  check ctx "without a master reading nothing is proven: no ranked, following nodes unproven and withheld"
+    (cls3.1.ranked == [] && cls3.1.unproven.contains "a" && cls3.1.readWithheld.contains "a"
+      && cls3.1.unfit == ["d"])
+  -- SAF-08: a reply from a different flared process than last pass is Unknown.
+  let withBoot := fun (r : FollowEvidence.Reading) (b : Nat) => { r with bootId := some b }
+  let (m1, boots1) := FollowEvidence.markProcessChanges []
+    [("b", 0, some (withBoot (fr "following" 1000) 7))]
+  check ctx "SAF-08: a node seen for the first time is not marked (an operator restart does not withhold everyone)"
+    (m1.all (fun (_, _, r?) => !((r?.map (·.processChanged)).getD false)) && boots1 == [("b", 7)])
+  let (m2, boots2) := FollowEvidence.markProcessChanges boots1
+    [("b", 0, some (withBoot (fr "following" 1000) 8))]
+  let c2 := FollowEvidence.classify fb [("b", true)] m2 [(0, fm)]
+  check ctx "SAF-08: a changed boot id makes an otherwise eligible follower Unknown: withheld and not promotable"
+    (c2.1.readWithheld == ["b"] && c2.1.unproven == ["b"] && c2.1.ranked == [] && c2.1.unfit == [])
+  let (m3, _) := FollowEvidence.markProcessChanges boots2
+    [("b", 0, some (withBoot (fr "following" 1000) 8))]
+  let c3 := FollowEvidence.classify fb [("b", true)] m3 [(0, fm)]
+  check ctx "SAF-08: the second consistent reading of the new process restores eligibility"
+    (c3.1.readWithheld == [] && c3.1.ranked == ["b"])
+  let (_, boots4) := FollowEvidence.markProcessChanges [("b", 8), ("z", 3)]
+    [("b", 0, none)]
+  check ctx "SAF-08: an unprobed node keeps its last boot id; a node no longer listed is forgotten"
+    (boots4 == [("b", 8)])
+  let (m5, _) := FollowEvidence.markProcessChanges [("e", 1)] [("e", 0, some (withBoot frOff 2))]
+  check ctx "SAF-08: a process change of a node out of the mode keeps the legacy policy"
+    (!(FollowEvidence.classify fb [("e", false)] m5 [(0, fm)]).1.readWithheld.contains "e")
+  let farBehind : FollowEvidence.Reading := { fr "disconnected" 1000 with sourceLsn := some 500000, appliedLsn := some 1000 }
+  check ctx "failover bound: a follower more backlog than the bound behind is unfit (no failover promotion)"
+    ((FollowEvidence.unfitReason farBehind (some "2:abc") 100000).isSome
+      && (FollowEvidence.unfitReason farBehind (some "2:abc") 0).isNone)
+  let nearBehind : FollowEvidence.Reading := { fr "disconnected" 1000 with sourceLsn := some 50000, appliedLsn := some 1000 }
+  check ctx "failover bound: a follower within the bound stays a last-resort candidate (unproven, not unfit)"
+    ((FollowEvidence.unfitReason nearBehind (some "2:abc") 100000).isNone)
+  let clsFar := FollowEvidence.classify { fb with failoverMaxLag := 100000 } [("b", true)] [("b", 0, some farBehind)] [(0, fm)]
+  check ctx "failover bound: classify lists the far-behind follower as unfit"
+    (clsFar.1.unfit == ["b"] && clsFar.1.ranked == [])
+  check ctx "probe policy: in the mode every tick; out of the mode every interval; never read: now"
+    (FollowEvidence.shouldProbe [("x", true)] "x" 7 30 && !FollowEvidence.shouldProbe [("x", false)] "x" 7 30
+      && FollowEvidence.shouldProbe [("x", false)] "x" 60 30 && FollowEvidence.shouldProbe [] "x" 7 30)
+  let (changed, now) := FollowEvidence.changedSummaries [("a", (cls1.2.2.head?.map (·.summary)).getD "")] cls1.2.2
+  check ctx "only changed judgements are reported; the summaries are carried forward"
+    (!(changed.map Prod.fst).contains "a" && (changed.map Prod.fst).contains "b" && now.length == cls1.2.2.length)
+
+def s3 : FlareClusterState :=
+  ({ nodeMap := [("m", node .Master .Active 0 "m"), ("s1", node .Slave .Active 0 "s1"),
+                 ("s2", node .Slave .Active 0 "s2"), ("s3", node .Slave .Active 0 "s3"),
+                 ("dn", node .Slave .Down 0 "dn")],
+     nodeMapVersion := 1 } : FlareClusterState).rebuildPartitionMap
+
+def slavesOf (s : FlareClusterState) : List String :=
+  ((s.partitionMap.find? (·.1 == 0)).map (·.2.slaves)).getD []
+
+def checkFollowShaping (ctx : Ctx) : IO Unit := do
+  let shaped := K8sReconciler.shapePromotionCandidates ["s2"] ["s3"] [] s3
+  check ctx "shaping: excluded removed, ranked first, the rest in map order; nodeMap untouched"
+    (slavesOf shaped == ["s3", "s1", "dn"] && shaped.nodeMap == s3.nodeMap)
+  check ctx "shaping: unproven go last; empty lists are the identity"
+    (slavesOf (K8sReconciler.shapePromotionCandidates [] [] ["s1"] s3) == ["s2", "s3", "dn", "s1"]
+      && (K8sReconciler.shapePromotionCandidates [] [] [] s3).partitionMap == s3.partitionMap)
+  check ctx "the successor search sees the shaped order (proven follower first)"
+    ((shaped.partitionMap.find? (·.1 == 0)).bind (fun (_, p) => K8sReconciler.findActiveSuccessor shaped p 0) == some "s3")
+  check ctx "drain shaping (unfit ++ unproven excluded) can leave NO successor: the guard then keeps the master"
+    (slavesOf (K8sReconciler.shapePromotionCandidates ["s1", "s2", "s3", "dn"] [] [] s3) == [])
+  let held := K8sReconciler.withholdReads ["s1", "m", "dn"] s3.nodeMap
+  check ctx "withholding: a listed Slave gets balance 0; master, Down corpse and unlisted slaves untouched; keys preserved"
+    ((held.lookup "s1").map (·.balance) == some 0 && (held.lookup "m").map (·.balance) == some 100
+      && (held.lookup "dn") == s3.nodeMap.lookup "dn" && (held.lookup "s2").map (·.balance) == some 100
+      && held.map Prod.fst == s3.nodeMap.map Prod.fst)
+  check ctx "the masterless refill skips an excluded (unfit) Active slave"
+    (let noMaster : FlareClusterState := { s3 with nodeMap := s3.nodeMap.filter (·.1 != "m") }
+     let refilled := K8sReconciler.promoteMasterlessPartition noMaster 0 ["s1", "s2", "s3"] [] [] ["s1"]
+     (refilled.nodeMap.find? (fun kv => kv.2.role == FlareRole.Master)).map (·.1) == some "s2")
+  check ctx "the masterless refill passes over a BLOCKED (not promotable) Active slave and seats the next one (blocked is a hard exclusion, unlike unfit)"
+    (let noMaster : FlareClusterState := { s3 with nodeMap := s3.nodeMap.filter (·.1 != "m") }
+     let refilled := K8sReconciler.promoteMasterlessPartition noMaster 0 ["s1", "s2", "s3"] [] [] [] false [] ["s1"]
+     (refilled.nodeMap.find? (fun kv => kv.2.role == FlareRole.Master)).map (·.1) == some "s2")
+  check ctx "classify reports a follower that declared needs_rebuild, with flared's reason"
+    (let r := { fr "needs_rebuild" 1000 with lastReason := some "epoch_mismatch" }
+     (FollowEvidence.classify fb [] [("d", 0, some r)] [(0, fm)]).1.needsRebuild == [("d", "epoch_mismatch")])
+  check ctx "requestRebuild adds one un-owned, resolved request per node and is idempotent; plan then demotes it"
+    (let (l1, a1) := requestRebuild empty masterKey slaveKey
+     let (l2, a2) := requestRebuild l1 masterKey slaveKey
+     a1 && !a2 && l2.entries.length == 1
+       && (l1.entries.head?.map (fun e => e.nodeKey == some slaveKey && !e.owned && e.drops == 0)) == some true
+       && ((plan l1 true "").2.map Prod.fst) == [slaveKey])
+  check ctx "requestRebuild adds nothing for a node that already has an (owned) entry"
+    (let owned := holdOwned (resolve (request empty masterKey slaveKey 1) state).1 slaveKey (some 5) (some ownEp)
+     !(requestRebuild owned masterKey slaveKey).2)
+  -- The two routes to a rebuild request RACE (design §5.4): a drop counted
+  -- for the node (refused forwards after an epoch change) and the
+  -- follower's own needs_rebuild. In either order there is exactly one
+  -- entry, un-owned, resolved to the node, demoted once by plan.
+  check ctx "race: drop request first, then the follower's declaration → one entry, drops kept, one demotion"
+    (let l1 := (resolve (request empty masterKey slaveKey 2) state).1
+     let (l2, added) := requestRebuild l1 masterKey slaveKey
+     !added && l2.entries.length == 1 && (l2.entries.head?.map (·.drops)) == some 2
+       && ((plan l2 true "").2.map Prod.fst) == [slaveKey])
+  check ctx "race: the follower's declaration first, then a drop → one entry with the drops added, one demotion"
+    (let (l1, added) := requestRebuild empty masterKey slaveKey
+     let l2 := (resolve (request l1 masterKey slaveKey 3) state).1
+     added && l2.entries.length == 1 && (l2.entries.head?.map (·.drops)) == some 3
+       && (l2.entries.head?.map (·.owned)) == some false
+       && ((plan l2 true "").2.map Prod.fst) == [slaveKey])
+  check ctx "race: a drop on an OWNED entry and the follower's declaration in the same pass → hand-over, single un-owned request"
+    (let owned := holdOwned (resolve (request empty masterKey slaveKey 1) state).1 slaveKey (some 5) (some ownEp)
+     let (afterAdv, steps) := advanceOwnedAll owned [(slaveKey, rebuild)]
+     let (l2, added) := requestRebuild afterAdv masterKey slaveKey
+     steps.map (·.2) == [.handedOver] && !added && l2.entries.length == 1
+       && (l2.entries.head?.map (·.owned)) == some false
+       && ((plan l2 true "").2.map Prod.fst) == [slaveKey])
+  check ctx "deleteGate: an unproven surviving follower refuses the delete"
+    (match StatsObservation.deleteGate .act true false true true with
+     | .error r => (r.splitOn "continuous-replication").length > 1
+     | .ok _ => false)
+
+private def checkMemoryConfig (ctx : Ctx) : IO Unit := do
+  let empty : RocksdbConfigSpec := {}
+  check ctx "unset memory settings preserve flared defaults" (!empty.hasAny && empty.toExtraConf == "")
+  let r : RocksdbConfigSpec := {
+    blockCacheSizeMb := some 64
+    writeBufferSizeMb := some 16
+    maxWriteBufferNumber := some 3
+    walTtlSeconds := some 900 }
+  let text := r.toExtraConf
+  check ctx "memory config renders all three options alongside WAL retention"
+    (r.hasAny && text.splitOn "\n" == ["rocksdb-block-cache-size-mb = 64",
+      "rocksdb-write-buffer-size-mb = 16", "rocksdb-max-write-buffer-number = 3",
+      "rocksdb-wal-ttl-seconds = 900"])
+  for r in ([{ blockCacheSizeMb := some 64 }, { writeBufferSizeMb := some 16 },
+      { maxWriteBufferNumber := some 3 }] : List RocksdbConfigSpec) do
+    check ctx "a memory-only spec is not ignored" r.hasAny
+  let yaml := FlareOperator.Migration.Provision.rocksdbSpecYaml r
+  check ctx "migration preserves the memory budget"
+    ((yaml.splitOn "blockCacheSizeMb: 64").length == 2 &&
+     (yaml.splitOn "writeBufferSizeMb: 16").length == 2 &&
+     (yaml.splitOn "maxWriteBufferNumber: 3").length == 2)
+
+/-- SAF-11: the breaker counts capacity unavailable NOW, so a majority
+    outage spread over ticks trips it. -/
+private def checkBreakerUnavailable (ctx : Ctx) : IO Unit := do
+  let node := fun (h : String) (role : FlareRole) (st : FlareState) =>
+    (s!"{h}:12121", ({ serverName := h, serverPort := 12121, role, state := st, partition := 0 } : FlareNode))
+  let cs := fun (ns : List (String × FlareNode)) =>
+    ({ FlareClusterState.default with nodeMap := ns } : FlareClusterState)
+  let cfg : CircuitBreakerConfig := {}
+  let unavail := K8sReconciler.breakerUnavailableKeys
+  let trips := fun (st : FlareClusterState) (dead live : List String) =>
+    (K8sReconciler.circuitBreakerDecision (unavail st dead live).length st.nodeMap.length cfg false).1
+      == .RecoveryRefill
+  let k := fun (h : String) => s!"{h}:12121"
+  -- 4 nodes, one partition master + 3 slaves (the 4→1 E2E shape).
+  let t1 := cs [node "a" .Master .Active, node "b" .Slave .Active, node "c" .Slave .Active, node "d" .Slave .Active]
+  check ctx "tick 1: one of four dead (25%) does not trip"
+    (!trips t1 [k "b"] [k "a", k "c", k "d"])
+  -- After failover b is Proxy+Down; c dies in the next tick.
+  let t2 := cs [node "a" .Master .Active, node "b" .Proxy .Down, node "c" .Slave .Active, node "d" .Slave .Active]
+  check ctx "tick 2: a second death with the first already Down (50%) trips"
+    (trips t2 [k "c"] [k "a", k "d"])
+  check ctx "the old per-tick count (1 of 4 in tick 2) would not have tripped"
+    ((K8sReconciler.circuitBreakerDecision 1 4 cfg false).1 == .AfterHandleFailover)
+  check ctx "a Prepare node with no live pod counts; one with a live pod does not"
+    (unavail (cs [node "a" .Master .Active, node "p" .Slave .Prepare, node "q" .Slave .Prepare]) [] [k "a", k "q"]
+      == [k "p"])
+  check ctx "a healthy proxy is not unavailable"
+    (unavail (cs [node "a" .Master .Active, node "x" .Proxy .Active]) [] [k "a", k "x"] == [])
+  check ctx "a node dead this tick is counted once even if also Down-eligible"
+    ((unavail (cs [node "a" .Master .Active, node "b" .Slave .Active]) [k "b"] [k "a"]).length == 1)
+  let big := cs ((List.range 8).map fun i =>
+    node s!"n{i}" (if i == 0 then .Master else .Slave) (if i == 7 then .Down else .Active))
+  let pair := cs [node "a" .Master .Active, node "b" .Slave .Active]
+  check ctx "client-idle-timeout renders into extra.conf only when set"
+    (({ clientIdleTimeoutSeconds := some 120 } : RocksdbConfigSpec).toExtraConf == "client-idle-timeout = 120"
+      && ({ clientIdleTimeoutSeconds := some 120 } : RocksdbConfigSpec).hasAny
+      && ({ maxTotalThreadQueue := some 1 } : RocksdbConfigSpec).toExtraConf == "max-total-thread-queue = 1")
+  check ctx "read-unavailable-error renders into extra.conf only when set"
+    (({ readUnavailableError := some true } : RocksdbConfigSpec).toExtraConf == "read-unavailable-error = true"
+      && ({ readUnavailableError := some false } : RocksdbConfigSpec).toExtraConf == "read-unavailable-error = false"
+      && ({} : RocksdbConfigSpec).toExtraConf == ""
+      && ({ readUnavailableError := some true } : RocksdbConfigSpec).hasAny)
+  check ctx "continuous replication flags render into extra.conf, so a spec change cannot drop them"
+    (({ replIdentityForward := some true, replFollowEnabled := some true, replFollowPollIntervalUsec := some 200000 } : RocksdbConfigSpec).toExtraConf
+      == "repl-identity-forward = true\nrepl-follow-enabled = true\nrepl-follow-poll-interval-usec = 200000")
+  check ctx "maxTotalThreadQueue renders into extra.conf"
+    (({ maxTotalThreadQueue := some 200000 } : RocksdbConfigSpec).toExtraConf == "max-total-thread-queue = 200000")
+  check ctx "breaker floor: one dead node of two (50%) does not trip with the default minimum of 2"
+    (!trips pair [k "a"] [k "b"])
+  check ctx "breaker floor: minUnavailableToTrip = 1 restores tripping on a single death"
+    ((K8sReconciler.circuitBreakerDecision 1 2 { cfg with minUnavailableToTrip := 1 } false).1 == .RecoveryRefill)
+  check ctx "breaker floor: two unavailable of four (50%) still trips"
+    ((K8sReconciler.circuitBreakerDecision 2 4 cfg false).1 == .RecoveryRefill)
+  let st := cs [node "a" .Master .Active, node "b" .Slave .Prepare, node "c" .Slave .Active]
+  check ctx "NotReady streaks: an Active node's streak grows; a Prepare node's restarts at 0"
+    (K8sReconciler.unreadyStreaks [(k "b", 9), (k "c", 2)] [k "b", k "c"] st == [(k "c", 3)])
+  let stAct := cs [node "a" .Master .Active, node "b" .Slave .Active, node "c" .Slave .Active]
+  check ctx "NotReady streaks: a node that just became Active starts from 1, not from its Prepare streak"
+    (K8sReconciler.unreadyStreaks (K8sReconciler.unreadyStreaks [] [k "b"] st) [k "b"] stAct == [(k "b", 1)])
+  check ctx "NotReady streaks: a node that turns Ready drops out"
+    (K8sReconciler.unreadyStreaks [(k "c", 4)] [] stAct == [])
+  -- CI 37893780448 (history recovery after (3a)/(4)): pass A declared c dead at
+  -- streak 6 and committed Down at its END; c re-registered BETWEEN the passes,
+  -- so pass B saw it Active and NotReady again. Carrying the old streak: 7 >= 6,
+  -- dead again, Down until the 60-tick stuck-Down restart (~7 min).
+  let stDownC := cs [node "a" .Master .Active, node "b" .Slave .Active, node "c" .Slave .Down]
+  check ctx "NotReady streaks: a node Down in the LAST COMMITTED map that rejoined starts a fresh window (old: 6 -> 7, dead again; new: 1)"
+    (let fresh := K8sReconciler.rejoinedAfterDown [k "c"] stAct
+     let carried := K8sReconciler.unreadyStreaks [(k "c", 6)] [k "c"] stAct
+     let rejoined := K8sReconciler.unreadyStreaks [(k "c", 6)] [k "c"] stAct fresh
+     let unhealthy := fun (l : List (String × Nat)) => (l.filter (·.2 ≥ 6)).map Prod.fst
+     fresh == [k "c"] && carried == [(k "c", 7)]
+       && K8sReconciler.detectDeadNodesPure stAct [k "a", k "b", k "c"] (unhealthy carried) == [k "c"]
+       && rejoined == [(k "c", 1)]
+       && K8sReconciler.detectDeadNodesPure stAct [k "a", k "b", k "c"] (unhealthy rejoined) == [])
+  -- review of 65427ae: a node-add event / re-registration is NOT the evidence
+  check ctx "NotReady streaks: no reset without a committed Down (a duplicate node add, a reconnect, a wedged or crash-looping process is still declared dead after 6 NotReady passes); still Down = no reset; nothing after an operator restart"
+    (K8sReconciler.rejoinedAfterDown [] stAct == []
+      && K8sReconciler.rejoinedAfterDown [k "c"] stDownC == []
+      && (List.range 6).foldl (fun acc _ => K8sReconciler.unreadyStreaks acc [k "c"] stAct (K8sReconciler.rejoinedAfterDown [] stAct)) [] == [(k "c", 6)]
+      -- other nodes keep their streak
+      && K8sReconciler.unreadyStreaks [(k "b", 5), (k "c", 6)] [k "b", k "c"] stAct [k "c"] == [(k "b", 6), (k "c", 1)])
+  -- CI 37899958227 history (3b): a partition emptied by a flush_all; the master
+  -- died, the ex-master came back with a new (empty) DB and is FORBIDDEN
+  -- (blocked); the replica is Active, known empty, "unfit" (it follows no one:
+  -- there is no master) and not blocked. It was never seated.
+  let emptyPart := cs [node "x" .Slave .Prepare, node "r" .Slave .Active]
+  let emptyPart := { emptyPart with nodeMap := emptyPart.nodeMap.map fun (kk, n) => if kk == k "x" then (kk, { n with lastMasterOf := 0 }) else (kk, n) }
+  let live := [k "x", k "r"]
+  let seated := fun (st : FlareClusterState) => (st.nodeMap.find? fun kv => kv.2.role == FlareRole.Master).map Prod.fst
+  check ctx "masterless refill: an EMPTY partition whose ex-master came back read empty seats the known-empty, unblocked Active slave even though it is 'unfit' (it follows no one); never a blocked copy, never when any copy holds data, never on an unread (not known empty) copy, never while the ex-master was not read empty"
+    (seated (K8sReconciler.promoteMasterlessPartition emptyPart 0 live [] [] [k "r"] true [k "x", k "r"] [k "x"]) == some (k "r")
+      && seated (K8sReconciler.promoteMasterlessPartition emptyPart 0 live [] [] [k "r"] true [k "x", k "r"] [k "x", k "r"]) == none
+      && seated (K8sReconciler.promoteMasterlessPartition emptyPart 0 live [] [k "x"] [k "r"] true [k "r"] [k "x"]) == none
+      && seated (K8sReconciler.promoteMasterlessPartition emptyPart 0 live [] [] [k "r"] true [k "x"] [k "x"]) == none
+      && seated (K8sReconciler.promoteMasterlessPartition emptyPart 0 live [] [] [k "r"] true [k "r"] [k "x"]) == none)
+  -- CI 37908698742: the re-registration demoted c (Active -> Prepare) DURING pass
+  -- A after its ListPods counted 6, c was Active again before pass B: never Down
+  -- at a commit. The left-Active key restarts the window (old: 7, dead again).
+  check ctx "NotReady streaks: a node that LEFT its Active membership (Active -> Prepare) between two ListPods starts a fresh window (old: 6 -> 7, dead again; new: 1); without such a transition the streak carries (a wedged process is still declared dead)"
+    (let crd1 : FlareClusterView := { metadata := { name := "c" }, spec := { partitions := 1, replicas := 3 } }
+     let (afterAdd, _) := Reconciler.reconcileStep stAct crd1 (.NodeAdd "c" 12121)
+     Reconciler.leftActive stAct afterAdd == [k "c"]
+     && Reconciler.leftActive stAct stAct == []
+     && K8sReconciler.unreadyStreaks [(k "c", 6)] [k "c"] stAct (K8sReconciler.rejoinedAfterDown [] stAct ++ Reconciler.leftActive stAct afterAdd) == [(k "c", 1)]
+     && K8sReconciler.unreadyStreaks [(k "c", 6)] [k "c"] stAct (K8sReconciler.rejoinedAfterDown [] stAct) == [(k "c", 7)])
+  check ctx "one long-Down node in eight (12%) does not trip"
+    (!trips big [] ((List.range 7).map fun i => k s!"n{i}"))
+
+private def checkTopologyDelivery (ctx : Ctx) : IO Unit := do
+  check ctx "only a complete OK response confirms topology delivery"
+    (FlareOperator.Server.topologyAckAccepted "OK\r\n")
+  for reply in ["", "OK", "SERVER_ERROR node sync error\r\n", "CLIENT_ERROR format error\r\n", "OK\r\nextra"] do
+    check ctx "missing, truncated or rejected topology reply remains unconfirmed"
+      (!FlareOperator.Server.topologyAckAccepted reply)
+  check ctx "first failed send retains its committed version"
+    (FlareOperator.Server.pendingTopologyAfterAttempt none 100 false == some 100)
+  check ctx "subsequent failures retain earliest pending version even as map advances"
+    (FlareOperator.Server.pendingTopologyAfterAttempt (some 100) 110 false == some 100)
+  check ctx "confirmed latest map clears pending delivery"
+    (FlareOperator.Server.pendingTopologyAfterAttempt (some 100) 110 true == none)
+  -- CI 38081479454: a registration between the pass's read and its send
+  check ctx "a pass's snapshot is sent only while the live map still has its version"
+    (FlareOperator.Server.snapshotStillLive 4294967296 4294967296)
+  check ctx "a snapshot older than the live map (a node registered meanwhile) is not sent"
+    (!FlareOperator.Server.snapshotStillLive 4294967296 4294967297)
+  -- CI 38090211947: a registration DURING the send (PublicationGate)
+  let g0 : FlareOperator.Server.PublicationGate := {}
+  let (sendOk, gS) := g0.beginSend 7
+  check ctx "an idle gate lets a send begin" sendOk
+  check ctx "no registration begins while a send is out" (!(gS.beginRegistration).1)
+  check ctx "a registration begins once the send ended" (gS.endSend.beginRegistration).1
+  let (regOk, gR) := g0.beginRegistration
+  check ctx "an idle gate lets a registration begin" regOk
+  check ctx "no send begins while a registration is being answered" (!(gR.beginSend 7).1)
+  check ctx "two registrations may be answered together" (gR.beginRegistration).1
+  check ctx "a send begins once every registration ended" (gR.endRegistration.beginSend 7).1
+  check ctx "a forced registration (wait ceiling) still blocks the NEXT send"
+    (!((gS.forceRegistration.endSend).beginSend 8).1)
+  let trig := fun (moved : Bool) (pending : Option Nat) (held active : Nat) =>
+    ({ versionMoved := moved, pending, repairHeld := held, activeNotReady := active } :
+      FlareOperator.Server.BroadcastTriggers)
+  check ctx "a pass at rest with nothing pending does not send"
+    (!(trig false none 0 0).any)
+  check ctx "each trigger alone sends"
+    ((trig true none 0 0).any && (trig false (some 7) 0 0).any &&
+     (trig false none 1 0).any && (trig false none 0 1).any)
+  check ctx "startup republish shape: pending only, version unchanged"
+    ((trig false (some 7) 0 0).pendingOnly)
+  check ctx "pending plus any other reason is not attributable to pending alone"
+    (!(trig true (some 7) 0 0).pendingOnly && !(trig false (some 7) 1 0).pendingOnly &&
+     !(trig false (some 7) 0 1).pendingOnly && !(trig false none 0 0).pendingOnly)
+  let g := FlareOperator.Server.startupGeneration
+  let u := FlareOperator.Server.generationUnit
+  check ctx "SAF-09: a recreated Lease (transitions 0) still yields a generation above the persisted one"
+    (g 0 (2 * u + 9) == 3)
+  check ctx "SAF-09: a Lease count above the persisted generation wins"
+    (g 5 (3 * u + 7) == 5)
+  check ctx "SAF-09: equal Lease count and persisted generation still move up by one"
+    (g 3 (3 * u + 1) == 4)
+  check ctx "SAF-09: a fresh cluster starts at generation 1"
+    (g 0 0 == 1)
+  check ctx "SAF-09: the first version of a new leader is above the persisted version"
+    (FlareOperator.Server.startupVersion 0 (2 * u + 9) > 2 * u + 9)
+  check ctx "SAF-09: a version is sent only when the durable record holds it"
+    (FlareOperator.Server.persistedCovers 10 10 && FlareOperator.Server.persistedCovers 11 10
+      && !FlareOperator.Server.persistedCovers 9 10)
+  check ctx "trigger label names every reason"
+    ((trig false (some 7) 0 0).label == "versionMoved=false pending=v7 repairHeld=0 activeNotReady=0")
+
+private def checkTopologyObservation (ctx : Ctx) : IO Unit := do
+  let parse := FlareOperator.TopologyObservation.reportedVersion
+  let judge := FlareOperator.TopologyObservation.judge
+  check ctx "complete stats expose the applied topology version"
+    (parse "STAT node_map_version 42\r\nEND\r\n" == some 42)
+  for reply in ["STAT node_map_version 42\r\n", "END\r\n", "STAT node_map_version bad\r\nEND\r\n",
+      "STAT node_map_version 42\r\nSTAT node_map_version 43\r\nEND\r\n"] do
+    check ctx "missing, truncated, invalid or duplicate versions are Unknown" (parse reply == none)
+  check ctx "observed older map needs delivery, not failover"
+    (judge 42 (some "uid-a") (some "uid-a") (some 41) == .behind)
+  check ctx "same-version observation is current"
+    (judge 42 (some "uid-a") (some "uid-a") (some 42) == .current)
+  check ctx "newer recipient is an authority mismatch, not a lagging recipient"
+    (judge 42 (some "uid-a") (some "uid-a") (some 43) == .ahead)
+  check ctx "same-name Pod replacement invalidates the reply"
+    (judge 42 (some "uid-a") (some "uid-b") (some 42) == .unknown)
+  check ctx "missing UID cannot confirm application"
+    (judge 42 none none (some 42) == .unknown)
+  let old : FlareOperator.TopologyObservation.Sample := {
+    nodeKey := "n", uid := some "old", reportedVersion := some 42
+    observedAtMs := 1, verdict := .current }
+  let fresh := { old with uid := some "new", reportedVersion := none, verdict := .unknown }
+  let audit := FlareOperator.TopologyObservation.record { samples := [old, { old with nodeKey := "gone" }] } ["n"] fresh
+  check ctx "fresh Unknown replaces old confirmation and removed nodes are pruned"
+    (match audit.samples with
+     | [s] => s.uid == some "new" && s.verdict == .unknown
+     | _ => false)
+
+private def checkTopologyMetrics (ctx : Ctx) : IO Unit := do
+  let s : FlareOperator.TopologyObservation.Sample := {
+    nodeKey := "n", uid := some "uid", reportedVersion := some 42
+    observedAtMs := 1000, verdict := .current }
+  let classify := FlareOperator.TopologyObservation.observedVerdict
+  check ctx "new desired version invalidates old current verdict"
+    (classify 43 1001 60000 (some s) == .behind)
+  check ctx "expired current observation becomes Unknown"
+    (classify 42 61001 60000 (some s) == .unknown)
+  check ctx "future timestamp is Unknown"
+    (classify 42 999 60000 (some s) == .unknown)
+  check ctx "UID-invalid observation is not rehabilitated by a matching number"
+    (classify 42 1001 60000 (some { s with verdict := .unknown }) == .unknown)
+  let counts := FlareOperator.TopologyObservation.summarize { samples := [s] } ["n", "unseen"] 43 1001 60000
+  check ctx "summary counts fresh lag and missing feedback separately"
+    (counts.behind == 1 && counts.unknown == 1 && counts.ahead == 0)
+  check ctx "removed recipients do not remain in counts"
+    (FlareOperator.TopologyObservation.summarize { samples := [s] } [] 43 1001 60000 == {})
+  let metrics ← FlareOperator.Metrics.Prometheus.initMetrics
+  metrics.topologyBehindNodes.set 2
+  metrics.topologyAheadNodes.set 1
+  metrics.topologyUnknownNodes.set 3
+  let rolesState : FlareClusterState := { FlareClusterState.default with nodeMap := [
+    ("c-nodes-0.c-nodes.ns.svc.cluster.local:12121", { serverName := "c-nodes-0.c-nodes.ns.svc.cluster.local", serverPort := 12121, role := FlareRole.Master, state := FlareState.Active, partition := 0 }),
+    ("c-nodes-1.c-nodes.ns.svc.cluster.local:12121", { serverName := "c-nodes-1.c-nodes.ns.svc.cluster.local", serverPort := 12121, role := FlareRole.Slave, state := FlareState.Prepare, partition := 0 })] }
+  FlareOperator.Metrics.Prometheus.updateNodeCounts metrics rolesState
+  let out ← FlareOperator.Metrics.Prometheus.exportMetrics metrics "unit"
+  check ctx "EV-15: one role sample per node, labelled with pod, partition, role and state"
+    ((out.splitOn "flare_operator_node_role{cluster=\"unit\",pod=\"c-nodes-0\",partition=\"0\",role=\"master\",state=\"active\"} 1\n").length == 2
+      && (out.splitOn "flare_operator_node_role{cluster=\"unit\",pod=\"c-nodes-1\",partition=\"0\",role=\"slave\",state=\"prepare\"} 1\n").length == 2)
+  for name in ["flare_operator_topology_observed_behind_nodes", "flare_operator_topology_observed_ahead_nodes", "flare_operator_topology_unknown_nodes"] do
+    check ctx "topology gauge is present in actual metrics exporter"
+      ((out.splitOn s!"# TYPE {name} gauge").length == 2)
+
+def activationCrd : FlareClusterView :=
+  { metadata := { name := some "unit", «namespace» := some "default" }
+    spec := { partitions := 1, replicas := 2 } }
+
+def activationState (st : FlareState) : FlareClusterState :=
+  { nodeMap := [("a:12121", node .Master .Active 0 "a"), ("b:12121", node .Slave st 0 "b")],
+    nodeMapVersion := 7 }
+
+def isOk : Flare.FlareResponse → Bool
+  | .OK => true
+  | _ => false
+
+def checkReactivation (ctx : Ctx) : IO Unit := do
+  -- CI run 37007523101: the operator's PREPARE-REPAIR activated a replica
+  -- while flared was still finishing its reconstruction; flared's own report
+  -- was then rejected as 0→0, and it retried the whole reconstruction.
+  let s := activationState .Active
+  let (s', r) := Reconciler.reconcileStep s activationCrd (.NodeState "b" 12121 .Active)
+  check ctx "re-activation of an Active node is acknowledged and changes nothing"
+    (isOk r && s'.nodeMap == s.nodeMap && s'.nodeMapVersion == s.nodeMapVersion)
+  let (_, rReady) := Reconciler.reconcileStep s activationCrd (.NodeState "a" 12121 .Ready)
+  check ctx "an Active master reporting Ready again is acknowledged" (isOk rReady)
+  let (sd, rDown) := Reconciler.reconcileStep (activationState .Down) activationCrd (.NodeState "b" 12121 .Active)
+  check ctx "a Down node still cannot report itself Active"
+    (!isOk rDown && sd.nodeMap == (activationState .Down).nodeMap)
+  let (sp, rPrep) := Reconciler.reconcileStep (activationState .Prepare) activationCrd (.NodeState "b" 12121 .Active)
+  check ctx "Prepare → Active under an Active master is still applied"
+    (isOk rPrep && (sp.lookupNode "b:12121").map (·.state) == some .Active)
+
+def holdNode (r : FlareRole) (st : FlareState) (p : Int) (nm : String) (lmo : Int := -1) : FlareNode :=
+  { serverName := nm, serverPort := 12121, role := r, state := st, partition := p, lastMasterOf := lmo }
+
+def containsSub (h n : String) : Bool := (h.splitOn n).length > 1
+
+/-- After failover: the dead master is Proxy/Down (lastMasterOf 0), its only
+    follower is Active but unfit (too far behind). -/
+def holdState : FlareClusterState :=
+  ({ nodeMap := [("m", holdNode .Proxy .Down (-1) "m" 0), ("f", holdNode .Slave .Active 0 "f")],
+     nodeMapVersion := 5 } : FlareClusterState).rebuildPartitionMap
+
+def masterOf (s : FlareClusterState) : Option String :=
+  (s.nodeMap.find? (fun kv => kv.2.role == FlareRole.Master)).map (·.1)
+
+def checkFailoverLagHold (ctx : Ctx) : IO Unit := do
+  -- CI-free reproduction (2026-10-03): without the hold, the refill's
+  -- last-resort tier crowned the unfit follower in the pass that failed its
+  -- master over, so failoverMaxLag protected nothing.
+  check ctx "lag hold off: the refill crowns the unfit follower as before"
+    (masterOf (K8sReconciler.promoteMasterlessPartition holdState 0 ["f"] [] ["f"] ["f"]) == some "f")
+  check ctx "lag hold on, ex-master away: the unfit follower is NOT crowned; the partition stays masterless"
+    (masterOf (K8sReconciler.promoteMasterlessPartition holdState 0 ["f"] [] ["f"] ["f"] true) == none)
+  check ctx "refill (CI 37777862552 pvc-survival): a key whose evidence is not promotable is never chosen in ANY tier; the refill takes the next candidate instead of starving the partition"
+    (masterOf (K8sReconciler.promoteMasterlessPartition holdState 0 ["f"] [] ["f"] [] false [] ["f"]) == none
+      && masterOf (K8sReconciler.promoteMasterlessPartition holdState 0 ["f"] [] ["f"] [] false [] []) == some "f")
+  -- history-masterless (c), 38040348416: two copies marked lastMasterOf, the
+  -- record's holder (a person's choice) is "b", map order puts "a" first
+  let twoLast : FlareClusterState :=
+    ({ holdState with nodeMap := [("a", holdNode .Slave .Prepare 0 "a" 0), ("b", holdNode .Slave .Prepare 0 "b" 0)] }).rebuildPartitionMap
+  check ctx "refill: within a tier the RECORDED history holder is preferred over map order; without a holder the order is as before; a holder the tier refuses (blocked) is not chosen for being the holder"
+    (masterOf (K8sReconciler.promoteMasterlessPartition twoLast 0 ["a", "b"] [] ["a", "b"] [] false [] [] (some "b")) == some "b"
+      && masterOf (K8sReconciler.promoteMasterlessPartition twoLast 0 ["a", "b"] [] ["a", "b"] [] false [] []) == some "a"
+      && masterOf (K8sReconciler.promoteMasterlessPartition twoLast 0 ["a", "b"] [] ["a", "b"] [] false [] ["b"] (some "b")) == some "a"
+      && masterOf (K8sReconciler.promoteMasterlessPartitions twoLast activationCrd ["a", "b"] [] ["a", "b"] [] false [] [] [] [(0, "b")]) == some "b")
+  check ctx "the held partition is reported with its follower"
+    (K8sReconciler.heldForExMaster (K8sReconciler.promoteMasterlessPartition holdState 0 ["f"] [] ["f"] ["f"] true)
+      activationCrd ["f"] ["f"] ["f"] == [(0, ["f"])])
+  let back : FlareClusterState :=
+    ({ holdState with nodeMap := [("m", holdNode .Slave .Prepare 0 "m" 0), ("f", holdNode .Slave .Active 0 "f")] }).rebuildPartitionMap
+  check ctx "ex-master back WITH data: it is crowned, not the unfit follower"
+    (masterOf (K8sReconciler.promoteMasterlessPartition back 0 ["m", "f"] [] ["m", "f"] ["f"] true) == some "m")
+  check ctx "ex-master back and READ empty (known-empty): nothing to wait for, the unfit follower is crowned"
+    (masterOf (K8sReconciler.promoteMasterlessPartition back 0 ["m", "f"] [] ["f"] ["f"] true ["m"]) == some "f")
+  check ctx "ex-master back but UNREADABLE (neither data-bearing nor known-empty): the hold continues, the unfit follower is NOT crowned (CI 37296281060)"
+    (masterOf (K8sReconciler.promoteMasterlessPartition back 0 ["m", "f"] [] ["f"] ["f"] true) == none
+      && masterOf (K8sReconciler.promoteMasterlessPartitions back activationCrd ["m", "f"] [] ["f"] ["f"] true [] []) == none
+      && !K8sReconciler.exMasterBackEmpty back 0 ["m", "f"] [])
+  check ctx "a known-empty reading of a pod that is not live does not end the hold"
+    (masterOf (K8sReconciler.promoteMasterlessPartition back 0 ["f"] [] ["f"] ["f"] true ["m"]) == none)
+  check ctx "wait budget over (partition in the expired list): the unfit follower is crowned"
+    (masterOf (K8sReconciler.promoteMasterlessPartitions holdState activationCrd ["f"] [] ["f"] ["f"] true [0]) == some "f"
+      && masterOf (K8sReconciler.promoteMasterlessPartitions holdState activationCrd ["f"] [] ["f"] ["f"] true []) == none)
+  let crdHold : K8sReconciler.FlareReconcileState :=
+    { followUnfitKeys := ["m", "f"], followHoldEnabled := true, livePodKeys := ["m", "f"], dataBearingKeys := ["m", "f"] }
+  check ctx "an ex-master re-seated on its partition is not reported NOT LOSS-FREE, even when probed unfit"
+    (K8sReconciler.refillHoldEffects back
+      (K8sReconciler.promoteMasterlessPartition back 0 ["m", "f"] [] ["m", "f"] ["f"] true) activationCrd crdHold
+      |>.isEmpty)
+  let logText := fun (effs : List K8sReconciler.FlareEffect) => String.intercalate "\n" (effs.filterMap fun
+    | .Log m => some m
+    | _ => none)
+  let expiredEffs := K8sReconciler.refillHoldEffects holdState
+      (K8sReconciler.promoteMasterlessPartitions holdState activationCrd ["f"] [] ["f"] ["f"] true [0]) activationCrd
+      { crdHold with livePodKeys := ["f"], dataBearingKeys := ["f"], followHoldExpiredParts := [0] }
+  check ctx "an unfit follower crowned after the wait is reported NOT LOSS-FREE with the EXPIRY reason (accepted-loss policy)"
+    (expiredEffs.length == 1 && containsSub (logText expiredEffs) "EXPIRED" && !containsSub (logText expiredEffs) "READ empty")
+  let emptyEffs := K8sReconciler.refillHoldEffects back
+      (K8sReconciler.promoteMasterlessPartition back 0 ["m", "f"] [] ["f"] ["f"] true ["m"]) activationCrd
+      { crdHold with livePodKeys := ["m", "f"], dataBearingKeys := ["f"], knownEmptyKeys := ["m"] }
+  check ctx "an unfit follower crowned because the ex-master was READ empty is reported with THAT reason"
+    (emptyEffs.length == 1 && containsSub (logText emptyEffs) "READ empty" && !containsSub (logText emptyEffs) "EXPIRED")
+  check ctx "a FIT follower is crowned at once with the hold on"
+    (masterOf (K8sReconciler.promoteMasterlessPartition holdState 0 ["f"] [] ["f"] [] true) == some "f")
+
+/-- CI 37030725289 sequence: after failover the ex-master entry is
+    Proxy/Down, partition -1, lastMasterOf 0; the unfit follower is Active. -/
+def holdKeyed : FlareClusterState :=
+  ({ nodeMap := [("m:12121", holdNode .Proxy .Down (-1) "m" 0), ("f:12121", holdNode .Slave .Active 0 "f")],
+     nodeMapVersion := 5 } : FlareClusterState).rebuildPartitionMap
+
+def checkExMasterReturn (ctx : Ctx) : IO Unit := do
+  let (s1, _) := Reconciler.reconcileStep holdKeyed activationCrd (.NodeAdd "m" 12121)
+  let m1 := s1.lookupNode "m:12121"
+  check ctx "a failed-over ex-master re-registers as a syncing slave of its old partition, keeping lastMasterOf"
+    (m1.map (fun n => (n.role == .Slave, n.state == .Prepare, n.partition, n.lastMasterOf)) == some (true, true, 0, 0))
+  let s2 := K8sReconciler.assignProxiesPure s1 activationCrd ["m:12121", "f:12121"] [] [] ["f:12121"]
+  check ctx "the zombie guard does not promote an excluded (unfit) Active slave"
+    (masterOf s2 == none)
+  let s3 := K8sReconciler.promoteMasterlessPartition s2 0 ["m:12121", "f:12121"] [] ["m:12121", "f:12121"] ["f:12121", "m:12121"] true
+  check ctx "the refill re-seats the returning data-bearing ex-master, not the unfit follower"
+    (masterOf s3 == some "m:12121")
+  let px : FlareClusterState :=
+    ({ nodeMap := [("p:12121", holdNode .Proxy .Active (-1) "p"), ("f:12121", holdNode .Slave .Active 0 "f")],
+       nodeMapVersion := 5 } : FlareClusterState).rebuildPartitionMap
+  let (pa, _) := Reconciler.autoAssign px activationCrd "p:12121" (holdNode .Proxy .Active (-1) "p") ["p:12121", "f:12121"] [] ["f:12121"]
+  check ctx "a proxy is neither crowned over nor used to promote an unfit-only partition (left to the refill)"
+    (masterOf pa == none && pa.nodeMap == px.nodeMap)
+  let (pb, _) := Reconciler.autoAssign px activationCrd "p:12121" (holdNode .Proxy .Active (-1) "p") ["p:12121", "f:12121"]
+  check ctx "without exclusions the zombie guard still promotes the Active slave"
+    (masterOf pb == some "f:12121")
+  -- CI 38808521263 (pvc-survival 17): master and slave killed together; the
+  -- ex-master is back (Slave/Prepare, lastMasterOf 0, data, lagging), the
+  -- replica re-registered as a Proxy and reads unknown — both excluded
+  let lv : FlareClusterState :=
+    ({ nodeMap := [("m:12121", holdNode .Slave .Prepare 0 "m" 0), ("p:12121", holdNode .Proxy .Active (-1) "p")],
+       nodeMapVersion := 9 } : FlareClusterState).rebuildPartitionMap
+  let lv1 := K8sReconciler.assignProxiesPure lv activationCrd ["m:12121", "p:12121"] [] [] ["m:12121", "p:12121"]
+  check ctx "an EXCLUDED proxy is not put in a masterless partition's master slot (the commit would abort it every pass)"
+    (masterOf lv1 == none && (lv1.lookupNode "p:12121").map (·.role) == some FlareRole.Proxy)
+  let lv2 := K8sReconciler.promoteMasterlessPartition lv1 0 ["m:12121", "p:12121"] [] ["m:12121", "p:12121"] ["m:12121", "p:12121"] true
+  check ctx "… so the refill re-seats the returning ex-master with the data"
+    (masterOf lv2 == some "m:12121")
+  let (pc, _) := Reconciler.autoAssign lv activationCrd "p:12121" (holdNode .Proxy .Active (-1) "p") ["m:12121", "p:12121"] [] ["m:12121"]
+  check ctx "a proxy that is NOT excluded still fills the master slot as before"
+    (masterOf pc == some "p:12121")
+  let act : FlareClusterState :=
+    { nodeMap := [("a:12121", holdNode .Master .Active 0 "a"), ("m:12121", holdNode .Slave .Prepare 0 "m" 0)], nodeMapVersion := 7 }
+  let (sa, _) := Reconciler.reconcileStep act activationCrd (.NodeState "m" 12121 .Active)
+  check ctx "a slave that activates under an Active master drops its lastMasterOf marker"
+    ((sa.lookupNode "m:12121").map (·.lastMasterOf) == some (-1))
+  -- CI 42569844590 failover-order (a174c3e): a second Prepare master reached
+  -- flared in the same map as the first; flared keeps one prepare partition
+  -- and neither reconstructed
+  let crd3 : FlareClusterView := { activationCrd with spec := { partitions := 3, replicas := 3 } }
+  let prep : FlareClusterState :=
+    ({ nodeMap := [("a:12121", holdNode .Master .Active 0 "a"), ("b:12121", holdNode .Master .Prepare 1 "b"),
+                   ("c:12121", holdNode .Proxy .Active (-1) "c")], nodeMapVersion := 7 } : FlareClusterState).rebuildPartitionMap
+  let (pd, _) := Reconciler.autoAssign prep crd3 "c:12121" (holdNode .Proxy .Active (-1) "c") ["a:12121", "b:12121", "c:12121"]
+  check ctx "no second new partition master while another partition's master is still Prepare"
+    ((pd.lookupNode "c:12121").map (·.role) == some FlareRole.Proxy && pd.nodeMap == prep.nodeMap)
+  let prepDone := prep.addNode "b:12121" (holdNode .Master .Active 1 "b")
+  let (pe, _) := Reconciler.autoAssign prepDone crd3 "c:12121" (holdNode .Proxy .Active (-1) "c") ["a:12121", "b:12121", "c:12121"]
+  check ctx "… once it is Active the next partition gets its (Prepare) master"
+    ((pe.lookupNode "c:12121").map (fun n => (n.role, n.state, n.partition)) == some (FlareRole.Master, FlareState.Prepare, 2))
+
+/-- Helpers for checkAttributedRejoin, NOT inlined: as local lambdas the
+    classifier and the refill were inlined at every use (1.17M lines of C, a
+    CI Lean build past 2 h). -/
+@[noinline] def arBind0 : String := PromotionEvidence.bindingFor 0 1 1024
+
+@[noinline] def arObs (h : Option (String × String)) (hasM : Bool) : PromotionEvidence.Observed :=
+  { mapPrepare := true, mapActive := false, podReady := true, partitionHasMaster := hasM,
+    lastMasterHistory := h, expectedBinding := some arBind0, attributedRejoin := true }
+
+@[noinline] def arClassify (r : String) (h : Option (String × String)) (hasM : Bool := false) : PromotionEvidence.Class :=
+  PromotionEvidence.classify (some r) (arObs h hasM)
+
+@[noinline] def arUnknown (c : PromotionEvidence.Class) : Bool := match c with | .unknown _ => true | _ => false
+@[noinline] def arForbidden (c : PromotionEvidence.Class) : Bool := match c with | .forbidden _ => true | _ => false
+
+@[noinline] def arRefill (st : FlareClusterState) (hold : Bool) (data excl known blocked : List String) : FlareClusterState :=
+  K8sReconciler.promoteMasterlessPartition st 0 ["m:12121", "s:12121"] [] data excl hold known blocked
+
+/-- Decision 2026-10-16 (promotion-proxy-only-copy, 38952942796): a dead
+    ex-slave is attributed to its partition ONLY by its persisted record,
+    must prove its copy, and is seated only as the masterless last resort.
+    The checks of checkAttributedRejoin as data (a pure term: in one IO
+    do-block the compiler duplicated the continuation into every match arm,
+    1.1M lines of C and a CI Lean build past 2 h). -/
+def arChecks : List (String × Bool) :=
+  let sl := fun (st : FlareState) => ({ holdNode .Slave st 0 "s" with formerSlaveOf := -1 } : FlareNode)
+  let live : FlareClusterState :=
+    ({ nodeMap := [("m:12121", holdNode .Master .Active 0 "m"), ("s:12121", holdNode .Slave .Active 0 "s")],
+       nodeMapVersion := 5 } : FlareClusterState).rebuildPartitionMap
+  let dead := K8sReconciler.handleFailoverWithPromotion live ["s:12121"]
+  let ds := dead.lookupNode "s:12121"
+  let rt := FlareClusterState.fromNodeMapData (FlareClusterState.serializeNodeMap dead)
+  let drained := K8sReconciler.handleDrainWithPromotion { dead with nodeMap := dead.nodeMap.map fun (k, n) => if k == "s:12121" then (k, holdNode .Slave .Active 0 "s") else (k, n) } ["s:12121"]
+  let rj := Prod.fst <| Reconciler.reconcileStep dead activationCrd (.NodeAdd "s" 12121)
+  let unattributed := dead.addNode "s:12121" { holdNode .Proxy .Down (-1) "s" with formerSlaveOf := -1 }
+  let fr := Prod.fst <| Reconciler.reconcileStep unattributed activationCrd (.NodeAdd "s" 12121)
+  let repairHeld := dead.addNode "s:12121" { holdNode .Proxy .Active (-1) "s" with formerSlaveOf := -1 }
+  let rh := Prod.fst <| Reconciler.reconcileStep repairHeld activationCrd (.NodeAdd "s" 12121)
+  let actd : FlareClusterState :=
+    { nodeMap := [("a:12121", holdNode .Master .Active 0 "a"), ("s:12121", { holdNode .Slave .Prepare 0 "s" with formerSlaveOf := 0 })], nodeMapVersion := 7 }
+  let av := Prod.fst <| Reconciler.reconcileStep actd activationCrd (.NodeState "s" 12121 .Active)
+  let bind0 := arBind0
+  let good := s!"STAT curr_items 30\r\nSTAT reconstruction_boot_id b1\r\nSTAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nSTAT rocksdb_copy_identity_consistent 1\r\nSTAT rocksdb_quarantined 0\r\nSTAT rocksdb_copy_partial 0\r\nSTAT rebuild_in_flight 0\r\nSTAT rebuild_parked 0\r\nSTAT rocksdb_switch_unresolved 0\r\nSTAT rocksdb_copy_id c1:1\r\nSTAT rocksdb_master_id M\r\nSTAT rocksdb_source_epoch 2:e\r\nSTAT rocksdb_partition_binding {bind0}\r\nEND\r\n"
+  let em := holdNode .Slave .Prepare 0 "m" 0
+  let ar := { holdNode .Slave .Prepare 0 "s" with formerSlaveOf := 0 }
+  let st2 : FlareClusterState := ({ nodeMap := [("m:12121", em), ("s:12121", ar)], nodeMapVersion := 9 } : FlareClusterState).rebuildPartitionMap
+  let live2 := ["m:12121", "s:12121"]
+  let st3 := st2.addNode "t:12121" { holdNode .Proxy .Down (-1) "t" with formerSlaveOf := 0 }
+  let seated := arRefill st2 true ["s:12121"] ["s:12121", "m:12121"] ["m:12121"] ["m:12121"]
+  let empty0 : FlareClusterState := { nodeMap := [], nodeMapVersion := 1 }
+  [
+    ("attribution: a dead ACTIVE slave records its partition; a Prepare slave keeps what it had; a master records none",
+    (K8sReconciler.deadSlaveOf (sl .Active) == 0 && K8sReconciler.deadSlaveOf (sl .Prepare) == -1
+      && K8sReconciler.deadSlaveOf { sl .Prepare with formerSlaveOf := 0 } == 0
+      && K8sReconciler.deadSlaveOf (holdNode .Master .Active 0 "m") == -1)),
+    ("attribution: the dead-node demotion sets formerSlaveOf for an Active slave",
+    (ds.map (fun n => (n.role == .Proxy, n.state == .Down, n.partition, n.formerSlaveOf)) == some (true, true, -1, 0))),
+    ("attribution: persisted (slaveOf=) and read back across an operator restart",
+    (containsSub (FlareClusterState.serializeNodeMap dead) " slaveOf=0" && ((rt.lookupNode "s:12121").map (·.formerSlaveOf)) == some 0)),
+    ("attribution: a DRAINED slave is not attributed (formerSlaveOf -1)",
+    (((drained.lookupNode "s:12121").map (·.formerSlaveOf)) == some (-1))),
+    ("rejoin: an attributed dead ex-slave re-registers as Slave/Prepare of ITS partition, keeping the record",
+    (((rj.lookupNode "s:12121").map fun n => (n.role == .Slave, n.state == .Prepare, n.partition, n.formerSlaveOf)) == some (true, true, 0, 0))),
+    ("rejoin: without the record it registers fresh (never attributed by its name)",
+    (((fr.lookupNode "s:12121").map (·.partition)) != some 0 || ((fr.lookupNode "s:12121").map (·.role == .Slave)) != some true
+      || ((fr.lookupNode "s:12121").map (·.state == .Prepare)) != some true)),
+    ("rejoin: a repair-held (live, unattributed) proxy is not rejoined into the partition",
+    (((rh.lookupNode "s:12121").map fun n => n.role == .Slave && n.state == .Prepare && n.formerSlaveOf == 0) != some true)),
+    ("attribution: activation under an Active master clears it",
+    (((av.lookupNode "s:12121").map (·.formerSlaveOf)) == some (-1))),
+    ("attributed rejoin: every key proven + the recorded history = lagging (only the held, logged last resort)",
+    (arClassify good (some ("M", "2:e")) false == .lagging)),
+    ("attributed rejoin: never eligible, not even with R3 eligible and a master present",
+    (!(arClassify good (some ("M", "2:e")) true).normal)),
+    ("attributed rejoin: a copy-integrity key NOT REPORTED is not proven (held), never read as healthy",
+    (["rocksdb_copy_partial 0", "rebuild_in_flight 0", "rebuild_parked 0", "rocksdb_switch_unresolved 0", "rocksdb_copy_identity_consistent 1", "rocksdb_quarantined 0", "rocksdb_copy_id c1:1"].all fun k =>
+      arUnknown (arClassify (good.replace s!"STAT {k}\r\n" "") (some ("M", "2:e")) false))),
+    ("attributed rejoin: part-way / in flight / parked / switch / identity / quarantine / running are FORBIDDEN",
+    (([("rocksdb_copy_partial 0", "rocksdb_copy_partial 1"), ("rebuild_in_flight 0", "rebuild_in_flight 1"), ("rebuild_parked 0", "rebuild_parked 1"),
+      ("rocksdb_switch_unresolved 0", "rocksdb_switch_unresolved 1"), ("rocksdb_copy_identity_consistent 1", "rocksdb_copy_identity_consistent 0"),
+      ("rocksdb_quarantined 0", "rocksdb_quarantined 1")].all fun (a, b) => arForbidden (arClassify (good.replace a b) (some ("M", "2:e")) false))
+      && arForbidden (arClassify (good.replace "STAT curr_items 30" "STAT reconstruction_current_state running\r\nSTAT curr_items 30") (some ("M", "2:e")) false))),
+    ("attributed rejoin: another history is FORBIDDEN; no record is held",
+    (arForbidden (arClassify good (some ("M", "1:old")) false) && arUnknown (arClassify good none false))),
+    ("attributed rejoin: empty, another binding, an unreported binding, a failed reconstruction are held",
+    (arUnknown (arClassify (good.replace "curr_items 30" "curr_items 0") (some ("M", "2:e")) false)
+      && arUnknown (arClassify (good.replace "partition=0 " "partition=1 ") (some ("M", "2:e")) false)
+      && arUnknown (arClassify (good.replace s!"STAT rocksdb_partition_binding {bind0}\r\n" "") (some ("M", "2:e")) false)
+      && arUnknown (arClassify (good.replace "STAT curr_items 30" "STAT reconstruction_current_state failed\r\nSTAT curr_items 30") (some ("M", "2:e")) false))),
+    ("attributed rejoin: unreadable / incomplete stats are held",
+    (arUnknown (PromotionEvidence.classify none (arObs (some ("M", "2:e")) false)) && arUnknown (arClassify (good.replace "END\r\n" "") (some ("M", "2:e")) false))),
+    ("the map state of an attributed rejoin: Slave/Prepare in the recorded partition, not its ex-master",
+    (PromotionEvidence.isAttributedRejoin true true 0 (-1) 0 && !PromotionEvidence.isAttributedRejoin true false 0 (-1) 0
+      && !PromotionEvidence.isAttributedRejoin true true 0 0 0 && !PromotionEvidence.isAttributedRejoin true true 1 (-1) 0)),
+    ("refill: the attributed copy (lagging) is seated once the ex-master is READ empty",
+    (masterOf (arRefill st2 true ["s:12121"] ["s:12121", "m:12121"] ["m:12121"] ["m:12121"]) == some "s:12121")),
+    ("refill: … but held while the ex-master is not read (unread is not empty)",
+    (masterOf (arRefill st2 true ["s:12121"] ["s:12121", "m:12121"] [] ["m:12121"]) == none)),
+    ("refill: … and seated after the wait expired (accepted-loss policy)",
+    (masterOf (arRefill st2 false ["s:12121"] ["s:12121", "m:12121"] [] ["m:12121"]) == some "s:12121")),
+    ("refill: a FORBIDDEN / unknown attributed copy is never seated, not even after the wait expired",
+    (masterOf (arRefill st2 false ["s:12121"] ["s:12121", "m:12121"] ["m:12121"] ["m:12121", "s:12121"]) == none)),
+    ("refill: another attributed copy NOT observed (Down) keeps the wait though the ex-master is read empty",
+    (masterOf (arRefill st3 true ["s:12121"] ["s:12121", "m:12121"] ["m:12121"] ["m:12121"]) == none
+      && K8sReconciler.unobservedCopies st3 0 live2 ["s:12121"] ["m:12121"] == ["t:12121"])),
+    ("refill: … and after the wait expired it is seated",
+    (masterOf (arRefill st3 false ["s:12121"] ["s:12121", "m:12121"] ["m:12121"] ["m:12121"]) == some "s:12121")),
+    ("refill: the seat clears the attribution",
+    (((seated.lookupNode "s:12121").map (·.formerSlaveOf)) == some (-1))),
+    ("masterless CRITICAL: also when no copy is registered",
+    (containsSub (K8sReconciler.masterlessSummary empty0 0 [] [] [] []) "no copy of the partition")),
+    ("masterless CRITICAL: names every copy with what was seen and its class (unread shown as not read, never empty)",
+    (let sm := K8sReconciler.masterlessSummary st2 0 [("s:12121", "FORBIDDEN (x)")] live2 [] []
+     containsSub sm "s:12121 (not read; FORBIDDEN (x))" && containsSub sm "m:12121 (not read; not classified)")),
+    ("masterless CRITICAL: logged on change or after the interval, not every pass",
+    (K8sReconciler.masterlessLogDue none "a" 0 60000 && !K8sReconciler.masterlessLogDue (some ("a", 1000)) "a" 30000 60000
+      && K8sReconciler.masterlessLogDue (some ("a", 1000)) "b" 30000 60000 && K8sReconciler.masterlessLogDue (some ("a", 1000)) "a" 61000 60000))
+  ]
+
+/-- Decision 2026-10-16: see arChecks. -/
+def checkAttributedRejoin (ctx : Ctx) : IO Unit := do
+  for (n, ok) in arChecks do check ctx n ok
+
+def nmGood : String := "version=4294967304\nh:12121 role=0 state=0 partition=0 thread=16 balance=100\ni:12121 role=1 state=0 partition=0 thread=17 balance=50"
+
+def kindOf (d : NodeMapRecovery.Decision) : String := d.kind
+
+def checkNodeMapRecovery (ctx : Ctx) : IO Unit := do
+  let proven := NodeMapRecovery.History.provenEmpty "all pods 0/0"
+  let ran := NodeMapRecovery.History.seen "lease marker"
+  let unk := NodeMapRecovery.History.unknown "pod unreadable"
+  check ctx "SAF-09: a valid persisted map is loaded (version and nodes kept)"
+    (match NodeMapRecovery.decide (.present nmGood) ran false with
+     | .load st => st.nodeMapVersion == 4294967304 && st.nodeMap.length == 2
+     | _ => false)
+  check ctx "SAF-09: a failed read is retried, never treated as absent (reset and approval do not override)"
+    (kindOf (NodeMapRecovery.decide (.failed "timeout") proven false) == "retry"
+      && kindOf (NodeMapRecovery.decide (.failed "timeout") ran true true) == "retry")
+  check ctx "SAF-09: missing map + a PROVEN new cluster = first build"
+    (kindOf (NodeMapRecovery.decide .notFound proven false) == "fresh")
+  check ctx "SAF-09: missing map + history = halt; reset accepts a fresh start; approval does NOT"
+    (kindOf (NodeMapRecovery.decide .notFound ran false) == "halt"
+      && kindOf (NodeMapRecovery.decide .notFound ran true) == "fresh"
+      && kindOf (NodeMapRecovery.decide .notFound ran false true) == "halt")
+  check ctx "SAF-09: missing map + an UNOBSERVED past = retry, never a first build (reset does not change that)"
+    (kindOf (NodeMapRecovery.decide .notFound unk false) == "retry"
+      && kindOf (NodeMapRecovery.decide .notFound unk true) == "retry")
+  check ctx "SAF-09: an unobserved past + first-build approval for this FlareCluster = first build"
+    (kindOf (NodeMapRecovery.decide .notFound unk false true) == "fresh")
+  check ctx "SAF-09: an EMPTY map is treated like a missing one"
+    (kindOf (NodeMapRecovery.decide (.present "  \n") proven false) == "fresh"
+      && kindOf (NodeMapRecovery.decide (.present "") ran false) == "halt"
+      && kindOf (NodeMapRecovery.decide (.present "") unk false) == "retry")
+  for (bad, why) in [("h:12121 role=0 state=0 partition=0", "no version line"),
+                     ("version=7\nversion=8\nh:12121 role=0 state=0 partition=0", "two version lines"),
+                     ("version=x\nh:12121 role=0 state=0 partition=0", "unreadable version"),
+                     ("version=7\nh:12121 role=9 state=0 partition=0", "a line that does not parse"),
+                     ("version=7\nh:12121 role=0 state=0 partition=0\nh:12121 role=1 state=0 partition=0", "duplicate keys"),
+                     ("version=0\nh:12121 role=0 state=0 partition=0", "nodes at version 0")] do
+    check ctx s!"SAF-09: an invalid map ({why}) halts, never loads partially"
+      (kindOf (NodeMapRecovery.decide (.present bad) ran false) == "halt"
+        && kindOf (NodeMapRecovery.decide (.present bad) proven false true) == "halt")
+  check ctx "SAF-09: reset accepts discarding an invalid map"
+    (kindOf (NodeMapRecovery.decide (.present "version=x") ran true) == "fresh")
+  check ctx "SAF-09: only NotFound counts as absent"
+    (NodeMapRecovery.classifyRead (.error "Error from server (NotFound): configmaps \"x\" not found") == .notFound
+      && NodeMapRecovery.classifyRead (.error "Unable to connect to the server: dial tcp: i/o timeout") == .failed "Unable to connect to the server: dial tcp: i/o timeout"
+      && NodeMapRecovery.classifyRead (.error "configmaps \"x\" not found") == .failed "configmaps \"x\" not found"
+      && NodeMapRecovery.classifyRead (.ok "x") == .present "x")
+  -- history: only positive proof is "new"; any gap is unknown
+  let p (n : String) (r : Bool) (v i : Option Nat) : NodeMapRecovery.PodEvidence := { name := n, ready := r, nodeMapVersion := v, currItems := i }
+  let isSeen := fun (h : NodeMapRecovery.History) => match h with | .seen _ => true | _ => false
+  let isUnk := fun (h : NodeMapRecovery.History) => match h with | .unknown _ => true | _ => false
+  let isNew := fun (h : NodeMapRecovery.History) => match h with | .provenEmpty _ => true | _ => false
+  let two := [p "a" true (some 0) (some 0), p "b" true (some 0) (some 0)]
+  check ctx "SAF-09 history: a Lease marker is enough (even with nothing else observed)"
+    (isSeen (NodeMapRecovery.history (.ok (some "17")) false [] 0))
+  check ctx "SAF-09 history: a pod with a node map version or data shows history, even if the Lease is unreadable"
+    (isSeen (NodeMapRecovery.history (.error "timeout") true [p "a" false (some 9) none] 2)
+      && isSeen (NodeMapRecovery.history (.ok none) true [p "a" false none (some 5)] 2))
+  check ctx "SAF-09 history: proven new only with the Lease read, every expected pod read, all 0/0"
+    (isNew (NodeMapRecovery.history (.ok none) true two 2))
+  check ctx "SAF-09 history: an unreadable Lease is unknown, not 'no marker'"
+    (isUnk (NodeMapRecovery.history (.error "forbidden") true two 2))
+  check ctx "SAF-09 history: a missing stats field is unknown, not 0"
+    (isUnk (NodeMapRecovery.history (.ok none) true [p "a" true (some 0) none, p "b" true (some 0) (some 0)] 2))
+  check ctx "SAF-09 history: a NotReady unreadable pod is unknown (all flared restarting is not a new cluster)"
+    (isUnk (NodeMapRecovery.history (.ok none) true [p "a" false none none, p "b" false none none] 2))
+  check ctx "SAF-09 history: no FlareCluster and no flared pods is NOT proven new (PVCs may hold data); a missing CR with pods is unknown too"
+    (isUnk (NodeMapRecovery.history (.ok none) true [] 0 true)
+      && isUnk (NodeMapRecovery.history (.ok none) true [p "a" false none none] 0 true)
+      && isUnk (NodeMapRecovery.history (.error "x") true [] 0 true))
+  check ctx "SAF-09 history: fewer pods than the spec expects is unknown; no spec is unknown; no pod list is unknown"
+    (isUnk (NodeMapRecovery.history (.ok none) true [p "a" true (some 0) (some 0)] 2)
+      && isUnk (NodeMapRecovery.history (.ok none) true two 0)
+      && isUnk (NodeMapRecovery.history (.ok none) false [] 2))
+
+def checkRepairSource (ctx : Ctx) : IO Unit := do
+  let ok := fun (v : Option String) => v.isNone
+  let v := fun (lm le reason : String) =>
+    StatsObservation.repairSourceVerdict (.known 0) (some lm) (some "L") (some le) (some "E1") (some reason)
+  check ctx "SAF-08 repair source: a master holding data is a valid rebuild source"
+    (ok (StatsObservation.repairSourceVerdict (.known 5)))
+  check ctx "SAF-08 repair source: an unreadable item count defers"
+    (!ok (StatsObservation.repairSourceVerdict .unknown (some "L") (some "L") (some "E1") (some "E1")))
+  check ctx "SAF-08 repair source: empty, same lineage AND same source epoch (deleted to empty in the same history) is a valid source"
+    (ok (v "L" "E1" "new"))
+  check ctx "SAF-08 repair source: empty, same lineage, epoch advanced by a BULK rewrite (flush_all/truncate) is a valid source"
+    (ok (v "L" "E2" "bulk"))
+  check ctx "SAF-08 repair source: empty, same master_id but epoch advanced by a PROMOTION (an empty copy promoted) defers"
+    (!ok (v "L" "E2" "promotion"))
+  check ctx "SAF-08 repair source: empty, same master_id, epoch changed for an unknown reason (or a fresh/inherited one) defers"
+    (!ok (v "L" "E2" "") && !ok (v "L" "E2" "new") && !ok (v "L" "E2" "inherited")
+      && !ok (StatsObservation.repairSourceVerdict (.known 0) (some "L") (some "L") (some "E2") (some "E1")))
+  check ctx "SAF-08 repair source: empty under a DIFFERENT lineage defers, even after a bulk rewrite"
+    (!ok (v "L2" "E2" "bulk"))
+  check ctx "SAF-08 repair source: empty with an incomparable history (lineage or epoch unreadable) defers"
+    (!ok (StatsObservation.repairSourceVerdict (.known 0) none (some "L"))
+      && !ok (StatsObservation.repairSourceVerdict (.known 0) (some "L") (some "L"))
+      && !ok (StatsObservation.repairSourceVerdict (.known 0)))
+  -- Rebuild evidence (flared rocksdb_rebuilt_from_*): the replica was last
+  -- rebuilt by a clean full dump from (lineage, epoch).
+  let ev := fun (lm le reason : String) (fromId fromEp : Option String) =>
+    StatsObservation.repairSourceVerdict (.known 0) (some lm) (some "L") (some le) (some "E1") (some reason) fromId fromEp
+  check ctx "SAF-08 repair source: empty, promoted epoch, but the replica was REBUILT BY FULL DUMP from exactly this lineage and epoch: valid (deleted to empty since)"
+    (ok (ev "L" "E5" "promotion" (some "L") (some "E5")))
+  check ctx "SAF-08 repair source: the same master_id but a DIFFERENT history (the evidence names an earlier epoch: an empty copy promoted since) defers"
+    (!ok (ev "L" "E6" "promotion" (some "L") (some "E5")))
+  check ctx "SAF-08 repair source: evidence under another lineage, missing, or partial defers"
+    (!ok (ev "L" "E5" "promotion" (some "L2") (some "E5"))
+      && !ok (ev "L" "E5" "promotion" none none)
+      && !ok (ev "L" "E5" "promotion" none (some "E5"))
+      && !ok (ev "L" "E5" "promotion" (some "L") none))
+  check ctx "SAF-08 repair source: evidence never overrides a different lineage of the master itself"
+    (!ok (ev "L2" "E5" "promotion" (some "L2") (some "E5")))
+
+def checkLedgerObserve (ctx : Ctx) : IO Unit := do
+  let l0 : ReplicaRepair.Ledger := {}
+  -- first observation of a FRESH ledger: non-zero = possibly unrepaired request
+  let (l1, d1, f1) := ReplicaRepair.observe l0 "m" [("r1", 4), ("r2", 0)] (some 7)
+  check ctx "ledger: a non-zero count at the FIRST observation is a request (possibly unrepaired), not a baseline (CI 37376724850)"
+    (d1 == [("r1", 4)] && f1 == ["r1"] && l1.initialized)
+  let (l2, d2, f2) := ReplicaRepair.observe l1 "m" [("r1", 4), ("r2", 0)] (some 7)
+  check ctx "ledger: the same cumulative value is never requested twice"
+    (d2.isEmpty && f2.isEmpty)
+  let (l3, d3, _) := ReplicaRepair.observe l2 "m" [("r1", 6)] (some 7)
+  check ctx "ledger: an increase in the same process attributes only the difference"
+    (d3 == [("r1", 2)])
+  let (l4, d4, f4) := ReplicaRepair.observe l3 "m" [("r1", 9)] (some 8)
+  check ctx "ledger: a RESTARTED master (new boot id) whose count climbed past the old value is attributed its WHOLE count, and its old-process counters are dropped"
+    (d4 == [("r1", 9)] && f4.isEmpty && !(l4.counters.any (fun (k, _) => (k.splitOn "|").getLast? == some "7")))
+  let (_, d5, _) := ReplicaRepair.observe l4 "m" [("r1", 2)] (some 8)
+  check ctx "ledger: a counter that went DOWN in the same process key is a reset: its count is new drops"
+    (d5 == [("r1", 2)])
+  let (lb, db, fb) := ReplicaRepair.observe l0 "m" [("r1", 3)] none
+  let (_, db2, _) := ReplicaRepair.observe lb "m" [("r1", 3)] none
+  check ctx "ledger: without a boot id the counter comparison still works (first sighting requested once)"
+    (db == [("r1", 3)] && fb == ["r1"] && db2.isEmpty)
+  let (_, dz, fz) := ReplicaRepair.observe l0 "m" [("r1", 0)] (some 1)
+  check ctx "ledger: a zero first sighting requests nothing"
+    (dz.isEmpty && fz.isEmpty)
+
+def checkMasterMoved (ctx : Ctx) : IO Unit := do
+  let m := fun (k : String) (e : Nat) (u : String) => ((k, e, u) : FollowEvidence.MasterIdentity)
+  check ctx "master moved: first pass (nothing before) is not a move"
+    (FollowEvidence.mastersMoved [] [(0, m "n0" 5 "u1")] == [])
+  check ctx "master moved: same key, epoch and UID is not a move"
+    (FollowEvidence.mastersMoved [(0, m "n0" 5 "u1")] [(0, m "n0" 5 "u1")] == [])
+  check ctx "master moved: another key is a move"
+    (FollowEvidence.mastersMoved [(0, m "n0" 5 "u1")] [(0, m "n1" 6 "u2")] == [0])
+  check ctx "master moved: SAME key with a new registration epoch is a move (L11)"
+    (FollowEvidence.mastersMoved [(0, m "n0" 5 "u1")] [(0, m "n0" 9 "u1")] == [0])
+  check ctx "master moved: SAME key with a new pod UID is a move (L11)"
+    (FollowEvidence.mastersMoved [(0, m "n0" 5 "u1")] [(0, m "n0" 5 "u2")] == [0])
+  check ctx "master moved: a partition that gained a master after others were seen is a move; only that partition"
+    (FollowEvidence.mastersMoved [(0, m "n0" 5 "u1")] [(0, m "n0" 5 "u1"), (1, m "n2" 5 "u3")] == [1])
+  -- review of 5c904b2: a masterless pass must not erase the last identity
+  let t0 : FollowEvidence.MasterTrack := {}
+  let (mv1, t1) := t0.step [(0, m "n0" 5 "u1")]
+  let (mv2, t2) := t1.step []
+  let (mv3, _) := t2.step [(0, m "n0" 9 "u2")]
+  check ctx "master track: the first observed pass is not a move"
+    (mv1 == [] && t1.seeded)
+  check ctx "master track: a pass with no master keeps the partition's last identity"
+    (mv2 == [] && t2.last == [(0, m "n0" 5 "u1")])
+  check ctx "master track: masterless -> the SAME key back with a new epoch and UID is a move (forced follow probe)"
+    (mv3 == [0])
+  let (mv4, _) := t2.step [(0, m "n0" 5 "u1")]
+  check ctx "master track: masterless -> the same identity back is not a move"
+    (mv4 == [])
+  let (mv5, t5) := t0.step []
+  let (mv6, _) := t5.step [(0, m "n0" 5 "u1")]
+  check ctx "master track: a first pass with no master at all is observed; a master appearing after it is a move"
+    (mv5 == [] && t5.seeded && mv6 == [0])
+  let (mv7, t7) := t1.step [(1, m "n2" 5 "u3")]
+  check ctx "master track: one partition masterless keeps its identity while another moves"
+    (mv7 == [1] && t7.last.lookup 0 == some (m "n0" 5 "u1"))
+
+def checkFollowConfirm (ctx : Ctx) : IO Unit := do
+  let off : FollowEvidence.Reading := { complete := true, enabled := some false }
+  let on : FollowEvidence.Reading := { complete := true, enabled := some true }
+  let torn : FollowEvidence.Reading := { complete := false, enabled := some true }
+  let p0 := FollowEvidence.startConfirm [] ["a", "b"] true 3 10
+  check ctx "follow confirm: a changed node is re-read every pass although remembered out of the mode"
+    (FollowEvidence.shouldProbeWith p0 [("a", false)] "a" 11 30
+      && !FollowEvidence.shouldProbe [("a", false)] "a" 11 30
+      && !FollowEvidence.shouldProbeWith p0 [("c", false)] "c" 11 30)
+  let (p1, e1) := FollowEvidence.stepConfirm p0 [("a", some off), ("b", some on)] 11
+  check ctx "follow confirm: the OLD mode keeps it pending (no long wait); the wanted mode confirms"
+    (p1.map (·.key) == ["a"] && (p1.head?.map (·.oldSeen)) == some 1
+      && e1.length == 1 && (match e1 with | [.confirmed c 11] => c.key == "b" | _ => false))
+  let (p2, e2) := FollowEvidence.stepConfirm p1 [("a", some torn)] 12
+  check ctx "follow confirm: an unreadable (incomplete) reading is Unknown — neither confirms nor refutes"
+    (p2.map (·.key) == ["a"] && (p2.head?.map (·.unknownSeen)) == some 1 && e2.isEmpty)
+  let (p3, e3) := FollowEvidence.stepConfirm p2 [] 13
+  check ctx "follow confirm: bounded — the budget expires (no unlimited fast poll) and the interval applies again"
+    (p3.isEmpty && (match e3 with | [.expired c] => c.key == "a" | _ => false)
+      && !FollowEvidence.shouldProbeWith p3 [("a", false)] "a" 14 30)
+  check ctx "follow confirm: a new change restarts a pending node with the new wanted mode"
+    ((FollowEvidence.startConfirm p1 ["a"] false 5 20).map (fun c => (c.key, c.want, c.left)) == [("a", false, 5)])
+
+def checkPodRows (ctx : Ctx) : IO Unit := do
+  let out := "n-0|10.0.0.1|True|n-0|svc|node-a|uid-A|2|\nn-1||False|n-1|svc||uid-B||\nn-2|10.0.0.3|True|n-2|svc|node-a|uid-C|0|2026-10-05T00:00:00Z\nbroken|row\n"
+  let pods := FlareOperator.K8s.Bridge.parsePodRows "ns" out
+  let find := fun (n : String) => pods.find? (·.name == n)
+  check ctx "SAF-08 pod list: Ready, UID and restart count come from the SAME row"
+    ((find "n-0").map (fun p => (p.ready, p.uid, p.restarts, p.terminating)) == some (true, "uid-A", some 2, false))
+  check ctx "SAF-08 pod list: a Pending pod (no IP, no restart count) keeps its columns aligned; the count stays unobserved"
+    ((find "n-1").map (fun p => (p.ready, p.ip, p.uid, p.restarts, p.nodeName)) == some (false, "", "uid-B", none, ""))
+  check ctx "SAF-08 pod list: a deletionTimestamp marks the pod Terminating; a malformed row is dropped"
+    ((find "n-2").map (·.terminating) == some true && pods.length == 3)
+  let out2 := "n-0|10.0.0.1|True|n-0|svc|node-a|uid-A|2||sts-abc\nn-1|10.0.0.2|True|n-1|svc|node-b|uid-B|0||\n"
+  let pods2 := FlareOperator.K8s.Bridge.parsePodRows "ns" out2
+  check ctx "A0 pod list: the controller-revision-hash column is read (empty when unlabelled)"
+    ((pods2.map (·.revision)) == ["sts-abc", ""])
+
+
+-- ─── E2E evidence harness (TraceMatch): ambiguous input never passes ─────
+
+open FlareOperator.E2E.TraceMatch in
+private def tdec (seq : Nat) (conn key decision reason : String) : String :=
+  s!"[1][NTC][cluster.cc:1544-_trace_read] read-trace seq={seq} conn={conn} key={key} via=client decision={decision} reason={reason} target=n0:12121 partition=0 own_role=slave own_state=active map_version=7 boot_id=1"
+
+private def tans (seq : Nat) (conn key result reason : String) : String :=
+  s!"[1][NTC][cluster.cc:1564-trace_read_result] read-trace-result seq={seq} conn={conn} key={key} via=client result={result} reason={reason}"
+
+open FlareOperator.E2E.TraceMatch in
+private def checkTraceParse (ctx : Ctx) : IO Unit := do
+  let all := ["init_mark_r0", "init_0", "init_1", "init_2"]
+  let out := "END\r\nVALUE init_0 0 5\r\nval_0\r\nEND\r\nSERVER_ERROR read unavailable\r\nEND\r\n"
+  check ctx "trace: replies parsed per key; an explicit error is err:, not a miss"
+    (parseGetReplies all out == some [("init_mark_r0", "miss"), ("init_0", "=val_0"), ("init_1", "err:SERVER_ERROR read unavailable"), ("init_2", "miss")])
+  check ctx "trace: fewer replies than GETs (cut off) is not observed"
+    (parseGetReplies all "END\r\nVALUE init_0 0 5\r\nval_0\r\nEND\r\n" == none)
+  check ctx "trace: a VALUE line without its data and END is not observed"
+    (parseGetReplies ["k"] "VALUE k 0 5\r\n" == none)
+
+open FlareOperator.E2E.TraceMatch in
+private def checkTraceMatch (ctx : Ctx) : IO Unit := do
+  -- round 0 on conn A; a forwarded read of the same key on the peer's
+  -- connection P; round 1 REUSES port A with its own marker
+  let log := String.intercalate "\n" [
+    tdec 1 "10.0.0.9:40000" "init_mark_r0" "local" "slave_guard_allowed", tans 2 "10.0.0.9:40000" "init_mark_r0" "miss" "local",
+    tdec 3 "10.0.0.2:5555" "init_0" "local" "master", tans 4 "10.0.0.2:5555" "init_0" "miss" "local",
+    tdec 5 "10.0.0.9:40000" "init_0" "local" "slave_guard_allowed", tans 6 "10.0.0.9:40000" "init_0" "hit" "local",
+    tdec 7 "10.0.0.9:40000" "init_1" "proxy" "own_slave_balance_0", tans 8 "10.0.0.9:40000" "init_1" "unavailable" "forward_failed",
+    tdec 9 "10.0.0.9:40000" "init_mark_r1" "local" "slave_guard_allowed", tans 10 "10.0.0.9:40000" "init_mark_r1" "miss" "local",
+    tdec 11 "10.0.0.9:40000" "init_0" "local" "slave_guard_allowed", tans 12 "10.0.0.9:40000" "init_0" "miss" "local"]
+  let tr := readTraces log
+  let r0 := tracesAfterMarker tr "init_mark_r0"
+  let r1 := tracesAfterMarker tr "init_mark_r1"
+  let t0 := (r0.lookup "init_0").getD {}
+  let t1 := (r0.lookup "init_1").getD {}
+  let t10 := (r1.lookup "init_0").getD {}
+  check ctx "trace: the same key on another connection (a forwarded read) is not matched"
+    (t0.answer.map (traceField · "seq") == some "6" && !t0.ambiguous)
+  check ctx "trace: a reused port is split at its next marker (round 0 does not take round 1's line)"
+    (r0.length == 2 && t10.answer.map (traceField · "seq") == some "12")
+  check ctx "trace: correct value with a local hit line is ok and local"
+    (classifyAnswer "=val_0" "=val_0" t0 == .ok && answeredLocally t0)
+  check ctx "trace: a failed forward answered END is a MASKED MISS, not ok and not availability"
+    (classifyAnswer "=val_1" "miss" t1 == .maskedMiss)
+  check ctx "trace: a real local miss of a present key is a data error from the own copy"
+    (classifyAnswer "=val_0" "miss" t10 == .wrongLocal)
+  check ctx "trace: an explicit error reply is refused (availability)"
+    (classifyAnswer "=val_0" "err:SERVER_ERROR read unavailable" t0 == .refused)
+  check ctx "trace: a legitimately absent key answered miss is ok"
+    (classifyAnswer "miss" "miss" t10 == .ok)
+  let fwd : KeyTrace := { decision := some (tdec 1 "c" "k" "proxy" "follow_guard"), answer := some (tans 2 "c" "k" "miss" "forwarded") }
+  check ctx "trace: a wrong answer after forwarding is a data error of the forwarded-to node"
+    (classifyAnswer "=v" "miss" fwd == .wrongForwarded)
+  -- review 2026-10-13 finding 3: the acceptance's final copy check
+  let ex := [("acc_0", "=v0"), ("acc_1", "miss")]
+  let locHit : KeyTrace := { decision := some (tdec 1 "c" "acc_0" "local" "slave_guard_allowed"), answer := some (tans 2 "c" "acc_0" "hit" "local") }
+  let locMiss : KeyTrace := { decision := some (tdec 3 "c" "acc_1" "local" "slave_guard_allowed"), answer := some (tans 4 "c" "acc_1" "miss" "local") }
+  let pxHit : KeyTrace := { decision := some (tdec 1 "c" "acc_0" "proxy" "own_slave_balance_0"), answer := some (tans 2 "c" "acc_0" "hit" "forwarded") }
+  let pxMiss : KeyTrace := { decision := some (tdec 3 "c" "acc_1" "proxy" "own_slave_balance_0"), answer := some (tans 4 "c" "acc_1" "miss" "forwarded") }
+  check ctx "local copy: every key correct and answered from the replica's own copy passes"
+    (judgeLocalCopy ex (some [("acc_0", "=v0"), ("acc_1", "miss")]) [("acc_0", locHit), ("acc_1", locMiss)]).isEmpty
+  check ctx "local copy: correct answers PROXIED to the master fail (availability, not the copy)"
+    ((judgeLocalCopy ex (some [("acc_0", "=v0"), ("acc_1", "miss")]) [("acc_0", pxHit), ("acc_1", pxMiss)]).length == 2)
+  check ctx "local copy: a corrupted local value fails"
+    ((judgeLocalCopy ex (some [("acc_0", "=CORRUPT"), ("acc_1", "miss")]) [("acc_0", locHit), ("acc_1", locMiss)]).length == 1)
+  check ctx "local copy: a deleted key resurrected locally fails"
+    ((judgeLocalCopy ex (some [("acc_0", "=v0"), ("acc_1", "=old")]) [("acc_0", locHit), ("acc_1", { locMiss with answer := some (tans 4 "c" "acc_1" "hit" "local") })]).length == 1)
+  check ctx "local copy: absent == absent WITHOUT a trace is not a pass (None==None)"
+    ((judgeLocalCopy ex (some [("acc_0", "=v0"), ("acc_1", "miss")]) [("acc_0", locHit)]).length == 1)
+  check ctx "local copy: an unobserved round, a short reply set or nothing to check fail closed"
+    (!(judgeLocalCopy ex none []).isEmpty && !(judgeLocalCopy ex (some [("acc_0", "=v0")]) [("acc_0", locHit)]).isEmpty &&
+     !(judgeLocalCopy [] (some []) []).isEmpty)
+  check ctx "local copy: an explicit error is not a match"
+    ((judgeLocalCopy ex (some [("acc_0", "err:SERVER_ERROR x"), ("acc_1", "miss")]) [("acc_0", locHit), ("acc_1", locMiss)]).length == 1)
+  -- review 2026-10-13 round 11: ACCEPTANCE's required observation fails
+  -- closed — every field obtained on both sides, a 0 is a value
+  let stS := fun (boot recon dump applied : String) =>
+    s!"STAT pid 1\r\nSTAT curr_items 28\r\nSTAT reconstruction_started {recon}\r\nSTAT reconstruction_boot_id {boot}\r\nSTAT repl_applied_lsn {applied}\r\nSTAT rocksdb_master_id mid-r\r\nSTAT rocksdb_source_epoch 2:e\r\nSTAT rocksdb_copy_id copy-r\r\nSTAT rocksdb_latest_sequence_number {applied}\r\nSTAT rocksdb_wal_fallback_to_dump {dump}\r\nSTAT repl_follow_source_epoch 2:e\r\nEND\r\n"
+  let stM := "STAT curr_items 28\r\nSTAT reconstruction_started 0\r\nSTAT reconstruction_boot_id 77\r\nSTAT repl_applied_lsn 0\r\nSTAT rocksdb_master_id mid-m\r\nSTAT rocksdb_source_epoch 2:e\r\nSTAT rocksdb_copy_id copy-m\r\nSTAT rocksdb_latest_sequence_number 183\r\nSTAT rocksdb_wal_fallback_to_dump 0\r\nEND\r\n"
+  let podS := "uid-s|10.0.0.2|containerd://cs|0"
+  let podM := "uid-m|10.0.0.1|containerd://cm|0"
+  let mk (sStats sPod : Option String) (mStats mPod : Option String) : AccObs :=
+    { replica := NodeObs.parse "10.0.0.2" sStats sPod, master := NodeObs.parse "10.0.0.1" mStats mPod }
+  let o0 := mk (some (stS "55" "2" "1" "158")) (some podS) (some stM) (some podM)
+  let o1 := mk (some (stS "55" "2" "1" "183")) (some podS) (some stM) (some podM)
+  check ctx "acceptance obs: complete, unchanged, cursor forward passes (zeros are values)"
+    ((o0.missing "b").isEmpty && (judgeNoRebuild "b" "a" o0 o1).isEmpty && caughtUp o1 && !caughtUp o0)
+  check ctx "acceptance obs: stats unreadable on BOTH sides is not 'no rebuild' (none == none)"
+    (!(judgeNoRebuild "b" "a" (mk none (some podS) none (some podM)) (mk none (some podS) none (some podM))).isEmpty)
+  check ctx "acceptance obs: pod read failed on both sides (uid/containerID/restartCount) fails"
+    (!(judgeNoRebuild "b" "a" (mk (some (stS "55" "2" "1" "158")) none (some stM) none) (mk (some (stS "55" "2" "1" "183")) none (some stM) none)).isEmpty)
+  -- each required field absent (removed from the reply) fails on its own
+  let fields := ["reconstruction_started", "reconstruction_boot_id", "repl_applied_lsn", "rocksdb_master_id",
+    "rocksdb_source_epoch", "rocksdb_copy_id", "rocksdb_latest_sequence_number", "rocksdb_wal_fallback_to_dump", "curr_items",
+    "repl_follow_source_epoch"]
+  let drop := fun (out f : String) => String.intercalate "\r\n" ((out.splitOn "\r\n").filter (fun l => !l.startsWith s!"STAT {f} "))
+  let eachFails := fields.all fun f =>
+    let after := mk (some (drop (stS "55" "2" "1" "183") f)) (some podS) (some (drop stM f)) (some podM)
+    let replicaOnly := mk (some (drop (stS "55" "2" "1" "183") f)) (some podS) (some stM) (some podM)
+    !(judgeNoRebuild "b" "a" o0 after).isEmpty && !(judgeNoRebuild "b" "a" o0 replicaOnly).isEmpty &&
+      ((judgeNoRebuild "b" "a" o0 replicaOnly).any (fun p => (p.splitOn f).length > 1))
+  check ctx "acceptance obs: every required stats field, when missing, fails and is named"
+    eachFails
+  check ctx "acceptance obs: a reconstruction counter that cannot be read after the rebuild fails (not 'unchanged')"
+    (!(judgeNoRebuild "b" "a" o0 (mk (some (drop (stS "56" "3" "1" "183") "reconstruction_started")) (some podS) (some stM) (some podM))).isEmpty)
+  check ctx "acceptance obs: parse failures fail (non-digit counter, empty identity, garbage pod read)"
+    (!(judgeNoRebuild "b" "a" o0 (mk (some (stS "55" "x2" "1" "183")) (some podS) (some stM) (some podM))).isEmpty &&
+     !(judgeNoRebuild "b" "a" o0 (mk (some ((stS "55" "2" "1" "183").replace "rocksdb_copy_id copy-r" "rocksdb_copy_id ")) (some podS) (some stM) (some podM))).isEmpty &&
+     !(judgeNoRebuild "b" "a" o0 (mk (some (stS "55" "2" "1" "183")) (some "uid-s|10.0.0.2|") (some stM) (some podM))).isEmpty &&
+     !(judgeNoRebuild "b" "a" o0 (mk (some (stS "55" "2" "1" "183")) (some "uid-s|10.0.0.2||0") (some stM) (some podM))).isEmpty &&
+     !(judgeNoRebuild "b" "a" o0 (mk (some (stS "55" "2" "1" "183")) (some "uid-s|10.0.0.2|containerd://cs|-1") (some stM) (some podM))).isEmpty)
+  check ctx "acceptance obs: stats read from another address than the pod's fail (not bound to the pod)"
+    (!(o0.replica.missing.isEmpty && (NodeObs.parse "10.0.0.9" (some (stS "55" "2" "1" "158")) (some podS)).missing.isEmpty))
+  check ctx "acceptance obs: a rebuild, a dump fallback, a new process, a new copy, a restart, a recreation, a history change each fail"
+    (!(judgeNoRebuild "b" "a" o0 (mk (some (stS "55" "3" "1" "183")) (some podS) (some stM) (some podM))).isEmpty &&
+     !(judgeNoRebuild "b" "a" o0 (mk (some (stS "55" "2" "2" "183")) (some podS) (some stM) (some podM))).isEmpty &&
+     !(judgeNoRebuild "b" "a" o0 (mk (some (stS "56" "2" "1" "183")) (some podS) (some stM) (some podM))).isEmpty &&
+     !(judgeNoRebuild "b" "a" o0 (mk (some ((stS "55" "2" "1" "183").replace "copy-r" "copy-r2")) (some podS) (some stM) (some podM))).isEmpty &&
+     !(judgeNoRebuild "b" "a" o0 (mk (some (stS "55" "2" "1" "183")) (some "uid-s|10.0.0.2|containerd://cs2|1") (some stM) (some podM))).isEmpty &&
+     !(judgeNoRebuild "b" "a" o0 (mk (some (stS "55" "2" "1" "183")) (some "uid-s2|10.0.0.2|containerd://cs|0") (some stM) (some podM))).isEmpty &&
+     !(judgeNoRebuild "b" "a" o0 (mk (some (stS "55" "2" "1" "183")) (some podS) (some (stM.replace "2:e" "3:f")) (some podM))).isEmpty &&
+     !(judgeNoRebuild "b" "a" o0 (mk (some (stS "55" "2" "1" "183")) (some podS) (some (stM.replace "mid-m" "mid-x")) (some podM))).isEmpty &&
+     !(judgeNoRebuild "b" "a" o0 (mk (some ((stS "55" "2" "1" "183").replace "repl_follow_source_epoch 2:e" "repl_follow_source_epoch 1:old")) (some podS) (some stM) (some podM))).isEmpty)
+  check ctx "acceptance obs: the cursor going back fails; caughtUp needs both item counts (never none == none)"
+    (!(judgeNoRebuild "b" "a" o1 o0).isEmpty &&
+     !caughtUp (mk (some (drop (stS "55" "2" "1" "183") "curr_items")) (some podS) (some (drop stM "curr_items")) (some podM)))
+  -- review of d311227 (P1): the large-value follow test fails closed — a
+  -- head or cursor that was not read is never 0, a count is not a copy
+  check ctx "big value: reaching the head needs the cursor AND the head read (an unread cursor is not ≥ 0)"
+    (reachedHead o1 183 && !reachedHead o1 184 && !reachedHead o0 183 &&
+     !reachedHead (mk (some (drop (stS "55" "2" "1" "183") "repl_applied_lsn")) (some podS) (some stM) (some podM)) 0 &&
+     !reachedHead (mk none (some podS) none (some podM)) 0)
+  check ctx "big value: the cursor must pass the large batch between two complete observations"
+    ((crossedBatch o0 o1 170).isEmpty && !(crossedBatch o0 o1 184).isEmpty && !(crossedBatch o0 o1 150).isEmpty &&
+     !(crossedBatch o0 (mk (some (drop (stS "55" "2" "1" "183") "repl_applied_lsn")) (some podS) (some stM) (some podM)) 170).isEmpty &&
+     !(crossedBatch (mk none (some podS) none (some podM)) o1 170).isEmpty)
+  check ctx "big value: STORED / DELETED must be a reply line; unobserved, NOT_FOUND, errors and mentions fail"
+    (acked "DELETED" (some "DELETED\r\n") && !acked "DELETED" none && !acked "DELETED" (some "NOT_FOUND\r\n") &&
+     !acked "DELETED" (some "SERVER_ERROR not DELETED\r\n") && !acked "DELETED" (some "") &&
+     acked "STORED" (some "STORED\r\n") && !acked "STORED" (some "NOT_STORED\r\n"))
+  let h64 := String.mk (List.replicate 64 'a')
+  check ctx "big value: the generated value's report needs a size and a 64-hex sha256 (no default)"
+    (parseDigestReport s!"5242880\n{h64}  /tmp/accbig\n" == some (5242880, h64) &&
+     parseDigestReport "" == none && parseDigestReport s!"{h64}  /tmp/accbig\n" == none &&
+     parseDigestReport s!"x\n{h64}  /tmp/accbig\n" == none && parseDigestReport "5242880\nabc  /tmp/accbig\n" == none &&
+     parseDigestReport s!"5242880\n{h64}  /tmp/accbig\nextra\n" == none)
+  let bigLoc : KeyTrace := { decision := some (tdec 1 "c" "accbig_value" "local" "slave_guard_allowed"), answer := some (tans 2 "c" "accbig_value" "hit" "local") }
+  let bigPx : KeyTrace := { decision := some (tdec 1 "c" "accbig_value" "proxy" "own_slave_balance_0"), answer := some (tans 2 "c" "accbig_value" "hit" "forwarded") }
+  let want := [("accbig_value", digestAnswer h64 5242880)]
+  check ctx "big value: the local copy is compared by content AND size, and a proxied answer fails"
+    ((judgeLocalCopy want (some [("accbig_value", s!"=sha256:{h64}:5242880")]) [("accbig_value", bigLoc)]).isEmpty &&
+     (judgeLocalCopy want (some [("accbig_value", s!"=sha256:{h64}:5242879")]) [("accbig_value", bigLoc)]).length == 1 &&
+     (judgeLocalCopy want (some [("accbig_value", s!"=sha256:{String.mk (List.replicate 64 'b')}:5242880")]) [("accbig_value", bigLoc)]).length == 1 &&
+     (judgeLocalCopy want (some [("accbig_value", s!"=sha256:{h64}:5242880")]) [("accbig_value", bigPx)]).length == 1 &&
+     (judgeLocalCopy want (some [("accbig_value", "miss")]) [("accbig_value", { bigLoc with answer := some (tans 2 "c" "accbig_value" "miss" "local") })]).length == 1)
+
+open FlareOperator.E2E.TraceMatch in
+private def checkTraceAmbiguity (ctx : Ctx) : IO Unit := do
+  let c := "10.0.0.9:40001"
+  let base := [tdec 1 c "init_mark_r0" "local" "x", tdec 2 c "init_0" "local" "slave_guard_allowed"]
+  let dup := readTraces (String.intercalate "\n" (base ++ [tans 3 c "init_0" "hit" "local", tans 4 c "init_0" "hit" "local"]))
+  let missing := readTraces (String.intercalate "\n" base)
+  let truncated := readTraces (String.intercalate "\n" (base ++ ["[1][NTC] read-trace-result seq=3 conn=" ++ c ++ " key=init_0 via=client result=hi"]))
+  let markerTwice := readTraces (String.intercalate "\n" (base ++ [tans 3 c "init_0" "hit" "local", tdec 4 "10.0.0.9:40002" "init_mark_r0" "local" "x"]))
+  let contra := readTraces (String.intercalate "\n" (base ++ [tans 3 c "init_0" "miss" "local"]))
+  let noMarker := readTraces (String.intercalate "\n" [tdec 2 c "init_0" "local" "x", tans 3 c "init_0" "hit" "local"])
+  let cls := fun (tr : List String) (a : String) => classifyAnswer "=val_0" a (((tracesAfterMarker tr "init_mark_r0").lookup "init_0").getD {})
+  check ctx "trace: a duplicated answer line is ambiguous" (cls dup "=val_0" == .ambiguous)
+  check ctx "trace: a missing answer line is untraced" (cls missing "=val_0" == .untraced)
+  check ctx "trace: a truncated answer line is ambiguous" (cls truncated "=val_0" == .ambiguous)
+  check ctx "trace: a marker seen twice makes its round ambiguous" (cls markerTwice "=val_0" == .ambiguous)
+  check ctx "trace: a value reply with a 'miss' answer line contradicts: ambiguous" (cls contra "=val_0" == .ambiguous)
+  check ctx "trace: without its marker no GET is matched (untraced)" (cls noMarker "=val_0" == .untraced)
+  check ctx "trace: none of the ambiguous inputs classifies as ok"
+    ([cls dup "=val_0", cls missing "=val_0", cls truncated "=val_0", cls markerTwice "=val_0", cls contra "=val_0", cls noMarker "=val_0"].all (· != .ok))
+
+open FlareOperator.E2E.TraceMatch in
+private def checkActivationOrder (ctx : Ctx) : IO Unit := do
+  let n := fun (i : Nat) => s!"empty-source-nodes-{i}.empty-source-nodes.flare-empty-source.svc.cluster.local:12121"
+  let acc := fun (v i : Nat) => s!"[NTC] node map accepted (version {v}, 3 entries); own role=slave state=prepare balance=0 partition=0; masters: 0={n i}/active"
+  let dump := fun (i : Nat) => s!"[NTC] starting dump operation (master={n i}, partition=0)"
+  let chk := fun (i v : Nat) => s!"[NTC] activation source check passed (attempt 1): source {n i} is the partition's master in the map read at version {v} (now {v}); copy master_id x, source epoch e"
+  let act := fun (i : Nat) => s!"[NTC] node activated (attempt 1) on the copy from {n i} (map version now 9)"
+  let stop := s!"[WRN] activation STOPPED before attempt 1: the partition's master is now {n 1}, not the source {n 2}"
+  let old := "empty-source-nodes-2"
+  check ctx "containsSubstr (linear rewrite): same answers — empty needle, start, end, absent, longer needle, multibyte text"
+    (FlareOperator.E2E.Helpers.containsSubstr "abc" "" && FlareOperator.E2E.Helpers.containsSubstr "abc" "ab"
+      && FlareOperator.E2E.Helpers.containsSubstr "abc" "bc" && !FlareOperator.E2E.Helpers.containsSubstr "abc" "bd"
+      && !FlareOperator.E2E.Helpers.containsSubstr "ab" "abc" && FlareOperator.E2E.Helpers.containsSubstr "再構築 held by X" "held by"
+      && FlareOperator.E2E.Helpers.containsSubstr "a再b" "再b" && !FlareOperator.E2E.Helpers.containsSubstr "a再b" "再c"
+      && FlareOperator.E2E.Helpers.containsSubstr "aaab" "aab")
+  check ctx "waitForCondition (review): a check starts only before the deadline; a hold AFTER it is late (not OK); at the deadline OK still counts; a miss at or after it is a timeout"
+    (FlareOperator.E2E.Helpers.mayStartCheck 999 1000 && !FlareOperator.E2E.Helpers.mayStartCheck 1000 1000
+      && FlareOperator.E2E.Helpers.waitStep true 1000 1000 == .ok
+      && FlareOperator.E2E.Helpers.waitStep true 1001 1000 == .late
+      && FlareOperator.E2E.Helpers.waitStep false 1000 1000 == .timeout
+      && FlareOperator.E2E.Helpers.waitStep false 999 1000 == .again)
+  -- R4 receiver filter (review): flared's real versioned line (cluster.cc
+  -- log_notice format) and the older lines are kept; unrelated lines are not
+  let realAccept := "2026-10-06T10:11:12.123456789Z [140239964415680][NTC][cluster.cc:1289-_reconstruct_node_partition_map] node map accepted (version 4294967390, 3 entries); own role=slave state=active balance=50 partition=0; masters: 0=continuous-replication-nodes-0.continuous-replication-nodes.flare-continuous-replication.svc.cluster.local:12121/active"
+  check ctx "R4 receiver filter: the versioned 'node map accepted' line is kept (it was dropped before), with node_balance / node sync / role shift lines; an unrelated line is not"
+    (receiverMapLine realAccept
+      && receiverMapLine "[NTC] shifting node_role (node_key=x, old_role=slave, old_partition=0, new_role=master, new_partition=0)"
+      && receiverMapLine "[NTC] node_balance changed 50 -> 0"
+      && receiverMapLine "[NTC] read source BOUND to m (epoch e)"
+      && !receiverMapLine "[NTC] storage open")
+  let hold := "[NTC] activation attempt 1 held by FLARE_TEST_ACTIVATION_HOLD_FILE"
+  let newPodName := "empty-source-nodes-1"
+  check ctx "activation precondition (review round 3): held, then the new map accepted, then STOPPED (no held line after the acceptance is needed) — holds"
+    (heldAcrossNewMap [dump 2, hold, hold, acc 415 1, stop] newPodName == none)
+  check ctx "activation precondition (review round 3): the CI 37731207056 shape (activated on the old map, then accepted), no hold before the acceptance, no acceptance — NOT met"
+    ((heldAcrossNewMap [dump 2, hold, chk 2 410, act 2, acc 415 1] newPodName).isSome
+      && (heldAcrossNewMap [dump 2, acc 415 1, hold] newPodName).isSome
+      && (heldAcrossNewMap [dump 2, hold] newPodName).isSome
+      && (heldAcrossNewMap [dump 2, acc 415 1] newPodName).isSome)
+  let new := "empty-source-nodes-1"
+  -- CI 37438962871 test 4, shortened
+  let ci := [acc 408 2, dump 2, acc 415 1, stop, dump 1, chk 1 435, act 1, acc 442 1]
+  check ctx "activation: CI 37438962871 (old copy STOPPED after the new map, new copy checked then activated) passes"
+    (judgeActivation ci old new).isPass
+  check ctx "activation: the old copy activated AFTER accepting the new map is a bug"
+    (match judgeActivation [dump 2, acc 415 1, chk 2 410, act 2] old new with | .bug _ => true | _ => false)
+  check ctx "activation: the old source validated against the new map's version is a bug"
+    (match judgeActivation [dump 2, acc 415 1, chk 2 415, act 2] old new with | .bug _ => true | _ => false)
+  check ctx "activation: the old copy activated BEFORE accepting the new map is undecided, not a pass"
+    (match judgeActivation [dump 2, chk 2 408, act 2, acc 415 1] old new with | .undecided _ => true | _ => false)
+  check ctx "activation: no line accepting the new map is undetermined"
+    (match judgeActivation [dump 1, chk 1 435, act 1] old new with | .undetermined _ => true | _ => false)
+  check ctx "activation: activating without a passing check of that copy is a bug"
+    (match judgeActivation [acc 415 1, dump 1, act 1] old new with | .bug _ => true | _ => false)
+  check ctx "activation: a new dump after the last passing check, then activation, is a bug"
+    (match judgeActivation [acc 415 1, dump 1, chk 1 420, dump 1, act 1] old new with | .bug _ => true | _ => false)
+  check ctx "activation: no activation in the window is undetermined"
+    (match judgeActivation [acc 415 1, dump 1, chk 1 420] old new with | .undetermined _ => true | _ => false)
+  check ctx "activation: a passing check without a map version is undetermined"
+    (match judgeActivation [acc 415 1, dump 2, "[NTC] activation source check passed (attempt 1): source " ++ n 2 ++ " is the partition's master", act 1] old new with | .undetermined _ => true | _ => false)
+
+-- ─── authoritative history (user direction 2026-10-09) ───────────────────
+
+open PromotionEvidence in
+/-- Restore provenance (restore-isolated 5): the binding the operator expects
+    is the one flared builds from the META the operator serves; a restored
+    copy only for exactly its binding, an unbound restored copy never; a bound
+    live copy never for another partition index / routing rule, but across a
+    partition COUNT change. -/
+private def checkRestoreProvenance (ctx : Ctx) : IO Unit := do
+  let (_, metaResp) := Reconciler.reconcileStep FlareClusterState.default { metadata := { name := "c" }, spec := { partitions := 1, replicas := 2 } } .Meta
+  let metaLines := match metaResp with | .End ls => ls | _ => []
+  check ctx "restore provenance: bindingFor uses exactly the routing layout the operator serves in META (size / jenkins / modular / hint 1 / virtual 4096)"
+    (metaLines.contains s!"META partition-size {FlareClusterState.default.partitionSize}"
+      && metaLines.contains "META key-hash-algorithm jenkins" && metaLines.contains "META partition-type modular"
+      && metaLines.contains "META partition-modular-hint 1" && metaLines.contains "META partition-modular-virtual 4096"
+      && bindingFor 0 1 1024 == "v1 partition=0 partitions=1 size=1024 hash=jenkins resolver=modular hint=1 virtual=4096"
+      && (parseBinding (bindingFor 3 4 1024)).isSome
+      && (parseBinding "v1 partition=0").isNone && (parseBinding "v2 partition=0 partitions=1 size=1024 hash=jenkins resolver=modular hint=1 virtual=4096").isNone
+      && (parseBinding "v1 partition=0 partition=0 size=1024 hash=jenkins resolver=modular hint=1 virtual=4096").isNone)
+  let p0n1 := bindingFor 0 1 1024
+  let p1n2 := bindingFor 1 2 1024
+  let p0n2 := bindingFor 0 2 1024
+  check ctx "restore provenance: a RESTORED copy only for its binding's partition and routing rule (P1 of 2 into a 1-partition P0: refused; another hash: refused; unbound: refused; the COUNT is not compared); a LIVE copy is never in conflict (its partition is the operator's decision)"
+    ((bindingConflict (some p1n2) (some 1) p0n1).isSome
+      && (bindingConflict (some (p0n1.replace "jenkins" "simple")) (some 1) p0n1).isSome
+      && (bindingConflict (some "-") (some 1) p0n1).isSome
+      && (bindingConflict none (some 1) p0n1).isSome
+      && (bindingConflict (some "garbage") (some 1) p0n1).isSome
+      && (bindingConflict (some p0n1) (some 1) p0n1).isNone
+      && (bindingConflict (some p0n2) (some 1) p0n1).isNone
+      && (bindingConflict (some p1n2) (some 0) p0n1).isNone
+      && (bindingConflict (some "garbage") (some 0) p0n1).isNone
+      && (bindingConflict none none p0n1).isNone)
+  let base := "STAT curr_items 25\r\nSTAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nSTAT rocksdb_copy_identity_consistent 1\r\nSTAT rocksdb_quarantined 0\r\nSTAT rocksdb_copy_partial 0\r\nSTAT rebuild_in_flight 0\r\nSTAT rocksdb_copy_id u1:2\r\nSTAT rocksdb_master_id M\r\nSTAT rocksdb_source_epoch 2:e\r\n"
+  let obs : Observed := { mapPrepare := false, mapActive := true, podReady := true, partitionHasMaster := false, lastMasterHistory := none, expectedBinding := some p0n1 }
+  let cls := fun (extra : String) => classify (some (base ++ extra ++ "END\r\n")) obs
+  check ctx "restore provenance in the classifier: another partition's restored copy is FORBIDDEN (before any history rule); its own restored copy and a live copy bound elsewhere are not forbidden for that reason; an invalid restored flag is unknown"
+    ((match cls s!"STAT rocksdb_partition_binding {p1n2}\r\nSTAT rocksdb_restored_unverified 1\r\n" with | .forbidden w => (w.splitOn "restore provenance").length > 1 | _ => false)
+      && (match cls "STAT rocksdb_partition_binding -\r\nSTAT rocksdb_restored_unverified 1\r\n" with | .forbidden _ => true | _ => false)
+      && (match cls s!"STAT rocksdb_partition_binding {p0n1}\r\nSTAT rocksdb_restored_unverified 1\r\n" with | .forbidden w => (w.splitOn "restore provenance").length == 1 | _ => true)
+      && (match cls s!"STAT rocksdb_partition_binding {p1n2}\r\nSTAT rocksdb_restored_unverified 0\r\n" with | .forbidden w => (w.splitOn "restore provenance").length == 1 | _ => true)
+      && (match cls "STAT rocksdb_restored_unverified x\r\n" with | .unknown _ => true | _ => false)
+      && (match classify (some (base ++ s!"STAT rocksdb_partition_binding {p1n2}\r\nSTAT rocksdb_restored_unverified 1\r\nEND\r\n")) { obs with expectedBinding := none } with | .forbidden w => (w.splitOn "restore provenance").length == 1 | _ => true))
+
+open FlareOperator.AuthoritativeHistory in
+/-- authority 29 as a PURE state transition (restored map -> both pods
+    re-register -> history adoption -> classification), through the real
+    functions. It states WHEN the recovery is automatic and when it is held
+    (safe, needs a human); it is NOT a claim about why the CI failure happened. -/
+private def checkAuthority29Transitions (ctx : Ctx) : IO Unit := do
+  let crd2 : FlareClusterView := { metadata := { name := "ci" }, spec := { partitions := 1, replicas := 2 } }
+  let mk := fun (n : String) (r : FlareRole) (st : FlareState) (lmo : Int) =>
+    (s!"{n}:12121", ({ serverName := n, serverPort := 12121, role := r, state := st, partition := 0, lastMasterOf := lmo } : FlareNode))
+  let restored := ({ nodeMap := [mk "a" .Master .Active (-1), mk "b" .Slave .Active (-1)] } : FlareClusterState).rebuildPartitionMap
+  let (s1, _) := Reconciler.reconcileStep restored crd2 (.NodeAdd "a" 12121)
+  let (s2, _) := Reconciler.reconcileStep s1 crd2 (.NodeAdd "b" 12121)
+  let node := fun (st : FlareClusterState) (n : String) => st.lookupNode s!"{n}:12121"
+  check ctx "authority 29 transition: after both pods re-register the restored map has NO master; both copies are Slave/Prepare; exactly the ex-master carries lastMasterOf"
+    ((s2.nodeMap.all fun (_, n) => n.role == FlareRole.Slave && n.state == FlareState.Prepare)
+      && ((node s2 "a").map (·.lastMasterOf)) == some 0 && ((node s2 "b").map (·.lastMasterOf)) == some (-1))
+  let stats := fun (mid ep cid boot : String) =>
+    s!"STAT curr_items 30\r\nSTAT reconstruction_boot_id {boot}\r\nSTAT repl_read_source_eligible 0\r\nSTAT repl_read_source_state revalidating\r\nSTAT repl_read_source_reason the master went\r\nSTAT rocksdb_copy_identity_consistent 1\r\nSTAT rocksdb_quarantined 0\r\nSTAT rocksdb_copy_partial 0\r\nSTAT rebuild_in_flight 0\r\nSTAT rebuild_parked 0\r\nSTAT rocksdb_switch_unresolved 0\r\nSTAT rocksdb_copy_id {cid}\r\nSTAT rocksdb_master_id {mid}\r\nSTAT rocksdb_source_epoch {ep}\r\nEND\r\n"
+  let absentStore := load "uid" 1 (some none) true
+  let sa := seenOfReply "ua" (some (stats "M" "2:e" "ca:1" "ba"))
+  let sbSame := seenOfReply "ub" (some (stats "M" "2:e" "cb:1" "bb"))
+  let sbOther := seenOfReply "ub" (some (stats "M" "1:old" "cb:1" "bb"))
+  let lastMasterOf := fun (st : FlareClusterState) => match (st.nodeMap.filter fun (_, n) => n.lastMasterOf == 0).map Prod.fst with | [x] => some x | _ => none
+  let obs := fun (h : Option (String × String)) => ({ mapPrepare := true, mapActive := false, podReady := false, partitionHasMaster := false, lastMasterHistory := h } : PromotionEvidence.Observed)
+  check ctx "authority 29 transition: AUTOMATIC recovery when every copy is read and holds ONE history, with the approval: the record is adopted from the last master, and then the copies classify as promotable (lagging, same history) instead of 'not recorded'"
+    ((match establish absentStore 0 none [("a:12121", sa), ("b:12121", sbSame)] true "t" (lastMasterOf s2) with
+        | (_, .recorded 0 r _) => r.holder == "a:12121" && r.hist == ⟨"M", "2:e"⟩ | _ => false)
+      && (PromotionEvidence.classify (some (stats "M" "2:e" "cb:1" "bb")) (obs (some ("M", "2:e")))).label == "lagging (same history)"
+      && (PromotionEvidence.classify (some (stats "M" "2:e" "cb:1" "bb")) (obs none)).promotable == false)
+  check ctx "authority 29 transition: HELD (safe; a human decides) — differing histories, no approval, two last masters (a map saved while a demoted ex-master was still Prepare); HELD only until read — an unreadable copy (RBAC) is adopted once it is read again"
+    ((match establish absentStore 0 none [("a:12121", sa), ("b:12121", sbOther)] true "t" (lastMasterOf s2) with | (_, .held 0 _) => true | _ => false)
+      && (establish absentStore 0 none [("a:12121", sa), ("b:12121", sbSame)] false "t" (lastMasterOf s2)).2 == .none
+      && (let twoLast := ({ nodeMap := [mk "a" .Slave .Prepare 0, mk "b" .Slave .Prepare 0] } : FlareClusterState)
+          match establish absentStore 0 none [("a:12121", sa), ("b:12121", sbSame)] true "t" (lastMasterOf twoLast) with | (_, .held 0 _) => true | _ => false)
+      && (match establish absentStore 0 none [("a:12121", sa), ("b:12121", .unreadable)] true "t" (lastMasterOf s2) with | (_, .held 0 _) => true | _ => false)
+      && (match establish absentStore 0 none [("a:12121", sa), ("b:12121", sbSame)] true "t" (lastMasterOf s2) with | (_, .recorded 0 _ _) => true | _ => false))
+  -- the HOLD's recovery (RUNBOOK #history-held-masterless): a PERSON names the
+  -- copy to keep; the operator never picks one by itself
+  let differing := [("a:12121", sa), ("b:12121", sbOther)]
+  let twoLast := ({ nodeMap := [mk "a" .Slave .Prepare 0, mk "b" .Slave .Prepare 0] } : FlareClusterState)
+  let emptyB := seenOfReply "ub" (some ((stats "M" "9:new" "cb:9" "bb").replace "STAT curr_items 30" "STAT curr_items 0"))
+  check ctx "authority 29 hold recovery: a copy CHOSEN by a person (differing histories, or two last masters) is adopted with its own history as the holder; the held states before the choice stay held"
+    ((match adoptChosen absentStore 0 none differing "b:12121" "t" with
+        | (s', .recorded 0 r _) => r.holder == "b:12121" && r.hist == ⟨"M", "1:old"⟩ && s'.recorded 0 == some ⟨"M", "1:old"⟩ | _ => false)
+      && (match establish absentStore 0 none [("a:12121", sa), ("b:12121", sbSame)] true "t" (lastMasterOf twoLast) with
+          | (st', .held 0 _) => (match adoptChosen st' 0 none [("a:12121", sa), ("b:12121", sbSame)] "a:12121" "t" with
+              | (_, .recorded 0 r _) => r.holder == "a:12121" | _ => false)
+          | _ => false))
+  check ctx "authority 29 hold recovery REFUSED (stays held, reason given): a copy not read, a chosen copy not among the copies, an unhealthy or EMPTY chosen copy while another holds data; no effect with a master in the map or a known record"
+    ((match adoptChosen absentStore 0 none [("a:12121", sa), ("b:12121", .unreadable)] "a:12121" "t" with | (_, .held 0 _) => true | _ => false)
+      && (match adoptChosen absentStore 0 none differing "c:12121" "t" with | (_, .held 0 _) => true | _ => false)
+      && (match adoptChosen absentStore 0 none [("a:12121", sa), ("b:12121", emptyB)] "b:12121" "t" with | (_, .held 0 w) => (w.splitOn "EMPTY").length > 1 | _ => false)
+      && (match adoptChosen absentStore 0 none [("a:12121", sa), ("b:12121", seenOfReply "ub" (some ((stats "M" "1:old" "cb:1" "bb").replace "rocksdb_quarantined 0" "rocksdb_quarantined 1")))] "b:12121" "t" with | (_, .held 0 _) => true | _ => false)
+      && (adoptChosen absentStore 0 (some "a:12121") differing "b:12121" "t").2 == .none
+      && (match adoptChosen absentStore 0 none differing "b:12121" "t" with
+          | (s', _) => (adoptChosen s' 0 none differing "a:12121" "t").2 == .none))
+
+open FlareOperator.AuthoritativeHistory in
+private def checkAuthoritativeHistory (ctx : Ctx) : IO Unit := do
+  let bM : Binding := ⟨"uid-m", "boot-m", "u1:3"⟩
+  let bS : Binding := ⟨"uid-s", "boot-s", "u2:1"⟩
+  let h2 : Hist := ⟨"M", "2:e"⟩
+  let rec0 : Record := { gen := 3, hist := h2, holder := "m", binding := bM, since := "t0", reason := "promotion" }
+  let st : Store := { clusterUid := "cu", parts := [(0, .known rec0 none)] }
+  let modern := fun (b : Binding) (h : Hist) (empty : Bool) => Seen.modern b h true empty [] ""
+  -- (1) establishing a record
+  let fresh : Store := { clusterUid := "cu", origin := "first-build" }
+  let absent := load "cu" 1 (some none) true
+  let cs := [("m", modern bM h2 false), ("s", modern bS h2 false)]
+  check ctx "history (1): first build only in a store CREATED as a first build; an absent record with a node map only with the migration approval"
+    ((match establish fresh 0 (some "m") cs false "t" with | (_, .recorded 0 r _) => r.reason == "first-build" | _ => false)
+      && (establish absent 0 (some "m") cs false "t").2 == .none
+      && (match establish absent 0 (some "m") cs true "t" with | (_, .recorded 0 r _) => r.reason == "adopted" | _ => false))
+  -- 41579664848: a first build's master read before its flared applied the
+  -- role (epoch reason "new") is not recorded; its promotion epoch is
+  let csNew := [("m", Seen.modern bM ⟨"M", "1:e"⟩ true true [] "new"), ("s", modern bS ⟨"S", "1:f"⟩ true)]
+  let csPromoted := [("m", Seen.modern bM h2 true true [] "promotion"), ("s", modern bS ⟨"S", "1:f"⟩ true)]
+  check ctx "history (1): a first build's master still on its copy's initial epoch (reason new) is held, not recorded; after its promotion advanced the epoch the record takes that history; an adoption (a record absent with a node map) is not affected"
+    ((match establish fresh 0 (some "m") csNew false "t" with | (s', .held 0 _) => s'.part 0 == none | _ => false)
+      && (match establish fresh 0 (some "m") csPromoted false "t" with | (_, .recorded 0 r _) => r.hist == h2 && r.reason == "first-build" | _ => false)
+      && (match establish absent 0 (some "m") csNew true "t" with | (_, .recorded 0 r _) => r.reason == "adopted" | _ => false))
+  -- 41211110343: the first master restarted before its record and came back a replica
+  let pb := fun (u : String) => ({ podUid := some u, bootId := some s!"boot-{u}", copyId := some s!"copy-{u}" } : PromotionEvidence.Binding)
+  let empties : List (String × PromotionEvidence.Class × PromotionEvidence.Binding) :=
+    [("a", .empty, pb "ua"), ("b", .empty, pb "ub")]
+  let intentSt : Store := { fresh with intents := [{ id := "i", partition := 0, kind := "promotion", target := "a", binding := bM, fromGen := 0, fromHist := h2, expectedVersion := 1 }] }
+  check ctx "history (1): a first build's partition with no record and no intent whose every copy reads empty, in this pass and again at the commit, is seated as a first build's; a record, an intent, an absent (not first-build) store, a copy that is not empty or has no reading keeps it guarded"
+    (firstBuildUnrecordedEmpty fresh 0 ["a", "b"] empties empties
+      && firstBuildUnrecordedEmptyCandidate fresh 0 ["a", "b"] empties
+      && !firstBuildUnrecordedEmpty st 0 ["a", "b"] empties empties
+      && !firstBuildUnrecordedEmpty intentSt 0 ["a", "b"] empties empties
+      && !firstBuildUnrecordedEmpty absent 0 ["a", "b"] empties empties
+      && !firstBuildUnrecordedEmptyCandidate absent 0 ["a", "b"] empties
+      && !firstBuildUnrecordedEmpty fresh 0 ["a", "b"] [("a", .empty, pb "ua"), ("b", .eligible, pb "ub")] empties
+      && !firstBuildUnrecordedEmptyCandidate fresh 0 ["a", "b"] [("a", .empty, pb "ua"), ("b", .eligible, pb "ub")]
+      && !firstBuildUnrecordedEmpty fresh 0 ["a", "b"] [("a", .empty, pb "ua")] empties
+      && !firstBuildUnrecordedEmpty fresh 0 [] empties empties
+      && firstBuildUnrecordedEmpty fresh 1 ["a"] empties empties)
+  -- review of 89cf9d9: the pass evidence may be stale at the commit
+  check ctx "history (1): the first build exception is refused when a copy's pod UID, boot id or copy id changed between the pass reading and the commit read, the commit read is not empty or unreadable, or a binding is incomplete"
+    (!firstBuildUnrecordedEmpty fresh 0 ["a", "b"] empties [("a", .empty, { pb "ua" with podUid := some "ua2" }), ("b", .empty, pb "ub")]
+      && !firstBuildUnrecordedEmpty fresh 0 ["a", "b"] empties [("a", .empty, { pb "ua" with bootId := some "boot-new" }), ("b", .empty, pb "ub")]
+      && !firstBuildUnrecordedEmpty fresh 0 ["a", "b"] empties [("a", .empty, pb "ua"), ("b", .empty, { pb "ub" with copyId := some "copy-new" })]
+      && !firstBuildUnrecordedEmpty fresh 0 ["a", "b"] empties [("a", .eligible, pb "ua"), ("b", .empty, pb "ub")]
+      && !firstBuildUnrecordedEmpty fresh 0 ["a", "b"] empties [("a", .unknown "stats unreadable", { podUid := none, bootId := none, copyId := none }), ("b", .empty, pb "ub")]
+      && !firstBuildUnrecordedEmpty fresh 0 ["a", "b"] empties [("b", .empty, pb "ub")]
+      && !firstBuildUnrecordedEmpty fresh 0 ["a"] [("a", .empty, { pb "ua" with copyId := none })] [("a", .empty, { pb "ua" with copyId := none })])
+  check ctx "history (1): a corrupt, foreign or unreadable record is NEVER adopted, approved or not, and never written back"
+    ((establish (load "cu" 1 (some (some "garbage")) false) 0 (some "m") cs true "t").2 == .none
+      && (establish (load "cu" 1 (some (some (serialize { st with clusterUid := "other" }))) false) 0 (some "m") cs true "t").2 == .none
+      && (establish (load "cu" 1 none false) 0 (some "m") cs true "t").2 == .none
+      && !writable (load "cu" 1 (some (some "garbage")) false) && !writable (load "cu" 1 none false) && writable absent)
+  check ctx "history (1): an UNREADABLE copy is never treated as empty: no adoption until every copy is observed; an empty master while another copy has data or cannot be read is not adopted"
+    ((match establish fresh 0 (some "m") [("m", modern bM h2 false), ("s", .unreadable)] false "t" with | (_, .held 0 _) => true | _ => false)
+      && (match establish fresh 0 (some "m") [("m", modern bM h2 true), ("s", modern bS h2 false)] false "t" with | (_, .held 0 _) => true | _ => false)
+      && othersHaveData [("m", modern bM h2 true), ("s", .unreadable)] "m")
+  -- (4) capability
+  check ctx "history (4): UNTRACKED only when every copy was observed completely and none is modern; one legacy copy beside a modern one does not untrack; a known partition is never downgraded"
+    ((match establish fresh 0 (some "m") [("m", .legacy), ("s", .legacy)] false "t" with | (s', .untracked 0 _) => !s'.tracked 0 | _ => false)
+      && (match establish fresh 0 (some "m") [("m", .legacy), ("s", .unreadable)] false "t" with | (s', .held 0 _) => s'.tracked 0 | _ => false)
+      && (match establish fresh 0 (some "m") [("m", modern bM h2 false), ("s", .legacy)] false "t" with | (s', .recorded 0 _ _) => s'.tracked 0 | _ => false)
+      && (establish st 0 (some "m") [("m", .legacy), ("s", .legacy)] true "t").1 == st)
+  check ctx "history (4): an APPROVED untracked partition becomes tracked once EVERY copy is modern; a mix, or no approval, stays untracked"
+    (let un : Store := { clusterUid := "cu", parts := [(0, .untracked "rc56")] }
+     (match establish un 0 (some "m") cs true "t" with | (s', .recorded 0 r _) => s'.tracked 0 && r.reason == "adopted" | _ => false)
+       && (establish un 0 (some "m") [("m", modern bM h2 false), ("s", .legacy)] true "t").1 == un
+       && (establish un 0 (some "m") cs false "t").1 == un)
+  -- (3) bulk
+  let bM2 : Binding := ⟨"uid-m", "boot-m", "u1:4"⟩
+  let bM3 : Binding := ⟨"uid-m", "boot-m", "u1:5"⟩
+  let h3 : Hist := ⟨"M", "3:bulk"⟩
+  check ctx "history (3): bulk is adopted only through flared's persisted chain recorded-copy -> current copy, ending at its epoch with reason bulk"
+    ((match bulk st 0 "m" (Seen.modern bM2 h3 true false [⟨"u1:3", "u1:4", "3:bulk"⟩] "bulk") "t" with
+      | (s', .recorded 0 r _) => r.gen == 4 && r.binding.copyId == "u1:4" && s'.recorded 0 == some h3 | _ => false)
+      && (match bulk st 0 "m" (Seen.modern bM3 ⟨"M", "4:b2"⟩ true false [⟨"u1:3", "u1:4", "3:bulk"⟩, ⟨"u1:4", "u1:5", "4:b2"⟩] "bulk") "t" with
+          | (_, .recorded 0 r _) => r.binding.copyId == "u1:5" | _ => false))
+  -- (3b) seed
+  let bSd : Binding := ⟨"uid-m", "boot-m", "w9:1"⟩
+  let hSeed : Hist := ⟨"M", "7:src"⟩
+  let seedChain : List Link := [⟨"u1:3", "w9:1", "7:src"⟩]
+  check ctx "history (seed): the recorded holder's copy replaced by a seed is followed through the chain recorded-copy -> current copy (reason seed, healthy): gen+1, reason seed"
+    (match seed st 0 "m" (Seen.modern bSd hSeed true false seedChain "seed") "t" with
+      | (s', .recorded 0 r _) => r.gen == 4 && r.reason == "seed" && r.binding.copyId == "w9:1" && s'.recorded 0 == some hSeed | _ => false)
+  check ctx "history (seed): a node that is not the recorded holder, a chain that does not reach the current copy, or no chain changes nothing"
+    ((seed st 0 "s" (Seen.modern bSd hSeed true false seedChain "seed") "t").1 == st
+      && (seed st 0 "m" (Seen.modern bSd hSeed true false [⟨"u9:3", "w9:1", "7:src"⟩] "seed") "t").1 == st
+      && (seed st 0 "m" (Seen.modern bSd hSeed true false [] "seed") "t").1 == st)
+  check ctx "history (seed): an epoch reason other than seed, a chain ending at another epoch, or an unhealthy copy changes nothing"
+    ((seed st 0 "m" (Seen.modern bSd hSeed true false seedChain "inherited") "t").1 == st
+      && (seed st 0 "m" (Seen.modern bSd hSeed true false seedChain "bulk") "t").1 == st
+      && (seed st 0 "m" (Seen.modern bSd ⟨"M", "8:other"⟩ true false seedChain "seed") "t").1 == st
+      && (seed st 0 "m" (Seen.modern bSd hSeed false false seedChain "seed") "t").1 == st)
+  check ctx "history (3): the same uuid with N+1 WITHOUT a chain, a gap in the chain (two flushes, one link missing), or a chain not ending at the epoch / reason bulk = a HOLD beside the RETAINED record, never adopted"
+    ((match bulk st 0 "m" (Seen.modern bM2 h3 true false [] "bulk") "t" with | (s', .held 0 _) => s'.recorded 0 == some h2 && (s'.held 0).isSome | _ => false)
+      && (match bulk st 0 "m" (Seen.modern bM3 ⟨"M", "4:b2"⟩ true false [⟨"u1:4", "u1:5", "4:b2"⟩] "bulk") "t" with | (_, .held 0 _) => true | _ => false)
+      && (match bulk st 0 "m" (Seen.modern bM2 h3 true false [⟨"u1:3", "u1:4", "3:bulk"⟩] "promotion") "t" with | (_, .held 0 _) => true | _ => false))
+  check ctx "history (3): the ex-master back with an EMPTY DB (new boot / copy, another history) is no bulk of the holder: nothing changes"
+    ((bulk st 0 "m" (Seen.modern ⟨"uid-m2", "boot-m2", "u9:1"⟩ ⟨"M2", "5:fresh"⟩ true true [] "new") "t").1 == st)
+  -- (5) intents
+  let i : Intent := { id := "t-11", partition := 0, kind := "promotion", target := "s", binding := bS, fromGen := 3, fromHist := h2, expectedVersion := 11 }
+  let some withI := beginIntent st i | check ctx "history (5): beginIntent on a known partition" false
+  check ctx "history (5): a second intent while one is pending, or an intent on an unknown partition, is REFUSED"
+    ((beginIntent withI { i with id := "t-12", target := "m" }).isNone && (beginIntent absent i).isNone)
+  check ctx "history (5): resolved ONLY when the PERSISTED map carries the intent id: the target master there, same binding, healthy, a new history"
+    (match resolveIntent withI i 12 ["t-11"] true (modern bS ⟨"M", "4:promo"⟩ false) "t" with
+     | (s', .recorded 0 r _) => r.gen == 4 && r.holder == "s" && s'.intentFor 0 == none | _ => false)
+  check ctx "history (5): a later map WITHOUT the id (another update after an uncommitted intent) never completes it: dropped once the expected version is reached, waited for before"
+    ((match resolveIntent withI i 12 ["t-10"] true (modern bS ⟨"M", "4:promo"⟩ false) "t" with | (s', .intentDropped 0 _) => s'.recorded 0 == some h2 | _ => false)
+      && (resolveIntent withI i 10 [] true (modern bS h2 false) "t").2 == .none)
+  check ctx "history (5): carried, but the target is not master there, changed binding, or unhealthy = a HOLD persisted beside the retained record: rebuilds and new intents refused (not only a log)"
+    ((match resolveIntent withI i 12 ["t-11"] false (modern bS ⟨"M", "4:p"⟩ false) "t" with | (s', .held 0 _) => s'.recorded 0 == some h2 && (s'.held 0).isSome && (rebuildAllowed s' 0 "m" (modern bM h2 false) (modern bS h2 false)).1 == false && (beginIntent s' i).isNone | _ => false)
+      && (match resolveIntent withI i 12 ["t-11"] true (modern ⟨"uid-s", "boot-s2", "u2:1"⟩ ⟨"M", "4:p"⟩ false) "t" with | (_, .held 0 _) => true | _ => false)
+      && (match resolveIntent withI i 12 ["t-11"] true (Seen.modern bS ⟨"M", "4:p"⟩ false false [] "") "t" with | (_, .held 0 _) => true | _ => false))
+  -- (2) rebuild source, fresh reads
+  check ctx "history (2): a rebuild copies only from the RECORD's holder (its COPY — a restarted process with the same copy is fine, another copy is not — its history, healthy); never while an intent is pending; an empty source only as the recorded copy (CI 37834294217)"
+    ((rebuildAllowed st 0 "m" (modern bM h2 false) (modern bS h2 false)).1
+      && (rebuildAllowed st 0 "m" (modern ⟨"uid-m", "boot-m2", "u1:3"⟩ h2 false) (modern bS h2 false)).1
+      && !(rebuildAllowed st 0 "m" (modern ⟨"uid-m", "boot-m2", "u9:1"⟩ h2 false) (modern bS h2 false)).1
+      && !(rebuildAllowed st 0 "m" (modern bM ⟨"M2", "5:fresh"⟩ false) (modern bS h2 false)).1
+      && !(rebuildAllowed st 0 "m" (Seen.modern bM h2 false false [] "") (modern bS h2 false)).1
+      && !(rebuildAllowed st 0 "m" .unreadable (modern bS h2 false)).1
+      && !(rebuildAllowed withI 0 "s" (modern bS h2 false) (modern bM h2 false)).1
+      && (rebuildAllowed st 0 "m" (modern bM h2 true) (modern bS h2 false)).1
+      && !(rebuildAllowed st 0 "m" (modern bM2 h2 true) (modern bS h2 false)).1
+      && (rebuildAllowed st 0 "m" (modern bM h2 true) (modern bS h2 true)).1
+      && !(rebuildAllowed absent 0 "m" (modern bM h2 false) (modern bS h2 false)).1
+      && (rebuildAllowed { clusterUid := "cu", parts := [(0, .untracked "tch")] } 0 "m" .legacy .legacy).1)
+  -- the four paired cases (review 2026-10-09)
+  let hold1 := bulk st 0 "m" (Seen.modern bM2 h2 true false [] "bulk") "t"
+  check ctx "history pair A: a bulk seen PART-WAY (copy N+1, no receipt yet) keeps the record and holds; the receipt arriving on a later pass adopts it and LIFTS the hold"
+    ((hold1.1.recorded 0 == some h2 && (hold1.1.held 0).isSome && !(rebuildAllowed hold1.1 0 "m" (modern bM h2 false) (modern bS h2 false)).1)
+      && (match bulk hold1.1 0 "m" (Seen.modern bM2 h3 true false [⟨"u1:3", "u1:4", "3:bulk"⟩] "bulk") "t" with
+          | (s', .recorded 0 r _) => r.gen == 4 && s'.held 0 == none | _ => false))
+  check ctx "history pair B: a bulk that CRASHED part-way and restarted (new boot, copy N+1, the old epoch, no receipt) stays held with the record retained — never adopted, never forgotten"
+    (let crashed := Seen.modern ⟨"uid-m", "boot-m2", "u1:4"⟩ h2 true false [] "promotion"
+     let (s', c) := bulk st 0 "m" crashed "t"
+     s'.recorded 0 == some h2 && (s'.held 0).isSome && (match c with | .held 0 _ => true | _ => false)
+       && (rebind s' 0 "m" crashed).1 == s')
+  check ctx "history pair C: a NORMAL restart (same copy id and history, new boot / pod UID, healthy) re-binds the holder; rebuilds from it are allowed again"
+    (let restarted := modern ⟨"uid-m9", "boot-m9", "u1:3"⟩ h2 false
+     match rebind st 0 "m" restarted with
+     | (s', .recorded 0 r _) => r.binding.bootId == "boot-m9" && r.gen == 3 && (rebuildAllowed s' 0 "m" restarted (modern bS h2 false)).1
+     | _ => false)
+  check ctx "history pair D: an EMPTY DB under the same name (another copy id and history) never re-binds and is no bulk: the record stays, rebuilds from it are refused"
+    (let emptyNew := modern ⟨"uid-m9", "boot-m9", "u9:1"⟩ ⟨"M9", "7:new"⟩ true
+     (rebind st 0 "m" emptyNew).1 == st && (bulk st 0 "m" emptyNew "t").1 == st
+       && !(rebuildAllowed st 0 "m" emptyNew (modern bS h2 false)).1)
+  -- (6) strict parser
+  let full := { withI with origin := "first-build" }
+  let txt := serialize full
+  check ctx "history (6): round trip; duplicates (cluster, origin, part, intent), unknown reason / kind / code, gen 0, empty tokens, no end = the whole record CORRUPT"
+    (parse txt == some full
+      && parse (txt.replace "end" "part 0 untracked x\nend") == none
+      && parse (txt.replace "end" "cluster cu\nend") == none
+      && parse (txt.replace "end" "origin -\nend") == none
+      && parse (txt.replace "end" ((txt.splitOn "\n").filter (·.startsWith "intent") |>.headD "" |>.replace "t-11" "t-99") ++ "\nend") == none
+      && parse (txt.replace " promotion -\n" " invented -\n") == none
+      && (txt.splitOn " promotion -\n").length == 2
+      && parse (txt.replace "part 0 known 3 " "part 0 known 0 ") == none
+      && parse (txt.replace "cluster cu" "cluster  cu") == none
+      && parse (txt.replace "\nend" "") == none
+      && parse (txt.replace "unknown" "unknown") == some full
+      && (load "cu" 1 (some (some (txt.replace "part 0 known 3 " "part 0 known 0 "))) false).recorded 0 == none)
+  -- review of aea6cfd
+  let bulkRec : Store := { clusterUid := "cu", parts := [(0, .known { rec0 with reason := "bulk" } none)] }
+  check ctx "history P1-3 (CI 37834294217): an EMPTY source that IS the recorded copy with the recorded history is the authoritative state (a proven bulk or plain deletes: empty-source 2); an empty OTHER copy or history is refused, whatever the target"
+    ((rebuildAllowed bulkRec 0 "m" (modern bM h2 true) (modern bS h2 false)).1
+      && (rebuildAllowed st 0 "m" (modern bM h2 true) (modern bS h2 false)).1
+      && (rebuildAllowed st 0 "m" (modern bM h2 true) .unreadable).1
+      && !(rebuildAllowed bulkRec 0 "m" (modern ⟨"uid-m", "boot-m", "u9:1"⟩ h2 true) (modern bS h2 false)).1
+      && !(rebuildAllowed st 0 "m" (modern ⟨"uid-m", "boot-m", "u9:1"⟩ h2 true) (modern bS h2 false)).1
+      && !(rebuildAllowed bulkRec 0 "m" (modern bM ⟨"M", "9:z"⟩ true) (modern bS h2 false)).1
+      && !(rebuildAllowed st 0 "m" (modern bM ⟨"M", "9:z"⟩ true) (modern bS h2 false)).1)
+  let full := "STAT rocksdb_copy_identity_consistent 1\r\nSTAT rocksdb_quarantined 0\r\nSTAT rocksdb_copy_partial 0\r\nSTAT rebuild_in_flight 0\r\nSTAT rocksdb_copy_id u1:3\r\nSTAT reconstruction_boot_id boot-m\r\nSTAT rocksdb_master_id M\r\nSTAT rocksdb_source_epoch 2:e\r\nSTAT curr_items 5\r\n"
+  check ctx "history P1-4: LEGACY only without ANY newer key; a modern reply missing a needed key, invalid or without a pod UID is UNREADABLE; running / parked / partial are unhealthy"
+    (seenOfReply "uid-m" (some "STAT curr_items 5\r\nSTAT rocksdb_master_id M\r\nEND\r\n") == .legacy
+      && seenOfReply "uid-m" (some ((full.replace "STAT rocksdb_copy_id u1:3\r\n" "") ++ "END\r\n")) == .unreadable
+      && seenOfReply "uid-m" (some (full ++ "STAT rebuild_parked x\r\nEND\r\n")) == .unreadable
+      && seenOfReply "" (some (full ++ "END\r\n")) == .unreadable
+      && seenOfReply "uid-m" (some full) == .unreadable
+      && seenOfReply "uid-m" (some (full ++ "END\r\n")) == Seen.modern bM h2 true false [] ""
+      -- CI 37834294217: a non-RocksDB flared reports R3 but NO copy key = no copy evidence (legacy), not unreadable
+      && seenOfReply "uid-m" (some "STAT curr_items 5\r\nSTAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nSTAT repl_read_source_reason ok\r\nEND\r\n") == .legacy
+      && seenOfReply "uid-m" (some "STAT curr_items 5\r\nSTAT repl_read_source_state eligible\r\nSTAT rebuild_in_flight 0\r\nEND\r\n") == .unreadable
+      && seenOfReply "uid-m" (some "STAT curr_items 5\r\nSTAT repl_read_source_state eligible\r\nSTAT rocksdb_master_id M\r\nEND\r\n") == .unreadable
+      && seenOfReply "uid-m" (some "STAT curr_items 5\r\nSTAT repl_read_source_state eligible\r\n") == .unreadable
+      && seenOfReply "uid-m" (some "STAT curr_items 5\r\nSTAT repl_read_source_state bogus\r\nEND\r\n") == .unreadable
+      && (match seenOfReply "uid-m" (some (full ++ "STAT reconstruction_current_state running\r\nEND\r\n")) with | .modern _ _ healthy _ _ _ => !healthy | _ => false)
+      && (match seenOfReply "uid-m" (some (full ++ "STAT rebuild_parked 1\r\nEND\r\n")) with | .modern _ _ healthy _ _ _ => !healthy | _ => false)
+      && (match seenOfReply "uid-m" (some ((full.replace "rocksdb_copy_partial 0" "rocksdb_copy_partial 1") ++ "END\r\n")) with | .modern _ _ healthy _ _ _ => !healthy | _ => false)
+      && (match seenOfReply "uid-m" (some (full ++ "STAT rocksdb_bulk_chain u1:2>u1:3@2:e\r\nSTAT rocksdb_source_epoch_reason bulk\r\nEND\r\n")) with
+          | .modern _ _ _ _ chain reason => chain == [⟨"u1:2", "u1:3", "2:e"⟩] && reason == "bulk" | _ => false))
+  let tchReply := "STAT curr_items 5\r\nSTAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nSTAT repl_read_source_reason ok\r\nEND\r\n"
+  check ctx "history (CI 37834294217): a first build of a non-RocksDB cluster (R3 keys, no copy key) becomes UNTRACKED (previous behaviour), so its rebuilds are not held as 'not recorded'"
+    (let copies := [("m", seenOfReply "uid-m" (some tchReply)), ("s", seenOfReply "uid-s" (some tchReply))]
+     match establish fresh 0 (some "m") copies false "t" with
+     | (s', .untracked 0 _) => (rebuildAllowed s' 0 "m" ((copies.lookup "m").getD .unreadable) ((copies.lookup "s").getD .unreadable)).1
+     | _ => false)
+  check ctx "history (cost, CI 741d0c5 / local 0db2229 lease loss): a pass reads only what can change the record — every copy only while a record can be established; the holder of a known record; an intent's target; nothing for untracked / unknown without approval, and those are not observed every pass"
+    (need fresh 0 false == .copies && urgent fresh 0 false
+      && need { clusterUid := "cu" } 0 false == .nothing
+      && need st 0 false == .holder "m" && !urgent st 0 false
+      && need withI 0 false != .copies && urgent withI 0 false
+      && need { clusterUid := "cu", parts := [(0, .untracked "tch")] } 0 false == .nothing
+      && need { clusterUid := "cu", parts := [(0, .untracked "tch")] } 0 true == .copies
+      && need absent 0 false == .nothing && need absent 0 true == .copies
+      && !urgent { clusterUid := "cu", parts := [(0, .untracked "tch")] } 0 false
+      && rebuildNeedsSource st 0 && !rebuildNeedsSource withI 0
+      && !rebuildNeedsSource { clusterUid := "cu", parts := [(0, .untracked "tch")] } 0
+      && !rebuildNeedsSource absent 0)
+  check ctx "history (CI 0db2229 authority 29): an APPROVED adoption with no master in the map adopts only an unambiguous history (every copy healthy, modern, the same history, one last master = holder); never without approval, never on differing histories / an unhealthy or unreadable copy / no or several last masters"
+    (let same := [("m", modern bM h2 false), ("s", modern bS h2 false)]
+     (match establish absent 0 none same true "t" (some "m") with
+       | (s', .recorded 0 r _) => r.holder == "m" && r.reason == "adopted" && s'.recorded 0 == some h2 | _ => false)
+     && (establish absent 0 none same false "t" (some "m")).2 == .none
+     && (match establish absent 0 none [("m", modern bM h2 false), ("s", modern bS ⟨"M", "9:z"⟩ false)] true "t" (some "m") with | (_, .held 0 _) => true | _ => false)
+     && (match establish absent 0 none [("m", modern bM h2 false), ("s", .unreadable)] true "t" (some "m") with | (_, .held 0 _) => true | _ => false)
+     && (match establish absent 0 none [("m", Seen.modern bM h2 false false [] ""), ("s", modern bS h2 false)] true "t" (some "m") with | (_, .held 0 _) => true | _ => false)
+     && (match establish absent 0 none same true "t" none with | (_, .held 0 _) => true | _ => false)
+     && (match establish absent 0 none same true "t" (some "x") with | (_, .held 0 _) => true | _ => false)
+     && (match establish fresh 0 none same false "t" (some "m") with | (_, .held 0 _) => true | _ => false))
+  check ctx "history (supplement): an intent whose fromGen / fromHist is not the CURRENT record is refused; a record changed under a pending intent = HOLD at resolution"
+    ((beginIntent st { i with fromGen := 2 }).isNone && (beginIntent st { i with fromHist := ⟨"M", "1:old"⟩ }).isNone
+      && (match resolveIntent (withI.setPart 0 (.known { rec0 with gen := 9 } none)) i 12 ["t-11"] true (modern bS ⟨"M", "4:p"⟩ false) "t" with | (_, .held 0 _) => true | _ => false))
+  check ctx "history (supplement): a pending intent's id is NEVER dropped from the committed map (the last 16 otherwise)"
+    (let many := (List.range 30).map (s!"t{·}")
+     keepTransitions many ["t3"] == ["t3"] ++ (many.drop 14) && (keepTransitions many []).length == 16)
+  check ctx "history (supplement): a first build persists no node map until its history record is written; an unreadable record blocks it too"
+    (!mapMayBePersisted (some none) false false && mapMayBePersisted (some none) false true
+      && mapMayBePersisted (some none) true false && !mapMayBePersisted none true true && mapMayBePersisted (some (some "x")) false false)
+  -- the minimal integration: commit -> persisted map -> operator restart (strict
+  -- validation) -> restored map -> resolution
+  let nS : FlareNode := { serverName := "s", serverPort := 12121, role := .Master, state := .Active, partition := 0 }
+  let nM : FlareNode := { serverName := "m", serverPort := 12121, role := .Slave, state := .Prepare, partition := 0 }
+  let committed : FlareClusterState := { FlareClusterState.default with nodeMapVersion := 12, nodeMap := [("s:12121", nS), ("m:12121", nM)], transitions := keepTransitions ["t-11"] ["t-11"] }
+  let restored := FlareOperator.NodeMapRecovery.validate (FlareClusterState.serializeNodeMap committed)
+  check ctx "history P1-2 (integration): a committed map with a transition id survives the persisted format and the STRICT startup validation; the restored map resolves the intent"
+    (match restored with
+     | .ok pm => pm.transitions == ["t-11"] && pm.nodeMapVersion == 12
+         && (match resolveIntent withI i pm.nodeMapVersion pm.transitions ((pm.lookupNode "s:12121").map (·.role) == some .Master) (modern bS ⟨"M", "4:p"⟩ false) "t" with
+             | (_, .recorded 0 r _) => r.holder == "s" | _ => false)
+     | .error _ => false)
+  check ctx "history P1-2: a malformed transition line is rejected by the strict validation"
+    (match FlareOperator.NodeMapRecovery.validate ((FlareClusterState.serializeNodeMap committed) ++ "\ntransition=t-11") with | .error _ => true | .ok _ => false)
+  check ctx "history: a decision uses the new store only when its write SUCCEEDED"
+    (afterWrite st withI true == withI && afterWrite st withI false == st)
+  -- the classifier wires REJOINING: another history than the authoritative one is never a candidate
+  let b := "STAT rocksdb_copy_identity_consistent 1\r\nSTAT rocksdb_quarantined 0\r\nSTAT rocksdb_copy_partial 0\r\nSTAT rebuild_in_flight 0\r\nSTAT rocksdb_copy_id u:1\r\nSTAT reconstruction_boot_id 7\r\nSTAT rocksdb_master_id M2\r\nSTAT rocksdb_source_epoch 5:fresh\r\n"
+  let o : PromotionEvidence.Observed := { mapPrepare := false, mapActive := true, podReady := true, partitionHasMaster := false, lastMasterHistory := some ("M", "2:e") }
+  check ctx "classifier: a REJOINING copy (another history than the authoritative one) is FORBIDDEN — empty, eligible to its current source, or not"
+    ((match PromotionEvidence.classify (some (b ++ "STAT curr_items 0\r\nSTAT repl_read_source_eligible 0\r\nEND\r\n")) o with | .forbidden _ => true | _ => false)
+      && (match PromotionEvidence.classify (some (b ++ "STAT curr_items 9\r\nSTAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nEND\r\n")) o with | .forbidden _ => true | _ => false)
+      && (match PromotionEvidence.classify (some (b ++ "STAT curr_items 0\r\nSTAT repl_read_source_eligible 0\r\nEND\r\n")) { o with lastMasterHistory := none } with | .empty => true | _ => false))
+
+-- ─── copy retention §10: rebuild concurrency ──────────────────────────────
+
+open FlareOperator.RebuildConcurrency in
+private def checkRebuildConcurrency (ctx : Ctx) : IO Unit := do
+  let st := fun (l : List (String × FlareNode)) => ({ nodeMap := l } : FlareClusterState).rebuildPartitionMap
+  let m0 := ("m0", holdNode .Master .Active 0 "m0")
+  let m1 := ("m1", holdNode .Master .Active 1 "m1")
+  let before := st [m0, m1, ("a", holdNode .Proxy .Active (-1) "a"), ("b", holdNode .Proxy .Active (-1) "b"),
+    ("c", holdNode .Proxy .Active (-1) "c")]
+  -- the pass assigns three proxies as rebuilding slaves at once
+  let after := st [m0, m1, ("a", holdNode .Slave .Prepare 0 "a"), ("b", holdNode .Slave .Prepare 0 "b"),
+    ("c", holdNode .Slave .Prepare 1 "c")]
+  let d := gate before after 1 1
+  check ctx "rebuild concurrency: one new rebuild is admitted, the others stay Proxy (cluster limit 1)"
+    (d.held.map Prod.fst == ["b", "c"]
+      && ((d.state.lookupNode "a").map (·.role)) == some FlareRole.Slave
+      && ((d.state.lookupNode "b").map (·.role)) == some FlareRole.Proxy
+      && ((d.state.lookupNode "c").map (·.role)) == some FlareRole.Proxy
+      && ((d.state.lookupPartition 0).map (·.slaves)) == some ["a"])
+  let d2 := gate before after 1 2
+  check ctx "rebuild concurrency: per partition 1 — a second rebuild in the same partition is held, another partition's is admitted"
+    (d2.held.map Prod.fst == ["b"] && ((d2.state.lookupNode "c").map (·.role)) == some FlareRole.Slave)
+  let busy := st [m0, m1, ("x", holdNode .Slave .Prepare 1 "x"), ("a", holdNode .Proxy .Active (-1) "a")]
+  let busyAfter := st [m0, m1, ("x", holdNode .Slave .Prepare 1 "x"), ("a", holdNode .Slave .Prepare 0 "a")]
+  check ctx "rebuild concurrency: a rebuild already in the map counts (also after an operator restart: the map is persisted)"
+    ((gate busy busyAfter 1 1).held.map Prod.fst == ["a"])
+  let idle := st [m0, m1, ("a", holdNode .Proxy .Active (-1) "a")]
+  let idleAfter := st [m0, m1, ("a", holdNode .Slave .Prepare 0 "a")]
+  check ctx "rebuild concurrency: a node reporting a running reconstruction in its stats counts as well"
+    ((gate idle idleAfter 1 1 ["y"]).held.map Prod.fst == ["a"] && (gate idle idleAfter 1 1).held.isEmpty)
+  -- 41278035134: a proxy whose OWN reconstruction still reports running is
+  -- not held by itself; another node's running rebuild still holds it
+  check ctx "rebuild concurrency: a node's own running reconstruction does not hold its own new assignment (another node's does)"
+    ((gate idle idleAfter 1 1 ["a"]).held.isEmpty
+      && ((gate idle idleAfter 1 1 ["a"]).state.lookupNode "a").map (·.role) == some FlareRole.Slave
+      && (gate idle idleAfter 1 1 ["a", "y"]).held.map Prod.fst == ["a"])
+  -- R7 (review 2026-10-08): a member the MAP has Active but whose stats
+  -- report a running reconstruction counts — for the cluster and for its
+  -- partition — and stops new assignments and resumes
+  let actBefore := st [m0, m1, ("z", holdNode .Slave .Active 1 "z"), ("a", holdNode .Proxy .Active (-1) "a")]
+  let actAfter := st [m0, m1, ("z", holdNode .Slave .Active 1 "z"), ("a", holdNode .Slave .Prepare 0 "a")]
+  let samePartAfter := st [m0, m1, ("z", holdNode .Slave .Active 1 "z"), ("a", holdNode .Slave .Prepare 1 "a")]
+  check ctx "rebuild concurrency (R7): a map=Active member running a reconstruction holds another partition's new assignment (cluster limit 1)"
+    ((gate actBefore actAfter 1 1 ["z"]).held.map Prod.fst == ["a"] && (gate actBefore actAfter 1 1).held.isEmpty)
+  check ctx "rebuild concurrency (R7): ... and its own partition's new assignment even with room in the cluster (partition limit 1)"
+    ((gate actBefore samePartAfter 1 2 ["z"]).held.map Prod.fst == ["a"] && (gate actBefore samePartAfter 1 2).held.isEmpty)
+  let parkState := st [m0, m1, ("x", holdNode .Slave .Prepare 0 "x"), ("z", holdNode .Slave .Active 1 "z")]
+  check ctx "rebuild concurrency (R7): a parked rebuild is NOT resumed while a map=Active member runs a reconstruction"
+    (resumeCandidate parkState 1 1 ["x"] ["z"] == none && resumeCandidate parkState 1 1 ["x"] [] == some "x")
+  -- round 2: contradictory observations — a FRESH running / unknown reading
+  -- wins over an older parked one; a fresh parked-idle reading frees the slot
+  let rep := fun (body : String) => some (body ++ "END\r\n")
+  check ctx "rebuild concurrency (review round 3): parked=1 with in_flight / snapshot_serving MISSING is unknown (not parked-idle) — the reviewer's reply"
+    (obsOfReply (some true) (rep "STAT rebuild_parked 1\r\nSTAT reconstruction_current_state running\r\n") == .unknown
+      && obsOfReply (some true) (rep "STAT rebuild_parked 1\r\nSTAT rebuild_in_flight 0\r\nSTAT reconstruction_current_state running\r\n") == .unknown)
+  check ctx "rebuild concurrency (review round 3): parked=1 with in_flight / serving INVALID is unknown; an explicit 0 for both is parked-idle"
+    (obsOfReply (some true) (rep "STAT rebuild_parked 1\r\nSTAT rebuild_in_flight x\r\nSTAT rocksdb_snapshot_serving 0\r\n") == .unknown
+      && obsOfReply (some true) (rep "STAT rebuild_parked 1\r\nSTAT rebuild_in_flight 0\r\nSTAT rocksdb_snapshot_serving 2\r\n") == .unknown
+      && obsOfReply (some true) (rep "STAT rebuild_parked yes\r\nSTAT rebuild_in_flight 0\r\nSTAT rocksdb_snapshot_serving 0\r\n") == .unknown
+      && obsOfReply (some true) (rep "STAT rebuild_parked 1\r\nSTAT rebuild_in_flight 0\r\nSTAT rocksdb_snapshot_serving 0\r\nSTAT reconstruction_current_state running\r\n") == .parkedIdle)
+  check ctx "rebuild concurrency (review round 3): running / in flight / idle; an invalid reconstruction state is unknown; absent only when confirmed; no reply or no END is unknown"
+    (obsOfReply (some true) (rep "STAT reconstruction_current_state running\r\n") == .running
+      && obsOfReply (some true) (rep "STAT rebuild_parked 1\r\nSTAT rebuild_in_flight 1\r\n") == .running
+      && obsOfReply (some true) (rep "STAT rebuild_in_flight 1\r\n") == .running
+      && obsOfReply (some true) (rep "STAT reconstruction_current_state succeeded\r\nSTAT rebuild_parked 0\r\n") == .idle
+      && obsOfReply (some true) (rep "STAT reconstruction_current_state walking\r\n") == .unknown
+      && obsOfReply (some false) none == .absent
+      && obsOfReply none none == .unknown
+      && obsOfReply (some true) none == .unknown
+      && obsOfReply (some true) (some "STAT rebuild_parked 0\r\n") == .unknown)
+  check ctx "rebuild concurrency (round 2): an older parked key re-read as running or unknown is NOT subtracted; one re-read as parked-idle is; one not re-read keeps its standing"
+    (reconcile ["x", "y", "w"] [("x", .running), ("y", .unknown), ("v", .parkedIdle)] == (["x", "y"], ["w", "v"]))
+  let pBefore := st [m0, m1, ("x", holdNode .Slave .Prepare 1 "x"), ("a", holdNode .Proxy .Active (-1) "a")]
+  let pAfter := st [m0, m1, ("x", holdNode .Slave .Prepare 1 "x"), ("a", holdNode .Slave .Prepare 0 "a")]
+  check ctx "rebuild concurrency (round 2): a key both parked (stale) and running (fresh) holds the cluster slot; it is not resumed"
+    ((gate pBefore pAfter 1 1 ["x"] ["x"]).held.map Prod.fst == ["a"]
+      && (gate pBefore pAfter 1 1 [] ["x"]).held.isEmpty
+      && resumeCandidate pBefore 1 1 ["x"] ["x"] == none)
+  -- not gated: a rejoining member (Slave before) and a master reconstruction
+  let rejoinBefore := st [m0, m1, ("x", holdNode .Slave .Prepare 1 "x"), ("r", holdNode .Slave .Down 0 "r")]
+  let rejoinAfter := st [m0, m1, ("x", holdNode .Slave .Prepare 1 "x"), ("r", holdNode .Slave .Prepare 0 "r")]
+  check ctx "rebuild concurrency: a rejoining Slave is never turned back into a Proxy (it may hold the only data)"
+    ((gate rejoinBefore rejoinAfter 1 1).held.isEmpty)
+  let mBefore := st [("p", holdNode .Proxy .Active (-1) "p"), ("x", holdNode .Slave .Prepare 1 "x"), m1]
+  let mAfter := st [("p", holdNode .Master .Prepare 0 "p"), ("x", holdNode .Slave .Prepare 1 "x"), m1]
+  check ctx "rebuild concurrency: a master reconstruction is not gated (the partition needs a master)"
+    ((gate mBefore mAfter 1 1).held.isEmpty)
+  -- a parked rebuild with nothing in flight gives back its cluster slot AND
+  -- its partition's slot (pf-dev 2026-11-05: a replica parked on no_space
+  -- with its old copy held the partition's slot against an empty replica)
+  let parkedBefore := st [m0, m1, ("x", holdNode .Slave .Prepare 1 "x"), ("a", holdNode .Proxy .Active (-1) "a"),
+    ("b", holdNode .Proxy .Active (-1) "b")]
+  let parkedAfter := st [m0, m1, ("x", holdNode .Slave .Prepare 1 "x"), ("a", holdNode .Slave .Prepare 0 "a"),
+    ("b", holdNode .Slave .Prepare 1 "b")]
+  check ctx "rebuild concurrency: a parked idle rebuild frees the cluster slot (a in P0 admitted; b waits for the cluster limit, not for x)"
+    ((gate parkedBefore parkedAfter 1 1 [] ["x"]).held == [("b", "the cluster already has 1 running rebuild(s) (limit 1)")]
+      && (gate parkedBefore parkedAfter 1 1).held.map Prod.fst == ["a", "b"])
+  let sameBefore := st [m0, m1, ("x", holdNode .Slave .Prepare 1 "x"), ("b", holdNode .Proxy .Active (-1) "b")]
+  let sameAfter := st [m0, m1, ("x", holdNode .Slave .Prepare 1 "x"), ("b", holdNode .Slave .Prepare 1 "b")]
+  check ctx "rebuild concurrency: a parked idle rebuild frees its PARTITION's slot (b in P1 admitted beside parked x); a running x still holds it"
+    ((gate sameBefore sameAfter 1 1 [] ["x"]).held.isEmpty
+      && ((gate sameBefore sameAfter 1 1 [] ["x"]).state.lookupNode "b").map (·.role) == some FlareRole.Slave
+      && (gate sameBefore sameAfter 1 1).held.map Prod.fst == ["b"]
+      && (gate sameBefore sameAfter 1 1 ["x"] ["x"]).held.map Prod.fst == ["b"])
+  let twoParked := st [m0, m1, ("x", holdNode .Slave .Prepare 1 "x"), ("b", holdNode .Slave .Prepare 1 "b")]
+  check ctx "rebuild concurrency: of two parked rebuilds in one partition one is resumed (the other parked one holds no slot); none while one of them runs"
+    (resumeCandidate twoParked 1 1 ["x", "b"] == some "x"
+      && resumeCandidate twoParked 1 1 ["x"] == none
+      && resumeCandidate twoParked 1 1 ["x", "b"] ["b"] == none)
+  let resumeState := st [m0, m1, ("x", holdNode .Slave .Prepare 1 "x"), ("a", holdNode .Slave .Prepare 0 "a")]
+  check ctx "rebuild concurrency: a parked rebuild is resumed only when no other rebuild runs (it takes its slot again)"
+    (resumeCandidate resumeState 1 1 ["x"] == none
+      && resumeCandidate resumeState 1 1 ["x", "a"] == some "x"
+      && resumeCandidate (st [m0, m1, ("x", holdNode .Slave .Prepare 1 "x")]) 1 1 ["x"] == some "x"
+      && resumeCandidate (st [m0, m1, ("x", holdNode .Slave .Prepare 1 "x")]) 1 1 ["x"] ["y"] == none)
+
+-- ─── history continuation across an ordered handover (A3) ──────────────
+
+open FlareOperator.HistoryContinuation in
+private def checkHistoryContinuation (ctx : Ctx) : IO Unit := do
+  let src : SourceObs := { latestSeq := some 100, epoch := some "7:e", masterId := some "M", boot := some 1 }
+  let ok : ReplicaObs := {
+    key := "r1", bindingAtStart := some "u/1/c", bindingNow := some "u/1/c", cursor := some 100,
+    followState := some "following", epoch := some "7:e", masterId := some "M", inFlightFromOld := some 0,
+    activeSlave := true, ready := true, r3Eligible := true }
+  check ctx "history continuation: a replica whose follow cursor is the old master's last sequence (same epoch, master_id, binding, nothing in flight) is prepared"
+    (excluded src (some 100) (some 100) ok == none)
+  check ctx "history continuation: a cursor behind or ahead of L, or unreadable, excludes it"
+    ((excluded src (some 100) (some 100) { ok with cursor := some 99 }).isSome
+      && (excluded src (some 100) (some 100) { ok with cursor := some 101 }).isSome
+      && (excluded src (some 100) (some 100) { ok with cursor := none }).isSome)
+  check ctx "history continuation: L moved between the readings (or unreadable) excludes every replica"
+    ((excluded src (some 99) (some 100) ok).isSome && (excluded src (some 100) none ok).isSome
+      && (excluded { src with latestSeq := some 101 } (some 100) (some 100) ok).isSome)
+  check ctx "history continuation: follow off / disconnected / needs_rebuild excludes it (it rebuilds as before); idle at the barrier with the cursor at L does not"
+    ((excluded src (some 100) (some 100) { ok with followState := none }).isSome
+      && (excluded src (some 100) (some 100) { ok with followState := some "disconnected" }).isSome
+      && (excluded src (some 100) (some 100) { ok with needsRebuild := true }).isSome
+      && (excluded src (some 100) (some 100) { ok with followState := some "idle" }).isNone)
+  check ctx "history continuation: another epoch or master_id, or the old master's unreadable, excludes it"
+    ((excluded src (some 100) (some 100) { ok with epoch := some "6:x" }).isSome
+      && (excluded src (some 100) (some 100) { ok with masterId := some "N" }).isSome
+      && (excluded { src with epoch := none } (some 100) (some 100) { ok with epoch := none }).isSome)
+  check ctx "history continuation: a forward still in flight from the old master (or unreadable) excludes it"
+    ((excluded src (some 100) (some 100) { ok with inFlightFromOld := some 1 }).isSome
+      && (excluded src (some 100) (some 100) { ok with inFlightFromOld := none }).isSome)
+  check ctx "history continuation: another pod/process/copy, not Ready, not Active, not R3, partial, quarantine or a pending repair excludes it"
+    ((excluded src (some 100) (some 100) { ok with bindingNow := some "u/2/c" }).isSome
+      && (excluded src (some 100) (some 100) { ok with bindingAtStart := none }).isSome
+      && (excluded src (some 100) (some 100) { ok with ready := false }).isSome
+      && (excluded src (some 100) (some 100) { ok with activeSlave := false }).isSome
+      && (excluded src (some 100) (some 100) { ok with r3Eligible := false }).isSome
+      && (excluded src (some 100) (some 100) { ok with partialCopy := true }).isSome
+      && (excluded src (some 100) (some 100) { ok with quarantined := true }).isSome
+      && (excluded src (some 100) (some 100) { ok with repairPending := true }).isSome)
+  let (prep, out) := partition src (some 100) (some 100) [ok, { ok with key := "r2", cursor := some 98 }, { ok with key := "r3" }]
+  check ctx "history continuation: partition keeps map order and says why the others rebuild"
+    (prep == ["r1", "r3"] && out.map Prod.fst == ["r2"])
+  check ctx "history continuation: the pin is released only when every prepared replica is past S (an unreadable cursor keeps it)"
+    (releaseReady 100 ["r1", "r3"] [("r1", some 101), ("r3", some 105)]
+      && !releaseReady 100 ["r1", "r3"] [("r1", some 101), ("r3", some 100)]
+      && !releaseReady 100 ["r1", "r3"] [("r1", some 101), ("r3", none)]
+      && !releaseReady 100 ["r1", "r3"] [("r1", some 101)]
+      && releaseReady 100 [] [])
+  check ctx "history continuation: the handover id binds partition, attempt and demote time"
+    (handoverId 0 2 1700 == "p0-a2-1700" && handoverId 0 2 1700 != handoverId 0 3 1700)
+
+-- ─── copy retention §7: discard approvals ───────────────────────────────
+
+open FlareOperator.RedundantCopy in
+private def checkRedundantCopy (ctx : Ctx) : IO Unit := do
+  let nd := fun (name : String) (role : FlareRole) (st : FlareState) (part : Int) =>
+    ({ serverName := name, serverPort := 12121, role := role, state := st, partition := part } : FlareNode)
+  -- partition 0: master m, Active slave s2 (another pod), and s1 whose rebuild is parked
+  let st : FlareClusterState :=
+    { nodeMap := [("m:1", nd "m" .Master .Active 0), ("s1:1", nd "s1" .Slave .Prepare 0), ("s2:1", nd "s2" .Slave .Active 0)],
+      partitionMap := [(0, { master := some "m:1", slaves := ["s1:1", "s2:1"] })], nodeMapVersion := 9 }
+  let other : Other :=
+    { key := "s2:1", podUid := "U2", active := true, sameHistory := true, repairOpen := false,
+      consistent := some 1, quarantined := some 0, dropped := some 0, failed := some 0, followOk := true }
+  let f : Facts :=
+    { key := "s1:1", podUid := "U1", copyId := "c-1:1", flaredMapVersion := some 9, consistent := some 1, quarantined := some 0,
+      others := [other], candidates := [] }
+  let kept := fun (v : Verdict) => match v with | .keep _ => true | _ => false
+  check ctx "redundant copy: the master and an Active same-history slave on another pod → grant, bound to the pod, copy and map version"
+    (decide st f == .grant "U1" "c-1:1" 9)
+  check ctx "redundant copy: only the master is left (no other Active copy) → keep"
+    (kept (decide st { f with others := [] }) && kept (decide st { f with others := [{ other with key := "m:1" }] }))
+  check ctx "redundant copy: a masterless partition keeps the copy (it may be the last data)"
+    (kept (decide { st with nodeMap := st.nodeMap.map fun (k, n) => if k == "m:1" then (k, { n with role := .Slave }) else (k, n) } f)
+      && kept (decide { st with nodeMap := st.nodeMap.map fun (k, n) => if k == "m:1" then (k, { n with state := .Down }) else (k, n) } f))
+  check ctx "redundant copy: the other copy has another history, an open repair, a new drop, the same pod UID, an unproven follow, or is not Active → keep"
+    (kept (decide st { f with others := [{ other with sameHistory := false }] })
+      && kept (decide st { f with others := [{ other with repairOpen := true }] })
+      && kept (decide st { f with others := [{ other with dropped := some 1 }] })
+      && kept (decide st { f with others := [{ other with failed := some 3 }] })
+      && kept (decide st { f with others := [{ other with podUid := "U1" }] })
+      && kept (decide st { f with others := [{ other with podUid := "" }] })
+      && kept (decide st { f with others := [{ other with followOk := false }] })
+      && kept (decide st { f with others := [{ other with active := false }] })
+      && kept (decide { st with nodeMap := st.nodeMap.map fun (k, n) => if k == "s2:1" then (k, { n with state := .Prepare }) else (k, n) } f))
+  check ctx "redundant copy: a promotion candidate, the master itself, an Active slave and a node outside the map are kept"
+    (kept (decide st { f with candidates := ["s1:1"] })
+      && kept (decide st { f with key := "m:1" })
+      && kept (decide st { f with key := "s2:1", others := [{ other with key := "s1:1" }] })
+      && kept (decide st { f with key := "zz:1" }))
+  check ctx "redundant copy: quarantined, inconsistent or unreported copies, an unknown pod UID or copy id, a malformed token → keep"
+    (kept (decide st { f with quarantined := some 1 }) && kept (decide st { f with quarantined := none })
+      && kept (decide st { f with consistent := some 0 }) && kept (decide st { f with consistent := none })
+      && kept (decide st { f with podUid := "" }) && kept (decide st { f with copyId := "" })
+      && kept (decide st { f with copyId := "c-1:1; rm -rf /" }) && kept (decide st { f with copyId := "a b" }))
+  check ctx "redundant copy: flared's map version must equal the operator's (stale, missing → keep)"
+    (kept (decide st { f with flaredMapVersion := some 8 }) && kept (decide st { f with flaredMapVersion := none })
+      && decide { st with nodeMapVersion := 10 } { f with flaredMapVersion := some 10 } == .grant "U1" "c-1:1" 10)
+  check ctx "redundant copy: missing telemetry of the other copy fails closed (its identity / quarantine not reported, the master's dropped / failed counters for it not reported) → keep"
+    (kept (decide st { f with others := [{ other with consistent := none }] })
+      && kept (decide st { f with others := [{ other with consistent := some 0 }] })
+      && kept (decide st { f with others := [{ other with quarantined := none }] })
+      && kept (decide st { f with others := [{ other with quarantined := some 1 }] })
+      && kept (decide st { f with others := [{ other with dropped := none }] })
+      && kept (decide st { f with others := [{ other with failed := none }] })
+      && kept (decide st { f with others := [{ other with dropped := none, failed := none, consistent := none, quarantined := none }] }))
+  check ctx "redundant copy: no baseline — drops counted before the operator looked (or before it restarted) still keep the copy; only zero since the master's flared started grants"
+    (kept (decide st { f with others := [{ other with dropped := some 27, failed := some 0 }] })
+      && kept (decide st { f with others := [{ other with dropped := some 0, failed := some 454 }] })
+      && decide st { f with others := [{ other with dropped := some 0, failed := some 0 }] } == .grant "U1" "c-1:1" 9)
+  check ctx "redundant copy: one clean copy among others grants; a clean copy that is not Active does not"
+    (decide st { f with others := [{ other with failed := some 1 }, { other with key := "s2:1" }] } == .grant "U1" "c-1:1" 9
+      && kept (decide st { f with others := [{ other with active := false }] }))
+  check ctx "redundant copy: the keep reason names the missing or non-zero evidence"
+    (match decide st { f with others := [{ other with failed := none }] } with
+     | .keep w => (w.splitOn "not reported").length > 1 | _ => false)
+  check ctx "redundant copy: a keep names why (logged only when it changes)"
+    (match decide st { f with others := [] } with | .keep w => w.length > 0 | _ => false)
+
+open FlareOperator.CopyDiscardApproval in
+private def checkCopyDiscardApproval (ctx : Ctx) : IO Unit := do
+  let a : Approval := {
+    name := "a1"
+    clusterUID := "C"
+    podUID := "P1"
+    copyId := "u:2"
+    requestId := "r1"
+    operation := "discard-retained"
+    expiresAt := "2026-10-08T00:00:00Z" }
+  let pods := fun (u : String) => if u == "P1" then some "nodes-1" else none
+  let now := "2026-10-07T12:00:00Z"
+  check ctx "approval: a valid approval for this cluster's pod is sent to that pod"
+    (CopyDiscardApproval.decide a "C" now pods == .send "nodes-1")
+  check ctx "approval: another cluster's approval is left alone; a decided one is not sent again"
+    (CopyDiscardApproval.decide a "OTHER" now pods == .skip && CopyDiscardApproval.decide { a with phase := "Applied" } "C" now pods == .skip
+      && CopyDiscardApproval.decide { a with phase := "Unknown" } "C" now pods == .skip)
+  check ctx "approval: expired, unknown operation, malformed tokens and a replaced pod are not sent"
+    (CopyDiscardApproval.decide { a with expiresAt := "2026-10-07T11:59:59Z" } "C" now pods == .expire
+      && (match CopyDiscardApproval.decide { a with operation := "legacy-in-place" } "C" now pods with | .refuse _ => true | _ => false)
+      && (match CopyDiscardApproval.decide { a with copyId := "u:2; rm -rf /" } "C" now pods with | .refuse _ => true | _ => false)
+      && (match CopyDiscardApproval.decide { a with podUID := "P2" } "C" now pods with | .refuse _ => true | _ => false)
+      && (match CopyDiscardApproval.decide { a with expiresAt := "2026-10-08" } "C" now pods with | .refuse _ => true | _ => false))
+  check ctx "approval: flared's answer classifies; no complete answer stays Pending (resent; flared answers a repeat from its record)"
+    (CopyDiscardApproval.classify (some "applied") == ("Applied", "applied") && (CopyDiscardApproval.classify (some "already:applied")).1 == "Applied"
+      && (CopyDiscardApproval.classify (some "refused:copy_changed")).1 == "Refused" && (CopyDiscardApproval.classify (some "already:refused:no_such_copy")).1 == "Refused"
+      && (CopyDiscardApproval.classify (some "already:started")).1 == "Unknown" && (CopyDiscardApproval.classify (some "failed")).1 == "Failed"
+      && (CopyDiscardApproval.classify none).1 == "Pending")
+  check ctx "approval: the reply is read only when it ended with END"
+    (CopyDiscardApproval.parseReply "STAT copy_discard_result applied\r\nEND\r\n" == some "applied"
+      && CopyDiscardApproval.parseReply "STAT copy_discard_result applied\r\n" == none)
+
+-- ─── history-tracking 10: a stale R3 binding through every refill tier ────
+
+/-- The masterless refill driven by the REAL classifier, the way Main feeds
+    it: non-normal classes are excluded (with the unfit followers) and
+    non-promotable ones blocked. history-tracking 10 / 38687661051. -/
+private def staleR3Refill (st : FlareClusterState) (replies : List (String × String))
+    (live dataBearing knownEmpty : List String) (expired : List Nat := [])
+    (lastHist : Option (String × String) := some ("M", "2:e")) (untracked : Option String := none)
+    : Option String × List String :=
+  let obs : PromotionEvidence.Observed :=
+    { mapPrepare := false, mapActive := true, podReady := true, partitionHasMaster := false,
+      lastMasterHistory := lastHist, untrackedLastMaster := untracked,
+      untrackedLastMasterReadEmpty := match untracked with
+        | some m => knownEmpty.contains m
+        | none => false }
+  let classes := replies.map fun (k, r) =>
+    let n? := st.lookupNode k
+    (k, PromotionEvidence.classify (some r) { obs with
+      mapPrepare := (n?.map (fun (n : FlareNode) => n.state)) == some FlareState.Prepare,
+      mapActive := (n?.map (fun (n : FlareNode) => n.state)) == some FlareState.Active })
+  let excl := classes.filterMap fun (k, c) => if c.normal then none else some k
+  let blocked := classes.filterMap fun (k, c) => if c.promotable then none else some k
+  let after := K8sReconciler.promoteMasterlessPartitions st activationCrd live [] dataBearing excl true expired knownEmpty blocked
+  let rs : K8sReconciler.FlareReconcileState :=
+    { followUnfitKeys := excl, followHoldEnabled := true, followHoldExpiredParts := expired,
+      livePodKeys := live, dataBearingKeys := dataBearing, knownEmptyKeys := knownEmpty }
+  (masterOf after, (K8sReconciler.refillHoldEffects st after activationCrd rs).filterMap fun
+    | .Log m => some m
+    | _ => none)
+
+private def checkStaleR3Refill (ctx : Ctx) : IO Unit := do
+  let copy := fun (items : Nat) (extra : String) =>
+    s!"STAT rocksdb_copy_identity_consistent 1\r\nSTAT rocksdb_quarantined 0\r\nSTAT rocksdb_copy_partial 0\r\nSTAT rebuild_in_flight 0\r\nSTAT rocksdb_copy_id u:1\r\nSTAT reconstruction_boot_id 7\r\nSTAT curr_items {items}\r\n" ++ extra ++ "END\r\n"
+  -- the follower cut off from its master: R3 still BOUND (decide_source keeps it)
+  let fStale := copy 30 "STAT rocksdb_master_id M\r\nSTAT rocksdb_source_epoch 2:e\r\nSTAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nSTAT repl_follow_last_reason peer_unreachable\r\n"
+  -- the ex-master back on its PVC with every write (same history)
+  let mData := copy 50 "STAT rocksdb_master_id M\r\nSTAT rocksdb_source_epoch 2:e\r\nSTAT repl_read_source_eligible 0\r\nSTAT repl_read_source_state none\r\n"
+  -- the ex-master back EMPTY (a new history of its own)
+  let mEmpty := copy 0 "STAT rocksdb_master_id M2\r\nSTAT rocksdb_source_epoch 5:x\r\nSTAT repl_read_source_eligible 0\r\nSTAT repl_read_source_state none\r\n"
+  -- the ex-master back with data but a copy left part-way (not healthy)
+  let mPartial := (mData.replace "rocksdb_copy_partial 0" "rocksdb_copy_partial 1")
+  let back : FlareClusterState :=
+    ({ holdState with nodeMap := [("m", holdNode .Slave .Prepare 0 "m" 0), ("f", holdNode .Slave .Active 0 "f")] }).rebuildPartitionMap
+  let nlf := fun (ls : List String) => ls.any (containsSub · "PROMOTION NOT LOSS-FREE")
+  let held := fun (ls : List String) => ls.any (containsSub · "has NO master")
+  let (cM, cL) := staleR3Refill back [("m", mData), ("f", fStale)] ["m", "f"] ["m", "f"] []
+  check ctx "history-tracking 10 (C): the ex-master back WITH every write is crowned, not the cut-off follower whose R3 binding is stale; no false NOT LOSS-FREE"
+    (cM == some "m" && !nlf cL)
+  let (aM, aL) := staleR3Refill back [("m", mEmpty), ("f", fStale)] ["m", "f"] ["f"] ["m"]
+  check ctx "history-tracking 10 (A): the ex-master back READ EMPTY: the follower is still seated (availability, the permitted last resort) and logged NOT LOSS-FREE with that reason"
+    (aM == some "f" && nlf aL && aL.any (containsSub · "READ empty"))
+  let (bM, bL) := staleR3Refill holdState [("f", fStale)] ["f"] ["f"] []
+  check ctx "history-tracking 10 (B): the ex-master AWAY: the follower is HELD (CRITICAL, no master) — the wait is not bypassed"
+    (bM == none && held bL && !nlf bL)
+  let (eM, eL) := staleR3Refill holdState [("f", fStale)] ["f"] ["f"] [] [0]
+  check ctx "history-tracking 10 (B, wait over): the follower is seated and logged NOT LOSS-FREE with the EXPIRY reason"
+    (eM == some "f" && nlf eL && eL.any (containsSub · "EXPIRED"))
+  let (pM, pL) := staleR3Refill back [("m", mPartial), ("f", fStale)] ["m", "f"] ["m", "f"] []
+  check ctx "history-tracking 10: an ex-master back with data but an unhealthy copy (part-way) is NOT crowned by name; the follower stays held until the ex-master is usable or the wait ends"
+    (pM == none && held pL)
+  let (pxM, pxL) := staleR3Refill back [("m", mPartial), ("f", fStale)] ["m", "f"] ["m", "f"] [] [0]
+  check ctx "history-tracking 10: ... and after the wait the follower is seated NOT LOSS-FREE (never the unhealthy ex-master)"
+    (pxM == some "f" && nlf pxL)
+  let (uM, _) := staleR3Refill holdState [("f", copy 30 "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\n")] ["f"] ["f"] [] [0]
+  check ctx "history-tracking 10: a stale-eligible follower whose history cannot be told is UNKNOWN: never seated, not even after the wait"
+    (uM == none)
+
+/-- The untracked (legacy-upgrade) cases of the stale-R3 refill: a function of
+    their own so the generated C of checkStaleR3Refill stays small enough for
+    cc1 (one function held 12.7 GB at -O3). -/
+private def checkStaleR3RefillUntracked (ctx : Ctx) : IO Unit := do
+  let copy := fun (items : Nat) (extra : String) =>
+    s!"STAT rocksdb_copy_identity_consistent 1\r\nSTAT rocksdb_quarantined 0\r\nSTAT rocksdb_copy_partial 0\r\nSTAT rebuild_in_flight 0\r\nSTAT rocksdb_copy_id u:1\r\nSTAT reconstruction_boot_id 7\r\nSTAT curr_items {items}\r\n" ++ extra ++ "END\r\n"
+  let mEmpty := copy 0 "STAT rocksdb_master_id M2\r\nSTAT rocksdb_source_epoch 5:x\r\nSTAT repl_read_source_eligible 0\r\nSTAT repl_read_source_state none\r\n"
+  let back : FlareClusterState :=
+    ({ holdState with nodeMap := [("m", holdNode .Slave .Prepare 0 "m" 0), ("f", holdNode .Slave .Active 0 "f")] }).rebuildPartitionMap
+  let nlf := fun (ls : List String) => ls.any (containsSub · "PROMOTION NOT LOSS-FREE")
+  let held := fun (ls : List String) => ls.any (containsSub · "has NO master")
+  -- upgrade from rc56 on tmpfs (decision 2026-10-16, CI 38714646714): the
+  -- partition is UNTRACKED (its master was a legacy flared: no history can be
+  -- recorded) and the replica was validated against that master itself, a
+  -- legacy peer (no epoch). Stale bound (eligible) or re-validating: LAGGING —
+  -- the held, logged last resort. Fails on 57d37a1 (unknown, never seated).
+  let fLegacy := fun (state : String) (src : String) (ep : String) =>
+    copy 2450 s!"STAT rocksdb_master_id N1\r\nSTAT rocksdb_source_epoch 1:n1\r\nSTAT repl_read_source_eligible {if state == "eligible" then 1 else 0}\r\nSTAT repl_read_source_state {state}\r\nSTAT repl_read_source {src}\r\nSTAT repl_read_source_epoch {ep}\r\nSTAT repl_read_source_reason x\r\n"
+  for state in ["eligible", "revalidating"] do
+    let f := fLegacy state "m" ""
+    let (lM, lL) := staleR3Refill back [("m", mEmpty), ("f", f)] ["m", "f"] ["f"] ["m"] [] none (some "m")
+    check ctx s!"untracked upgrade ({state}): the ex-master (a legacy master) back READ EMPTY: the replica it validated is seated as the last resort, logged NOT LOSS-FREE (READ empty)"
+      (lM == some "f" && nlf lL && lL.any (containsSub · "READ empty"))
+    let (hM, hL) := staleR3Refill holdState [("f", f)] ["f"] ["f"] [] [] none (some "m")
+    let (xM, xL) := staleR3Refill holdState [("f", f)] ["f"] ["f"] [] [0] none (some "m")
+    check ctx s!"untracked upgrade ({state}): the ex-master AWAY: HELD, then seated NOT LOSS-FREE only after the wait (EXPIRED)"
+      (hM == none && held hL && !nlf hL && xM == some "f" && nlf xL && xL.any (containsSub · "EXPIRED"))
+  let never := fun (f : String) (untracked : Option String) =>
+    (staleR3Refill back [("m", mEmpty), ("f", f)] ["m", "f"] ["f"] ["m"] [0] none untracked).1 == none
+  check ctx "untracked upgrade: still UNKNOWN (never seated, not even after the wait) when the binding names ANOTHER node, the source had a history epoch, the partition is not untracked, or the copy is empty"
+    (never (fLegacy "eligible" "x" "") (some "m") && never (fLegacy "eligible" "m" "3:k") (some "m")
+      && never (fLegacy "eligible" "m" "") none
+      && PromotionEvidence.classify (some ((fLegacy "eligible" "m" "").replace "curr_items 2450" "curr_items 0"))
+          { mapPrepare := false, mapActive := true, podReady := true, partitionHasMaster := false,
+            lastMasterHistory := none, untrackedLastMaster := some "m" } != .lagging)
+  -- 62dddf9 40981436327 (rc56 upgrade 9): a held copy's R3 readings are logged
+  let det := PromotionEvidence.r3DetailOf (some ((fLegacy "needs_rebuild" "m" "3:k").replace "reason x" "reason history differs: copy 1:n1, master m 3:k"))
+  check ctx "promotion evidence: the readings line of a copy not promotable names R3's state, source, source epoch, reason, its history and items"
+    (containsSub det "state=needs_rebuild" && containsSub det "source=m" && containsSub det "sourceEpoch=3:k"
+      && containsSub det "reason=history differs: copy 1:n1, master m 3:k" && containsSub det "copy=N1/1:n1" && containsSub det "items=2450"
+      && PromotionEvidence.r3DetailOf none == "no reply")
+  -- with a master present nothing changes: the same reading is eligible
+  check ctx "untracked upgrade: with a master present the same bound reading is ELIGIBLE (the rule is masterless-only)"
+    (PromotionEvidence.classify (some (fLegacy "eligible" "m" ""))
+      { mapPrepare := false, mapActive := true, podReady := true, partitionHasMaster := true,
+        lastMasterHistory := none, untrackedLastMaster := some "m" } == .eligible)
+  -- ddf24f6 41103383413 (rc56 upgrade 9): the ex-master came back EMPTY with a
+  -- new lineage and R3 re-validated the replica against it before the refill:
+  -- needs_rebuild "lineage differs ... master m <new>". Only the source
+  -- changed, so the copy keeps the legacy rule (held last resort, NOT LOSS-FREE).
+  let fRebuilt := fun (src reason : String) =>
+    (fLegacy "needs_rebuild" src "").replace "reason x" s!"reason {reason}"
+  let rb := fRebuilt "m" "lineage differs: copy N1, master m M2"
+  let (rM, rL) := staleR3Refill back [("m", mEmpty), ("f", rb)] ["m", "f"] ["f"] ["m"] [] none (some "m")
+  check ctx "untracked upgrade (needs_rebuild against the ex-master back READ EMPTY): the replica is seated as the last resort, logged NOT LOSS-FREE (READ empty)"
+    (rM == some "f" && nlf rL && rL.any (containsSub · "READ empty"))
+  let (rhM, rhL) := staleR3Refill holdState [("f", rb)] ["f"] ["f"] [] [] none (some "m")
+  check ctx "untracked upgrade (needs_rebuild against the ex-master): the ex-master AWAY: HELD, not seated before the wait"
+    (rhM == none && held rhL && !nlf rhL)
+  -- review of 0cf9d43: the rule needs the ex-master READ EMPTY this pass; the
+  -- replica's own R3 reading alone never says the ex-master's copy is gone
+  let mData := copy 50 "STAT rocksdb_master_id M\r\nSTAT rocksdb_source_epoch 2:e\r\nSTAT repl_read_source_eligible 0\r\nSTAT repl_read_source_state none\r\n"
+  let (axM, axL) := staleR3Refill holdState [("f", rb)] ["f"] ["f"] [] [0] none (some "m")
+  check ctx "untracked upgrade (needs_rebuild against the ex-master): the ex-master AWAY (emptiness not observed): never seated, not even after the wait"
+    (axM == none && !nlf axL)
+  let (dM, _) := staleR3Refill back [("m", mData), ("f", rb)] ["m", "f"] ["m", "f"] [] [0] none (some "m")
+  check ctx "untracked upgrade (needs_rebuild against the ex-master): the ex-master back WITH data (not read empty): the replica is never seated NOT LOSS-FREE, not even after the wait"
+    (dM != some "f")
+  let (uxM, _) := staleR3Refill back [("f", rb)] ["m", "f"] ["f"] [] [0] none (some "m")
+  check ctx "untracked upgrade (needs_rebuild against the ex-master): the ex-master live but UNREADABLE: never seated, not even after the wait"
+    (uxM == none)
+  check ctx "untracked upgrade (needs_rebuild against the ex-master): the classifier says lagging only with the ex-master read empty"
+    (PromotionEvidence.classify (some rb)
+        { mapPrepare := false, mapActive := true, podReady := true, partitionHasMaster := false,
+          lastMasterHistory := none, untrackedLastMaster := some "m", untrackedLastMasterReadEmpty := true } == .lagging
+      && PromotionEvidence.classify (some rb)
+        { mapPrepare := false, mapActive := true, podReady := true, partitionHasMaster := false,
+          lastMasterHistory := none, untrackedLastMaster := some "m" } != .lagging)
+  check ctx "untracked upgrade: needs_rebuild stays UNKNOWN (never seated, not even after the wait) when it compared with ANOTHER node, compared a history, the source had an epoch, or the partition is not untracked"
+    (never (fRebuilt "x" "lineage differs: copy N1, master x M2") (some "m")
+      && never (fRebuilt "m" "lineage differs: copy N1, master x M2") (some "m")
+      && never (fRebuilt "m" "history differs: copy 1:n1, master m 5:x") (some "m")
+      && never ((fLegacy "needs_rebuild" "m" "5:x").replace "reason x" "reason lineage differs: copy N1, master m M2") (some "m")
+      && never rb none)
+
+-- ─── promotion by reason (decision 2026-10-08) ────────────────────────────
+
+private def checkPromotionEvidence (ctx : Ctx) : IO Unit := do
+  let base := "STAT rocksdb_copy_identity_consistent 1\r\nSTAT rocksdb_quarantined 0\r\nSTAT rocksdb_copy_partial 0\r\nSTAT rebuild_in_flight 0\r\nSTAT rocksdb_copy_id u:1\r\nSTAT reconstruction_boot_id 7\r\nSTAT curr_items 60\r\nSTAT rocksdb_master_id M\r\nSTAT rocksdb_source_epoch 2:e\r\n"
+  let reply := fun (extra : String) => some (base ++ extra ++ "END\r\n")
+  let obs : PromotionEvidence.Observed := {
+    mapPrepare := false, mapActive := true, podReady := true, partitionHasMaster := false
+    lastMasterHistory := some ("M", "2:e") }
+  let cls := fun (r : Option String) (o : PromotionEvidence.Observed) => PromotionEvidence.classify r o
+  -- the PAIR: the same copy, the same history; only whether a copy is in flight differs
+  check ctx "promotion by reason: a healthy copy of the last master's history, merely behind (R3 not bound) is LAGGING — a last resort may seat it"
+    (cls (reply "STAT repl_read_source_eligible 0\r\nSTAT repl_read_source_state none\r\n") { obs with mapPrepare := true, mapActive := false } == .lagging)
+  check ctx "promotion by reason: the same copy while a rebuild is in flight is FORBIDDEN, wait or not"
+    (match cls (some ((base.replace "rebuild_in_flight 0" "rebuild_in_flight 1") ++ "STAT repl_read_source_eligible 0\r\nSTAT repl_read_source_state none\r\nEND\r\n")) { obs with mapPrepare := true, mapActive := false } with
+      | .forbidden _ => true | _ => false)
+  check ctx "promotion by reason: a merging dump left part-way, identity disagreement, quarantine, needs_rebuild are FORBIDDEN"
+    ((match cls (some ((base.replace "rocksdb_copy_partial 0" "rocksdb_copy_partial 1") ++ "END\r\n")) obs with | .forbidden _ => true | _ => false)
+      && (match cls (some ((base.replace "rocksdb_copy_identity_consistent 1" "rocksdb_copy_identity_consistent 0") ++ "END\r\n")) obs with | .forbidden _ => true | _ => false)
+      && (match cls (some ((base.replace "rocksdb_quarantined 0" "rocksdb_quarantined 1") ++ "END\r\n")) obs with | .forbidden _ => true | _ => false)
+      && (match cls (reply "STAT repl_read_source_state needs_rebuild\r\nSTAT repl_read_source_eligible 0\r\n") { obs with partitionHasMaster := true } with | .forbidden _ => true | _ => false))
+  -- user decision 2026-10-09: the ex-master came back EMPTY; the healthy
+  -- copy of the recorded history, merely behind, is the one to promote
+  let nr := fun (extra : String) => reply ("STAT repl_read_source_state needs_rebuild\r\nSTAT repl_read_source_eligible 0\r\n" ++ extra)
+  let vsEmpty := "STAT repl_read_source_reason history differs: copy 2:e, master n-0.svc:12121 5:fresh\r\n"
+  check ctx "needs_rebuild (1): R3 compared the copy with a DIFFERENT, later history (the empty returning ex-master); the copy is the recorded last master's: LAGGING (last resort, NOT LOSS-FREE)"
+    (cls (nr vsEmpty) obs == .lagging
+      && cls (nr "STAT repl_read_source_reason lineage differs: copy M, master n-0.svc:12121 Z\r\n") obs == .lagging)
+  check ctx "needs_rebuild (2): the same shape with an unhealthy or unfinished copy stays FORBIDDEN (partial, quarantine, identity, switch unresolved, in flight, parked, running, corrupted, follow apply error)"
+    ([("rocksdb_copy_partial 0", "rocksdb_copy_partial 1"), ("rocksdb_quarantined 0", "rocksdb_quarantined 1"),
+      ("rocksdb_copy_identity_consistent 1", "rocksdb_copy_identity_consistent 0"), ("rebuild_in_flight 0", "rebuild_in_flight 1")].all (fun (a, b) =>
+        match cls (some ((base.replace a b) ++ "STAT repl_read_source_state needs_rebuild\r\n" ++ vsEmpty ++ "END\r\n")) obs with | .forbidden _ => true | _ => false)
+      && ["STAT rocksdb_switch_unresolved 1\r\n", "STAT rebuild_parked 1\r\n", "STAT reconstruction_current_state running\r\n",
+          "STAT rocksdb_corrupted 1\r\n", "STAT repl_follow_last_reason apply_error\r\n", "STAT repl_follow_last_reason generations_unavailable\r\n"].all (fun x =>
+        match cls (nr (vsEmpty ++ x)) obs with | .forbidden _ => true | _ => false))
+  check ctx "needs_rebuild: compared with the RECORDED history itself, or the copy is not the recorded history = FORBIDDEN (a real divergence)"
+    ((match cls (nr "STAT repl_read_source_reason history differs: copy 2:e, master n-1.svc:12121 2:e\r\n") obs with | .forbidden _ => true | _ => false)
+      && (match cls (some ((base.replace "rocksdb_source_epoch 2:e" "rocksdb_source_epoch 1:old") ++ "STAT repl_read_source_state needs_rebuild\r\n" ++ vsEmpty ++ "END\r\n")) obs with | .forbidden _ => true | _ => false))
+  check ctx "needs_rebuild: no recorded history, or a reason that does not name what was compared = UNKNOWN (held), never empty or lagging"
+    ((match cls (nr vsEmpty) { obs with lastMasterHistory := none, isLastMasterHolder := true } with | .unknown _ => true | _ => false)
+      && (match cls (nr "STAT repl_read_source_reason something else\r\n") obs with | .unknown _ => true | _ => false)
+      && (match cls (nr "") obs with | .unknown _ => true | _ => false))
+  check ctx "promotion by reason: re-validation against a PRESENT master is forbidden; the master's going does not turn it into a pass — only the RECORDED last master's history is lagging"
+    ((match cls (reply "STAT repl_read_source_state revalidating\r\nSTAT repl_read_source_eligible 0\r\n") { obs with partitionHasMaster := true } with | .forbidden _ => true | _ => false)
+      && cls (reply "STAT repl_read_source_state revalidating\r\nSTAT repl_read_source_eligible 0\r\n") obs == .lagging
+      && (match cls (reply "STAT repl_read_source_state revalidating\r\nSTAT repl_read_source_eligible 0\r\n") { obs with lastMasterHistory := none, isLastMasterHolder := true } with | .unknown _ => true | _ => false)
+      && (match cls (some ((base.replace "rocksdb_source_epoch 2:e" "rocksdb_source_epoch 9:x") ++ "STAT repl_read_source_state revalidating\r\nSTAT repl_read_source_eligible 0\r\nEND\r\n")) obs with | .forbidden _ => true | _ => false))
+  check ctx "promotion by reason: a parked rebuild or a running reconstruction is FORBIDDEN (the copy was never completed)"
+    ((match cls (reply "STAT repl_read_source_eligible 0\r\nSTAT rebuild_parked 1\r\n") obs with | .forbidden _ => true | _ => false)
+      && (match cls (reply "STAT repl_read_source_eligible 0\r\nSTAT reconstruction_current_state running\r\n") obs with | .forbidden _ => true | _ => false))
+  check ctx "promotion by reason: at commit the candidate is classified AGAIN — the same process and copy turning forbidden, or eligible turning lagging, aborts"
+    ((PromotionEvidence.reclassifyAllows .eligible .eligible).1
+      && (PromotionEvidence.reclassifyAllows .lagging .lagging).1
+      && !(PromotionEvidence.reclassifyAllows .lagging (cls (some ((base.replace "rebuild_in_flight 0" "rebuild_in_flight 1") ++ "STAT repl_read_source_eligible 0\r\nEND\r\n")) obs)).1
+      && !(PromotionEvidence.reclassifyAllows .eligible (cls (reply "STAT repl_read_source_state revalidating\r\nSTAT repl_read_source_eligible 0\r\n") obs)).1
+      && !(PromotionEvidence.reclassifyAllows .eligible .lagging).1)
+  check ctx "promotion by reason: another history, or no record of the last master's, is UNKNOWN (held) — the ex-master's own copy is NOT presumed known (it may have come back empty)"
+    ((match cls (some ((base.replace "rocksdb_source_epoch 2:e" "rocksdb_source_epoch 9:x") ++ "STAT repl_read_source_eligible 0\r\nEND\r\n")) obs with | .forbidden _ => true | _ => false)
+      && (match cls (reply "STAT repl_read_source_eligible 0\r\n") { obs with lastMasterHistory := none } with | .unknown _ => true | _ => false)
+      && (match cls (reply "STAT repl_read_source_eligible 0\r\n") { obs with lastMasterHistory := none, isLastMasterHolder := true } with | .unknown _ => true | _ => false))
+  check ctx "promotion by reason: unreadable or incomplete is UNKNOWN; a bound eligible Active copy is ELIGIBLE while its partition HAS a master"
+    ((match cls none obs with | .unknown _ => true | _ => false)
+      && (match cls (some base) obs with | .unknown _ => true | _ => false)
+      && cls (reply "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\n") { obs with partitionHasMaster := true } == .eligible)
+  -- history-tracking 10 (38687661051): the PAIR — the same bound R3 reading
+  -- is eligible against a present master and NOT once the partition is
+  -- masterless (a stale binding: R3 keeps it while its master is unreachable)
+  let bound := reply "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nSTAT repl_follow_last_reason peer_unreachable\r\n"
+  check ctx "history-tracking 10: a STALE R3 eligible (masterless partition) is not eligible — the recorded last master's history = LAGGING (held, logged last resort only)"
+    (cls bound obs == .lagging && cls bound { obs with partitionHasMaster := true } == .eligible)
+  check ctx "history-tracking 10: a stale R3 eligible with NO recorded history, or no reported history, is UNKNOWN (held) — being disconnected is not by itself 'same history'"
+    ((match cls bound { obs with lastMasterHistory := none } with | .unknown _ => true | _ => false)
+      && (match cls (some ((base.replace "STAT rocksdb_master_id M\r\nSTAT rocksdb_source_epoch 2:e\r\n" "") ++ "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nEND\r\n")) obs with | .unknown _ => true | _ => false))
+  check ctx "history-tracking 10: a stale R3 eligible does not override FORBIDDEN (another history = rejoining; rebuild in flight; partial; quarantine)"
+    ((match cls (some ((base.replace "rocksdb_source_epoch 2:e" "rocksdb_source_epoch 9:x") ++ "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nEND\r\n")) obs with | .forbidden _ => true | _ => false)
+      && [("rebuild_in_flight 0", "rebuild_in_flight 1"), ("rocksdb_copy_partial 0", "rocksdb_copy_partial 1"), ("rocksdb_quarantined 0", "rocksdb_quarantined 1")].all (fun (a, b) =>
+        match cls (some ((base.replace a b) ++ "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nEND\r\n")) obs with | .forbidden _ => true | _ => false))
+  check ctx "history-tracking 10: at commit the stale-eligible copy is classified the same way (lagging = lagging); a non-reading pass refuses it (commitTimeAllows)"
+    ((PromotionEvidence.reclassifyAllows (cls bound obs) (cls bound obs)).1
+      && !(PromotionEvidence.reclassifyAllows .eligible (cls bound obs)).1
+      && !PromotionEvidence.commitTimeAllows (cls bound obs))
+  check ctx "promotion by reason: LEGACY is not unconditional — Prepare, NotReady or a running reconstruction is not legacy-promotable"
+    (cls (some "STAT curr_items 60\r\nEND\r\n") { obs with mapActive := true, podReady := true } == .legacy
+      && (match cls (some "STAT curr_items 60\r\nEND\r\n") { obs with mapPrepare := true, mapActive := false } with | .unknown _ => true | _ => false)
+      && (match cls (some "STAT curr_items 60\r\nEND\r\n") { obs with podReady := false } with | .unknown _ => true | _ => false)
+      && (match cls (some "STAT curr_items 60\r\nSTAT reconstruction_current_state running\r\nEND\r\n") obs with | .forbidden _ => true | _ => false))
+  check ctx "promotion by reason: a backend without copy evidence (tch) is decided by the narrow legacy rule, not held as unknown"
+    (cls (some "STAT repl_read_source_eligible 0\r\nSTAT repl_read_source_state none\r\nSTAT curr_items 60\r\nEND\r\n") { obs with lastMasterHistory := none } == .legacy
+      && cls (some "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nSTAT curr_items 60\r\nEND\r\n") { obs with partitionHasMaster := true } == .eligible
+      -- masterless: the stale R3 binding is not used; the narrow legacy rule decides (tch has no WAL follower)
+      && cls (some "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nSTAT curr_items 60\r\nEND\r\n") obs == .legacy
+      && (match cls (some "STAT repl_read_source_eligible 0\r\nSTAT repl_read_source_state none\r\nSTAT curr_items 60\r\nEND\r\n") { obs with mapPrepare := true, mapActive := false } with | .unknown _ => true | _ => false)
+      && (match cls (some "STAT repl_read_source_eligible 0\r\nSTAT repl_read_source_state needs_rebuild\r\nSTAT curr_items 60\r\nEND\r\n") obs with | .forbidden _ => true | _ => false))
+  check ctx "promotion by reason (review 2026-10-08): the ONLY unread promotion is the first master of a partition no copy has held"
+    (PromotionEvidence.firstMasterOfNewPartition true [(true, 0, -1), (true, 0, -1)] 1
+      && !PromotionEvidence.firstMasterOfNewPartition true [(true, 0, -1), (true, 1, -1)] 1
+      && !PromotionEvidence.firstMasterOfNewPartition true [(true, 0, -1), (false, -1, 1)] 1
+      && !PromotionEvidence.firstMasterOfNewPartition false [(true, 0, -1)] 1
+      && !PromotionEvidence.firstMasterOfNewPartition true [] (-1))
+  check ctx "promotion by reason: an existing copy read at commit passes only as a normal promotion (not lagging, forbidden or unknown)"
+    (PromotionEvidence.commitTimeAllows .eligible && PromotionEvidence.commitTimeAllows .legacy
+      && !PromotionEvidence.commitTimeAllows .lagging && !PromotionEvidence.commitTimeAllows (.forbidden "x")
+      && !PromotionEvidence.commitTimeAllows (.unknown "x"))
+  -- review 2026-10-08 (counterexamples run with lake env lean --stdin)
+  let rv := { mapPrepare := false, mapActive := true, podReady := true, partitionHasMaster := false, lastMasterHistory := none : PromotionEvidence.Observed }
+  check ctx "promotion by reason (review CE-a): quarantined / part-way markers are FORBIDDEN before any legacy rule (not legacy)"
+    (match cls (some "STAT rocksdb_quarantined 1\r\nSTAT rocksdb_copy_partial 1\r\nSTAT curr_items 60\r\nEND\r\n") rv with | .forbidden _ => true | _ => false)
+  check ctx "promotion by reason (review CE-b): a running reconstruction is FORBIDDEN even with eligible=1 and no copy evidence (tch)"
+    (match cls (some "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nSTAT reconstruction_current_state running\r\nSTAT curr_items 60\r\nEND\r\n") rv with | .forbidden _ => true | _ => false)
+  check ctx "promotion by reason (review CE-c): a reported but INVALID value is UNKNOWN, not read as unreported"
+    (match cls (some "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nSTAT rocksdb_copy_id copy-1\r\nSTAT rocksdb_copy_identity_consistent invalid\r\nSTAT rocksdb_copy_partial invalid\r\nSTAT curr_items 60\r\nEND\r\n") rv with | .unknown _ => true | _ => false)
+  check ctx "promotion by reason: an invalid eligible / state / items / running value is UNKNOWN; a parked rebuild is FORBIDDEN on tch and legacy-shaped replies too"
+    ((match cls (some "STAT repl_read_source_eligible yes\r\nSTAT curr_items 60\r\nEND\r\n") rv with | .unknown _ => true | _ => false)
+      && (match cls (some "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state bogus\r\nSTAT curr_items 60\r\nEND\r\n") rv with | .unknown _ => true | _ => false)
+      && (match cls (some "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nSTAT curr_items x\r\nEND\r\n") rv with | .unknown _ => true | _ => false)
+      && (match cls (some "STAT repl_read_source_eligible 1\r\nSTAT reconstruction_current_state walking\r\nSTAT curr_items 60\r\nEND\r\n") rv with | .unknown _ => true | _ => false)
+      && (match cls (some "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nSTAT rebuild_parked 1\r\nSTAT curr_items 60\r\nEND\r\n") rv with | .forbidden _ => true | _ => false)
+      && (match cls (some "STAT rebuild_in_flight 1\r\nSTAT curr_items 60\r\nEND\r\n") rv with | .forbidden _ => true | _ => false))
+  check ctx "promotion by reason: a reply with ANY newer key is never downgraded to legacy (a lone rocksdb_copy_id is not legacy)"
+    (cls (some "STAT rocksdb_copy_id c:1\r\nSTAT curr_items 60\r\nEND\r\n") rv != .legacy
+      && cls (some "STAT curr_items 60\r\nEND\r\n") rv == .legacy)
+  check ctx "promotion by reason (review P1): an unresolved copy switch is FORBIDDEN; an invalid value for it is unknown"
+    ((match cls (reply "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nSTAT rocksdb_switch_unresolved 1\r\n") obs with | .forbidden _ => true | _ => false)
+      && (match cls (reply "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nSTAT rocksdb_switch_unresolved x\r\n") obs with | .unknown _ => true | _ => false))
+  -- round 2: the real older RocksDB formats stay legacy
+  let rc56 := "STAT curr_items 60\r\nSTAT rocksdb_master_id old-master-id\r\nSTAT rocksdb_repl_last_lsn 12\r\nSTAT rocksdb_latest_sequence_number 12\r\nEND\r\n"
+  let rc65 := "STAT curr_items 60\r\nSTAT reconstruction_boot_id 9\r\nSTAT reconstruction_current_state succeeded\r\nSTAT rocksdb_master_id old-master-id\r\nSTAT rocksdb_source_epoch 2:e\r\nSTAT rocksdb_incarnation 1\r\nEND\r\n"
+  check ctx "promotion by reason (review round 2): a v0.1.0-rc56 / rc65-shaped RocksDB reply (master id, source epoch, reconstruction state — no R3 or copy-retention key) is LEGACY when Active, Ready, idle"
+    (cls (some rc56) rv == .legacy && cls (some "STAT rocksdb_master_id old-master-id\r\nSTAT curr_items 60\r\nEND\r\n") rv == .legacy
+      && cls (some rc65) rv == .legacy)
+  check ctx "promotion by reason (review round 2): ... but an rc65 reply with a running reconstruction is FORBIDDEN, and Prepare / NotReady stay unknown"
+    ((match cls (some (rc65.replace "succeeded" "running")) rv with | .forbidden _ => true | _ => false)
+      && (match cls (some rc65) { rv with mapPrepare := true, mapActive := false } with | .unknown _ => true | _ => false)
+      && (match cls (some rc65) { rv with podReady := false } with | .unknown _ => true | _ => false))
+  -- round 2: the restarted-promotion timeline (copy-identity 11), pure
+  let vk := "n-0.c-nodes.ns.svc.cluster.local:12121"
+  let opOk := s!"2026-10-08T04:31:10.865924356Z [flare-operator] PROMOTION EVIDENCE (by reason, this pass): [{vk}=eligible [boot 77]]\n2026-10-08T04:31:19.227312668Z [flare-operator] PROMOTION committed: [{vk} (pod incarnation)]\n"
+  let flOk := "2026-10-08T04:31:08.269441822Z [NTC] storage open\n2026-10-08T04:31:08.271249906Z [NTC] read source BOUND to m\n2026-10-08T04:31:08.272974136Z [NTC] node activated\n"
+  let tl := fun (o f b : String) => match FlareOperator.E2E.PromotionTimeline.judge o f vk b with | .ok _ => true | .error _ => false
+  check ctx "timeline (review round 2): fresh eligible evidence of the current process, read after its activation and binding and before the commit, passes"
+    (tl opOk flOk "77")
+  check ctx "timeline (review round 2): lines WITHOUT timestamps are not accepted"
+    (!tl s!"[flare-operator] PROMOTION EVIDENCE (by reason, this pass): [{vk}=eligible [boot 77]]\n[flare-operator] PROMOTION committed: [{vk}]\n" flOk "77"
+      && !tl opOk "[NTC] read source BOUND to m\n[NTC] node activated\n" "77")
+  check ctx "timeline (review round 2): a reading logged only AFTER the commit is not accepted"
+    (!tl s!"2026-10-08T04:31:19.227312668Z [flare-operator] PROMOTION committed: [{vk}]\n2026-10-08T04:31:20.000000000Z [flare-operator] PROMOTION EVIDENCE (by reason, this pass): [{vk}=eligible [boot 77]]\n" flOk "77")
+  check ctx "timeline (review round 2): an activation/binding AFTER the reading (the reading was of an earlier process), a missing activation, or another boot id is not accepted"
+    (!tl opOk "2026-10-08T04:31:12.000000000Z [NTC] read source BOUND to m\n2026-10-08T04:31:12.100000000Z [NTC] node activated\n" "77"
+      && !tl opOk "2026-10-08T04:31:08.271249906Z [NTC] read source BOUND to m\n" "77"
+      && !tl opOk flOk "78")
+  let hoEl := s!"2026-10-08T04:31:10.000000000Z [flare-operator] PROMOTION EVIDENCE (handover demote, the successor's own R3 reading): {vk}=eligible [boot 77] binding u|77|c\n"
+  let hoLag := fun (boot : String) => s!"2026-10-08T04:31:15.000000000Z [flare-operator] PROMOTION EVIDENCE (read at commit, a pass that did not read the candidates): {vk}=lagging (same history) [boot {boot}]\n2026-10-08T04:31:15.100000000Z [flare-operator] promotion of {vk}: lagging (same history) at commit, accepted for an ordered handover whose drain was proven clean\n2026-10-08T04:31:16.000000000Z [flare-operator] PROMOTION committed: [{vk}]\n"
+  check ctx "timeline (a8b9793 matrix, SAF-08): an ordered handover's lagging commit read stands on the eligible demote-time reading of the same boot"
+    (tl (hoEl ++ hoLag "77") flOk "77")
+  check ctx "timeline: ... but not without an eligible reading of that boot before it, nor when the commit read another boot, nor without the handover acceptance"
+    (!tl (hoLag "77") flOk "77"
+      && !tl (hoEl.replace "boot 77" "boot 76" ++ hoLag "77") flOk "77"
+      && !tl (hoEl ++ hoLag "78") flOk "77"
+      && !tl (hoEl ++ (hoLag "77").replace "accepted for an ordered handover" "x") flOk "77")
+  check ctx "timeline (review round 2): timestamps of different precision compare as instants, not as text"
+    (FlareOperator.E2E.PromotionTimeline.parseTs "2026-10-08T04:31:08.5Z x" == some ("2026-10-08T04:31:08.500000000", "x")
+      && FlareOperator.E2E.PromotionTimeline.parseTs "[flare-operator] x" == none
+      && FlareOperator.E2E.PromotionTimeline.parseTs "2026-10-08T04:31:08Z x" == some ("2026-10-08T04:31:08.000000000", "x"))
+  let idle := PromotionEvidence.successorIdle
+  check ctx "rolling / node guard (review of ba85535): a caught-up successor is idle by its own markers and R3 eligible, or a pre-R3 flared holding data"
+    (idle (some "STAT repl_read_source_eligible 1\r\nSTAT curr_items 5\r\nEND\r\n")
+      && idle (some "STAT curr_items 5\r\nSTAT reconstruction_current_state succeeded\r\nEND\r\n"))
+  check ctx "rolling / node guard (review of ba85535): a reconstruction running, a rebuild in flight or parked, eligible 0, empty, incomplete or unreadable is not a caught-up successor"
+    (!idle (some "STAT curr_items 5\r\nSTAT reconstruction_current_state running\r\nEND\r\n")
+      && !idle (some "STAT curr_items 5\r\nSTAT rebuild_in_flight 1\r\nEND\r\n")
+      && !idle (some "STAT repl_read_source_eligible 1\r\nSTAT rebuild_in_flight 1\r\nEND\r\n")
+      && !idle (some "STAT repl_read_source_eligible 1\r\nSTAT rebuild_parked 1\r\nEND\r\n")
+      && !idle (some "STAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state revalidating\r\nEND\r\n")
+      && !idle (some "STAT repl_read_source_eligible 0\r\nEND\r\n")
+      && !idle (some "STAT curr_items 0\r\nEND\r\n")
+      && !idle (some "STAT reconstruction_current_state succeeded\r\nEND\r\n")
+      && !idle (some "STAT repl_read_source_eligible 1\r\n")
+      && !idle none)
+  let fullB := PromotionEvidence.bindingOf (some "u") (some "STAT reconstruction_boot_id 7\r\nSTAT rocksdb_copy_id c:1\r\nEND\r\n")
+  check ctx "handover / node guard / rolling master delete (review of ba85535): only eligible with a complete binding; legacy, lagging, empty or an incomplete identity is refused"
+    (PromotionEvidence.handoverAccepts .eligible fullB
+      && !PromotionEvidence.handoverAccepts .legacy fullB
+      && !PromotionEvidence.handoverAccepts .lagging fullB
+      && !PromotionEvidence.handoverAccepts .empty fullB
+      && !PromotionEvidence.handoverAccepts .eligible { fullB with copyId := none })
+  check ctx "handover precheck: a legacy reply holding data classifies legacy (refused), and with a reconstruction running it is forbidden (refused)"
+    (let rv : PromotionEvidence.Observed := { mapPrepare := false, mapActive := true, podReady := true, partitionHasMaster := true, lastMasterHistory := none }
+     let legacyReply := "STAT curr_items 5\r\nSTAT reconstruction_current_state succeeded\r\nEND\r\n"
+     PromotionEvidence.classify (some legacyReply) rv == .legacy
+       && !PromotionEvidence.handoverAccepts (PromotionEvidence.classify (some legacyReply) rv) (PromotionEvidence.bindingOf (some "u") (some legacyReply))
+       && (match PromotionEvidence.classify (some (legacyReply.replace "succeeded" "running")) rv with | .forbidden _ => true | _ => false))
+  check ctx "handover binding (review of ba85535): complete only with pod UID, boot id and copy id all reported"
+    ((PromotionEvidence.bindingOf (some "u") (some "STAT reconstruction_boot_id 7\r\nSTAT rocksdb_copy_id c:1\r\nEND\r\n")).complete
+      && !(PromotionEvidence.bindingOf (some "u") (some "STAT reconstruction_boot_id 7\r\nEND\r\n")).complete
+      && !(PromotionEvidence.bindingOf (some "u") (some "STAT rocksdb_copy_id c:1\r\nEND\r\n")).complete
+      && !(PromotionEvidence.bindingOf none (some "STAT reconstruction_boot_id 7\r\nSTAT rocksdb_copy_id c:1\r\nEND\r\n")).complete
+      && !(PromotionEvidence.bindingOf (some "u") (some "STAT reconstruction_boot_id 7\r\nSTAT rocksdb_copy_id \r\nEND\r\n")).complete)
+  let b := PromotionEvidence.bindingOf (some "uid-1") (reply "")
+  check ctx "promotion by reason: the commit refuses when the pod, the flared process or the copy changed since the reading, or it was not read"
+    ((PromotionEvidence.commitAllows (some .eligible) b b).1
+      && !(PromotionEvidence.commitAllows (some .eligible) b { b with podUid := some "uid-2" }).1
+      && !(PromotionEvidence.commitAllows (some .eligible) b { b with bootId := some "8" }).1
+      && !(PromotionEvidence.commitAllows (some .eligible) b { b with copyId := some "u:2" }).1
+      && !(PromotionEvidence.commitAllows none b b).1
+      && !(PromotionEvidence.commitAllows (some (.forbidden "x")) b b).1)
+
+-- ─── R3: source eligibility (operator side) ──────────────────────────────
+
+open FlareOperator.SourceEligibility in
+private def checkSourceEligibility (ctx : Ctx) : IO Unit := do
+  check ctx "R3: a slave reporting eligible=0 is withheld from promotion; eligible=1 and an explicit pre-R3 reply are not"
+    (withheld [("a", .eligible 0), ("b", .eligible 1), ("c", .legacy)] == ["a"])
+  check ctx "R3 (decision 2026-10-07): an unreadable or incomplete reply is WITHHELD this pass"
+    (withheld [("a", .unknown), ("b", .eligible 1)] == ["a"]
+      && classifyReply none == .unknown
+      && classifyReply (some "STAT repl_read_source_eligible 1\r\n") == .unknown)
+  check ctx "R3: a complete reply is classified by its keys; legacy only when it EXPLICITLY predates R3"
+    (classifyReply (some "STAT repl_read_source_eligible 1\r\nEND\r\n") == .eligible 1
+      && classifyReply (some "STAT repl_read_source_eligible 0\r\nEND\r\n") == .eligible 0
+      && classifyReply (some "STAT curr_items 5\r\nEND\r\n") == .legacy
+      && classifyReply (some "STAT rocksdb_copy_id u:1\r\nEND\r\n") == .unknown
+      && classifyReply (some "STAT repl_read_source_state revalidating\r\nEND\r\n") == .unknown)
+  check ctx "R3: a promotion is possible with a masterless partition, a missing pod, an unhealthy node or a terminating master"
+    (promotionRisk true false [] [] [] && promotionRisk false true [] [] []
+      && promotionRisk false false ["x"] [] [] && promotionRisk false false [] ["m"] ["m"])
+  check ctx "R3: a terminating SLAVE alone or a healthy cluster is not a promotion pass"
+    (!promotionRisk false false [] ["s"] ["m"] && !promotionRisk false false [] [] ["m"])
+  check ctx "R3: needs_rebuild becomes a rebuild request with flared's reason; other states do not"
+    (rebuildRequests [("a", some "needs_rebuild", some "history differs"), ("b", some "revalidating", none),
+                      ("c", some "eligible", none), ("d", none, none), ("e", some "needs_rebuild", none)]
+      == [("a", "history differs"), ("e", "the copy's source changed lineage or history")])
+
+open FlareOperator.Migration in
+/-- FlareMigration forward gate (2026-10-11): equal key counts alone moved
+    Duplicating → Forwarding, the first client-visible step (the source then
+    proxies every client read/write to the target). -/
+def checkMigrationForwardGate (ctx : Ctx) : IO Unit := do
+  let open_ := FlareOperator.Migration.MigPhase.Duplicating
+  let spec : FlareOperator.Migration.MigSpec := { source := "s", target := { name := "t" } }
+  let mk (pod : String) (rep : Bool) (loss sc : Nat) (st : String) (boot : Nat := 1000) (uid : String := s!"{pod}-uid")
+      : FlareOperator.Migration.SrcCounters :=
+    { pod, podUid := uid, boot, replicating := rep, loss, seedCompleted := sc, seedState := st }
+  let base := [mk "m0" false 3 0 "none", mk "m1" false 0 0 "none"]
+  let done := [mk "m0" true 3 1 "completed_dump", mk "m1" true 0 1 "completed_snapshot_push"]
+  -- the old behaviour, now refused: converged counts, nothing else
+  check ctx "migration: equal counts alone (no seed evidence, loss unknown, no approval) do NOT switch to forward"
+    ((migStep spec open_ { convergedTicks := 6, sourceKeys := 10, targetKeys := 10 }).2 == .none)
+  -- the V approval (bound line) and the live masters this tick
+  let attempt := "mig-uid/123"
+  let sN : NodeIdent := { pod := "s0", podUid := "s0-uid", boot := 1000, masterId := "mid-a", copyId := "copy-a:1", epoch := "1:ep-a", seq := "500" }
+  let dN : NodeIdent := { pod := "d0", podUid := "d0-uid", boot := 2000, masterId := "mid-a", copyId := "copy-d:1", epoch := "1:ep-a", seq := "700" }
+  let bind := s!"attempt={attempt}|src=s0,s0-uid,1000,mid-a,copy-a:1,1:ep-a,500|dst=d0,d0-uid,2000,mid-a,copy-d:1,1:ep-a,700"
+  let appr := s!"v=1|verdict=MATCH|verified_at=5000|{bind}"
+  -- every source pod's APPLIED state (any role): duplicate before, forward after
+  let pr (pod mode : String) (settled : Bool := true) (rep : Bool := true) : PodRepl :=
+    { pod, replicating := rep, mode, inFlight := if settled then 0 else 1, enqueued := 0, terminal := 0 }
+  let dup := some [pr "s0" "duplicate", pr "s1" "duplicate"]
+  let fwd := some [pr "s0" "forward", pr "s1" "forward"]
+  let ok : MigObs := { convergedTicks := 6, seedCompleted := true, loss := .clean, attemptId := attempt,
+                       srcIdent := some [sN], dstIdent := some [dN], now := some 5100, sourcePods := dup }
+  let withA := { spec with forwardApproval := appr }
+  check ctx "migration: counts + seed + clean loss but NO approval → held (counts are not a verification)"
+    ((migStep spec open_ ok).2 == .none)
+  check ctx "migration: approveForward=true alone (a boolean) → held, and the hold says it is not accepted"
+    ((migStep { spec with approveForward := true } open_ ok).2 == .none
+      && ((forwardHold { spec with approveForward := true } ok).getD "").startsWith "approveForward is a boolean")
+  check ctx "migration: counts + seed + clean loss + a V MATCH approval equal to the live masters → switchForward"
+    (migStep withA open_ ok == (.Forwarding, .switchForward))
+  check ctx "migration: approved, but loss counted since the attempt → held"
+    ((migStep withA open_ { ok with loss := .lost 1 }).2 == .none)
+  check ctx "migration: approved, but loss Unknown → held"
+    ((migStep withA open_ { ok with loss := .unknown "x" }).2 == .none)
+  check ctx "migration: approved, clean, but seed not completed → held"
+    ((migStep withA open_ { ok with seedCompleted := false }).2 == .none)
+  -- negatives on the approval itself
+  check ctx "approval: a DIFFERENT / UNKNOWN verdict, another format version or no verified_at → refused"
+    ((migStep { spec with forwardApproval := s!"v=1|verdict=DIFFERENT|verified_at=5000|{bind}" } open_ ok).2 == .none
+      && (migStep { spec with forwardApproval := s!"v=1|verdict=UNKNOWN|verified_at=5000|{bind}" } open_ ok).2 == .none
+      && (migStep { spec with forwardApproval := s!"v=2|verdict=MATCH|verified_at=5000|{bind}" } open_ ok).2 == .none
+      && (migStep { spec with forwardApproval := bind } open_ ok).2 == .none)
+  check ctx "approval: a MATCH from ANOTHER attempt (stale result, or an approval reused on a recreated migration) → refused"
+    ((migStep withA open_ { ok with attemptId := "mig-uid-2/123" }).2 == .none
+      && (migStep withA open_ { ok with attemptId := "" }).2 == .none)
+  check ctx "approval: same count but a WRONG VALUE written on the target after the MATCH (target position moved) → refused"
+    ((migStep withA open_ { ok with dstIdent := some [{ dN with seq := "701" }] }).2 == .none)
+  check ctx "approval: a write on the source after the MATCH → refused"
+    ((migStep withA open_ { ok with srcIdent := some [{ sN with seq := "501" }] }).2 == .none)
+  check ctx "approval: source restarted / target restarted / target pod replaced after the MATCH → refused"
+    ((migStep withA open_ { ok with srcIdent := some [{ sN with boot := 1500 }] }).2 == .none
+      && (migStep withA open_ { ok with dstIdent := some [{ dN with boot := 2600 }] }).2 == .none
+      && (migStep withA open_ { ok with dstIdent := some [{ dN with podUid := "new" }] }).2 == .none)
+  check ctx "approval: target re-seeded (copy / history / epoch changed) after the MATCH → refused"
+    ((migStep withA open_ { ok with dstIdent := some [{ dN with copyId := "copy-e:1" }] }).2 == .none
+      && (migStep withA open_ { ok with dstIdent := some [{ dN with epoch := "2:ep-b" }] }).2 == .none)
+  check ctx "approval: a master unreadable this tick, or no clock → refused (fail closed)"
+    ((migStep withA open_ { ok with dstIdent := none }).2 == .none
+      && (migStep withA open_ { ok with srcIdent := none }).2 == .none
+      && (migStep withA open_ { ok with now := none }).2 == .none)
+  check ctx "approval: older than the max age, or verified in the future of the source clock → refused"
+    ((migStep withA open_ { ok with now := some (5000 + approvalMaxAgeSeconds + 1) }).2 == .none
+      && (migStep withA open_ { ok with now := some 4000 }).2 == .none
+      && (migStep withA open_ { ok with now := some (5000 + approvalMaxAgeSeconds) }).2 == .switchForward)
+  check ctx "approval: a binding naming one master twice cannot cover a second, unverified master → refused"
+    ((migStep { spec with forwardApproval := s!"v=1|verdict=MATCH|verified_at=5000|attempt={attempt}|src=s0,s0-uid,1000,mid-a,copy-a:1,1:ep-a,500;s0,s0-uid,1000,mid-a,copy-a:1,1:ep-a,500|dst=d0,d0-uid,2000,mid-a,copy-d:1,1:ep-a,700" }
+        open_ { ok with srcIdent := some [sN, { sN with pod := "s1" }] }).2 == .none)
+  -- the same line scripts/tests/test_verify_copy.py GOLDEN prints: change both together
+  let golden := "v=1|verdict=MATCH|verified_at=1800000030|attempt=mig-uid/123|src=s0,s0-uid,1799999000,mid-a,copy-a:1,1:ep-a,500|dst=d0,d0-uid,1799999000,mid-a,copy-a:1,1:ep-a,500"
+  let gS : NodeIdent := { pod := "s0", podUid := "s0-uid", boot := 1799999000, masterId := "mid-a", copyId := "copy-a:1", epoch := "1:ep-a", seq := "500" }
+  let gD : NodeIdent := { gS with pod := "d0", podUid := "d0-uid" }
+  check ctx "approval golden: the comparator's MATCH line parses and holds against the masters it names"
+    (approvalHold golden { attemptId := "mig-uid/123", srcIdent := some [gS], dstIdent := some [gD], now := some 1800000100 } == none
+      && (approvalHold golden { attemptId := "mig-uid/124", srcIdent := some [gS], dstIdent := some [gD], now := some 1800000100 }).isSome)
+  check ctx "approval: one use — the approval a forward switch was already issued with is refused in Duplicating"
+    ((migStep withA open_ { ok with consumedApproval := appr }).2 == .none
+      && ((forwardHold withA { ok with consumedApproval := appr }).getD "").endsWith "(one use)"
+      && (migStep withA open_ { ok with consumedApproval := "v=1|verdict=MATCH|verified_at=1|other" }).2 == .switchForward)
+  check ctx "approval: Forwarding re-checks the consumed approval itself (consumption does not block the post-apply check)"
+    ((migStep withA .Forwarding { ok with sourceForwardApplied := true, sourcePods := fwd, consumedApproval := appr }).1 == .AwaitingCutover)
+  -- post-apply recheck (the switch window)
+  check ctx "Forwarding: forward applied and the approval still matches → AwaitingCutover"
+    ((migStep withA .Forwarding { ok with sourceForwardApplied := true, sourcePods := fwd }).1 == .AwaitingCutover)
+  check ctx "Forwarding: forward applied but a write landed between the switch check and the apply → stays Forwarding"
+    ((migStep withA .Forwarding { ok with sourceForwardApplied := true, sourcePods := fwd, srcIdent := some [{ sN with seq := "502" }] }).1 == .Forwarding
+      && (migStep withA .Forwarding { ok with sourceForwardApplied := true, sourcePods := fwd, dstIdent := some [{ dN with seq := "702" }] }).1 == .Forwarding)
+  check ctx "Forwarding: not applied yet → stays Forwarding; a boolean cannot advance it either"
+    ((migStep withA .Forwarding ok).1 == .Forwarding
+      && (migStep { spec with approveForward := true } .Forwarding { ok with sourceForwardApplied := true, sourcePods := fwd }).1 == .Forwarding)
+  check ctx "Forwarding: after a hold, a NEW MATCH bound to the current positions advances it"
+    ((migStep { spec with forwardApproval := s!"v=1|verdict=MATCH|verified_at=5050|attempt={attempt}|src=s0,s0-uid,1000,mid-a,copy-a:1,1:ep-a,502|dst=d0,d0-uid,2000,mid-a,copy-d:1,1:ep-a,700" }
+        .Forwarding { ok with sourceForwardApplied := true, sourcePods := fwd, srcIdent := some [{ sN with seq := "502" }] }).1 == .AwaitingCutover)
+  -- the switch window (2026-10-12): forward acts on the pod a client hits;
+  -- the rendered config is not what pods apply
+  check ctx "switch precondition: a source pod not in duplicate mode / not replicating / with forwards in flight / unreadable → no switch"
+    ((migStep withA open_ { ok with sourcePods := some [pr "s0" "duplicate", pr "s1" "forward"] }).2 == .none
+      && (migStep withA open_ { ok with sourcePods := some [pr "s0" "duplicate", pr "s1" "duplicate" (rep := false)] }).2 == .none
+      && (migStep withA open_ { ok with sourcePods := some [pr "s0" "duplicate" (settled := false), pr "s1" "duplicate"] }).2 == .none
+      && (migStep withA open_ { ok with sourcePods := none }).2 == .none
+      && (migStep withA open_ { ok with sourcePods := some [] }).2 == .none
+      && ((forwardHold withA { ok with sourcePods := some [pr "s0" "duplicate", pr "s1" "forward"] }).getD "").startsWith "switch precondition")
+  check ctx "Forwarding: forward RENDERED but a pod still applies duplicate (mixed modes) / forwards in flight / unreadable → stays Forwarding"
+    ((migStep withA .Forwarding { ok with sourceForwardApplied := true, sourcePods := some [pr "s0" "forward", pr "s1" "duplicate"] }).1 == .Forwarding
+      && (migStep withA .Forwarding { ok with sourceForwardApplied := true, sourcePods := some [pr "s0" "forward", pr "s1" "forward" (settled := false)] }).1 == .Forwarding
+      && (migStep withA .Forwarding { ok with sourceForwardApplied := true, sourcePods := none }).1 == .Forwarding
+      && ((forwardAppliedHold withA { ok with sourceForwardApplied := true, sourcePods := some [pr "s0" "forward", pr "s1" "duplicate"] }).getD "").startsWith "forward mode is rendered but not yet applied")
+  check ctx "crash between the CR patch and the status patch: Duplicating with forward rendered OR any pod applying forward → Forwarding, no re-issue; abort refused"
+    (migStep withA open_ { ok with sourceForwardApplied := true } == (.Forwarding, .none)
+      && migStep withA open_ { ok with sourcePods := some [pr "s0" "duplicate", pr "s1" "forward"] } == (.Forwarding, .none)
+      && (migStep { withA with abort := true } open_ { ok with sourcePods := some [pr "s0" "duplicate", pr "s1" "forward"] }).2 != .doAbort
+      && (migStep { withA with abort := true } open_ { ok with sourceForwardApplied := true }).2 != .doAbort
+      && (migStep { withA with abort := true } open_ ok).2 == .doAbort)
+  -- strict stats parsing (review 2026-10-12): the old reader summed
+  -- getD-0 counters, so END + on + duplicate alone read as drained
+  let st (lines : List String) : String := String.join (lines.map (· ++ "\r\n")) ++ "END\r\n"
+  -- real flared output carries stats with EMPTY values (E2E 38215512251:
+  -- "STAT repl_follow_source " made every real reply untrusted)
+  let sbase := ["STAT pid 7", "STAT repl_follow_source ", "STAT reconstruction_last_success_source ",
+                "STAT cluster_replication on", "STAT cluster_replication_mode duplicate"]
+  let gauge (n : Nat) := s!"STAT cluster_replication_forward_in_flight {n}"
+  let cn (k : String) (n : String) := s!"STAT cluster_replication[{k}] {n}"
+  let settledOf (out : String) : Option Bool := (podReplOf "s0" out).map PodRepl.settled
+  let parsed0 (outs : List String) : Option (List PodRepl) := outs.mapM (podReplOf "s0")
+  check ctx "podReplOf counterexamples that the old reader called drained: no in-flight gauge / non-numeric counter / a name twice / unknown counter / END not last / malformed line → unreadable"
+    (podReplOf "s0" (st sbase) == none
+      && podReplOf "s0" (st (sbase ++ [gauge 0, cn "forward_enqueued" "abc"])) == none
+      && podReplOf "s0" (st (sbase ++ [gauge 0, cn "forward_enqueued" "-1"])) == none
+      && podReplOf "s0" (st (sbase ++ [gauge 0, cn "forward_enqueued" "2", cn "forward_enqueued" "0"])) == none
+      && podReplOf "s0" (st (sbase ++ [gauge 0, gauge 0])) == none
+      && podReplOf "s0" (st (sbase ++ [gauge 0, cn "forward_new_outcome" "1"])) == none
+      && podReplOf "s0" (st (sbase ++ [gauge 0]) ++ "STAT late 1\r\n") == none
+      && podReplOf "s0" ((st (sbase ++ [gauge 0])).replace "END\r\n" "") == none
+      && podReplOf "s0" (st (sbase ++ [gauge 0, "garbage"])) == none
+      && podReplOf "s0" (st (sbase ++ ["STAT cluster_replication_forward_in_flight x"])) == none
+      && podReplOf "s0" (st ["STAT cluster_replication on", gauge 0]) == none
+      && podReplOf "s0" (st [gauge 0]) == none
+      && podReplOf "s0" (st ["STAT cluster_replication maybe", gauge 0]) == none
+      && podReplOf "s0" (st (sbase ++ [gauge 0, "STAT repl_follow_source x"])) == none
+      && podReplOf "s0" (st ["STAT  cluster_replication on", gauge 0]) == none)
+  check ctx "podReplOf: in flight > 0 is never settled, whatever the counters say (queued but not yet counted enqueued; answered but not released)"
+    (settledOf (st (sbase ++ [gauge 1])) == some false
+      && settledOf (st (sbase ++ [gauge 1, cn "forward_enqueued" "3", cn "forward_applied" "3"])) == some false
+      && settledOf (st (sbase ++ [gauge 0])) == some true
+      && settledOf (st (sbase ++ [gauge 0, cn "forward_enqueued" "3", cn "forward_applied" "3"])) == some true)
+  check ctx "podReplOf: every terminal path counts — dropped_stopping / dropped_retries (missing before: such a pod never read as drained) and the rest"
+    (settledOf (st (sbase ++ [gauge 0, cn "forward_enqueued" "2", cn "forward_dropped_stopping" "1", cn "forward_dropped_retries" "1"])) == some true
+      && settledOf (st (sbase ++ [gauge 0, cn "forward_enqueued" "9", cn "forward_applied" "1", cn "forward_noop_set_not_stored" "1",
+           cn "forward_missing_touch_not_found" "1", cn "forward_failed_set_server_error" "1", cn "forward_dropped_abandoned" "1",
+           cn "forward_dropped_down" "1", cn "forward_dropped_stopping" "1", cn "forward_dropped_retries" "1", cn "forward_dropped_unknown_op" "1"])) == some true)
+  check ctx "podReplOf: with nothing in flight the counters must be EQUAL — more outcomes than forwards (double count / foreign counter) or fewer (an unaccounted path) is not drained; non-terminal counters are not outcomes"
+    (settledOf (st (sbase ++ [gauge 0, cn "forward_enqueued" "1", cn "forward_applied" "2"])) == some false
+      && settledOf (st (sbase ++ [gauge 0, cn "forward_enqueued" "2", cn "forward_applied" "1"])) == some false
+      && settledOf (st (sbase ++ [gauge 0, cn "forward_applied" "1"])) == some false
+      && settledOf (st (sbase ++ [gauge 0, cn "forward_enqueued" "1", cn "forward_dropped_unqueued" "1"])) == some false
+      && settledOf (st (sbase ++ [gauge 0, cn "forward_enqueued" "1", cn "forward_retried" "1"])) == some false
+      && settledOf (st (sbase ++ [gauge 0, cn "forward_enqueued" "1", cn "forward_server_error_retried" "1"])) == some false
+      && settledOf (st (sbase ++ [gauge 0, cn "forward_enqueued" "1", cn "forward_applied" "1", cn "seed_completed" "4", cn "forward_dropped_unqueued" "3", cn "forward_retried" "2"])) == some true)
+  -- the same literal as the cutter test test_foreign_outcome_counters_are_the_gate_set
+  let answeredLit := "forward_applied,forward_failed_delete_client_error,forward_failed_delete_end,forward_failed_delete_error,forward_failed_delete_exists,forward_failed_delete_found,forward_failed_delete_none,forward_failed_delete_not_stored,forward_failed_delete_ok,forward_failed_delete_server_error,forward_failed_delete_stored,forward_failed_delete_touched,forward_failed_set_client_error,forward_failed_set_deleted,forward_failed_set_end,forward_failed_set_error,forward_failed_set_exists,forward_failed_set_found,forward_failed_set_none,forward_failed_set_not_found,forward_failed_set_ok,forward_failed_set_server_error,forward_failed_set_touched,forward_failed_touch_client_error,forward_failed_touch_deleted,forward_failed_touch_end,forward_failed_touch_error,forward_failed_touch_exists,forward_failed_touch_found,forward_failed_touch_none,forward_failed_touch_not_stored,forward_failed_touch_server_error,forward_failed_touch_stored,forward_missing_touch_not_found,forward_noop_delete_not_found,forward_noop_set_not_stored".splitOn ","
+  check ctx "forwardAnsweredCounters is exactly the 36 names flared's foreign_outcome_counter can produce (literal shared with the cutter test)"
+    (answeredLit.length == 36 && forwardAnsweredCounters.length == 36
+      && answeredLit.all forwardAnsweredCounters.contains && forwardAnsweredCounters.all answeredLit.contains)
+  check ctx "podReplOf: names of a known SHAPE but outside the exact set are unknown → not trusted (no prefix match): an op never sent, an answer that is not a failure for that op, an unknown answer, a new seed counter"
+    (podReplOf "s0" (st (sbase ++ [gauge 0, cn "forward_failed_get_server_error" "1"])) == none
+      && podReplOf "s0" (st (sbase ++ [gauge 0, cn "forward_noop_set_stored" "1"])) == none
+      && podReplOf "s0" (st (sbase ++ [gauge 0, cn "forward_failed_set_stored" "1"])) == none
+      && podReplOf "s0" (st (sbase ++ [gauge 0, cn "forward_failed_set_bogus" "1"])) == none
+      && podReplOf "s0" (st (sbase ++ [gauge 0, cn "forward_missing_set_not_found" "1"])) == none
+      && podReplOf "s0" (st (sbase ++ [gauge 0, cn "seed_new" "1"])) == none
+      && (podReplOf "s0" (st (sbase ++ [gauge 0, cn "forward_failed_touch_not_stored" "1", cn "seed_snapshot_push_disabled" "1"]))).isSome)
+  check ctx "podReplOf: a forward answered and counted BEFORE forward_enqueued is (a very fast queue) reads in flight 1, enqueued 0, outcome 1 → held as in flight, never as 'more outcomes'"
+    (settledOf (st (sbase ++ [gauge 1, cn "forward_applied" "1"])) == some false
+      && ((podsHold "duplicate" (parsed0 [st (sbase ++ [gauge 1, cn "forward_applied" "1"])])).getD "").endsWith "in flight")
+  check ctx "podReplOf: off needs no mode; mode and gauge read back"
+    (podReplOf "s0" (st ["STAT cluster_replication off", gauge 0]) == some { pod := "s0", replicating := false, mode := "", inFlight := 0, enqueued := 0, terminal := 0 }
+      && (podReplOf "s0" (st (sbase ++ [gauge 2]))).map (·.inFlight) == some 2
+      && (podReplOf "s0" ((st (sbase ++ [gauge 0])).replace "\r\n" "\n")).isSome)
+  -- the gate fed by PARSED replies (the stats path the controller uses)
+  let parsed (outs : List String) : Option (List PodRepl) := outs.mapM (podReplOf "s0")
+  let dupOk := st (sbase ++ [gauge 0, cn "forward_enqueued" "5", cn "forward_applied" "5"])
+  check ctx "switch gate on parsed replies: a pod with a forward in flight, an old-format reply, or disagreeing counters → no switch and stays Forwarding; all drained → switch"
+    ((migStep withA open_ { ok with sourcePods := parsed [dupOk, st (sbase ++ [gauge 1, cn "forward_enqueued" "5", cn "forward_applied" "5"])] }).2 == .none
+      && (migStep withA open_ { ok with sourcePods := parsed [dupOk, st sbase] }).2 == .none
+      && (migStep withA open_ { ok with sourcePods := parsed [dupOk, st (sbase ++ [gauge 0, cn "forward_enqueued" "5", cn "forward_applied" "4"])] }).2 == .none
+      && (migStep withA open_ { ok with sourcePods := parsed [dupOk, dupOk] }).2 != .none
+      && ((podsHold "duplicate" (parsed [st (sbase ++ [gauge 3])])).getD "").endsWith "in flight"
+      && (migStep withA .Forwarding { ok with sourceForwardApplied := true, sourcePods := parsed [st ["STAT cluster_replication on", "STAT cluster_replication_mode forward", gauge 1]] }).1 == .Forwarding)
+  -- loss over the whole attempt
+  check ctx "migration loss: unchanged counters over the attempt → clean"
+    (lossVerdict base (some done) == .clean)
+  check ctx "migration loss: a counter moved (also one counted during the seed) → lost n"
+    (lossVerdict base (some [mk "m0" true 5 1 "completed_dump", mk "m1" true 1 1 "completed_dump"]) == .lost 3)
+  check ctx "migration loss: no baseline → Unknown"
+    (match lossVerdict [] (some done) with | .unknown _ => true | _ => false)
+  check ctx "migration loss: baseline read while replication was already on → Unknown"
+    (match lossVerdict [mk "m0" true 3 0 "none", mk "m1" false 0 0 "none"] (some done) with | .unknown _ => true | _ => false)
+  check ctx "migration loss: a source master restarted (start time moved) → Unknown, not clean"
+    (match lossVerdict base (some [mk "m0" true 0 1 "completed_dump" (boot := 2000), mk "m1" true 0 1 "completed_dump"]) with
+      | .unknown _ => true | _ => false)
+  check ctx "migration loss: pod replaced (same name, new UID) → Unknown"
+    (match lossVerdict base (some [mk "m0" true 3 1 "completed_dump" (uid := "new"), mk "m1" true 0 1 "completed_dump"]) with
+      | .unknown _ => true | _ => false)
+  check ctx "migration loss: a counter went down → Unknown"
+    (match lossVerdict base (some [mk "m0" true 2 1 "completed_dump", mk "m1" true 0 1 "completed_dump"]) with
+      | .unknown _ => true | _ => false)
+  check ctx "migration loss: a master unreadable → Unknown"
+    (match lossVerdict base none with | .unknown _ => true | _ => false)
+  check ctx "migration loss: start time within rounding (±1 s) is the same process"
+    (lossVerdict base (some [mk "m0" true 3 1 "completed_dump" (boot := 1001), mk "m1" true 0 1 "completed_dump" (boot := 999)]) == .clean)
+  -- seed of THIS attempt
+  check ctx "migration seed: completed on every master, counter above the baseline → completed"
+    (seedCompletedSince base (some done))
+  check ctx "migration seed: state completed_* from an EARLIER attempt (counter not above the baseline) → not completed"
+    (!seedCompletedSince [mk "m0" false 3 1 "completed_dump", mk "m1" false 0 1 "completed_dump"] (some done))
+  check ctx "migration seed: one master failed_transfer → not completed"
+    (!seedCompletedSince base (some [mk "m0" true 3 1 "completed_dump", mk "m1" true 0 1 "failed_transfer"]))
+  check ctx "migration seed: restarted master → not completed"
+    (!seedCompletedSince base (some [mk "m0" true 3 1 "completed_dump" (boot := 5000), mk "m1" true 0 1 "completed_dump"]))
+  -- dwell counted only while Duplicating
+  check ctx "migration dwell: 0 = 0 during Provisioning does not pre-load converged ticks"
+    (nextConvergedTicks .Provisioning 5 (some 0) (some 0) == 0
+      && nextConvergedTicks .Duplicating 5 (some 0) (some 0) == 6
+      && nextConvergedTicks .Duplicating 5 (some 3) (some 2) == 0
+      && nextConvergedTicks .Duplicating 5 none (some 2) == 0)
+  -- abort after the forward switch
+  check ctx "migration: abort in Forwarding / AwaitingCutover is refused (the target holds acknowledged writes)"
+    ((migStep { spec with abort := true } .Forwarding {}).2 != .doAbort
+      && (migStep { spec with abort := true } .AwaitingCutover {}).2 != .doAbort
+      && (migStep { spec with abort := true } .Duplicating {}).2 == .doAbort)
+  -- the V binding alone
+  check ctx "V binding: live masters equal to what was verified, same attempt → no hold"
+    (forwardBindingHold bind attempt [sN] [dN] == none)
+  check ctx "V binding: a verification from another attempt (stale, or the approval reused) → hold"
+    ((forwardBindingHold bind "s0 s0-uid 1791799999 0 0 0 none" [sN] [dN]).isSome)
+  check ctx "V binding: a write after the scan (source position moved) → hold"
+    ((forwardBindingHold bind attempt [{ sN with seq := "501" }] [dN]).isSome)
+  check ctx "V binding: a write on the target after the scan → hold"
+    ((forwardBindingHold bind attempt [sN] [{ dN with seq := "701" }]).isSome)
+  check ctx "V binding: source restarted after the scan → hold"
+    ((forwardBindingHold bind attempt [{ sN with boot := 1500 }] [dN]).isSome)
+  check ctx "V binding: target replaced (new pod UID) after the scan → hold"
+    ((forwardBindingHold bind attempt [sN] [{ dN with podUid := "new" }]).isSome)
+  check ctx "V binding: target re-seeded (copy / history changed) → hold"
+    ((forwardBindingHold bind attempt [sN] [{ dN with copyId := "copy-e:1" }]).isSome
+      && (forwardBindingHold bind attempt [sN] [{ dN with masterId := "mid-z" }]).isSome)
+  check ctx "V binding: a master added or missing → hold"
+    ((forwardBindingHold bind attempt [sN, { sN with pod := "s1" }] [dN]).isSome
+      && (forwardBindingHold bind attempt [] [dN]).isSome)
+  check ctx "V binding: malformed → hold"
+    ((forwardBindingHold "attempt=x|src=|dst=" attempt [sN] [dN]).isSome
+      && (forwardBindingHold "garbage" attempt [sN] [dN]).isSome)
+  check ctx "migration baseline: serialize/parse round trip; malformed → none"
+    (parseBaseline (serializeBaseline base) == some base && parseBaseline "m0 u x 0 1 2 none" == none
+      && parseBaseline "" == some [])
+
+private def hasSub (s sub : String) : Bool := (s.splitOn sub).length > 1
+
+open FlareOperator.K8s.Bridge in
+/-- Opt-in cross-cluster snapshot-push switch (default unchanged). -/
+def checkSnapshotPushSwitch (ctx : Ctx) : IO Unit := do
+  let r : FlareOperator.K8s.ClusterReplicationSpec := { enabled := true, serverName := "dst", mode := "duplicate" }
+  let dflt := renderFlaredExtraConf {} (some r)
+  check ctx "snapshot-push switch: default renders exactly the old replication block (no new line)"
+    (dflt == "cluster-replication = true\ncluster-replication-server-name = dst\ncluster-replication-server-port = 12121\ncluster-replication-mode = duplicate\ncluster-replication-concurrency = 2")
+  check ctx "snapshot-push switch: opt-in false renders cluster-replication-snapshot-push = false"
+    (renderFlaredExtraConf {} (some { r with snapshotPush := false }) == dflt ++ "\ncluster-replication-snapshot-push = false")
+  check ctx "snapshot-push switch: replication off renders only the explicit false (the switch is not rendered)"
+    (renderFlaredExtraConf {} none == "cluster-replication = false")
+  -- item 1 (2026-10-13): a DESTINATION with replication off but the switch
+  -- false renders it (flared then refuses an incoming push)
+  -- (the operator renders a disabled replication through the `none` path
+  -- with the CR's switch: 05eee82 per-key-only 6 showed the switch dropped
+  -- when only the `some` path carried it)
+  check ctx "snapshot-push switch: replication OFF with snapshotPush false renders the switch (destination refuses pushes)"
+    (renderFlaredExtraConf {} none false == "cluster-replication = false\ncluster-replication-snapshot-push = false")
+  check ctx "snapshot-push switch: replication off with the default renders exactly the old line"
+    (renderFlaredExtraConf {} none true == "cluster-replication = false")
+  -- review 2026-10-13 finding 1: an unreadable source CR stops the plan
+  let srcView (push : Bool) : FlareOperator.K8s.FlareClusterView :=
+    { metadata := {}, spec := { clusterReplication := { snapshotPush := push } } }
+  check ctx "migration plan: an UNREADABLE source CR is an error (no default that accepts pushes), not ({}, true)"
+    (match FlareOperator.Migration.Provision.sourceSettings (.error "Forbidden") with
+     | .error e => hasSub e "Forbidden" && hasSub e "nothing of the target applied"
+     | .ok _ => false)
+  check ctx "migration plan: a readable per-key-only source gives the target snapshotPush false"
+    (match FlareOperator.Migration.Provision.sourceSettings (.ok (srcView false)) with
+     | .ok (_, push) => push == false
+     | .error _ => false)
+  check ctx "migration plan: a readable default source gives the target the default"
+    (match FlareOperator.Migration.Provision.sourceSettings (.ok (srcView true)) with
+     | .ok (_, push) => push == true
+     | .error _ => false)
+  -- FlareMigration gives a per-key-only source's switch to the target
+  let plan : FlareOperator.Migration.Provision.TargetPlan := {
+    migName := "m", ns := "ns", targetName := "tgt", partitions := 1, replicas := 2,
+    persistenceSize := "1Gi", drainSeconds := 30, flaredImage := "f", operatorImage := "o",
+    serviceAccount := "sa", rocksdb := {} }
+  let pk := { plan with snapshotPush := false }
+  check ctx "migration target of a default source: no replication block, the target config is the old one"
+    (!hasSub (FlareOperator.Migration.Provision.flareClusterYaml plan) "clusterReplication" &&
+     !hasSub (FlareOperator.Migration.Provision.configMapYaml plan) "snapshot-push")
+  check ctx "migration target of a per-key-only source: CR carries enabled false + snapshotPush false, its first config refuses pushes"
+    (hasSub (FlareOperator.Migration.Provision.flareClusterYaml pk) "\n  clusterReplication:\n    enabled: false\n    snapshotPush: false" &&
+     hasSub (FlareOperator.Migration.Provision.configMapYaml pk) "cluster-replication-snapshot-push = false")
+  -- the target operator renders the same config from that CR (first SIGHUP a no-op)
+  check ctx "migration target config equals what the target operator renders from the target CR (replication off, switch false)"
+    (hasSub (FlareOperator.Migration.Provision.configMapYaml pk)
+      (String.intercalate "\n    " ((renderFlaredExtraConf {} none false).splitOn "\n")) &&
+     !hasSub (FlareOperator.Migration.Provision.configMapYaml pk) "cluster-replication-server-name")
+
+def run : IO UInt32 := do
+  let ctx : Ctx := { failures := ← IO.mkRef [], count := ← IO.mkRef 0 }
+  for (name, ok) in FlareOperator.UnitTestsHandover.results do
+    check ctx name ok
+  for (name, ok) in FlareOperator.UnitTestsRolling.results do
+    check ctx name ok
+  for (name, ok) in FlareOperator.UnitTestsNodeGuard.results do
+    check ctx name ok
+  for (name, ok) in FlareOperator.UnitTestsFailover.results do
+    check ctx name ok
+  for (name, ok) in (← FlareOperator.UnitTestsFailover.probeResults) do
+    check ctx name ok
+  for (name, ok) in FlareOperator.UnitTestsNodeMove.results do
+    check ctx name ok
+  for (name, ok) in FlareOperator.UnitTestsFence.results do
+    check ctx name ok
+  checkObserve ctx
+  checkRequestResolve ctx
+  checkGate ctx
+  checkReconstructingDefer ctx
+  checkAdoptRecordedOutside ctx
+  checkAdoptNeverDemoted ctx
+  checkAdoptCompletes ctx
+  checkAdoptSamePod ctx
+  checkAdoptRecordedInPrepare ctx
+  checkAdoptGrowth ctx
+  checkAdoptRecreatedPod ctx
+  checkAdoptShortPrepare ctx
+  checkAdoptShortPrepareGuards ctx
+  checkAdoptBeforePlan ctx
+  checkAdoptPersistence ctx
+  checkFollowOwnership ctx
+  checkAdvanceHold ctx
+  checkAdvanceComplete ctx
+  checkJson ctx
+  checkEpisodes ctx
+  checkJudgeRefusals ctx
+  checkJudgeAcceptance ctx
+  checkStatsObservation ctx
+  checkDeleteGate ctx
+  checkFollowJudge ctx
+  checkFollowClassify ctx
+  checkFollowShaping ctx
+  checkMemoryConfig ctx
+  checkTopologyDelivery ctx
+  checkBreakerUnavailable ctx
+  checkTopologyObservation ctx
+  checkTopologyMetrics ctx
+  checkReactivation ctx
+  checkFailoverLagHold ctx
+  checkExMasterReturn ctx
+  checkAttributedRejoin ctx
+  checkNodeMapRecovery ctx
+  checkRepairSource ctx
+  checkPodRows ctx
+  checkFollowConfirm ctx
+  checkMasterMoved ctx
+  checkLedgerObserve ctx
+  checkTraceParse ctx
+  checkTraceMatch ctx
+  checkTraceAmbiguity ctx
+  checkActivationOrder ctx
+  checkSourceEligibility ctx
+  checkRebuildConcurrency ctx
+  checkHistoryContinuation ctx
+  checkAuthoritativeHistory ctx
+  checkAuthority29Transitions ctx
+  checkRestoreProvenance ctx
+  checkCopyDiscardApproval ctx
+  checkRedundantCopy ctx
+  checkPromotionEvidence ctx
+  checkStaleR3Refill ctx
+  checkStaleR3RefillUntracked ctx
+  checkMigrationForwardGate ctx
+  checkSnapshotPushSwitch ctx
+  let failures ← ctx.failures.get
+  let n ← ctx.count.get
+  IO.println s!"1..{n}"
+  if failures.isEmpty then
+    IO.println s!"# {n} checks passed"
+    return 0
+  else
+    IO.println s!"# FAILED: {failures}"
+    return 1
+
+end FlareOperator.UnitTests
+
+def main : IO UInt32 := FlareOperator.UnitTests.run

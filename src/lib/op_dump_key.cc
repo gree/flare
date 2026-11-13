@@ -108,6 +108,25 @@ int op_dump_key::_parse_text_server_parameters() {
 				throw -1;
 			}
 		}
+		// A partition filter needs a CONSISTENT partition_size: the partition
+		// must lie inside it, and it must be answerable by the key resolver
+		// (its table is bounded — an oversized value indexed past it and
+		// crashed a live slave). Rejected here with SERVER_ERROR instead of
+		// letting run_server touch the resolver.
+		if (this->_partition >= 0) {
+			if (this->_partition_size <= this->_partition) {
+				log_debug("invalid partition/partition_size (partition=%d, partition_size=%d)", this->_partition, this->_partition_size);
+				throw -1;
+			}
+			if (this->_cluster != NULL) {
+				key_resolver* kr = this->_cluster->get_key_resolver();
+				int cap = kr ? kr->get_partition_size_capacity() : 0;
+				if (cap > 0 && this->_partition_size >= cap) {
+					log_debug("partition_size exceeds resolver capacity (partition_size=%d, capacity=%d)", this->_partition_size, cap);
+					throw -1;
+				}
+			}
+		}
 
 		// bwlimit (optional)
 		n += util::next_digit(p+n, q, sizeof(q));

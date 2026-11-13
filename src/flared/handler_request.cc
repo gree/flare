@@ -30,6 +30,8 @@
 
 #include "op_parser_binary_node.h"
 #include "op_parser_text_node.h"
+#include "op_proxy_read.h"
+#include "op_proxy_write.h"
 
 namespace gree {
 namespace flare {
@@ -38,6 +40,8 @@ namespace flare {
 /**
  *	ctor for handler_request
  */
+int handler_request::_stop_after_request = 0;
+
 handler_request::handler_request(shared_thread t, shared_connection_tcp c):
 		thread_handler(t),
 		_connection(c) {
@@ -79,7 +83,12 @@ int handler_request::run() {
 		this->_thread->set_state("accept");
 		this->_thread->set_op(p->get_ident());
 
+		if (dynamic_cast<op_proxy_read*>(p) != NULL || dynamic_cast<op_proxy_write*>(p) != NULL) {
+			stats_object->increment_client_requests();
+		}
+		stats_object->request_begin();
 		p->run_server();
+		stats_object->request_end();
 
 		if (p->is_shutdown_request()) {
 			this->_thread->set_state("shutdown");
@@ -90,6 +99,11 @@ int handler_request::run() {
 
 		delete p;
 
+		if (handler_request::is_stop_after_request()) {
+			this->_thread->set_state("shutdown");
+			log_info("graceful stop -> closing the client connection after its request", 0);
+			break;
+		}
 		if (this->_thread->is_shutdown_request()) {
 			this->_thread->set_state("shutdown");
 			log_info("thread shutdown request -> breaking loop", 0);

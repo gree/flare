@@ -27,6 +27,7 @@
  *	$Id$
  */
 #include "cluster_replication.h"
+#include "app.h"
 #include "handler_cluster_replication.h"
 #include "handler_dump_replication.h"
 #include "logger.h"
@@ -51,7 +52,8 @@ cluster_replication::cluster_replication(thread_pool* tp):
 		_server_port(0),
 		_concurrency(0),
 		_started(false),
-		_mode (mode_duplicate) {
+		_mode (mode_duplicate),
+		_snapshot_push(true) {
 	pthread_mutex_init(&this->_mutex_started, NULL);
 }
 
@@ -111,6 +113,29 @@ int cluster_replication::start(string server_name, int server_port, int concurre
  *	stop cluster replication.
  */
 int cluster_replication::stop() {
+	// Clean no-op when nothing was ever started. This guard belongs HERE, at
+	// the source, not at every call site: stop() is reached from three places
+	// (the two flared.cc reload() branches AND ~cluster_replication()), and
+	// the destructor path is the dangerous one. cluster_replication is held
+	// by two owners — flared::_cluster_replication and the cluster's proxy
+	// event-listener list — so ~cluster_replication() only runs during flared
+	// static teardown, which delete's _other_thread_pool (this->_thread_pool)
+	// BEFORE the member shared_ptr is released. Walking a torn-down thread
+	// pool (get_active over a freed std::map, then shutdown()/shared_thread
+	// release over freed control blocks) is exactly what triggers the
+	// "pure virtual method called" abort during a rolling restart. When
+	// replication was never start()ed there is provably nothing to tear down
+	// (no threads dispatched, _thread_pool never touched), so return early and
+	// never dereference _thread_pool. A started replication is still stopped
+	// in full below; flared's dtor now also stops it while the pool is alive.
+	pthread_mutex_lock(&this->_mutex_started);
+	bool was_started = this->_started;
+	pthread_mutex_unlock(&this->_mutex_started);
+	if (!was_started) {
+		log_debug("cluster replication was never started -> stop() is a no-op", 0);
+		return 0;
+	}
+
 	log_notice("stop cluster replication", 0);
 
 	pthread_mutex_lock(&this->_mutex_started);
@@ -208,11 +233,28 @@ cluster::proxy_request cluster_replication::on_post_proxy_write(op_proxy_write* 
 		vector<string> proxy = op->get_proxy();
 		shared_queue_proxy_write q(new queue_proxy_write(NULL, NULL, proxy, e, op->get_ident()));
 		q->set_post_proxy(true);
+		q->set_foreign(true);
+		q->track_in_flight();
 
 		int key_hash_value = e.get_key_hash_value(storage::hash_algorithm_murmur);
 		if (this->_enqueue(q, key_hash_value, false) < 0) {
+			// The client was (or will be) answered by the local write; this
+			// change now never reaches the destination cluster. It used to be
+			// a log_notice only, invisible to the drop counter the operator
+			// reads (cross-cluster audit 2026-10-11, path (i)/(ii)): count it
+			// under the destination, like a forward that exhausted its retries.
+			char dest[BUFSIZ];
+			snprintf(dest, sizeof(dest), "%s:%d", this->_server_name.c_str(), this->_server_port);
+			stats_object->increment_proxy_write_dropped(string(dest));
+			stats_object->crepl_incr("forward_dropped_unqueued");
+			static AtomicCounter unqueued_logged(0);
+			if (unqueued_logged.incr() % 100 == 1) {
+				log_err("cluster replication write DROPPED before it was queued (dest=%s, key=%s, version=%u): no forwarding thread took it — counted (logged 1 in 100)",
+						dest, e.key.c_str(), e.version);
+			}
 			return cluster::proxy_request_continue;
 		}
+		stats_object->crepl_incr("forward_enqueued");
 	}
 
 	return cluster::proxy_request_continue;
@@ -229,7 +271,7 @@ cluster::proxy_request cluster_replication::on_post_proxy_write(op_proxy_write* 
 int cluster_replication::_start_dump_replication(string server_name, int server_port, storage* st, cluster* cl) {
 	log_notice("start to replicate the dump of storage", 0);
 	shared_thread t = this->_thread_pool->get(thread_pool::thread_type_dump_replication);
-	handler_dump_replication* h = new handler_dump_replication(t, cl, st, server_name, server_port);
+	handler_dump_replication* h = new handler_dump_replication(t, cl, st, server_name, server_port, this->_snapshot_push);
 	t->trigger(h);
 	return 0;
 }
@@ -258,11 +300,13 @@ int cluster_replication::_enqueue(shared_thread_queue q, int key_hash_value, boo
 	}
 
 	shared_thread t;
+	unsigned int t_id = 0;		// the id the thread had in this copy of the map
 	int index = key_hash_value % m.size();
 	int i = 0;
 	for (thread_pool::local_map::iterator it = m.begin(); it != m.end(); it++) {
 		if (i == index) {
 			t = it->second;
+			t_id = it->first;
 			break;
 		}
 		i++;
@@ -271,8 +315,10 @@ int cluster_replication::_enqueue(shared_thread_queue q, int key_hash_value, boo
 	if (sync) {
 		q->sync_ref();
 	}
-	if (t->enqueue(q) < 0) {
-		log_warning("enqueue failed (perhaps thread is now exiting?)", 0);
+	// refused if the thread was cleaned and reused (a new id) since the
+	// copy above: the caller counts it as dropped, never a new handler's item
+	if (t->enqueue(q, 0, t_id) < 0) {
+		log_warning("enqueue failed (the thread is exiting or was reused)", 0);
 		if (sync) {
 			q->sync_unref();
 		}

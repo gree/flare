@@ -60,6 +60,17 @@ private:
 	shared_cluster_replication	_cluster_replication;
 
 public:
+	// The graceful-stop budget (msec) shared by the wait for executing client
+	// requests and the forward drain: shutdown-forward-drain-msec, raised to
+	// the forward hold + 5 s (a sync client write may wait that long on a
+	// held forward). 0 (no drain) stays 0: nothing is waited for.
+	static int shutdown_budget_ms(int drain_ms, int hold_ms) {
+		if (drain_ms <= 0) {
+			return 0;
+		}
+		const int held = hold_ms > 0 ? hold_ms + 5000 : 0;
+		return drain_ms > held ? drain_ms : held;
+	};
 	flared();
 	~flared();
 
@@ -72,6 +83,7 @@ public:
 	thread_pool* get_other_thread_pool() { return this->_other_thread_pool; };
 	cluster* get_cluster() { return this->_cluster; };
 	storage* get_storage() { return this->_storage; };
+	shared_cluster_replication get_cluster_replication() { return this->_cluster_replication; };
 
 	virtual void on_storage_error();
 
@@ -79,8 +91,15 @@ protected:
 	string _get_pid_path();
 
 private:
+	int _listen();
 	int _set_resource_limit();
 	int _set_signal_handler();
+	void _drain_forwards(int msec);
+	void _wait_requests(int msec);
+	void _note_drain_baseline();
+	bool _drain_baseline_set;
+	uint64_t _drain_dropped0;
+	uint64_t _drain_failed0;
 };
 
 }	// namespace flare

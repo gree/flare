@@ -1,0 +1,72 @@
+# GitHub Actions e2e-test (breaker-migration) leg on PR #143, second run — FAIL (1 of 37)
+# tested revision: f87c2dce83ce7f68b1483b455a9bff161944125b
+# run: https://github.com/gree/flare/actions/runs/34802942000/job/103849098112
+# command: timeout 4500 .lake/build/bin/flare_e2e --filter "circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration"
+# date: 2026-09-14
+# other legs (topology, replication, wal-recovery), both builds and the evidence job passed on the same run. topology-authority test 3 (the previous failure) passed: fence, restart after 10s, lease restored, re-acquired, re-applied.
+# failure: topology-authority test 4 (TAP 12), "the pass broadcast v4294967308 despite an unreadable lease".
+# cause (harness): the operator did fence — 'lease fence: getLease failed ... LEASE FENCE ... suppressing (v4294967307 → v4294967308)' — and on its next tick recreated the lease and RETRIED: 'retrying a suppressed topology send (suppressed v4294967308; publishing v4294967308)' then 'topology changed (v4294967308 → v4294967308), broadcasting'. The test's negative check was the substring '→ v4294967308), broadcasting', which the retry's own line matches; on the CI runner the retry landed inside the 8s read window (locally it landed after it). The retry is the behaviour the same test REQUIRES two assertions later. The held pass would have logged old < new ('(v4294967307 → v4294967308), broadcasting'); a retry/re-send logs old == new. The check now distinguishes the two shapes. Operator image unchanged.
+
+# Tests: 37, Failures: 1
+ok 1 - baseline: two active masters
+ok 2 - wait out the operator startup grace period
+ok 3 - majority outage (scale 4→1) trips the breaker
+ok 4 - no live-topology churn while tripped
+ok 5 - restoring capacity resumes recovery automatically
+ok 6 - cluster shape survives an operator restart (state reload)
+ok 7 - writes still served after operator restart
+ok 8 - failover still works after the restart (reloaded state is live)
+ok 9 - flared rejects a topology push carrying a stale version
+ok 10 - control: holding the lease, the stopped pass does broadcast
+ok 11 - lease taken by another identity: the pass fences, the process exits, and the restarted leader re-applies the topology
+not ok 12 - lease unreadable: the stopped pass fails closed and does not send
+ok 13 - control: writes to the master replicate to the slave
+ok 14 - cut link: the master drops replica writes and the operator requests a repair
+ok 15 - the repair runs: held as proxy, confirmed, re-seated, reconstructed; keys recovered without another drop
+ok 16 - SAF-05: a drop seen while resync is disabled is held, survives an operator restart, and is repaired once the gate opens
+ok 17 - SAF-05: a ledger save that fails is marked unsaved, retried every pass, lands when allowed, and survives a restart
+ok 18 - SAF-05: a corrupt ledger is held as unavailable, never replaced by an empty one; the drop seen meanwhile is recovered once it is readable
+ok 19 - SAF-06: the delete carries the observed pod UID as an API precondition; a same-name pod with another UID is refused by the apiserver
+ok 20 - SAF-06: the UID-precondition delete has a deadline — a server that accepts and never answers returns within it
+ok 21 - the lost-activation condition is staged: the activation is dropped and a reconstruction completed
+ok 22 - the repair re-derives Prepare→Active from completion evidence and names it
+ok 23 - GET /metrics answers HTTP 200 with Prometheus text
+ok 24 - memcached_current_items equals stats curr_items verbatim
+ok 25 - writes are reflected in /metrics (curr_items grows, set counter present)
+ok 26 - flared_version and rocksdb passthrough are exported
+ok 27 - /metrics still answers with the operator scaled to 0 (SPOF removed)
+ok 28 - seed 60 keys across both source partitions
+ok 29 - migration CR accepted; target provisioned and Ready (phase Duplicating)
+ok 30 - counts converge and source flips to forward (phase AwaitingCutover)
+ok 31 - every key re-hashed into the 1-partition target (master AND slave)
+ok 32 - parked at AwaitingCutover until approval (gate honored)
+ok 33 - approveCutover flips the entry Service to the target
+ok 34 - reads through the entry Service hit the target cluster
+ok 35 - approveRetire deletes the source StatefulSet (phase Retired)
+ok 36 - provisioned operator self-retires when a helm successor appears
+ok 37 - abort rolls a migration back (target resources deleted)
+# RESULT: FAIL
+
+# --- topology-authority harness lines ---
+# pass held at the pre-send point with version 4294967305
+# pass held at the pre-send point with version 4294967306; taking the lease away now
+# Waiting for: operator container restarted after losing the lease (timeout: 180s)
+#   OK after 10s
+# lease deleted to restore authority: lease.coordination.k8s.io "topo-auth-operator-lease" deleted from flare-topo-auth namespace
+# pass held at the pre-send point with version 4294967308; deleting the lease so the read fails
+#   reason: the pass broadcast v4294967308 despite an unreadable lease
+
+# --- operator log (restarted container) from test 3's re-acquire through test 4 ---
+[pod/flare-operator-768fdbb4cb-25fmv/flare-operator] [flare-operator] starting (namespace=flare-topo-auth, port=12120, interval=5s, identity=flare-operator-768fdbb4cb-25fmv)
+[pod/flare-operator-768fdbb4cb-25fmv/flare-operator] [flare-operator] phase 1: attempting to acquire lease 'topo-auth-operator-lease'
+[pod/flare-operator-768fdbb4cb-25fmv/flare-operator] [flare-operator] phase 2: acquired lease, entering leader mode
+[pod/flare-operator-768fdbb4cb-25fmv/flare-operator] [flare-operator] replica repair ledger: nothing in status, starting fresh (first observation will record baselines only)
+[pod/flare-operator-768fdbb4cb-25fmv/flare-operator] [flare-operator] topology changed (v4294967306 → v4294967307), broadcasting
+[pod/flare-operator-768fdbb4cb-25fmv/flare-operator] [TopologyBroadcast] Broadcast complete (v4294967307)
+[pod/flare-operator-768fdbb4cb-25fmv/flare-operator] [flare-operator] TEST BARRIER: holding before the pre-send lease check (v4294967308)
+[pod/flare-operator-768fdbb4cb-25fmv/flare-operator] [flare-operator] TEST BARRIER: released (v4294967308)
+[pod/flare-operator-768fdbb4cb-25fmv/flare-operator] [flare-operator] lease fence: getLease failed (getLease failed (exit 1): Error from server (NotFound): leases.coordination.k8s.io "topo-auth-operator-lease" not found
+[pod/flare-operator-768fdbb4cb-25fmv/flare-operator] [flare-operator] LEASE FENCE: not the lease holder anymore — suppressing topology broadcast (v4294967307 → v4294967308); held for retry once authority returns
+[pod/flare-operator-768fdbb4cb-25fmv/flare-operator] [flare-operator] retrying a suppressed topology send (suppressed v4294967308; publishing v4294967308)
+[pod/flare-operator-768fdbb4cb-25fmv/flare-operator] [flare-operator] topology changed (v4294967308 → v4294967308), broadcasting
+[pod/flare-operator-768fdbb4cb-25fmv/flare-operator] [TopologyBroadcast] Broadcast complete (v4294967308)

@@ -1,0 +1,32 @@
+# Combined kubectl + aws-cli v2 + nc image for flare's tier-2 S3 backup CronJobs
+# (deploy/backup-cronjob.yaml / flare-k8s clusters/*/backup-cronjob-s3-oidc.yaml).
+#
+# - aws-cli v2 (from the official amazon/aws-cli base) speaks the keyless OIDC
+#   web-identity flow (AWS_ROLE_ARN + AWS_WEB_IDENTITY_TOKEN_FILE) out of the box.
+# - kubectl for `kubectl cp` (pulls each flared pod's checkpoint; flared has tar).
+# - nc (nmap-ncat) to send the memcached `backup` op that makes the checkpoint.
+# - tar/gzip for kubectl cp on this (client) side.
+# Base from AWS's public ECR (no Docker Hub pull-rate limits in CI).
+FROM public.ecr.aws/aws-cli/aws-cli:2.15.0
+
+ARG KUBECTL_VERSION=v1.28.4
+RUN yum install -y tar gzip nmap-ncat ca-certificates \
+    && curl -fsSLo /usr/local/bin/kubectl \
+         "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
+    && chmod +x /usr/local/bin/kubectl \
+    && kubectl version --client=true --output=yaml >/dev/null 2>&1 || true \
+    && yum clean all && rm -rf /var/cache/yum
+
+# Backup logic lives IN the image (env-driven), so the CronJob manifest is
+# just env + a command name instead of inline shell. ONE strictly-ordered
+# runner (checkpoint -> pull -> 3-phase upload -> verify -> once-a-day
+# generation + prune) so the steps can never interleave the way separate
+# delta/daily CronJobs could:
+#   flare-backup-run
+COPY deploy/backup-scripts/ /usr/local/bin/
+RUN chmod +x /usr/local/bin/flare-backup-*
+
+# The base image's ENTRYPOINT is ["aws"]; the CronJobs run `sh -c "..."` via
+# `command:`, which overrides it — reset here so the image is a generic shell too.
+ENTRYPOINT []
+CMD ["/bin/sh"]

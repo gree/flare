@@ -61,6 +61,19 @@ AS_IF([test "x$ac_cv_lib_kyotocabinet_main" = "xyes"],
 		])
 	])
 
+# RocksDB
+AC_ARG_WITH(rocksdb,
+	AS_HELP_STRING([--with-rocksdb], [rocksdb libraries]),
+	AS_IF([test "$withval" != "no"], [CXXFLAGS="${CXXFLAGS} -I${withval}/include" LDFLAGS="${LDFLAGS} -L${withval}/lib"], []))
+AS_IF([test "x$with_rocksdb" != "xno"],
+	[AC_CHECK_LIB(rocksdb, main, [], [])], [ac_cv_lib_rocksdb_main=no])
+AS_IF([test "x$ac_cv_lib_rocksdb_main" = "xyes"],
+	[],
+	[AS_IF([test "x$with_rocksdb" != "x" -a "x$with_rocksdb" != "xno"],
+		[AC_MSG_ERROR([rocksdb requested but not found])
+		])
+	])
+
 # libuuid
 AC_CHECK_LIB(uuid, main, [], [echo "libuuid not found"; exit 1])
 
@@ -82,6 +95,9 @@ AS_IF([test "x$ac_cv_lib_zookeeper_mt_main" = "xyes"],
 # Kyoto Cabinet
 AM_CONDITIONAL(ENABLE_KYOTOCABINET, test "$ac_cv_lib_kyotocabinet_main" = "yes")
 
+# RocksDB
+AM_CONDITIONAL(ENABLE_ROCKSDB, test "$ac_cv_lib_rocksdb_main" = "yes")
+
 # libzookeeper
 AM_CONDITIONAL(ENABLE_ZOOKEEPER, test "$ac_cv_lib_zookeeper_mt_main" = "yes")
 
@@ -93,6 +109,15 @@ then
 	AC_DEFINE([ENABLE_MYSQL_REPLICATION], 1, [enable mysql replication feature or not])
 fi
 AC_MSG_RESULT($enable_mysql_replication)
+
+# K8s Operator
+AC_MSG_CHECKING(if k8s-operator mode is enabled)
+AC_ARG_ENABLE(k8s-operator, [AS_HELP_STRING([--enable-k8s-operator], [enable Kubernetes operator mode: use Lean 4 operator as index server [default=no]])], [enable_k8s_operator="yes"], [enable_k8s_operator="no"])
+if test "x$enable_k8s_operator" = "xyes"
+then
+	AC_DEFINE([ENABLE_K8S_OPERATOR], 1, [enable Kubernetes operator mode])
+fi
+AC_MSG_RESULT($enable_k8s_operator)
 
 # FlareFS
 AC_MSG_CHECKING(if flarefs is enabled)

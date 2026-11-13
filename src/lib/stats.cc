@@ -27,6 +27,10 @@
  *	$Id$
  */
 #include "stats.h"
+#include <stdlib.h>
+#include <fcntl.h>
+#include <time.h>
+#include <unistd.h>
 
 namespace gree {
 namespace flare {
@@ -44,6 +48,27 @@ stats::stats():
 		_cmd_set(0),
 		_get_hits(0),
 		_get_misses(0),
+		_proxy_write_dropped(0),
+		_requests_in_progress(0),
+		_client_requests(0),
+		_writes_waiting_for_master(0),
+		_master_waits_ok(0),
+		_reads_waited_for_master(0),
+		_master_waits_timeout(0),
+		_reconstruction_started(0),
+		_reconstruction_completed(0),
+		_reconstruction_failed(0),
+		_follow_enabled(false),
+		_follow_state(follow_idle),
+		_follow_applied_lsn(0),
+		_follow_source_lsn(0),
+		_follow_source_lsn_observed_at(0),
+		_follow_last_progress_at(0),
+		_reconstruction_boot_id(0),
+		_reconstruction_current_id(0),
+		_reconstruction_current_state(0),
+		_reconstruction_last_success_id(0),
+		_reconstruction_last_success_source(""),
 		_delete_hits(0),
 		_delete_misses(0),
 		_incr_hits(0),
@@ -58,12 +83,54 @@ stats::stats():
 		_bytes_read(0),
 		_bytes_written(0),
 		_total_thread_queue(0) {
+	pthread_mutex_init(&this->_mutex_proxy_write_dropped_by_dest, NULL);
+	pthread_mutex_init(&this->_mutex_diag, NULL);
+	pthread_mutex_init(&this->_mutex_crepl, NULL);
+	pthread_mutex_init(&this->_mutex_repl_in_flight, NULL);
+	this->_crepl_seed_state = "none";
+	this->_crepl_in_flight = 0;
+	this->_diag_enabled = getenv("FLARE_TEST_FORWARD_DIAG") != NULL;
+	pthread_mutex_init(&this->_mutex_reconstruction, NULL);
+	pthread_mutex_init(&this->_mutex_follow, NULL);
+	// Unique per process. The operator binds evidence and drop counters to
+	// it per node, so a restarted process must never repeat its
+	// predecessor's value. The former time<<32 ^ pid<<16 ^ random() did:
+	// random() is never seeded and a container's pid repeats, so a restart
+	// within the same second (or two pods started in the same second, CI
+	// 37438962871) gave the same id. Read from the kernel's CSPRNG; if that
+	// fails, mix nanosecond time, pid and an address. Masked to 62 bits so
+	// it stays inside the signed range JSON/Kubernetes integers keep exactly
+	// (the operator stores it in the CR status). Never persisted.
+	{
+		uint64_t r = 0;
+		int fd = open("/dev/urandom", O_RDONLY);
+		if (fd >= 0) {
+			if (read(fd, &r, sizeof(r)) != (ssize_t)sizeof(r)) {
+				r = 0;
+			}
+			close(fd);
+		}
+		if (r == 0) {
+			struct timespec ts;
+			clock_gettime(CLOCK_REALTIME, &ts);
+			r = ((uint64_t)ts.tv_sec * 1000000007ULL) ^ ((uint64_t)ts.tv_nsec << 20)
+				^ ((uint64_t)getpid() << 40) ^ (uint64_t)(uintptr_t)this;
+		}
+		r &= 0x3fffffffffffffffULL;
+		if (r == 0) r = 1;
+		this->_reconstruction_boot_id = r;
+	}
 }
 
 /**
  *	dtor for stats
  */
 stats::~stats() {
+	pthread_mutex_destroy(&this->_mutex_proxy_write_dropped_by_dest);
+	pthread_mutex_destroy(&this->_mutex_diag);
+	pthread_mutex_destroy(&this->_mutex_crepl);
+	pthread_mutex_destroy(&this->_mutex_repl_in_flight);
+	pthread_mutex_destroy(&this->_mutex_reconstruction);
 }
 // }}}
 
@@ -151,6 +218,335 @@ uint64_t stats::get_cmd_get()											{ return this->_cmd_get.fetch(); }
 uint64_t stats::get_cmd_set()											{ return this->_cmd_set.fetch(); }
 uint64_t stats::get_get_hits()											{ return this->_get_hits.fetch(); }
 uint64_t stats::get_get_misses()										{ return this->_get_misses.fetch(); }
+uint64_t stats::get_proxy_write_dropped()					{ return this->_proxy_write_dropped.fetch(); }
+uint64_t stats::get_reconstruction_started()			{ return this->_reconstruction_started.fetch(); }
+
+static const char* _reconstruction_state_name(int s) {
+	switch (s) {
+	case stats::reconstruction_running: return "running";
+	case stats::reconstruction_succeeded: return "succeeded";
+	case stats::reconstruction_failed_state: return "failed";
+	case stats::reconstruction_aborted: return "aborted";
+	default: return "none";
+	}
+}
+
+uint64_t stats::reconstruction_begin() {
+	pthread_mutex_lock(&this->_mutex_reconstruction);
+	this->_reconstruction_started.incr();
+	this->_reconstruction_current_id = this->_reconstruction_started.fetch();
+	this->_reconstruction_current_state = reconstruction_running;
+	uint64_t id = this->_reconstruction_current_id;
+	pthread_mutex_unlock(&this->_mutex_reconstruction);
+	return id;
+}
+int stats::reconstruction_succeeded_from(uint64_t id, const string& source) {
+	this->_reconstruction_completed.incr();
+	pthread_mutex_lock(&this->_mutex_reconstruction);
+	// last_success only ADVANCES: a late success of an older handler never
+	// masks a newer one, and never claims the newer id.
+	if (id > this->_reconstruction_last_success_id) {
+		this->_reconstruction_last_success_id = id;
+		this->_reconstruction_last_success_source = source;
+	}
+	// The current state belongs to the CURRENT handler only.
+	if (id == this->_reconstruction_current_id) {
+		this->_reconstruction_current_state = reconstruction_succeeded;
+	}
+	pthread_mutex_unlock(&this->_mutex_reconstruction);
+	return 0;
+}
+int stats::reconstruction_failed_final(uint64_t id) {
+	this->_reconstruction_failed.incr();
+	pthread_mutex_lock(&this->_mutex_reconstruction);
+	if (id == this->_reconstruction_current_id) {
+		this->_reconstruction_current_state = reconstruction_failed_state;
+	}
+	pthread_mutex_unlock(&this->_mutex_reconstruction);
+	return 0;
+}
+int stats::reconstruction_aborted_by_shutdown(uint64_t id) {
+	pthread_mutex_lock(&this->_mutex_reconstruction);
+	if (id == this->_reconstruction_current_id) {
+		this->_reconstruction_current_state = reconstruction_aborted;
+	}
+	pthread_mutex_unlock(&this->_mutex_reconstruction);
+	return 0;
+}
+namespace {
+	const char* _follow_state_name(int st) {
+		switch (st) {
+			case stats::follow_initial_sync:  return "initial_sync";
+			case stats::follow_following:     return "following";
+			case stats::follow_disconnected:  return "disconnected";
+			case stats::follow_needs_rebuild: return "needs_rebuild";
+			case stats::follow_error:         return "error";
+			default:                          return "idle";
+		}
+	}
+}
+
+stats::follow_record stats::get_follow_record() {
+	follow_record r;
+	pthread_mutex_lock(&this->_mutex_follow);
+	r.enabled = this->_follow_enabled;
+	r.source = this->_follow_source;
+	r.source_epoch = this->_follow_source_epoch;
+	r.state = _follow_state_name(this->_follow_state);
+	r.last_reason = this->_follow_last_reason;
+	r.applied_lsn = this->_follow_applied_lsn;
+	r.source_lsn = this->_follow_source_lsn;
+	r.source_lsn_observed_at = this->_follow_source_lsn_observed_at;
+	r.last_progress_at = this->_follow_last_progress_at;
+	pthread_mutex_unlock(&this->_mutex_follow);
+	return r;
+}
+
+int stats::follow_set_state(follow_state st, const string& reason) {
+	pthread_mutex_lock(&this->_mutex_follow);
+	const bool changed = (this->_follow_state != static_cast<int>(st));
+	this->_follow_state = st;
+	if (!reason.empty() || st == follow_following || st == follow_idle) {
+		this->_follow_last_reason = reason;
+	}
+	pthread_mutex_unlock(&this->_mutex_follow);
+	if (changed) {
+		log_notice("replication follow state: %s%s%s", _follow_state_name(st),
+			reason.empty() ? "" : " — ", reason.c_str());
+	}
+	return 0;
+}
+
+int stats::follow_set_source(const string& source, const string& source_epoch) {
+	pthread_mutex_lock(&this->_mutex_follow);
+	this->_follow_source = source;
+	this->_follow_source_epoch = source_epoch;
+	pthread_mutex_unlock(&this->_mutex_follow);
+	return 0;
+}
+
+int stats::follow_note_progress(uint64_t applied_lsn) {
+	pthread_mutex_lock(&this->_mutex_follow);
+	if (applied_lsn > this->_follow_applied_lsn) {
+		this->_follow_applied_lsn = applied_lsn;
+		this->_follow_last_progress_at = this->get_timestamp();
+	}
+	pthread_mutex_unlock(&this->_mutex_follow);
+	return 0;
+}
+
+int stats::follow_set_enabled(bool enabled) {
+	pthread_mutex_lock(&this->_mutex_follow);
+	this->_follow_enabled = enabled;
+	pthread_mutex_unlock(&this->_mutex_follow);
+	return 0;
+}
+
+int stats::follow_note_source_position(uint64_t source_lsn) {
+	pthread_mutex_lock(&this->_mutex_follow);
+	this->_follow_source_lsn = source_lsn;
+	// A position without the time it was observed cannot be acted on, so the
+	// two are always written together.
+	this->_follow_source_lsn_observed_at = this->get_timestamp();
+	pthread_mutex_unlock(&this->_mutex_follow);
+	return 0;
+}
+
+stats::reconstruction_record stats::get_reconstruction_record() {
+	reconstruction_record r;
+	pthread_mutex_lock(&this->_mutex_reconstruction);
+	r.boot_id = this->_reconstruction_boot_id;
+	r.current_id = this->_reconstruction_current_id;
+	r.current_state = _reconstruction_state_name(this->_reconstruction_current_state);
+	r.last_success_id = this->_reconstruction_last_success_id;
+	r.last_success_source = this->_reconstruction_last_success_source;
+	pthread_mutex_unlock(&this->_mutex_reconstruction);
+	return r;
+}
+uint64_t stats::get_reconstruction_boot_id() { return this->_reconstruction_boot_id; }
+uint64_t stats::get_reconstruction_current_id() { return this->get_reconstruction_record().current_id; }
+string stats::get_reconstruction_current_state() { return this->get_reconstruction_record().current_state; }
+uint64_t stats::get_reconstruction_last_success_id() { return this->get_reconstruction_record().last_success_id; }
+string stats::get_reconstruction_last_success_source() { return this->get_reconstruction_record().last_success_source; }
+uint64_t stats::get_reconstruction_completed()		{ return this->_reconstruction_completed.fetch(); }
+uint64_t stats::get_reconstruction_failed()				{ return this->_reconstruction_failed.fetch(); }
+
+int stats::increment_proxy_write_dropped(const string& dest) {
+	this->_proxy_write_dropped.incr();
+	pthread_mutex_lock(&this->_mutex_proxy_write_dropped_by_dest);
+	this->_proxy_write_dropped_by_dest[dest]++;
+	pthread_mutex_unlock(&this->_mutex_proxy_write_dropped_by_dest);
+	return 0;
+}
+
+void stats::diag_incr(const string& name) {
+	if (!this->_diag_enabled) {
+		return;
+	}
+	pthread_mutex_lock(&this->_mutex_diag);
+	this->_diag[name]++;
+	pthread_mutex_unlock(&this->_mutex_diag);
+}
+
+void stats::crepl_incr(const string& name) {
+	pthread_mutex_lock(&this->_mutex_crepl);
+	this->_crepl[name]++;
+	pthread_mutex_unlock(&this->_mutex_crepl);
+}
+
+map<string, uint64_t> stats::get_crepl() {
+	pthread_mutex_lock(&this->_mutex_crepl);
+	map<string, uint64_t> r = this->_crepl;
+	pthread_mutex_unlock(&this->_mutex_crepl);
+	return r;
+}
+
+void stats::crepl_in_flight_add() {
+	pthread_mutex_lock(&this->_mutex_crepl);
+	this->_crepl_in_flight++;
+	pthread_mutex_unlock(&this->_mutex_crepl);
+}
+
+void stats::crepl_in_flight_sub() {
+	pthread_mutex_lock(&this->_mutex_crepl);
+	if (this->_crepl_in_flight > 0) {
+		this->_crepl_in_flight--;
+	}
+	pthread_mutex_unlock(&this->_mutex_crepl);
+}
+
+void stats::repl_in_flight_add(const string& dest) {
+	pthread_mutex_lock(&this->_mutex_repl_in_flight);
+	this->_repl_in_flight[dest]++;
+	pthread_mutex_unlock(&this->_mutex_repl_in_flight);
+}
+
+void stats::repl_in_flight_sub(const string& dest) {
+	pthread_mutex_lock(&this->_mutex_repl_in_flight);
+	map<string, uint64_t>::iterator it = this->_repl_in_flight.find(dest);
+	if (it != this->_repl_in_flight.end()) {
+		if (it->second > 1) {
+			it->second--;
+		} else {
+			this->_repl_in_flight.erase(it);
+		}
+	}
+	pthread_mutex_unlock(&this->_mutex_repl_in_flight);
+}
+
+map<string, uint64_t> stats::get_repl_in_flight(uint64_t& total) {
+	pthread_mutex_lock(&this->_mutex_repl_in_flight);
+	map<string, uint64_t> r = this->_repl_in_flight;
+	pthread_mutex_unlock(&this->_mutex_repl_in_flight);
+	total = 0;
+	for (map<string, uint64_t>::const_iterator it = r.begin(); it != r.end(); it++) {
+		total += it->second;
+	}
+	return r;
+}
+
+void stats::increment_proxy_write_failed(const string& dest) {
+	pthread_mutex_lock(&this->_mutex_repl_in_flight);
+	this->_proxy_write_failed[dest]++;
+	pthread_mutex_unlock(&this->_mutex_repl_in_flight);
+}
+
+void stats::increment_proxy_write_skipped(const string& dest) {
+	pthread_mutex_lock(&this->_mutex_repl_in_flight);
+	this->_proxy_write_skipped[dest]++;
+	pthread_mutex_unlock(&this->_mutex_repl_in_flight);
+}
+
+void stats::increment_proxy_write_refused_rebuilding(const string& dest) {
+	pthread_mutex_lock(&this->_mutex_repl_in_flight);
+	this->_proxy_write_refused_rebuilding[dest]++;
+	pthread_mutex_unlock(&this->_mutex_repl_in_flight);
+}
+
+static map<string, uint64_t> snapshot_with_total(pthread_mutex_t* m, const map<string, uint64_t>& src, uint64_t& total) {
+	pthread_mutex_lock(m);
+	map<string, uint64_t> r = src;
+	pthread_mutex_unlock(m);
+	total = 0;
+	for (map<string, uint64_t>::const_iterator it = r.begin(); it != r.end(); it++) {
+		total += it->second;
+	}
+	return r;
+}
+
+map<string, uint64_t> stats::get_proxy_write_failed(uint64_t& total) {
+	return snapshot_with_total(&this->_mutex_repl_in_flight, this->_proxy_write_failed, total);
+}
+
+void stats::note_proxy_write_held(const string& dest, uint64_t ms) {
+	pthread_mutex_lock(&this->_mutex_repl_in_flight);
+	this->_proxy_write_held[dest]++;
+	uint64_t& m = this->_proxy_write_held_ms_max[dest];
+	if (ms > m) {
+		m = ms;
+	}
+	pthread_mutex_unlock(&this->_mutex_repl_in_flight);
+}
+
+map<string, uint64_t> stats::get_proxy_write_held(uint64_t& total) {
+	return snapshot_with_total(&this->_mutex_repl_in_flight, this->_proxy_write_held, total);
+}
+
+map<string, uint64_t> stats::get_proxy_write_held_ms_max(uint64_t& max_all) {
+	pthread_mutex_lock(&this->_mutex_repl_in_flight);
+	map<string, uint64_t> r = this->_proxy_write_held_ms_max;
+	pthread_mutex_unlock(&this->_mutex_repl_in_flight);
+	max_all = 0;
+	for (map<string, uint64_t>::const_iterator it = r.begin(); it != r.end(); it++) {
+		if (it->second > max_all) {
+			max_all = it->second;
+		}
+	}
+	return r;
+}
+
+map<string, uint64_t> stats::get_proxy_write_skipped(uint64_t& total) {
+	return snapshot_with_total(&this->_mutex_repl_in_flight, this->_proxy_write_skipped, total);
+}
+
+map<string, uint64_t> stats::get_proxy_write_refused_rebuilding(uint64_t& total) {
+	return snapshot_with_total(&this->_mutex_repl_in_flight, this->_proxy_write_refused_rebuilding, total);
+}
+
+map<string, uint64_t> stats::get_crepl_snapshot(uint64_t& in_flight) {
+	pthread_mutex_lock(&this->_mutex_crepl);
+	map<string, uint64_t> r = this->_crepl;
+	in_flight = this->_crepl_in_flight;
+	pthread_mutex_unlock(&this->_mutex_crepl);
+	return r;
+}
+
+void stats::set_crepl_seed_state(const string& state) {
+	pthread_mutex_lock(&this->_mutex_crepl);
+	this->_crepl_seed_state = state;
+	pthread_mutex_unlock(&this->_mutex_crepl);
+}
+
+string stats::get_crepl_seed_state() {
+	pthread_mutex_lock(&this->_mutex_crepl);
+	string r = this->_crepl_seed_state;
+	pthread_mutex_unlock(&this->_mutex_crepl);
+	return r;
+}
+
+map<string, uint64_t> stats::get_diag() {
+	pthread_mutex_lock(&this->_mutex_diag);
+	map<string, uint64_t> r = this->_diag;
+	pthread_mutex_unlock(&this->_mutex_diag);
+	return r;
+}
+
+map<string, uint64_t> stats::get_proxy_write_dropped_by_dest() {
+	pthread_mutex_lock(&this->_mutex_proxy_write_dropped_by_dest);
+	map<string, uint64_t> r = this->_proxy_write_dropped_by_dest;
+	pthread_mutex_unlock(&this->_mutex_proxy_write_dropped_by_dest);
+	return r;
+}
 uint64_t stats::get_delete_hits()									{ return this->_delete_hits.fetch(); }
 uint64_t stats::get_delete_misses()								{ return this->_delete_misses.fetch(); }
 uint64_t stats::get_incr_hits()										{ return this->_incr_hits.fetch(); }

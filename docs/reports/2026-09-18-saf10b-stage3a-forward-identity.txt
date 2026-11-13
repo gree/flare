@@ -1,0 +1,44 @@
+# SAF-10b stage 3a — forwarded changes carry the source's replication identity and apply through the common rule
+# host: local darwin arm64, nix devShell
+# build (RocksDB unit tests): ~/git/flare/configure --with-rocksdb=<rocksdb-8.3.2> CXXFLAGS="-std=c++17 -g -O0 -D_LIBCPP_ENABLE_CXX17_REMOVED_RANDOM_SHUFFLE -D_LIBCPP_ENABLE_CXX17_REMOVED_AUTO_PTR"
+# build (whole tree incl. src/flared): nix build .#flare      (src/flared cannot be built in the local VPATH tree; pre-existing, reproduced at the base commit)
+# date: 2026-09-18
+
+=== what was wired ===
+* storage::entry gains repl_tag, parsed from the wire as a trailing "rl=<epoch>/<label>" token. It is recognised
+  before the option parser, which rejects unknown words — so a node that does not understand it is never sent it.
+* queue_proxy_write stamps the tag from the source epoch and the label captured inside the key's critical section,
+  but ONLY when cluster::get_repl_identity_forward() is on.
+* op_set and op_delete apply a tagged, proxied change through storage::apply_identified_change() — the common rule —
+  and fall back to the previous path when the backend reports it unsupported.
+* Outcome mapping for the source: applied/skipped -> success (the destination is not behind, so no drop is counted
+  and no repair is requested), refused -> SERVER_ERROR (the destination is not following our history and the
+  source's retry and drop accounting must surface it), error -> SERVER_ERROR.
+* flared gains the runtime option repl-identity-forward (default FALSE, dynamic). It must stay off until every node
+  understands the tag: an older node would reject the request outright and every forwarded write would be dropped.
+
+=== tests ===
+test_op_set::test_parse_text_server_parameters_replication_tag              pass   the tag is parsed, not treated as an option
+test_op_set::test_parse_text_server_parameters_replication_tag_with_options pass   it coexists with noreply
+test_op_set::test_parse_text_server_parameters_without_replication_tag      pass   absent tag leaves the entry unchanged
+test_identified_change_maps_outcomes_for_the_source                         pass   applied / skipped (same or older) / refused (foreign history, malformed, zero label); a tagged delete leaves the tombstone that refuses an older put
+test_identified_change_unsupported_on_a_plain_storage                       pass   a backend without an identity reports unsupported so the caller keeps its old behaviour
+
+=== results ===
+new stage-3a tests: 5 test(s), 23 assertion(s), 0 failure(s) — 100% passed
+full RocksDB + op-level regression set: 100 test(s), 926 assertion(s), 0 failure(s) — 100% passed
+whole-tree build with the flared option wired (nix build .#flare, non-RocksDB): pass, its cutter suite reports ERROR: 0
+
+=== a build hygiene note, repeated ===
+Adding a member to storage::entry (a header shared by the library and the test modules, which statically embed
+libflare objects) produced the same stale-link symptom as in stage 2: a vector of entries appearing one element
+short, counters reading as garbage, and one test aborting with no message. `make -C test/lib clean` before
+rebuilding is required after ANY header change here. Two working hypotheses were chased before this was identified
+(a corruption-latch regression and a reaper regression); both were artefacts, and the library behaved correctly
+throughout.
+
+=== NOT executed / still open ===
+* The follow-mode transport, reconnection and needs_rebuild (stage 3b) are not implemented yet, so nothing yet
+  keeps pulling WAL during normal operation.
+* repl-identity-forward is OFF by default and no E2E exercises it yet.
+* Lock-hold time and writer starvation bounds (design §3.8, T17): still deferred by agreement.

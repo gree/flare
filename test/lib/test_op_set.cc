@@ -32,6 +32,7 @@
 
 #include <app.h>
 #include <op_set.h>
+#include "mock_cluster.h"
 #include <binary_request_header.h>
 
 #include <boost/predef/other/endian.h>
@@ -68,6 +69,43 @@ namespace test_op_set
 		cut_assert_equal_double(stats_object->get_timestamp() + 60, 2, op._entry.expire);
 		cut_assert_equal_int(10, op._entry.size);
 		cut_assert_equal_memory("0123456789", 10, op._entry.data.get(), 10);
+	}
+
+	// SAF-10b stage 3: a forwarded change carries its source's replication
+	// identity as a trailing token. It must be recognised as an identity and
+	// not fall into the option parser, which rejects unknown words.
+	void test_parse_text_server_parameters_replication_tag()
+	{
+		stats_object->update_timestamp();
+		shared_connection c(new connection_sstream(" key 5 60 10 7 rl=3:1f2e/4242\r\n0123456789\r\n"));
+		test_op_set op(c);
+		cut_assert_equal_int(0, op._parse_text_server_parameters());
+		cut_assert_equal_string("key", op._entry.key.c_str());
+		cut_assert_equal_int(7, static_cast<int>(op._entry.version));
+		cut_assert_equal_string("3:1f2e/4242", op._entry.repl_tag.c_str());
+		cut_assert_equal_memory("0123456789", 10, op._entry.data.get(), 10);
+	}
+
+	// The identity may travel together with the ordinary options, in any
+	// position among them.
+	void test_parse_text_server_parameters_replication_tag_with_options()
+	{
+		stats_object->update_timestamp();
+		shared_connection c(new connection_sstream(" key 5 60 10 7 rl=3:1f2e/4242 noreply\r\n0123456789\r\n"));
+		test_op_set op(c);
+		cut_assert_equal_int(0, op._parse_text_server_parameters());
+		cut_assert_equal_string("3:1f2e/4242", op._entry.repl_tag.c_str());
+		cut_assert_equal_int(storage::option_noreply, op._entry.option & storage::option_noreply);
+	}
+
+	// A request without one is unchanged: no identity, no behaviour change.
+	void test_parse_text_server_parameters_without_replication_tag()
+	{
+		stats_object->update_timestamp();
+		shared_connection c(new connection_sstream(" key 5 60 10 7\r\n0123456789\r\n"));
+		test_op_set op(c);
+		cut_assert_equal_int(0, op._parse_text_server_parameters());
+		cut_assert_equal_string("", op._entry.repl_tag.c_str());
 	}
 
 	void test_parse_binary_server_parameters_empty()
@@ -110,6 +148,23 @@ namespace test_op_set
 		cut_assert_equal_memory("value", 5, op._entry.data.get(), 5);
 		char* dummy;
 		cut_assert_equal_int(-1, c->readsize(1, &dummy));
+	}
+
+	// flare-parked-slave-forward-noise: op_set / op_delete answer a forwarded
+	// change from another history with "rebuild pending" only when this node's
+	// copy is being rebuilt (a slave in Prepare); an Active replica keeps
+	// "replication identity refused" (it really diverged).
+	void test_rebuild_pending_only_for_a_preparing_slave()
+	{
+		mock_cluster cl("localhost", 12121);
+		cut_assert_equal_boolean(false, cl.is_rebuild_pending_here(NULL));
+		cl.set_node("localhost", 12121, cluster::role_slave, cluster::state_prepare, 0, 0);
+		cut_assert_equal_boolean(true, cl.is_rebuild_pending_here(NULL));
+		cl.set_node("localhost", 12121, cluster::role_slave, cluster::state_active, 0, 1);
+		cut_assert_equal_boolean(false, cl.is_rebuild_pending_here(NULL));
+		cl.set_node("localhost", 12121, cluster::role_master, cluster::state_prepare, 0, 1);
+		cut_assert_equal_boolean(false, cl.is_rebuild_pending_here(NULL));
+		cut_assert_equal_string("rebuild pending", op::rebuild_pending_message);
 	}
 
 	void teardown()

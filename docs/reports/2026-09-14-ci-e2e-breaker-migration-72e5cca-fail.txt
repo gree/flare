@@ -1,0 +1,79 @@
+# GitHub Actions e2e-test (breaker-migration) leg on PR #143, fifth run (docs-only push, operator image unchanged) — FAIL (3 of 37)
+# tested revision: 72e5ccaa48a6816d4825a8ab284d7aa7ae52bf12
+# run: https://github.com/gree/flare/actions/runs/34818137311/job/103893266484
+# command: timeout 4500 .lake/build/bin/flare_e2e --filter "circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration"
+# date: 2026-09-14
+# other legs, both builds and the evidence job passed. The PR had been marked ready for review on run 4's green; it is back to draft.
+#
+# (1) circuit-breaker test 3: no trip within 480s — second occurrence of the EV-09 finding (per-tick death count), now 2 of 6 executions on this PR (runs 1,2,4,4-rerun tripped in 5-15s; runs 3 and 5 did not). Not changed on this branch.
+#
+# (2) replica-repair test 5 (SAF-05 save failure): "the unsaved ledger never landed after the permission actually propagated" — HARNESS. Timeline (UTC):
+#     08:11:05.36  harness restores the ClusterRole grant ("fault cleared")
+#     08:11:05.42  runner-side `kubectl auth can-i patch flareclusters/status --as=system:serviceaccount:...:flare-operator` → "yes" (OK after 0s)
+#     08:11:05 .. 08:13:09  operator's own `kubectl patch flarecluster --subresource=status` keeps failing Forbidden ("replica repair ledger still unsaved (... Forbidden ...)" is the last operator line captured at 08:13:09)
+#     08:13:09.56  120s landing window expires → fail. No "ledger persisted on retry" was captured before the diagnostics.
+#     The impersonated can-i is therefore NOT a proxy for the operator's authorization: it flipped instantly while the operator's path stayed denied for >124s (locally the same latency measured ~131s on the can-i itself). Mechanism not identified here (the apiserver's RBAC authorizer is informer-backed; the delay lies somewhere on the operator's token path); what is established is that the two paths differ and the operator's lags by about two minutes. The operator's behaviour was the specified one: marked unsaved, retried every pass, still denied. Test 5 now probes the permission from inside the operator pod as its own SA (same token, CA and path as the patch) before timing the landing, and prints both the propagation time and the landing time.
+# (3) replica-repair test 6: precondition failure only (test 5 left the ledger non-empty) — cascade, no independent finding.
+
+# Tests: 37, Failures: 3
+# RESULT: FAIL
+ok 1 - baseline: two active masters
+ok 2 - wait out the operator startup grace period
+not ok 3 - majority outage (scale 4→1) trips the breaker
+ok 4 - no live-topology churn while tripped
+ok 5 - restoring capacity resumes recovery automatically
+ok 6 - cluster shape survives an operator restart (state reload)
+ok 7 - writes still served after operator restart
+ok 8 - failover still works after the restart (reloaded state is live)
+ok 9 - flared rejects a topology push carrying a stale version
+ok 10 - control: holding the lease, the stopped pass does broadcast
+ok 11 - lease taken by another identity: the pass fences, the process exits, and the restarted leader re-applies the topology
+ok 12 - lease unreadable: the stopped pass fails closed and does not send
+ok 13 - control: writes to the master replicate to the slave
+ok 14 - cut link: the master drops replica writes and the operator requests a repair
+ok 15 - the repair runs: held as proxy, confirmed, re-seated, reconstructed; keys recovered without another drop
+ok 16 - SAF-05: a drop seen while resync is disabled is held, survives an operator restart, and is repaired once the gate opens
+not ok 17 - SAF-05: a ledger save that fails is marked unsaved, retried every pass, lands when allowed, and survives a restart
+not ok 18 - SAF-05: a corrupt ledger is held as unavailable, never replaced by an empty one; the drop seen meanwhile is recovered once it is readable
+ok 19 - SAF-06: the delete carries the observed pod UID as an API precondition; a same-name pod with another UID is refused by the apiserver
+ok 20 - SAF-06: the UID-precondition delete has a deadline — a server that accepts and never answers returns within it
+ok 21 - the lost-activation condition is staged: the activation is dropped and a reconstruction completed
+ok 22 - the repair re-derives Prepare→Active from completion evidence and names it
+ok 23 - GET /metrics answers HTTP 200 with Prometheus text
+ok 24 - memcached_current_items equals stats curr_items verbatim
+ok 25 - writes are reflected in /metrics (curr_items grows, set counter present)
+ok 26 - flared_version and rocksdb passthrough are exported
+ok 27 - /metrics still answers with the operator scaled to 0 (SPOF removed)
+ok 28 - seed 60 keys across both source partitions
+ok 29 - migration CR accepted; target provisioned and Ready (phase Duplicating)
+ok 30 - counts converge and source flips to forward (phase AwaitingCutover)
+ok 31 - every key re-hashed into the 1-partition target (master AND slave)
+ok 32 - parked at AwaitingCutover until approval (gate honored)
+ok 33 - approveCutover flips the entry Service to the target
+ok 34 - reads through the entry Service hit the target cluster
+ok 35 - approveRetire deletes the source StatefulSet (phase Retired)
+ok 36 - provisioned operator self-retires when a helm successor appears
+ok 37 - abort rolls a migration back (target resources deleted)
+# --- test 5 harness lines ---
+e2e-test (breaker-migration)	UNKNOWN STEP	2026-09-14T08:10:02.6817955Z #   OK after 0s
+e2e-test (breaker-migration)	UNKNOWN STEP	2026-09-14T08:10:02.8719809Z #   OK after 0s
+e2e-test (breaker-migration)	UNKNOWN STEP	2026-09-14T08:10:29.4541571Z # fault cleared: 10.244.0.30 → 10.244.0.31 forwards again
+e2e-test (breaker-migration)	UNKNOWN STEP	2026-09-14T08:11:05.3628153Z # fault cleared: status write allowed again
+e2e-test (breaker-migration)	UNKNOWN STEP	2026-09-14T08:11:05.3629151Z # Waiting for: operator SA may patch flareclusters/status again (timeout: 300s)
+e2e-test (breaker-migration)	UNKNOWN STEP	2026-09-14T08:11:05.4181981Z #   OK after 0s
+e2e-test (breaker-migration)	UNKNOWN STEP	2026-09-14T08:11:05.4182603Z # Waiting for: the unsaved ledger lands once the write is allowed (timeout: 120s)
+e2e-test (breaker-migration)	UNKNOWN STEP	2026-09-14T08:13:09.5602488Z #   TIMEOUT after 120s waiting for: the unsaved ledger lands once the write is allowed
+e2e-test (breaker-migration)	UNKNOWN STEP	2026-09-14T08:13:10.0703404Z #   reason: the unsaved ledger never landed after the permission actually propagated
+e2e-test (breaker-migration)	UNKNOWN STEP	2026-09-14T08:13:10.3552997Z #   reason: precondition: the ledger is not empty ([repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local:121
+e2e-test (breaker-migration)	UNKNOWN STEP	2026-09-14T08:13:10.5142630Z #   OK after 0s
+e2e-test (breaker-migration)	UNKNOWN STEP	2026-09-14T08:13:15.8758321Z #   OK after 0s
+e2e-test (breaker-migration)	UNKNOWN STEP	2026-09-14T08:13:28.3288247Z # fault cleared: 10.244.0.30 → 10.244.0.31 forwards again
+e2e-test (breaker-migration)	UNKNOWN STEP	2026-09-14T08:13:35.6902853Z #   OK after 0s
+e2e-test (breaker-migration)	UNKNOWN STEP	2026-09-14T08:13:35.7894621Z #   OK after 0s
+e2e-test (breaker-migration)	UNKNOWN STEP	2026-09-14T08:13:35.8429809Z #   OK after 0s
+e2e-test (breaker-migration)	UNKNOWN STEP	2026-09-14T08:13:35.8928557Z #   OK after 0s
+# --- operator lines captured at failure ---
+e2e-test (breaker-migration)	UNKNOWN STEP	2026-09-14T08:13:09.6149487Z [flare-operator] WARNING: could not persist the replica repair ledger (kubectl failed (exit 1): Error from server (Forbidden): flareclusters.flare.gr
+e2e-test (breaker-migration)	UNKNOWN STEP	2026-09-14T08:13:09.6157518Z [flare-operator] WARNING: replica repair ledger still unsaved (kubectl failed (exit 1): Error from server (Forbidden): flareclusters.flare.gree.net "
+e2e-test (breaker-migration)	UNKNOWN STEP	2026-09-14T08:13:27.7550041Z # [pod/flare-operator-66d5694b85-nbq72/flare-operator] [flare-operator] WARNING: could not persist the replica repair ledger (kubectl failed (exit 1)
+e2e-test (breaker-migration)	UNKNOWN STEP	2026-09-14T08:13:27.7565368Z # [pod/flare-operator-66d5694b85-nbq72/flare-operator] [flare-operator] WARNING: replica repair ledger still unsaved (kubectl failed (exit 1): Error 

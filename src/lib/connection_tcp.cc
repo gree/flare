@@ -28,11 +28,40 @@
  */
 #include "app.h"
 #include "connection_tcp.h"
+#include <poll.h>
+#include <fcntl.h>
+#include <arpa/inet.h>
+#include <algorithm>
 
 namespace gree {
 namespace flare {
 
 int connection_tcp::read_timeout = 10*60*1000;
+int connection_tcp::accepted_read_timeout = 10*60*1000;
+
+namespace {
+uint64_t monotonic_ms_now() {
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+}	// anonymous namespace
+
+int connection_tcp::open() {
+	const int r = this->_open(this->get_host(), this->get_port());
+	// only an open that TIMED OUT (a destination that does not answer SYNs)
+	// is stamped: that is the expensive failure a sender must not queue
+	// behind. A refused connect or a failed lookup is fast to retry, and a
+	// destination that comes straight back must be reached again at once
+	// (test_handler_proxy::test_proxy_state_machine_for_node_state hung on
+	// 69e789e, which stamped every failure)
+	this->_open_failed_at_ms = (r < 0 && this->_errno == ETIMEDOUT) ? monotonic_ms_now() : 0;
+	return r;
+}
+
+bool connection_tcp::open_failed_within(int ms) const {
+	return this->_open_failed_at_ms > 0 && monotonic_ms_now() - this->_open_failed_at_ms < (uint64_t)ms;
+}
 
 // {{{ ctor/dtor
 /**
@@ -56,7 +85,13 @@ connection_tcp::connection_tcp(const std::string& host, int port):
 		_write_buf_len(0),
 		_write_buf_chunk_size(0),
 		_connect_retry_limit(connection_tcp::connect_retry_limit),
-		_connect_retry_wait(connection_tcp::connect_retry_wait) {
+		_connect_retry_wait(connection_tcp::connect_retry_wait),
+		_connect_timeout_ms(0),
+		_deadline_ms(0),
+		_write_progress_timeout_ms(0),
+		_write_deadline_ms(0),
+		_open_failed_at_ms(0),
+		_sender_given_up(false) {
 }
 
 /**
@@ -71,7 +106,7 @@ connection_tcp::connection_tcp(int sock, struct sockaddr_in addr):
 		_port(-1),
 		_path(""),
 		_sock(sock),
-		_read_timeout(read_timeout),
+		_read_timeout(accepted_read_timeout),
 		_errno(0),
 		_read_buf(NULL),
 		_read_buf_p(NULL),
@@ -80,7 +115,13 @@ connection_tcp::connection_tcp(int sock, struct sockaddr_in addr):
 		_write_buf_len(0),
 		_write_buf_chunk_size(0),
 		_connect_retry_limit(connection_tcp::connect_retry_limit),
-		_connect_retry_wait(connection_tcp::connect_retry_wait) {
+		_connect_retry_wait(connection_tcp::connect_retry_wait),
+		_connect_timeout_ms(0),
+		_deadline_ms(0),
+		_write_progress_timeout_ms(0),
+		_write_deadline_ms(0),
+		_open_failed_at_ms(0),
+		_sender_given_up(false) {
 }
 
 /**
@@ -95,7 +136,7 @@ connection_tcp::connection_tcp(int sock, struct sockaddr_un addr):
 		_port(-1),
 		_path(""),
 		_sock(sock),
-		_read_timeout(read_timeout),
+		_read_timeout(accepted_read_timeout),
 		_errno(0),
 		_read_buf(NULL),
 		_read_buf_p(NULL),
@@ -104,7 +145,13 @@ connection_tcp::connection_tcp(int sock, struct sockaddr_un addr):
 		_write_buf_len(0),
 		_write_buf_chunk_size(0),
 		_connect_retry_limit(connection_tcp::connect_retry_limit),
-		_connect_retry_wait(connection_tcp::connect_retry_wait) {
+		_connect_retry_wait(connection_tcp::connect_retry_wait),
+		_connect_timeout_ms(0),
+		_deadline_ms(0),
+		_write_progress_timeout_ms(0),
+		_write_deadline_ms(0),
+		_open_failed_at_ms(0),
+		_sender_given_up(false) {
 }
 
 /**
@@ -132,6 +179,20 @@ connection_tcp::~connection_tcp() {
 /**
  *	open tcp connection_tcp
  */
+int connection_tcp::set_deadline_from_now(int ms) {
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	this->_deadline_ms = (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000 + (uint64_t)(ms > 0 ? ms : 0);
+	return 0;
+}
+
+int connection_tcp::set_write_deadline_from_now(int ms) {
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	this->_write_deadline_ms = (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000 + (uint64_t)(ms > 0 ? ms : 0);
+	return 0;
+}
+
 int connection_tcp::_open(string host, int port) {
 	this->_errno = 0;
 	log_debug("connecting to %s:%d", host.c_str(), port);
@@ -152,16 +213,71 @@ int connection_tcp::_open(string host, int port) {
 
 	int i;
 	for (i = 0; i < (this->_connect_retry_limit+1); i++) {
+		if (this->_connect_timeout_ms > 0) {
+			// Bounded connect: non-blocking connect + poll(POLLOUT) with a
+			// deadline, then back to blocking mode for the rest of the I/O.
+			int flags = fcntl(this->_sock, F_GETFL, 0);
+			fcntl(this->_sock, F_SETFL, flags | O_NONBLOCK);
+			int rc = connect(this->_sock, (struct sockaddr*)&this->_addr_inet, sizeof(this->_addr_inet));
+			int err = (rc < 0) ? errno : 0;
+			if (rc < 0 && err == EINPROGRESS) {
+				struct pollfd pfd;
+				pfd.fd = this->_sock;
+				pfd.events = POLLOUT;
+				pfd.revents = 0;
+				int pr = poll(&pfd, 1, this->_connect_timeout_ms);
+				if (pr == 1) {
+					socklen_t len = sizeof(err);
+					if (getsockopt(this->_sock, SOL_SOCKET, SO_ERROR, &err, &len) < 0) {
+						err = errno;
+					}
+				} else {
+					err = (pr == 0) ? ETIMEDOUT : errno;
+				}
+			}
+			fcntl(this->_sock, F_SETFL, flags);
+			if (err == 0) {
+				break;
+			}
+			{
+				// which ADDRESS did not answer (T24, 2026-10-12: a connect to a
+				// name another connection had just reached timed out; the
+				// resolved address was not logged, so a stale DNS answer could
+				// not be told from a path drop)
+				char ip[INET_ADDRSTRLEN] = "?";
+				inet_ntop(AF_INET, &this->_addr_inet.sin_addr, ip, sizeof(ip));
+				log_warning("connect() to %s:%d (resolved %s) failed: %s (%d) within %d msec -> wait for %d usec",
+					host.c_str(), port, ip, util::strerror(err), err, this->_connect_timeout_ms, this->_connect_retry_wait);
+			}
+			// a failed connect leaves the socket unusable: start a fresh one
+			::close(this->_sock);
+			this->_sock = socket(AF_INET, SOCK_STREAM, 0);
+			if (this->_sock < 0) {
+				this->_errno = errno;
+				return -1;
+			}
+			if (i < this->_connect_retry_limit) {
+				// no wait after the last attempt: nothing follows it
+				usleep(this->_connect_retry_wait);
+			}
+			errno = err;
+			continue;
+		}
 		if (connect(this->_sock, (struct sockaddr*)&this->_addr_inet, sizeof(this->_addr_inet)) < 0) {
 			log_warning("connect() failed: %s (%d) -> wait for %d usec", util::strerror(errno), errno, this->_connect_retry_wait);
-			usleep(this->_connect_retry_wait);
+			if (i < this->_connect_retry_limit) {
+				usleep(this->_connect_retry_wait);
+			}
 			continue;
 		}
 		break;
 	}
 	if (i == (this->_connect_retry_limit+1)) {
-		log_err("connect() failed", -1);
-		this->_errno = errno;
+		const int last = errno;		// before logging can change it
+		char ip[INET_ADDRSTRLEN] = "?";
+		inet_ntop(AF_INET, &this->_addr_inet.sin_addr, ip, sizeof(ip));
+		log_err("connect() to %s:%d (resolved %s) failed", host.c_str(), port, ip);
+		this->_errno = last;
 		this->close();
 		return -1;
 	}
@@ -239,7 +355,35 @@ int connection_tcp::read(char** p, int expect_len, bool readline, bool& actual) 
 	int len = 0;
 	actual = true;
 	do {
-		int n = poll(&ufds, 1, this->_read_timeout);
+		int wait_ms = this->_read_timeout;
+		bool deadline_bound = false;	// this poll is shortened by the total deadline
+		if (this->_deadline_ms > 0) {
+			struct timespec ts;
+			clock_gettime(CLOCK_MONOTONIC, &ts);
+			const uint64_t now = (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+			if (now >= this->_deadline_ms) {
+				log_info("request deadline exceeded before the reply was complete", 0);
+				this->_errno = -3;		// distinct: total deadline (-1 = per-read timeout, -2 = peer closed)
+				delete[] *p;
+				*p = NULL;
+				return -1;
+			}
+			const uint64_t left = this->_deadline_ms - now;
+			if (left < (uint64_t)wait_ms) {
+				wait_ms = (int)left;
+				deadline_bound = true;
+			}
+		}
+		int n = poll(&ufds, 1, wait_ms);
+		if (n == 0 && deadline_bound) {
+			// the poll ended because the TOTAL deadline ran out, not the
+			// per-read timeout: report it as the deadline (-3)
+			log_info("request deadline exceeded before the reply was complete", 0);
+			this->_errno = -3;
+			delete[] *p;
+			*p = NULL;
+			return -1;
+		}
 		if (n == 0) {
 			log_info("poll() timed out (%0.4f sec)", this->_read_timeout / 1000.0);
 			this->_errno = -1;
@@ -486,8 +630,32 @@ int connection_tcp::write(const char* p, int bufsiz, bool buffered) {
 
 	this->_errno = 0;
 
+	// opt-in write bounds (see _write_progress_timeout_ms): -4 = no progress
+	// for the progress timeout, -5 = the total write deadline passed
+	const bool bounded = this->_write_progress_timeout_ms > 0 || this->_write_deadline_ms > 0;
+	uint64_t last_progress_ms = bounded ? monotonic_ms_now() : 0;
 	int written = 0;
 	while (written < bufsiz) {
+		if (bounded) {
+			const uint64_t now = monotonic_ms_now();
+			int bound_errno = 0;
+			if (this->_write_deadline_ms > 0 && now >= this->_write_deadline_ms) {
+				bound_errno = -5;
+				log_warning("write deadline exceeded (%d of %d bytes written) -> closing socket", written, bufsiz);
+			} else if (this->_write_progress_timeout_ms > 0 && now >= last_progress_ms + (uint64_t)this->_write_progress_timeout_ms) {
+				bound_errno = -4;
+				log_warning("write made no progress for %d msec (peer connected but not reading; %d of %d bytes written) -> closing socket",
+					this->_write_progress_timeout_ms, written, bufsiz);
+			}
+			if (bound_errno != 0) {
+				this->close();
+				this->_errno = bound_errno;
+				delete[] this->_write_buf;
+				this->_write_buf = NULL;
+				this->_write_buf_len = this->_write_buf_chunk_size = 0;
+				return -1;
+			}
+		}
 		int len = ::write(this->_sock, p+written, bufsiz-written);
 		if (len < 0) {
 			if (errno == EAGAIN) {
@@ -496,9 +664,22 @@ int connection_tcp::write(const char* p, int bufsiz, bool buffered) {
 				struct pollfd ufds;
 				ufds.fd = this->_sock;
 				ufds.events = POLLOUT;
-				int n = poll(&ufds, 1, connection_tcp::write_timeout);
+				int wait_ms = connection_tcp::write_timeout;
+				if (bounded) {
+					const uint64_t now = monotonic_ms_now();
+					if (this->_write_progress_timeout_ms > 0) {
+						const uint64_t until = last_progress_ms + (uint64_t)this->_write_progress_timeout_ms;
+						const int left = until > now ? (int)(until - now) : 0;
+						if (left < wait_ms) wait_ms = left;
+					}
+					if (this->_write_deadline_ms > 0) {
+						const int left = this->_write_deadline_ms > now ? (int)min<uint64_t>(this->_write_deadline_ms - now, 0x7fffffff) : 0;
+						if (left < wait_ms) wait_ms = left;
+					}
+				}
+				int n = poll(&ufds, 1, wait_ms);
 				if (n == 0) {
-					log_info("poll() timed out (%0.4f sec)", connection_tcp::write_timeout / 1000.0);
+					log_info("poll() timed out (%0.4f sec)", wait_ms / 1000.0);
 					continue;
 				} else if (n < 0 || !(ufds.revents & (POLLOUT))) {
 					if (errno == EINTR) {
@@ -531,6 +712,9 @@ int connection_tcp::write(const char* p, int bufsiz, bool buffered) {
 		}
 		stats_object->add_bytes_written(len);
 		written += len;
+		if (bounded) {
+			last_progress_ms = monotonic_ms_now();
+		}
 		if (written >= bufsiz) {
 			log_debug("write %d bytes (total %d bytes) -> complete", len, written);
 			break;
@@ -575,6 +759,17 @@ int connection_tcp::writeline(const char* p) {
 	}
 
 	return n;
+}
+
+string connection_tcp::get_peer() const {
+	if (this->_addr_family != AF_INET || !this->_host.empty()) {
+		return "";
+	}
+	char buf[BUFSIZ];
+	util::inet_ntoa(this->_addr_inet.sin_addr, buf);
+	ostringstream s;
+	s << buf << ":" << ntohs(this->_addr_inet.sin_port);
+	return s.str();
 }
 
 string connection_tcp::get_host() const {

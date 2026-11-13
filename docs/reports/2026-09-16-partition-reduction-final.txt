@@ -1,0 +1,20 @@
+# partition-reduction suite after the wait-for-evidence fix — harness only, operator image unchanged
+# tested revision: 0ddeb7d6b8b8fbdf6f2439a4532ceda6041460ac
+# host: local kind cluster flare-e2e (single node, arm64)
+# command: cd flare_operator && .lake/build/bin/flare_e2e --filter partition-reduction
+# date: 2026-09-16
+# note: test 3's wait for the operator to reconcile the patched CRD took 25s here — longer than the fixed 15s sleep the suite used before (CI run 35083558955 failure, see 2026-09-16-ci-e2e-replication-685853e-fail.txt), i.e. the race was reproducible locally too.
+
+# === Suite: partition-reduction ===
+# Waiting for: operator reconciles with the patched CRD (CRD changed / reduction warning logged) (timeout: 120s)
+#   OK after 25s
+# Operator logged partition reduction warning ✓
+# Tests: 7, Failures: 0
+# RESULT: PASS
+ok 1 - pre-flight: cluster stable with 2 partitions
+ok 2 - attempt partition reduction (2 → 1)
+ok 3 - wait for operator to detect reduction
+ok 4 - verify cluster still has 2 partitions (reduction blocked)
+ok 5 - verify operator logged partition reduction warning
+ok 6 - restore CRD to 2 partitions
+ok 7 - verify cluster healthy after CRD restoration

@@ -86,6 +86,7 @@ public:
 		type_tch,
 		type_tcb,
 		type_kch,
+		type_rocksdb,
 	};
 
 	enum									capability {
@@ -137,11 +138,25 @@ public:
 		uint64_t						version;
 		uint32_t						option;
 		shared_byte					data;
+		// ORDER LABEL (SAF-10): the source's own commit position for this
+		// change, captured INSIDE the key's critical section by every path
+		// that can change a key. It orders two deliveries of the same key
+		// against each other across the forwarding and WAL paths; it is not
+		// a change identifier and not a position (it can be inflated by
+		// other keys' writes committed between our write and our read).
+		// In-memory only: never serialized into the value header.
+		uint64_t						seq_label;
+		// REPLICATION TAG (SAF-10b stage 3), wire form "rl=<epoch>/<label>".
+		// Present on a forwarded change whose source could identify itself;
+		// empty means "no identity travelled with this change", and the
+		// receiver then applies it the way it always has. Never serialized
+		// into the value header either.
+		string							repl_tag;
 
 		static const int				header_size = sizeof(uint32_t) + sizeof(time_t) + sizeof(uint64_t) + sizeof(uint64_t);
 		static const uint64_t		max_data_size = 2147483647;
 
-		_entry() { flag = expire = size = version = option = 0; };
+		_entry() { flag = expire = size = version = option = 0; seq_label = 0; };
 
 		bool is_data_available() const { return this->data.get() != NULL; };
 
@@ -227,10 +242,135 @@ public:
 	virtual uint64_t size() = 0;
 	virtual int get_key(string key, int limit, vector<string>& r) { return -1; };
 
+	// Physically reap entries whose expire is in the past. Chunked so the
+	// caller can throttle a full-keyspace sweep: scans up to max_scan keys
+	// whose key is > after_key (empty = from the start), deletes the expired
+	// ones, sets last_key to the last key visited and more=true if further
+	// chunks remain. scanned/reaped are per-call counts. The deletes go
+	// through the normal write path (never a compaction filter, whose drops
+	// bypass the WAL and diverge followers). NOTE: a storage-level remove is
+	// LOCAL — live slaves are fed by op-level proxying, and WAL sync only runs
+	// at reconstruction — so the caller (handler_reaper) must replicate each
+	// reaped key itself: pass `reaped_entries` to receive (key, version) of
+	// every key actually deleted, and forward them as version-carrying
+	// deletes exactly like a client delete. Default: not supported.
+	virtual int reap_expired(time_t now, uint32_t max_scan, const string& after_key,
+			string& last_key, bool& more, uint32_t& scanned, uint32_t& reaped,
+			vector<entry>* reaped_entries = NULL) {
+		(void)now; (void)max_scan; (void)after_key; (void)last_key; (void)more;
+		(void)scanned; (void)reaped; (void)reaped_entries;
+		return -1;
+	}
+
 	virtual void set_listener(storage_listener* l) { this->_listener = l; };
+
+	// Filesystem usage of the data dir (statvfs; 0 on error). On a tmpfs
+	// cluster this is RAM the dataset occupies — the quantity that drives
+	// the pod's memory limit and that container-level memory metrics
+	// (working_set of the flared container) do NOT show. Exported via
+	// `stats` -> /metrics as flare_node_data_dir_{used,capacity}_bytes.
+	virtual uint64_t get_data_dir_used_bytes();
+	virtual uint64_t get_data_dir_capacity_bytes();
 
 	virtual type get_type() = 0;
 	virtual bool is_capable(capability c) = 0;
+
+	// Replication-cursor / lineage accessors. Meaningful only for WAL-capable
+	// backends (storage_rocksdb overrides these); the base defaults let
+	// backend-agnostic callers (e.g. cluster::_shift_node_role) query them via
+	// a storage* without pulling in backend-specific headers. Non-WAL backends
+	// report 0, so cursor-vs-sequence logic is a safe no-op there.
+	virtual uint64_t get_repl_last_lsn() { return 0; }
+	virtual int set_repl_last_lsn(uint64_t lsn) { return 0; }
+	virtual uint64_t get_latest_sequence_number() { return 0; }
+
+	// GENERATIONS (SAF-10, design §3.1). Two tokens with different jobs:
+	//  - source epoch: identifies the MASTER'S HISTORY, i.e. the sequence
+	//    space order labels live in. Advanced on promotion, on a replacement
+	//    of this node's history (snapshot swap, hard reset) and on a bulk
+	//    operation that rewrites it (truncate / flush_all). NOT advanced by
+	//    an ordinary process restart, which keeps the same DB and sequence
+	//    space, so a follower can reconnect and resume from its cursor.
+	//  - receiver incarnation: identifies THIS NODE'S COPY. Advanced
+	//    whenever the local DB is replaced, so deliveries and streams issued
+	//    against the previous copy can be refused. Also not advanced by a
+	//    plain restart.
+	// Non-WAL backends report 0 and the callers treat that as "no
+	// generations" (today's behaviour).
+	// Both are OPAQUE IDENTITIES compared for equality, never ordered: a
+	// per-node counter cannot distinguish two histories that advanced the
+	// same number of times (sequential promotion of two different copies
+	// would produce the same value for unrelated sequence spaces), so each
+	// value carries a freshly minted token. An empty string means
+	// "unavailable" — the node could not establish or persist its
+	// generations — and every replication path must refuse to serve or
+	// accept on that, rather than assuming a default.
+	// Apply a forwarded change that carries a replication identity
+	// ("rl=<epoch>/<label>", SAF-10b stage 3) through the COMMON APPLY RULE,
+	// so it is ordered against the same change arriving through the WAL
+	// stream instead of overwriting whatever is there. Backends without a
+	// replication identity return identified_unsupported and the caller does
+	// what it always did.
+	enum identified_apply {
+		identified_unsupported = -1,	// backend cannot order changes: fall back
+		identified_applied = 0,			// written
+		identified_skipped,				// already has this change or a newer one
+		identified_refused,				// not following this history / not this copy
+		// the copy follows ANOTHER history (its epoch differs) and the change
+		// is an ordinary key: the copy is being rebuilt. INVARIANT that makes
+		// refusing it safe: a copy accepts an epoch only through adopt_history
+		// followed by a WAL catch-up (or a WAL reconstruction), so a change
+		// refused here that is not in the snapshot/dump comes back from the
+		// master's WAL (purged WAL -> needs_rebuild). Malformed tags, reserved
+		// keys, incarnation refusals and an unavailable epoch stay
+		// identified_refused.
+		identified_refused_history,
+		identified_error,				// storage failure; nothing written
+	};
+	virtual int apply_identified_change(const string& tag, entry& e, bool is_delete) {
+		(void)tag; (void)e; (void)is_delete;
+		return identified_unsupported;
+	}
+
+	virtual string get_source_epoch() { return ""; }
+	virtual string get_incarnation() { return ""; }
+	// 0 on success, -1 when the new value could not be persisted. A failure
+	// leaves the node with UNAVAILABLE generations (fail closed).
+	// `reason` is recorded with the new epoch: "promotion" or "bulk"
+	// (truncate / flush_all). It lets a repair tell a legitimately emptied
+	// source from an empty copy that was promoted (SAF-08).
+	virtual int advance_source_epoch(const char* reason = "unspecified") { (void)reason; return 0; }
+	// History continuation across an ordered handover (storage_rocksdb):
+	// a map was accepted whose master of `partition` is `master_key` ("" =
+	// none) — a prepared replica commits when it is the prepared successor
+	// and discards when it is another node. A promotion to master of
+	// `partition`: 1 = a prepared history was committed (the caller does not
+	// advance the epoch again), 0 = none, -1 = it could not be committed.
+	virtual int history_on_map(int partition, const string& master_key, const string& own_key, uint64_t map_version) {
+		(void)partition; (void)master_key; (void)own_key; (void)map_version; return 0;
+	}
+	virtual int history_on_promotion(int partition, const string& own_key, uint64_t map_version) {
+		(void)partition; (void)own_key; (void)map_version; return 0;
+	}
+	virtual int advance_incarnation() { return 0; }
+	virtual int regenerate_master_id() { return 0; }
+	// decision 2026-10-08 (flared's own refusal): true when this copy must not
+	// serve as a master — being rebuilt, left part-way, quarantined, copy
+	// identity records disagree. Non-RocksDB backends never refuse.
+	virtual bool promotion_forbidden(std::string& why) { (void)why; return false; }
+	// Partition binding (restore provenance): which partition, under which
+	// routing layout, this copy's data belongs to. `want` is the binding the
+	// accepted node map gives it. Returns 0 (allowed / recorded), 1 (refused:
+	// `why` says why), -1 (could not be read or written). Backends without
+	// copy evidence allow everything.
+	virtual int check_partition_binding(const std::string& want, bool as_master, std::string& why) { (void)want; (void)as_master; (void)why; return 0; }
+	// Whether get() may physically delete an entry it finds expired (only the
+	// partition master; see storage_rocksdb). Backends without replication
+	// ordering ignore it.
+	virtual void set_lazy_expiry_delete(bool on) { (void)on; }
+	// D7: a new follow generation (stop/start of the WAL follower); 0 = the
+	// backend has no continuous follower.
+	virtual uint64_t bump_follow_generation() { return 0; }
 
 	static inline int option_cast(string s, option& r) {
 		if (s == "") {
@@ -313,6 +453,8 @@ public:
 			t = type_tcb;
 		} else if (s == "kch") {
 			t = type_kch;
+		} else if (s == "rocksdb") {
+			t = type_rocksdb;
 		} else {
 			return -1;
 		}
@@ -327,6 +469,8 @@ public:
 			return "tcb";
 		case type_kch:
 			return "kch";
+		case type_rocksdb:
+			return "rocksdb";
 		}
 		return "";
 	};

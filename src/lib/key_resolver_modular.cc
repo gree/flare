@@ -103,7 +103,17 @@ int key_resolver_modular::startup() {
  *	get partition for key hash value
  */
 int key_resolver_modular::resolve(int key_hash_value, int partition_size) {
-	// XXX: check partition_size is smaller than this->_partition_size
+	// The resolving table is _map[1 .. _partition_size-1] (row 0 is NULL by
+	// construction). partition_size arrives from the WIRE for dump/dump_key,
+	// and an out-of-range value used to index straight past the table —
+	// observed live as a SIGSEGV of a serving slave from a single
+	// `dump 0 0 100000` request. -1 never equals a real partition, so every
+	// caller's `p != partition` filter simply skips the key.
+	if (this->_map == NULL || partition_size <= 0 || partition_size >= this->_partition_size
+			|| this->_map[partition_size] == NULL) {
+		log_debug("resolve: partition_size out of range (partition_size=%d, capacity=%d)", partition_size, this->_partition_size);
+		return -1;
+	}
 	return this->_map[partition_size][key_hash_value % this->_virtual];
 }
 // }}}

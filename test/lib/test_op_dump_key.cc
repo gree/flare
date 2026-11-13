@@ -93,6 +93,22 @@ namespace test_op_dump_key
 		}
 	}
 
+	// Regression (see test_op_dump): partition >= partition_size is rejected
+	// at parse time so the key resolver is never indexed out of range.
+	void test_parse_text_server_parameters_partition_out_of_range()
+	{
+		{
+			shared_connection c(new connection_sstream(" 0 0\r\n"));
+			test_op_dump_key op(c);
+			cut_assert_equal_int(-1, op._parse_text_server_parameters());
+		}
+		{
+			shared_connection c(new connection_sstream(" 2 2\r\n"));
+			test_op_dump_key op(c);
+			cut_assert_equal_int(-1, op._parse_text_server_parameters());
+		}
+	}
+
 	void test_parse_text_server_parameters_bwlimit()
 	{
 		shared_connection c(new connection_sstream(" 2 5 1000\r\n"));

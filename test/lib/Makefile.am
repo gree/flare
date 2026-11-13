@@ -38,14 +38,23 @@ noinst_LTLIBRARIES =	\
 	test_op_ping.la	\
 	test_op_prepend.la	\
 	test_op_quit.la	\
+	test_op_repl_snapshot_push.la	\
+	test_op_repl_sync_wal.la	\
 	test_op_replace.la	\
 	test_op_set.la	\
 	test_op_show.la	\
 	test_op_shutdown.la	\
 	test_op_stats.la	\
+	test_stats_reconstruction.la	\
+	test_source_eligibility.la	\
+	test_copy_protection.la	\
+	test_handler_reconstruction.la	\
+	test_copy_switch.la	\
+	test_signal_interrupt.la	\
 	test_op_touch.la	\
 	test_op_verbosity.la	\
 	test_op_version.la	\
+	test_metrics_formatter.la	\
 	test_thread_pool.la	\
 	test_time_util.la \
 	test_util.la	\
@@ -53,6 +62,9 @@ noinst_LTLIBRARIES =	\
 	test_time_watcher.la
 if ENABLE_KYOTOCABINET
 noinst_LTLIBRARIES += test_storage_kch.la
+endif
+if ENABLE_ROCKSDB
+noinst_LTLIBRARIES += test_storage_rocksdb.la
 endif
 if ENABLE_ZOOKEEPER
 noinst_LTLIBRARIES += test_zookeeper_coordinator.la test_zookeeper_lock.la
@@ -80,7 +92,7 @@ test_connection_tcp_la_SOURCES	= test_connection_tcp.cc common_connection_tests.
 test_cluster_la_SOURCES	= test_cluster.cc
 test_connection_iostream_la_SOURCES	= test_connection_iostream.cc common_connection_tests.cc connection_iostream.cc
 test_handler_proxy_la_SOURCES	= test_handler_proxy.cc mock_cluster.cc
-test_handler_cluster_replication_la_SOURCES	= test_handler_cluster_replication.cc
+test_handler_cluster_replication_la_SOURCES	= test_handler_cluster_replication.cc connection_iostream.cc mock_storage.cc mock_cluster.cc
 test_handler_dump_replication_la_SOURCES	= test_handler_dump_replication.cc mock_cluster.cc mock_storage.cc
 test_storage_la_SOURCES	= test_storage.cc
 test_storage_entry_la_SOURCES	= test_storage_entry.cc
@@ -88,6 +100,9 @@ test_storage_tcb_la_SOURCES	= test_storage_tcb.cc common_storage_tests.cc
 test_storage_tch_la_SOURCES	= test_storage_tch.cc common_storage_tests.cc
 if ENABLE_KYOTOCABINET
 test_storage_kch_la_SOURCES	= test_storage_kch.cc common_storage_tests.cc
+endif
+if ENABLE_ROCKSDB
+test_storage_rocksdb_la_SOURCES	= test_storage_rocksdb.cc common_storage_tests.cc connection_iostream.cc mock_storage.cc
 endif
 test_key_resolver_modular_la_SOURCES	= test_key_resolver_modular.cc
 test_op_la_SOURCES	= test_op.cc connection_iostream.cc
@@ -116,14 +131,23 @@ test_op_parser_la_SOURCES	= test_op_parser.cc connection_iostream.cc
 test_op_ping_la_SOURCES	= test_op_ping.cc connection_iostream.cc
 test_op_prepend_la_SOURCES	= test_op_prepend.cc connection_iostream.cc
 test_op_quit_la_SOURCES	= test_op_quit.cc connection_iostream.cc
+test_op_repl_snapshot_push_la_SOURCES	= test_op_repl_snapshot_push.cc connection_iostream.cc
+test_op_repl_sync_wal_la_SOURCES	= test_op_repl_sync_wal.cc connection_iostream.cc
 test_op_replace_la_SOURCES	= test_op_replace.cc connection_iostream.cc
-test_op_set_la_SOURCES	= test_op_set.cc connection_iostream.cc
+test_op_set_la_SOURCES	= test_op_set.cc connection_iostream.cc mock_cluster.cc
 test_op_show_la_SOURCES	= test_op_show.cc connection_iostream.cc
 test_op_shutdown_la_SOURCES	= test_op_shutdown.cc connection_iostream.cc
 test_op_stats_la_SOURCES	= test_op_stats.cc connection_iostream.cc
+test_stats_reconstruction_la_SOURCES	= test_stats_reconstruction.cc
+test_source_eligibility_la_SOURCES	= test_source_eligibility.cc
+test_copy_protection_la_SOURCES	= test_copy_protection.cc
+test_handler_reconstruction_la_SOURCES	= test_handler_reconstruction.cc mock_cluster.cc
+test_copy_switch_la_SOURCES	= test_copy_switch.cc
+test_signal_interrupt_la_SOURCES	= test_signal_interrupt.cc
 test_op_touch_la_SOURCES	= test_op_touch.cc connection_iostream.cc
 test_op_verbosity_la_SOURCES	= test_op_verbosity.cc connection_iostream.cc
 test_op_version_la_SOURCES	= test_op_version.cc connection_iostream.cc
+test_metrics_formatter_la_SOURCES	= test_metrics_formatter.cc
 test_thread_pool_la_SOURCES	= test_thread_pool.cc
 test_time_util_la_SOURCES	= test_time_util.cc
 test_util_la_SOURCES	= test_util.cc

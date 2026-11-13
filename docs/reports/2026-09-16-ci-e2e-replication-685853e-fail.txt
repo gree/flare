@@ -1,0 +1,57 @@
+# GitHub Actions e2e-test (replication) leg on PR #143, seventh run (evidence-only push, operator image unchanged) — FAIL (1 of 40)
+# tested revision: 685853eb950598cda3975b06c92079cd34328e6c
+# run: https://github.com/gree/flare/actions/runs/35083558955/job/104752987336
+# command: timeout 4500 .lake/build/bin/flare_e2e --filter "replace-nodes,cluster-replication,partition-reduction,wal-retention-config,strict-durability,snapshot-push-seed"
+# date: 2026-09-16
+# other three E2E legs (incl. breaker-migration 37/37 — the breaker tripped), both builds and the evidence job passed. First failure of this leg in 7 runs.
+# failure: partition-reduction test 5 "verify operator logged partition reduction warning" — HARNESS timing. The suite patches spec.partitions 2→1, sleeps a FIXED 15s ("2-3 reconcile cycles"), asserts the master count is unchanged (trivially true if nothing has happened yet), then reads the last 200 operator log lines once. Timeline (UTC): patch 10:34:21.2; read 10:34:36.4. In that window the operator's reconcile ticks ranged 1.0-14.4s (+5s interval; the previous green run's ticks were 1.4-2.1s), and the diagnostics dumped at the failure (156 operator lines) contain neither "CRD changed: partitions 2→1" nor the warning — no reconcile had fetched the patched CRD yet. The warning is emitted at the top of the first reconcile that sees the new CRD (Main.lean detectPartitionReduction), so this is a race between a fixed sleep and reconcile latency, pre-existing in the suite; this branch's heavier ticks (stats probes, ledger) make a slow tick more likely. Harness fix: test 3 waits (≤120s) for the operator's own evidence that it reconciled the patched CRD; test 5 polls (≤60s, tail 1000) instead of one 200-line read. Not a safety control's check; recorded in SAFETY-TODO and the PR.
+
+# Tests: 40, Failures: 1
+# RESULT: FAIL
+ok 1 - pre-flight: both clusters stable (2P × 2R)
+ok 2 - write keys to old cluster
+ok 3 - trigger replication old→new
+ok 4 - migration reaches Forwarding
+ok 5 - new cluster has 2 partitions with masters
+ok 6 - data replicated to new cluster # SKIP flared may not support cluster-replication in test image
+ok 7 - write test data to v1
+ok 8 - trigger cluster replication via CRD patch
+ok 9 - migrationPhase transitions to Dumping
+ok 10 - ConfigMap contains cluster-replication settings
+ok 11 - flared stats report the APPLIED replication state (drift observable)
+ok 12 - all 30 keys migrate to v2 via the duplicate-mode dump
+ok 13 - v2 slave converges too (foreign-marked stream not hoarded)
+ok 14 - user patches mode=forward to advance
+ok 15 - migrationPhase transitions to Forwarding
+ok 16 - ConfigMap updated to forward mode
+ok 17 - disable renders an explicit cluster-replication = false (not removal)
+ok 18 - pre-flight: cluster stable with 2 partitions
+ok 19 - attempt partition reduction (2 → 1)
+ok 20 - wait for operator to detect reduction
+ok 21 - verify cluster still has 2 partitions (reduction blocked)
+not ok 22 - verify operator logged partition reduction warning
+ok 23 - restore CRD to 2 partitions
+ok 24 - verify cluster healthy after CRD restoration
+ok 25 - pre-flight: ConfigMap exists with extra.conf key
+ok 26 - patch spec.rocksdb.walTtlSeconds is propagated to ConfigMap
+ok 27 - patch spec.rocksdb.walSizeLimitMb is propagated to ConfigMap
+ok 28 - updating walTtlSeconds triggers re-render
+ok 29 - flared is running with RocksDB backend
+ok 30 - pre-flight: ConfigMap exists with extra.conf key
+ok 31 - patch spec.rocksdb.syncWrites=true is propagated
+ok 32 - patching syncWrites=false cleanly replaces stale value
+ok 33 - syncWrites + walTtlSeconds coexist in extra.conf
+ok 34 - flared is running with RocksDB backend
+ok 35 - seed 500 keys into the source
+ok 36 - enable duplicate replication (equal partition counts)
+ok 37 - destination master seeded via snapshot push (rocksdb_snapshot_bootstrap > 0)
+ok 38 - all 500 keys present on the destination (via proxy reads)
+ok 39 - destination slave converges (relay from the swapped master)
+ok 40 - disable stops the stream declaratively
+# --- partition-reduction harness lines ---
+e2e-test (replication)	Run E2E tests (replication)	2026-09-16T10:34:21.1549408Z # Master count: 2
+e2e-test (replication)	Run E2E tests (replication)	2026-09-16T10:34:21.2188722Z # Partition reduction patch applied (operator should block i
+e2e-test (replication)	Run E2E tests (replication)	2026-09-16T10:34:36.3197658Z # After reduction attempt, master count: 2
+e2e-test (replication)	Run E2E tests (replication)	2026-09-16T10:34:36.4341975Z #   reason: operator did not log partition reduction warning
+# --- reconcile durations in the section (ms, sorted) ---
+1006 1104 1393 1393 1399 1399 1414 1414 1416 1416 1425 1425 1489 1489 1680 1680 1966 2053 2053 2195 2256 14426 

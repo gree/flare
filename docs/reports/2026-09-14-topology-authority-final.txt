@@ -1,0 +1,16 @@
+# topology-authority suite (SAF-01) after the lease-takeover test's two harness fixes — harness only, operator image unchanged
+# tested revision: 332cbf947c3e24181075bf1e67ad1e43cb1c0f6a
+# host: local kind cluster flare-e2e (single node, arm64); harness operator memory limit 1Gi
+# command: cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority
+# date: 2026-09-14
+# note: test 3 now (a) polls for the fence line from the release and reads the previous container's log once the restart count moves, instead of one read 8s later from the current container (the CI failure at 22b4d03, see 2026-09-14-ci-e2e-breaker-migration-22b4d03-fail.txt), and (b) keeps the foreign lease until the exit is observed, then restores authority. An intermediate, uncommitted state with only (a) failed locally with 'logged the fence but did not exit' because the lease was deleted before the operator's next lease check; that is what (b) fixes. Observed here: fence seen, container restarted after 5s, lease restored, re-acquired and topology re-applied.
+
+# === Suite: topology-authority ===
+# Waiting for: operator container restarted after losing the lease (timeout: 180s)
+# lease deleted to restore authority: lease.coordination.k8s.io "topo-auth-operator-lease" deleted from flare-topo-auth namespace
+# Tests: 4, Failures: 0
+# RESULT: PASS
+ok 1 - flared rejects a topology push carrying a stale version
+ok 2 - control: holding the lease, the stopped pass does broadcast
+ok 3 - lease taken by another identity: the pass fences, the process exits, and the restarted leader re-applies the topology
+ok 4 - lease unreadable: the stopped pass fails closed and does not send

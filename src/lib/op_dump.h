@@ -32,6 +32,8 @@
 #include "storage.h"
 #include "bwlimitter.h"
 
+#include <boost/function.hpp>
+
 using namespace std;
 
 namespace gree {
@@ -48,12 +50,34 @@ protected:
 	int								_partition;
 	int								_partition_size;
 	bwlimitter				_bwlimitter;
+	// COPY RETENTION (design §3.2): into a staging copy every key must be
+	// stored (a failed store fails the dump), the END marker must be seen,
+	// and the space is watched while the copy grows.
+	bool							_strict;
+	bool							_completed;
+	uint64_t					_items;
+	boost::function<bool (string&)>	_space_watch;
 
 public:
 	op_dump(shared_connection c, cluster* cl, storage* st);
 	virtual ~op_dump();
 
 	virtual int run_client(int wait, int partition, int partition_size, uint64_t bwlimit = 0);
+	void set_strict(bool b) { this->_strict = b; }
+	// called every kSpaceWatchItems stored items; false stops the dump
+	void set_space_watch(boost::function<bool (string&)> w) { this->_space_watch = w; }
+	// true only when the source's END marker was read
+	bool is_completed() const { return this->_completed; }
+	uint64_t get_items() const { return this->_items; }
+	static const uint64_t kSpaceWatchItems = 1024;
+	// SERVE side: a write that makes no progress for this long ends the dump
+	// (the iterator — on RocksDB a snapshot pinning files and memtables — is
+	// released). No total deadline: a throttled dump takes as long as it
+	// needs. Tests shorten it.
+	static int serve_progress_timeout_ms;
+	// test seam: called after the iteration ended and before the final
+	// END / SERVER_ERROR frame is sent (NULL outside tests)
+	static void (*before_final_frame_hook)();
 
 protected:
 	virtual int _parse_text_server_parameters();

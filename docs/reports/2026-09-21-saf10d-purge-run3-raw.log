@@ -1,0 +1,33 @@
+# === Suite: continuous-replication-purge ===
+# Deploying cluster 'cont-repl-purge' in namespace 'flare-cont-repl-purge'
+# Waiting for: namespace flare-cont-repl-purge not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-cont-repl-purge (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap cont-repl-purge-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting 50s grace period for operator reconciliation...
+# Waiting for: replica following and matching (timeout: 120s)
+#   OK after 0s
+# following: state=(some following) applied=(some 24) master latest=(some 24)
+# fault: rejecting 10.244.0.33 ⇄ 10.244.0.34:12121 on flare-e2e-control-plane (both directions)
+# under the cut: 40/40 keys of 100 kB written (master latest 64, replica applied 24); waited 8 s for the WAL purge
+# fault cleared: 10.244.0.33 ⇄ 10.244.0.34 forwards again
+# Waiting for: follower declares needs_rebuild with reason lsn_purged (timeout: 120s)
+#   TIMEOUT after 120s waiting for: follower declares needs_rebuild with reason lsn_purged
+# after the heal: follower state=error reason=apply_error applied=(some 24) items master=60 replica=60
+#   reason: expected needs_rebuild/lsn_purged, got error/apply_error
+# --- diagnostics for failing suite 'continuous-replication-purge' ---
+# Cleaning up cluster 'cont-repl-purge'
+# Tests: 2, Failures: 1
+# RESULT: FAIL
+1..2
+ok 1 - precondition: both flags on, retention knobs baked, replica following
+not ok 2 - T6: history purged while cut → the follower declares needs_rebuild (lsn_purged), never synchronised; the operator rebuilds it; it follows again
+EXIT=1

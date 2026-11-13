@@ -32,7 +32,13 @@
 #include "queue_proxy_read.h"
 #include "queue_proxy_write.h"
 #include "server.h"
+#include "op_get.h"
 
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <fcntl.h>
+#include <pthread.h>
+#include <errno.h>
 #include <cppcutter.h>
 
 #include "logger.h"
@@ -42,6 +48,18 @@ using namespace gree::flare;
 
 namespace test_handler_proxy {
 	static const int wait_retry_num = 10;
+
+	// Let the kernel reserve a port instead of guessing one and ignoring
+	// bind failure. Keep the listener open until the handler connects.
+	struct test_server : server {
+		int bound_port() {
+			struct sockaddr_in addr;
+			socklen_t size = sizeof(addr);
+			if (_listen_socket_index == 0 ||
+				getsockname(_listen_socket[0], reinterpret_cast<struct sockaddr*>(&addr), &size) != 0) return -1;
+			return ntohs(addr.sin_port);
+		}
+	};
 
 	void sa_usr1_handler(int sig) {
 		// just ignore
@@ -70,8 +88,11 @@ namespace test_handler_proxy {
 		stats_object = new stats();
 		stats_object->update_timestamp();
 
-		port = rand() % (65535 - 1024) + 1024;
-		s = new server();
+		test_server* listener = new test_server();
+		s = listener;
+		cut_assert_equal_int(0, s->listen(0));
+		port = listener->bound_port();
+		cut_assert_true(port > 0);
 
 		cl = new mock_cluster("localhost", port);
 		thread_idx = new AtomicCounter(1);
@@ -127,7 +148,6 @@ namespace test_handler_proxy {
 	}
 
 	shared_thread start_handler_proxy(int thread_type) {
-		s->listen(port);
 		shared_thread t = tp->get(thread_type);
 		handler_proxy* h = new handler_proxy(t, cl, "localhost", port);
 		t->trigger(h, true, false);
@@ -175,6 +195,59 @@ namespace test_handler_proxy {
 		cut_assert_equal_boolean(true, q->is_success());
 		cut_assert_equal_int(op::result_stored, q->get_result());
 		cut_assert_equal_int(0, stats_object->get_total_thread_queue());
+	}
+
+	// the SENDER closes a forwarding connection it has not used for
+	// proxy_idle_close_sec (the receiver keeps idle connections for its client
+	// idle timeout, 600 s): the receiver sees EOF, and the next forward opens
+	// a new connection and succeeds
+	void test_idle_forwarding_connection_is_closed_by_the_sender_and_reopened() {
+		const int saved = handler_proxy::proxy_idle_close_sec;
+		handler_proxy::proxy_idle_close_sec = 1;
+		cluster::node n = cl->set_node("localhost", port, cluster::role_slave, cluster::state_active);
+		shared_thread t = start_handler_proxy(n.node_thread_type);
+
+		shared_queue_proxy_write q1 = get_proxy_queue_write();
+		proxy_request(t, q1, "STORED");
+		const bool ok1 = q1->is_success();
+
+		// the receiver's end of the first connection reads EOF once the
+		// sender has closed it (within a few seconds, not 600). The forwarded
+		// request was never read here, so read it off first: EOF comes after it
+		bool eof = false;
+		for (int r = 0; r < 50 && !eof && cs.size() > 0; r++) {
+			char b[1024];
+			const int x = ::recv(cs[0]->get_sock(), b, sizeof(b), MSG_DONTWAIT);
+			if (x == 0) {
+				eof = true;
+			} else if (x < 0) {
+				usleep(100 * 1000);
+			}
+		}
+
+		shared_queue_proxy_write q2 = get_proxy_queue_write();
+		q2->sync_ref();
+		shared_thread_queue tq2 = q2;
+		t->enqueue(tq2);
+		vector<shared_connection_tcp> cs2;
+		for (int r = 0; r < 50 && cs2.size() == 0; r++) {
+			cs2 = s->wait();
+			if (cs2.size() == 0) usleep(100 * 1000);
+		}
+		if (cs2.size() > 0) {
+			cs2[0]->writeline("STORED");
+		}
+		q2->sync();
+		const bool ok2 = q2->is_success();
+		for (size_t k = 0; k < cs2.size(); k++) {
+			cs.push_back(cs2[k]);
+		}
+		handler_proxy::proxy_idle_close_sec = saved;
+
+		cut_assert_true(ok1, cut_message("the first forward did not succeed"));
+		cut_assert_true(eof, cut_message("the sender did not close its idle forwarding connection"));
+		cut_assert_true(cs2.size() > 0, cut_message("the next forward did not open a new connection"));
+		cut_assert_true(ok2, cut_message("the forward on the reopened connection did not succeed"));
 	}
 
 	void test_proxy_write_to_slave() {
@@ -267,11 +340,60 @@ namespace test_handler_proxy {
 		shared_thread t = start_handler_proxy(n.node_thread_type);
 
 		shared_queue_proxy_read q = get_proxy_queue_read();
-		proxy_request(t, q, "");  // proxy request should be skipped so no reponse
+		// A skipped request must complete its queue reference. It does not
+		// require successful transport: run() skips it before _process_queue.
+		q->sync_ref();
+		shared_thread_queue queued = q;
+		cut_assert_equal_int(0, t->enqueue(queued));
+		q->sync();
 
 		cut_assert_equal_boolean(false, q->is_success());
 		cut_assert_equal_int(op::result_none, q->get_result());
 		cut_assert_equal_int(0, stats_object->get_total_thread_queue());
+	}
+
+	void test_stale_balance_read_guard_uses_production_routing_and_recovers() {
+		cluster::node master = cl->set_node("master", 12121, cluster::role_master, cluster::state_active, 0, 100);
+		cluster::node slave = cl->set_node("localhost", port, cluster::role_slave, cluster::state_active, 0, 50);
+		cl->set_partition(0, master, &slave, 1);
+		// R3: a slave copy that was never validated against its source in
+		// this process answers nothing locally (forwarded to the master; here
+		// no transport target, so enqueue failure — never a local read).
+		{
+			shared_connection c0;
+			op_get op0(c0, cl, NULL);
+			storage::entry e0 = get_entry(" key", storage::parse_type_get);
+			shared_queue_proxy_read q0;
+			cl->clear_node_map();
+			cut_assert_equal_int(cluster::proxy_request_error_enqueue, cl->pre_proxy_read(&op0, e0, NULL, q0));
+			master = cl->set_node("master", 12121, cluster::role_master, cluster::state_active, 0, 100);
+			slave = cl->set_node("localhost", port, cluster::role_slave, cluster::state_active, 0, 50);
+		}
+		// The follow guard below is checked on a copy bound to its source
+		// (as a completed reconstruction binds it), with the map in force.
+		cl->bind_read_source("master:12121", "lineage", "epoch", "test: validated copy");
+		// Keep the stale positive-balance partition, but no transport target:
+		// forced master routing must return enqueue failure, never local read.
+		cl->clear_node_map();
+		stats_object->follow_set_enabled(true);
+		stats_object->follow_set_source("master:12121", "epoch");
+		stats_object->follow_note_source_position(100);
+		stats_object->follow_note_progress(100);
+		stats_object->follow_set_state(stats::follow_following, "");
+		shared_connection c;
+		op_get op(c, cl, NULL);
+		storage::entry e = get_entry(" key", storage::parse_type_get);
+		shared_queue_proxy_read q;
+		cut_assert_equal_int(cluster::proxy_request_continue, cl->pre_proxy_read(&op, e, NULL, q));
+		stats_object->follow_set_state(stats::follow_disconnected, "test-cut");
+		cut_assert_equal_int(cluster::proxy_request_error_enqueue, cl->pre_proxy_read(&op, e, NULL, q));
+		stats_object->follow_set_state(stats::follow_following, "");
+		stats_object->follow_note_source_position(101);
+		cut_assert_equal_int(cluster::proxy_request_error_enqueue, cl->pre_proxy_read(&op, e, NULL, q));
+		stats_object->follow_note_progress(101);
+		cut_assert_equal_int(cluster::proxy_request_continue, cl->pre_proxy_read(&op, e, NULL, q));
+		stats_object->follow_set_source("other-master:12121", "other-epoch");
+		cut_assert_equal_int(cluster::proxy_request_error_enqueue, cl->pre_proxy_read(&op, e, NULL, q));
 	}
 
 	void test_proxy_read_to_prepare_node() {
@@ -436,6 +558,460 @@ namespace test_handler_proxy {
 		q = get_proxy_queue_write();
 		proxy_request(t, q, "STORED");
 		cut_assert_equal_boolean(false, q->is_success());
+	}
+
+	// A destination whose address takes SYNs but never answers (a replaced
+	// pod's old IP, forward-window-steps 38048708017): reproduced with a
+	// listener whose accept queue is full — Linux drops further SYNs, so a
+	// blocking connect hangs for the kernel's SYN timeout (~130 s) per attempt.
+	struct sync_args { shared_queue_proxy_write q; volatile bool done; };
+	void* run_sync(void* a) {
+		sync_args* x = static_cast<sync_args*>(a);
+		x->q->sync();
+		x->done = true;
+		return NULL;
+	}
+
+
+
+	// a loopback listener whose accept queue is full (Linux drops further
+	// SYNs: a connect to it times out); returns its port, fds in `fds`
+	int make_unanswering_listener(vector<int>& fds) {
+		int lfd = socket(AF_INET, SOCK_STREAM, 0);
+		cut_assert_true(lfd >= 0, cut_message("socket() failed: errno %d", errno));
+		fds.push_back(lfd);
+		struct sockaddr_in addr;
+		memset(&addr, 0, sizeof(addr));
+		addr.sin_family = AF_INET;
+		addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+		addr.sin_port = 0;
+		int one = 1;
+		cut_assert_equal_int(0, setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)), cut_message("setsockopt failed: errno %d", errno));
+		cut_assert_equal_int(0, bind(lfd, (struct sockaddr*)&addr, sizeof(addr)), cut_message("bind failed: errno %d", errno));
+		cut_assert_equal_int(0, listen(lfd, 0), cut_message("listen failed: errno %d", errno));
+		socklen_t len = sizeof(addr);
+		cut_assert_equal_int(0, getsockname(lfd, (struct sockaddr*)&addr, &len), cut_message("getsockname failed: errno %d", errno));
+		cut_assert_true(ntohs(addr.sin_port) > 0, cut_message("no port assigned"));
+		for (int k = 0; k < 4; k++) {
+			int f = socket(AF_INET, SOCK_STREAM, 0);
+			cut_assert_true(f >= 0, cut_message("filler socket() failed: errno %d", errno));
+			fds.push_back(f);
+			cut_assert_equal_int(0, fcntl(f, F_SETFL, fcntl(f, F_GETFL, 0) | O_NONBLOCK), cut_message("fcntl failed: errno %d", errno));
+			const int cr = connect(f, (struct sockaddr*)&addr, sizeof(addr));
+			cut_assert_true(cr == 0 || errno == EINPROGRESS, cut_message("filler connect failed: errno %d", errno));
+		}
+		usleep(300 * 1000);
+		return ntohs(addr.sin_port);
+	}
+
+	// enqueue `q` on `t` and wait at most `limit_ms` for its sync; true when it finished
+	bool run_with_watchdog(shared_thread t, shared_queue_proxy_write q, int limit_ms, vector<int>& release, pthread_t& th, sync_args& a) {
+		q->sync_ref();
+		shared_thread_queue tq = q;
+		t->enqueue(tq);
+		a.q = q;
+		a.done = false;
+		const int pc = pthread_create(&th, NULL, run_sync, &a);
+		if (pc != 0) {
+			// no watchdog thread: the forward cannot be waited for safely —
+			// release anything that could hang and FAIL (never a silent pass)
+			for (size_t k = 0; k < release.size(); k++) {
+				::close(release[k]);
+			}
+			release.clear();
+			cut_fail("pthread_create failed (%d): the watchdog could not start", pc);
+		}
+		int waited = 0;
+		while (!a.done && waited < limit_ms) {
+			usleep(100 * 1000);
+			waited += 100;
+		}
+		const bool finished = a.done;
+		if (!finished) {
+			// release a connect still hanging (pending SYNs get a RST)
+			for (size_t k = 0; k < release.size(); k++) {
+				::close(release[k]);
+			}
+			release.clear();
+		}
+		pthread_join(th, NULL);
+		return finished;
+	}
+
+	void test_proxy_write_to_an_unanswering_address_is_a_counted_drop_within_seconds() {
+		vector<int> fds;
+		const int bh_port = make_unanswering_listener(fds);
+		cluster::node n = cl->set_node("127.0.0.1", bh_port, cluster::role_slave, cluster::state_active);
+		shared_thread t = tp->get(n.node_thread_type);
+		handler_proxy* h = new handler_proxy(t, cl, "127.0.0.1", bh_port);
+		t->trigger(h, true, false);
+
+		const uint64_t dropped0 = stats_object->get_proxy_write_dropped();
+		shared_queue_proxy_write q = get_proxy_queue_write();
+		q->set_post_proxy(true);
+		pthread_t th;
+		sync_args a;
+		const bool finished = run_with_watchdog(t, q, 20000, fds, th, a);
+		for (size_t k = 0; k < fds.size(); k++) {
+			::close(fds[k]);
+		}
+		cut_assert_true(finished, cut_message("the forward was neither sent nor dropped within 20 s (it queued behind a hanging connect)"));
+		cut_assert_equal_boolean(false, q->is_success());
+		cut_assert_true(stats_object->get_proxy_write_dropped() > dropped0, cut_message("the failed forward was not counted as a drop"));
+	}
+
+	// after a TIMED-OUT open was counted as a drop, a later forward (past the
+	// fail-fast window) reconnects as soon as the destination answers
+	void test_after_a_timed_out_open_a_later_forward_reconnects_once_the_destination_answers() {
+		vector<int> fds;
+		const int bh_port = make_unanswering_listener(fds);
+		cluster::node n = cl->set_node("127.0.0.1", bh_port, cluster::role_slave, cluster::state_active);
+		shared_thread t = tp->get(n.node_thread_type);
+		handler_proxy* h = new handler_proxy(t, cl, "127.0.0.1", bh_port);
+		t->trigger(h, true, false);
+
+		const uint64_t dropped0 = stats_object->get_proxy_write_dropped();
+		shared_queue_proxy_write q1 = get_proxy_queue_write();
+		q1->set_post_proxy(true);
+		pthread_t th;
+		sync_args a;
+		const bool f1 = run_with_watchdog(t, q1, 20000, fds, th, a);
+		const uint64_t dropped1 = stats_object->get_proxy_write_dropped();
+		// the destination comes back on the same port
+		for (size_t k = 0; k < fds.size(); k++) {
+			::close(fds[k]);
+		}
+		fds.clear();
+		server* back = new server();
+		const int lr = back->listen(bh_port);
+		usleep((handler_proxy::proxy_fail_fast_window_ms + 500) * 1000);	// past the fail-fast window
+		shared_queue_proxy_write q2 = get_proxy_queue_write();
+		q2->set_post_proxy(true);
+		q2->sync_ref();
+		shared_thread_queue tq2 = q2;
+		t->enqueue(tq2);
+		vector<shared_connection_tcp> bcs;
+		for (int r = 0; r < 100 && bcs.size() == 0; r++) {
+			bcs = back->wait();
+			if (bcs.size() == 0) usleep(100 * 1000);
+		}
+		if (bcs.size() > 0) {
+			bcs[0]->writeline("STORED");
+		}
+		q2->sync();
+		const bool ok2 = q2->is_success();
+		for (size_t k = 0; k < bcs.size(); k++) {
+			bcs[k]->close();
+		}
+		back->close();
+		delete back;
+		cut_assert_true(f1, cut_message("the first forward was neither sent nor dropped within 20 s"));
+		cut_assert_true(dropped1 > dropped0, cut_message("the timed-out forward was not counted"));
+		cut_assert_equal_int(0, lr);
+		cut_assert_true(bcs.size() > 0, cut_message("no reconnect after the destination came back"));
+		cut_assert_true(ok2, cut_message("the forward after the reconnect did not succeed"));
+		cut_assert_equal_int((int)dropped1, (int)stats_object->get_proxy_write_dropped());
+	}
+
+	// a client write forwarded TO a master (pre-proxy) through an address that
+	// times out fails for the client and is NOT counted as a replica drop
+	void test_pre_proxy_write_to_an_unanswering_address_fails_without_a_replica_drop() {
+		vector<int> fds;
+		const int bh_port = make_unanswering_listener(fds);
+		cluster::node n = cl->set_node("127.0.0.1", bh_port, cluster::role_master, cluster::state_active);
+		shared_thread t = tp->get(n.node_thread_type);
+		handler_proxy* h = new handler_proxy(t, cl, "127.0.0.1", bh_port);
+		t->trigger(h, true, false);
+
+		const uint64_t dropped0 = stats_object->get_proxy_write_dropped();
+		shared_queue_proxy_write q = get_proxy_queue_write();		// pre-proxy (post_proxy false)
+		pthread_t th;
+		sync_args a;
+		const bool finished = run_with_watchdog(t, q, 20000, fds, th, a);
+		for (size_t k = 0; k < fds.size(); k++) {
+			::close(fds[k]);
+		}
+		cut_assert_true(finished, cut_message("the client write was neither answered nor failed within 20 s"));
+		cut_assert_equal_boolean(false, q->is_success());
+		cut_assert_equal_int((int)dropped0, (int)stats_object->get_proxy_write_dropped());
+	}
+
+	// the same for a REFUSED master connection (retries exhausted): the client
+	// hears the failure, no replica drop is counted (it was, before)
+	void test_pre_proxy_write_to_a_refused_master_is_not_a_replica_drop() {
+		cluster::node n = cl->set_node("localhost", port, cluster::role_master, cluster::state_active);
+		shared_thread t = start_handler_proxy(n.node_thread_type);
+		s->close();
+		const uint64_t dropped0 = stats_object->get_proxy_write_dropped();
+		shared_queue_proxy_write q = get_proxy_queue_write();
+		proxy_request_to_down_node(t, q);
+		cut_assert_equal_boolean(false, q->is_success());
+		cut_assert_equal_int((int)dropped0, (int)stats_object->get_proxy_write_dropped());
+	}
+
+	// a forward to a replica whose role became PROXY is skipped: counted as a
+	// drop when it was a post-proxy forward, not when it was a client write
+	void test_post_proxy_forward_skipped_to_a_proxy_is_a_counted_drop() {
+		cluster::node n = cl->set_node("localhost", port, cluster::role_proxy, cluster::state_active);
+		shared_thread t = start_handler_proxy(n.node_thread_type);
+		const uint64_t dropped0 = stats_object->get_proxy_write_dropped();
+		shared_queue_proxy_write pre = get_proxy_queue_write();
+		proxy_request(t, pre, "STORED");
+		cut_assert_equal_boolean(false, pre->is_success());
+		cut_assert_equal_int((int)dropped0, (int)stats_object->get_proxy_write_dropped());
+		// the client write was never sent: marked so its sender routes it
+		// again by the map in force (cluster::pre_proxy_write)
+		cut_assert_equal_boolean(true, pre->is_skipped());
+		shared_queue_proxy_write post = get_proxy_queue_write();
+		post->set_post_proxy(true);
+		post->sync_ref();
+		shared_thread_queue tq = post;
+		t->enqueue(tq);
+		post->sync();
+		cut_assert_equal_boolean(false, post->is_success());
+		cut_assert_equal_int((int)dropped0 + 1, (int)stats_object->get_proxy_write_dropped());
+		// a replica forward is a counted drop, never routed again (the master
+		// already applied it)
+		cut_assert_equal_boolean(false, post->is_skipped());
+	}
+
+	// forwards still QUEUED when their thread shuts down are counted as drops
+	// (post-proxy) — they vanished without a trace before; client writes are not
+	// a handler that never dequeues: its queue stays as it is until shutdown
+	struct idle_handler : public thread_handler {
+		idle_handler(shared_thread t): thread_handler(t) {};
+		int run() {
+			while (this->_thread->is_shutdown_request() == thread::shutdown_request_none) {
+				usleep(10 * 1000);
+			}
+			return 0;
+		};
+	};
+
+	void test_forwards_abandoned_at_thread_shutdown_are_counted() {
+		shared_thread t = tp->get(42);
+		t->trigger(new idle_handler(t), true, false);
+		t->set_peer("abandoned.example", 12121);
+		const uint64_t dropped0 = stats_object->get_proxy_write_dropped();
+		for (int k = 0; k < 3; k++) {
+			shared_queue_proxy_write q = get_proxy_queue_write();
+			q->set_post_proxy(true);
+			shared_thread_queue tq = q;
+			cut_assert_equal_int(0, t->enqueue(tq));
+		}
+		shared_queue_proxy_write pre = get_proxy_queue_write();
+		shared_thread_queue tpre = pre;
+		cut_assert_equal_int(0, t->enqueue(tpre));
+		// a GRACEFUL shutdown, as node removal does (cluster.cc): the thread
+		// notifies, THEN cleans its queue (thread_run) — so wait for the count
+		// (bounded) instead of reading it the instant shutdown() returns
+		t->shutdown(true, false);
+		for (int w = 0; w < 50 && stats_object->get_proxy_write_dropped() < dropped0 + 3; w++) {
+			usleep(100 * 1000);
+		}
+		cut_assert_equal_int((int)dropped0 + 3, (int)stats_object->get_proxy_write_dropped(), cut_message("the queued post-proxy forwards were not counted within 5 s of the shutdown"));
+		map<string, uint64_t> by = stats_object->get_proxy_write_dropped_by_dest();
+		cut_assert_equal_int(3, (int)by["abandoned.example:12121"]);
+	}
+
+	// Review 2026-10-13 [P1] (in-cluster paths): cluster::_enqueue and
+	// _broadcast copy the active map, release its lock and enqueue later; in
+	// between the thread can be cleaned and REUSED for another handler (a
+	// proxy to another node after a map change), whose run opens the queue
+	// again. The hook does exactly that between the copy and the enqueue: the
+	// item must be refused, never handed to the new handler.
+	struct pool_cluster : public mock_cluster {
+		pool_cluster(string name, int port, thread_pool* p): mock_cluster(name, port) {
+			this->_other_thread_pool = p;
+			this->_proxy_concurrency = 1;
+		}
+		int enqueue_node(shared_thread_queue q, string node_key, int key_hash) { return this->_enqueue(q, node_key, key_hash, false); }
+		int enqueue_type(shared_thread_queue q, thread_pool::thread_type type) { return this->_enqueue(q, type, false); }
+		int broadcast(shared_thread_queue q, vector<string> prior) { return this->_broadcast(q, false, prior); }
+	};
+
+	// review of 93f5cc3: a NOREPLY client write on its way to a master that
+	// turned proxy before it was sent has no sender waiting to route it
+	// again; the forwarding thread queues it to the partition's master in
+	// force instead of dropping it unseen
+	void test_noreply_client_write_skipped_to_a_proxy_goes_to_the_master_in_force() {
+		test_server* m = new test_server();
+		cut_assert_equal_int(0, m->listen(0));
+		const int mport = m->bound_port();
+		pool_cluster pc("localhost", 1, tp);
+		cluster::node old_master = pc.set_node("localhost", port, cluster::role_proxy, cluster::state_active, -1);
+		cluster::node new_master = pc.set_node("localhost", mport, cluster::role_master, cluster::state_active, 0, 100);
+		pc.set_partition(0, new_master);
+		shared_thread t = tp->get(old_master.node_thread_type);
+		t->trigger(new handler_proxy(t, &pc, "localhost", port), true, false);
+
+		storage::entry e = get_entry(" nkey 0 0 5 3", storage::parse_type_set, "VALUE");
+		e.option |= storage::option_noreply;
+		shared_queue_proxy_write q(new queue_proxy_write(&pc, NULL, vector<string>(), e, "set"));
+		shared_thread_queue tq = q;
+		cut_assert_equal_int(0, t->enqueue(tq));
+
+		vector<shared_connection_tcp> mcs;
+		for (int r = 0; r < 50 && mcs.size() == 0; r++) {
+			mcs = m->wait();
+			if (mcs.size() == 0) usleep(100 * 1000);
+		}
+		string got;
+		if (mcs.size() > 0) {
+			char* line = NULL;
+			if (mcs[0]->readline(&line) > 0) {
+				got = line;
+			}
+			delete[] line;
+		}
+		for (size_t k = 0; k < mcs.size(); k++) {
+			mcs[k]->close();
+		}
+		m->close();
+		delete m;
+		cut_assert_true(mcs.size() > 0, cut_message("the master in force was never contacted: the noreply write was dropped unseen"));
+		cut_assert_true(got.find("set nkey 0 0 5") == 0, cut_message("the master in force got [%s]", got.c_str()));
+		cut_assert_equal_boolean(false, q->is_skipped());
+	}
+
+
+	// the second handler: takes what reaches it, counts it and releases a
+	// waiting sender (so the old code fails the count instead of hanging)
+	AtomicCounter* delivered_to_new_handler = NULL;
+	struct recording_handler : public thread_handler {
+		recording_handler(shared_thread t): thread_handler(t) {};
+		int run() {
+			while (this->_thread->is_shutdown_request() == thread::shutdown_request_none) {
+				shared_thread_queue q;
+				if (this->_thread->dequeue(q, 1) == 0 && q) {
+					delivered_to_new_handler->incr();
+					q->sync_unref();
+				}
+			}
+			return 0;
+		};
+	};
+
+	bool reuse_fired = false;
+	int reuse_type = 0;
+	shared_thread reused;
+	void reuse_thread_for_another_handler(thread* t) {
+		if (reuse_fired) {
+			return;
+		}
+		reuse_fired = true;
+		t->shutdown(true, false);
+		for (int i = 0; i < 50 && t->is_running(); i++) {
+			usleep(100 * 1000);
+		}
+		usleep(500 * 1000);		// clean(): back to the pool
+		// another destination: another node's thread type (a fresh copy of
+		// THIS type's active map then no longer contains the thread)
+		reused = tp->get(reuse_type);
+		reused->trigger(new recording_handler(reused), true, false);
+		for (int i = 0; i < 50 && !reused->is_running(); i++) {
+			usleep(100 * 1000);
+		}
+	}
+
+	// starts the one idle thread of `type`, runs `enqueue` with the reuse
+	// hook armed, and checks the item was refused and nothing reached the
+	// reused thread
+	template <typename F>
+	void assert_refused_after_reuse(int type, F enqueue, const char* path) {
+		shared_thread old_t = tp->get(type);
+		old_t->trigger(new idle_handler(old_t), true, false);
+		for (int i = 0; i < 50 && !old_t->is_running(); i++) {
+			usleep(100 * 1000);
+		}
+		cut_assert(old_t->is_running());
+		const unsigned int old_id = old_t->get_id();
+		AtomicCounter delivered(0);
+		delivered_to_new_handler = &delivered;
+		reuse_fired = false;
+		reuse_type = type + 1000;
+		reused.reset();
+		thread::enqueue_before_lock_hook = reuse_thread_for_another_handler;
+		int r = enqueue();
+		thread::enqueue_before_lock_hook = NULL;
+		cut_assert(reuse_fired, cut_message("%s: the hook did not run (no enqueue was attempted)", path));
+		cut_assert(reused, cut_message("%s: no thread for the second handler", path));
+		cut_assert(reused.get() == old_t.get(), cut_message("%s: the pool gave a new thread, not the cleaned one: the reuse was not reproduced", path));
+		cut_assert(reused->get_id() != old_id, cut_message("%s: the reused thread kept id %u", path, old_id));
+		usleep(300 * 1000);		// the new handler takes anything it was given within 1 s
+		const int got = (int)delivered.fetch();
+		const int queued = (int)reused->get_thread_info().queue_size;
+		cut_notify("%s: reused thread %u -> %u: r=%d taken by the new handler=%d queued=%d total=%d",
+			path, old_id, reused->get_id(), r, got, queued, (int)stats_object->get_total_thread_queue());
+		reused->shutdown(true, false);
+		for (int i = 0; i < 50 && reused->is_running(); i++) {
+			usleep(100 * 1000);
+		}
+		reused.reset();
+		delivered_to_new_handler = NULL;
+		cut_assert_equal_int(0, got + queued, cut_message("%s: the item was handed to the reused thread's new handler", path));
+		cut_assert_equal_int(0, (int)stats_object->get_total_thread_queue());
+	}
+
+	void test_proxy_enqueue_is_not_handed_to_a_reused_thread() {
+		pool_cluster pc("localhost", port, tp);
+		cluster::node n = pc.set_node("localhost", port, cluster::role_master, cluster::state_active);
+		const string node_key = pc.to_node_key("localhost", port);
+		shared_queue_proxy_write q = get_proxy_queue_write();
+		shared_thread_queue tq = q;
+		int r = 0;
+		struct call { pool_cluster* pc; shared_thread_queue tq; string k; int* r;
+			int operator()() { *r = pc->enqueue_node(tq, k, 7); return *r; } };
+		call c = { &pc, tq, node_key, &r };
+		assert_refused_after_reuse(n.node_thread_type, c, "_enqueue(node_key)");
+		// never the reused thread (checked above), but not dropped either: the
+		// destination is still in the map, so the forward is offered again
+		// and a fresh forwarding thread of the destination takes it
+		cut_assert_equal_int(0, r, cut_message("_enqueue(node_key) dropped a forward whose destination is still there"));
+		thread_pool::local_map m = tp->get_active(n.node_thread_type);
+		cut_assert_equal_int(1, (int)m.size());
+		shared_thread fresh = m.begin()->second;
+		fresh->shutdown(true, false);
+		for (int i = 0; i < 50 && fresh->is_running(); i++) {
+			usleep(100 * 1000);
+		}
+	}
+
+	void test_typed_enqueue_is_not_handed_to_a_reused_thread() {
+		pool_cluster pc("localhost", port, tp);
+		shared_queue_proxy_write q = get_proxy_queue_write();
+		shared_thread_queue tq = q;
+		int r = 0;
+		struct call { pool_cluster* pc; shared_thread_queue tq; int* r;
+			int operator()() { *r = pc->enqueue_type(tq, thread_pool::thread_type_controller); return *r; } };
+		call c = { &pc, tq, &r };
+		assert_refused_after_reuse(thread_pool::thread_type_controller, c, "_enqueue(type)");
+		cut_assert_equal_int(-1, r);
+	}
+
+	void test_broadcast_is_not_handed_to_a_reused_thread() {
+		pool_cluster pc("localhost", port, tp);
+		cluster::node n = pc.set_node("localhost", port, cluster::role_master, cluster::state_active);
+		shared_queue_proxy_write q = get_proxy_queue_write();
+		shared_thread_queue tq = q;
+		struct call { pool_cluster* pc; shared_thread_queue tq;
+			int operator()() { vector<string> none; return pc->broadcast(tq, none); } };
+		call c = { &pc, tq };
+		assert_refused_after_reuse(n.node_thread_type, c, "_broadcast");
+	}
+
+	void test_broadcast_to_a_prior_node_is_not_handed_to_a_reused_thread() {
+		pool_cluster pc("localhost", port, tp);
+		cluster::node n = pc.set_node("localhost", port, cluster::role_master, cluster::state_active);
+		vector<string> prior;
+		prior.push_back(pc.to_node_key("localhost", port));
+		shared_queue_proxy_write q = get_proxy_queue_write();
+		shared_thread_queue tq = q;
+		// sync for the prior node: a refused item is unref'd, so sync() returns
+		struct call { pool_cluster* pc; shared_thread_queue tq; vector<string> prior;
+			int operator()() { return pc->broadcast(tq, prior); } };
+		call c = { &pc, tq, prior };
+		assert_refused_after_reuse(n.node_thread_type, c, "_broadcast(prior)");
 	}
 }
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 noexpandtab autoindent

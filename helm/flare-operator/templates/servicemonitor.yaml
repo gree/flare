@@ -1,0 +1,19 @@
+{{- if and .Values.operator.enabled .Values.monitoring.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "flare-operator.fullname" . }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "flare-operator.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "flare-operator.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: metrics
+      interval: {{ .Values.monitoring.serviceMonitor.interval }}
+      # Operator-scoped metrics only (reconcile durations, cluster FSM state).
+      # Per-pod flared stats are served natively by each flared pod and scraped
+      # directly via the flared-metrics PodMonitor — see podmonitor.yaml.
+{{- end }}

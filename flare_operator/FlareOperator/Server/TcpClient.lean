@@ -1,0 +1,236 @@
+/-
+  Server/TcpClient.lean - Outbound TCP client for pushing topology to flared nodes
+
+  Implements active connections from operator to flared nodes' port 12121.
+  When topology changes (nodeMapVersion increments), the operator actively
+  connects to each flared node and sends "node sync <version>" command
+  with the full node list.
+
+  This mirrors the C++ flarei behavior where the coordinator pushes topology
+  updates to nodes via their listening port (src/lib/queue_node_sync.cc).
+-/
+
+import Std.Internal.UV.TCP
+import Std.Net.Addr
+import FlareOperator.K8s.FlareCluster
+import FlareOperator.Flare.Protocol
+
+namespace FlareOperator.Server
+
+open FlareOperator.K8s
+open FlareOperator.Flare
+open Std.Internal.UV.TCP (Socket)
+open Std.Net (SocketAddress SocketAddressV4 IPv4Addr)
+
+-- ===========================================================================
+-- Client Connection Helpers
+-- ===========================================================================
+
+/-- Parse an IPv4 address string (e.g., "10.244.0.5") into IPv4Addr.
+    Returns none if the format is invalid. -/
+private def parseIPv4 (s : String) : Option IPv4Addr :=
+  let parts := s.split (· == '.')
+  if parts.length != 4 then
+    none
+  else
+    match parts.mapM (·.toNat?) with
+    | none => none
+    | some octets =>
+      if octets.any (· > 255) then
+        none
+      else
+        match octets with
+        | [a, b, c, d] => some ⟨#v[a.toUInt8, b.toUInt8, c.toUInt8, d.toUInt8]⟩
+        | _ => none
+
+/-- Send a string over the socket, with a HARD deadline. An accepted-but-
+    stalled peer used to park the unbounded wait forever — and because the
+    topology broadcast runs synchronously in the reconcile loop, ONE such
+    pod froze the whole control plane (observed live: 22 minutes with no
+    reconcile ticks — no failover, no drain, no refill — while a wedged
+    flared held the send). 3s dwarfs any healthy in-VPC send. -/
+private def sendString (sock : Socket) (s : String) : IO Unit := do
+  let promise ← sock.send s.toUTF8
+  let t := promise.result!
+  for _ in [0:60] do
+    if (← IO.hasFinished t) then
+      match t.get with
+      | .ok _ => return ()
+      | .error e => throw (IO.userError s!"socket send failed: {e}")
+    IO.sleep 50
+  throw (IO.userError "send timed out after 3s (peer accepted but stalled)")
+
+/-- A flared's answer to `version`: one line starting `VERSION `. -/
+def versionReplyAnswers (reply : String) : Bool :=
+  reply.startsWith "VERSION "
+
+/-- Wait for `t` until the monotonic `deadline` (ms); true when it finished. -/
+private def finishedBy {α : Type} (t : Task α) (deadline : Nat) : IO Bool := do
+  while !(← IO.hasFinished t) && (← IO.monoMsNow) < deadline do
+    IO.sleep 10
+  IO.hasFinished t
+
+/-- Can the OPERATOR reach this flared? It must accept a TCP connection AND
+    answer `version` (one `VERSION ` line) within `timeoutMs` in all — a
+    connect alone also succeeded for a wedged flared (risk B10). Socket closed
+    right after.
+
+    This tests the operator→pod path specifically, which nothing else does:
+    the readiness probe runs INSIDE the pod (kubelet asks flared about
+    itself) and `kubectl exec` stats probes travel via the API server. A
+    node can therefore be perfectly healthy for clients while the operator
+    cannot push topology to it — it then runs on a stale map indefinitely.
+
+    Feeds dead detection through StateMachine/UnreachableNode (spec 12,
+    2026-10-31): flarei's retry count and wait, a master only with a reachable
+    successor, and nothing at all when no node of the cluster is reachable
+    (then the fault is taken to be the operator's own). -/
+def probeNodeReachable (ip : String) (port : Nat) (timeoutMs : Nat := 3000) : IO Bool := do
+  -- connect, send, receive and the socket shutdown all share ONE monotonic
+  -- deadline: the caller's `timeoutMs` bounds the whole probe (review of
+  -- a074161, P1 — the connect wait used to count sleeps, not time).
+  let deadline := (← IO.monoMsNow) + timeoutMs
+  let ipAddr ← match parseIPv4 ip with
+    | some addr => pure addr
+    | none => return false
+  let sock ← Socket.new
+  let addr := SocketAddress.v4 (SocketAddressV4.mk ipAddr port.toUInt16)
+  try
+    let connectTask := (← sock.connect addr).result!
+    if !(← finishedBy connectTask deadline) then return false
+    match connectTask.get with
+    | .error _ => return false
+    | .ok () => pure ()
+    -- connected: a flared that accepts but does not answer (wedged, SIGSTOP)
+    -- is not reachable either (risk flare-risk-probe-connect-only). Ask for
+    -- its version within the rest of the same budget.
+    let sendTask := (← sock.send "version\r\n".toUTF8).result!
+    if !(← finishedBy sendTask deadline) then return false
+    match sendTask.get with
+    | .error _ => return false
+    | .ok _ => pure ()
+    let mut bytes := ByteArray.empty
+    while (← IO.monoMsNow) < deadline do
+      let t := (← sock.recv? 128).result!
+      if !(← finishedBy t deadline) then return false
+      match t.get with
+      | .error _ => return false
+      | .ok none => return false
+      | .ok (some chunk) =>
+        if chunk.isEmpty then return false
+        bytes := bytes ++ chunk
+        if bytes.data.contains 10 then
+          return versionReplyAnswers (String.fromUTF8? bytes |>.getD "")
+        if bytes.size > 256 then return false
+    return false
+  catch _ =>
+    return false
+  finally
+    try
+      let _ ← finishedBy (← sock.shutdown).result! deadline
+    catch _ =>
+      pure ()
+
+-- ===========================================================================
+-- Topology Push (Node Sync)
+-- ===========================================================================
+
+/-- Connect to a flared node's port 12121 and send "node sync <version>" with full node list.
+
+    Wire protocol (operator push to flared's listening port):
+      <operator connects to flared:12121>
+      Operator → flared: "node sync <version>\r\n"
+      Operator → flared: "NODE <name> <port> <role> <state> <partition> <balance> <thread>\r\n" (repeated)
+      Operator → flared: "END\r\n"
+      flared → Operator: "OK\r\n" (or error, which remains retry-pending)
+      <operator disconnects>
+
+    Reference: C++ src/lib/queue_node_sync.cc::run_client() -/
+def topologyAckAccepted (reply : String) : Bool := reply == "OK\r\n"
+
+/-- One bounded protocol response, including fragmented reads. An EOF,
+    malformed response or server rejection is not a delivery confirmation. -/
+private def receiveTopologyAck (sock : Socket) : IO Bool := do
+  let deadline := (← IO.monoMsNow) + 3000
+  let mut bytes := ByteArray.empty
+  while (← IO.monoMsNow) < deadline do
+    let p ← sock.recv? 64
+    let t := p.result!
+    while !(← IO.hasFinished t) && (← IO.monoMsNow) < deadline do
+      IO.sleep 25
+    if !(← IO.hasFinished t) then return false
+    match t.get with
+    | .error _ => return false
+    | .ok none => return false
+    | .ok (some chunk) =>
+      if chunk.isEmpty then return false
+      bytes := bytes ++ chunk
+      if bytes.size > 64 then return false
+      let reply := String.fromUTF8! bytes
+      if reply.contains '\n' then return topologyAckAccepted reply
+  return false
+
+def sendNodeSyncToNode (ip : String) (port : Nat) (version : Nat) (nodes : List FlareNode) : IO Bool := do
+  -- Parse IP address
+  let ipAddr ← match parseIPv4 ip with
+    | some addr => pure addr
+    | none =>
+      IO.eprintln s!"[TcpClient] Invalid IP address: {ip}"
+      return false
+
+  -- Create socket and connect
+  let sock ← Socket.new
+  let addr := SocketAddress.v4 (SocketAddressV4.mk ipAddr port.toUInt16)
+
+  try
+    -- Connect to flared node's listening port 12121 under a HARD deadline.
+    -- A deleted pod's IP blackholes the SYN and the kernel connect timeout
+    -- is ~2 minutes; blocking that long serialized the whole (sequential)
+    -- broadcast and starved the reconcile loop for minutes per dead target
+    -- (observed live: minutes of "time expired" to a recreated pod's old IP
+    -- while the cluster sat masterless). Poll the connect task with a 3s
+    -- budget instead — a live flared on the same VPC connects in <10ms, so
+    -- 3s only ever gives up on genuinely unreachable targets.
+    let connectPromise ← sock.connect addr
+    let connectTask := connectPromise.result!
+    let mut connected := false
+    for _ in [0:60] do
+      if (← IO.hasFinished connectTask) then
+        connected := true
+        break
+      IO.sleep 50
+    if !connected then
+      IO.eprintln s!"[TcpClient] connect to {ip}:{port} timed out after 3s — skipping target"
+      return false
+    let connectResult := connectTask.get
+    match connectResult with
+    | .error e =>
+      IO.eprintln s!"[TcpClient] Failed to connect to {ip}:{port}: {e}"
+      return false
+    | .ok () =>
+      -- Send "node sync <version>" command
+      sendString sock s!"node sync {version}\r\n"
+
+      -- Send full node list
+      let nodeListPayload := serializeNodeList nodes
+      sendString sock nodeListPayload
+
+      let confirmed ← receiveTopologyAck sock
+      IO.eprintln s!"[TcpClient] node sync v{version} to {ip}:{port}: reply-confirmed={confirmed}"
+      return confirmed
+  catch e =>
+    IO.eprintln s!"[TcpClient] Error sending to {ip}:{port}: {e}"
+    return false
+  finally
+    -- Close connection (bounded: best-effort — never park the caller)
+    try
+      let shutdownPromise ← sock.shutdown
+      let t := shutdownPromise.result!
+      for _ in [0:20] do
+        if (← IO.hasFinished t) then
+          break
+        IO.sleep 50
+    catch _ =>
+      pure ()
+
+end FlareOperator.Server

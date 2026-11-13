@@ -1,0 +1,1697 @@
+# === Suite: wal-bandwidth-throttle ===
+# Cleaning up cluster 'wal-throttle'
+# Deploying cluster 'wal-throttle' in namespace 'flare-wal-throttle'
+# Waiting for: namespace flare-wal-throttle not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-wal-throttle (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap wal-throttle-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet wal-throttle-nodes to be ready...
+# Waiting for: all 4 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 4 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 50s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator-wal-throttle) ---
+#   [flare-operator] retrying an unconfirmed topology send (pending v4294967318; publishing v4294967318)
+#   [flare-operator] topology changed (v4294967318 → v4294967318), broadcasting
+#   [TopologyBroadcast] Broadcasting node sync v4294967318 (4 nodes) to 4 pods
+#   [TcpClient] node sync v4294967318 to 10.244.0.12:12121: reply-confirmed=true
+#   [TcpClient] node sync v4294967318 to 10.244.0.10:12121: reply-confirmed=true
+#   [TcpClient] node sync v4294967318 to 10.244.0.11:12121: reply-confirmed=true
+#   [TcpClient] node sync v4294967318 to 10.244.0.9:12121: reply-confirmed=true
+#   [TopologyBroadcast] Broadcast attempt complete (v4294967318); all targets reply-confirmed=true
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 2844ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 16 cycles remaining
+#   [TopologyAudit] node=wal-throttle-nodes-2.wal-throttle-nodes.flare-wal-throttle.svc.cluster.local:12121 uid=(some 82883ccf-c554-4185-baec-29b5486e85bf) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1718ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 15 cycles remaining
+#   [TopologyAudit] node=wal-throttle-nodes-1.wal-throttle-nodes.flare-wal-throttle.svc.cluster.local:12121 uid=(some 2a3a447c-19ad-4960-ad3a-695f30a817f1) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1729ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 14 cycles remaining
+#   [TopologyAudit] node=wal-throttle-nodes-0.wal-throttle-nodes.flare-wal-throttle.svc.cluster.local:12121 uid=(some 6613e937-4da6-4bae-bcdb-714c1241c572) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1698ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 13 cycles remaining
+#   [TopologyAudit] node=wal-throttle-nodes-3.wal-throttle-nodes.flare-wal-throttle.svc.cluster.local:12121 uid=(some 5ac27045-9619-4447-8c93-9ddd4b5041e4) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 2040ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 12 cycles remaining
+#   [TopologyAudit] node=wal-throttle-nodes-2.wal-throttle-nodes.flare-wal-throttle.svc.cluster.local:12121 uid=(some 82883ccf-c554-4185-baec-29b5486e85bf) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1738ms (nodes=4 M=2 S=2 D=0 P=0)
+#   
+# Cleaning up cluster 'wal-throttle'
+# === Suite: wal-incremental-sync ===
+# Cleaning up cluster 'wal-sync'
+# Deploying cluster 'wal-sync' in namespace 'flare-wal-sync'
+# Waiting for: namespace flare-wal-sync not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-wal-sync (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap wal-sync-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet wal-sync-nodes to be ready...
+# Waiting for: all 4 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 4 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 50s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator-wal-sync) ---
+#   [DEBUG] Sending response: NODE wal-sync-nodes-3.wal-sync-nodes.flare-wal-sync.svc.cluster.local 12121 1 0 1 0 19 | NODE wal-sync-nodes-2.wal-sync-nodes.flare-wal-sync.svc.cluster.local 12121 1 0 0 0 18 | NODE wal-sync-nodes-1.wal-sync-nodes.flare-wal-sync.svc.cluster.local 12121 0 0 1 100 17 | NODE wal-sync-nodes-0.wal-sync-nodes.flare-wal-sync.svc.cluster.local 12121 0 0 0 100 16 | END | 
+#   [flare-operator] continuous-replication probe: 1 stats read(s) in 148ms (tick 9; in-mode remembered: 0, out-of-mode remembered: 1)
+#   [flare-operator] grace period: 14 cycles remaining
+#   [TopologyAudit] node=wal-sync-nodes-0.wal-sync-nodes.flare-wal-sync.svc.cluster.local:12121 uid=(some 1f03426b-3943-452d-a09e-fb2cc05a199d) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1988ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 13 cycles remaining
+#   [TopologyAudit] node=wal-sync-nodes-3.wal-sync-nodes.flare-wal-sync.svc.cluster.local:12121 uid=(some c25a872d-0c61-4e35-9389-228cbebb66ab) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 2027ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 12 cycles remaining
+#   [TopologyAudit] node=wal-sync-nodes-2.wal-sync-nodes.flare-wal-sync.svc.cluster.local:12121 uid=(some 3f6ab8e9-a27c-4bab-aac7-dec08279728e) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1734ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 11 cycles remaining
+#   [TopologyAudit] node=wal-sync-nodes-1.wal-sync-nodes.flare-wal-sync.svc.cluster.local:12121 uid=(some 300dd03b-1c12-4318-8ae3-30b6557b70cf) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1821ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 10 cycles remaining
+#   [TopologyAudit] node=wal-sync-nodes-0.wal-sync-nodes.flare-wal-sync.svc.cluster.local:12121 uid=(some 1f03426b-3943-452d-a09e-fb2cc05a199d) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1722ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 9 cycles remaining
+#   [TopologyAudit] node=wal-sync-nodes-3.wal-sync-nodes.flare-wal-sync.svc.cluster.local:12121 uid=(some c25a872d-0c61-4e35-9389-228cbebb66ab) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 2092ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 8 cycles remaining
+#   [TopologyAudit] node=wal-sync-nodes-2.wal-sync-nodes.flare-wal-sync.svc.cluster.local:12121 uid=(some 3f6ab8e9-a27c-4bab-aac7-dec08279728e) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1719ms (nodes=4 M=2 S=2 D=0 P=0)
+#   
+# Baseline: wal_sync_success=0, wal_fallback_to_dump=0
+# Deleting slave pod: wal-sync-nodes-2
+# Waiting for: all pods ready after slave restart (timeout: 180s)
+#   OK after 15s
+# After restart: wal_sync_success=1, wal_fallback_to_dump=0, master_id_mismatch=0, lsn_ahead=0
+# Cleaning up cluster 'wal-sync'
+# === Suite: wal-purged-fallback ===
+# Cleaning up cluster 'wal-purged'
+# Deploying cluster 'wal-purged' in namespace 'flare-wal-purged'
+# Waiting for: namespace flare-wal-purged not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-wal-purged (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap wal-purged-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet wal-purged-nodes to be ready...
+# Waiting for: all 4 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 4 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 50s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator-wal-purged) ---
+#   [flare-operator] retrying an unconfirmed topology send (pending v4294967318; publishing v4294967318)
+#   [flare-operator] topology changed (v4294967318 → v4294967318), broadcasting
+#   [TopologyBroadcast] Broadcasting node sync v4294967318 (4 nodes) to 4 pods
+#   [TcpClient] node sync v4294967318 to 10.244.0.37:12121: reply-confirmed=true
+#   [TcpClient] node sync v4294967318 to 10.244.0.33:12121: reply-confirmed=true
+#   [TcpClient] node sync v4294967318 to 10.244.0.31:12121: reply-confirmed=true
+#   [TcpClient] node sync v4294967318 to 10.244.0.35:12121: reply-confirmed=true
+#   [TopologyBroadcast] Broadcast attempt complete (v4294967318); all targets reply-confirmed=true
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 2496ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 15 cycles remaining
+#   [TopologyAudit] node=wal-purged-nodes-1.wal-purged-nodes.flare-wal-purged.svc.cluster.local:12121 uid=(some 1678564d-d781-4489-8228-d0b8cbde5ac1) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1715ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 14 cycles remaining
+#   [TopologyAudit] node=wal-purged-nodes-0.wal-purged-nodes.flare-wal-purged.svc.cluster.local:12121 uid=(some 7ff29c43-83ca-4b99-ba95-f111ec183e9c) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1709ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 13 cycles remaining
+#   [TopologyAudit] node=wal-purged-nodes-3.wal-purged-nodes.flare-wal-purged.svc.cluster.local:12121 uid=(some 242bca34-8823-480f-9f5b-c1ef538c514a) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 2040ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 12 cycles remaining
+#   [TopologyAudit] node=wal-purged-nodes-2.wal-purged-nodes.flare-wal-purged.svc.cluster.local:12121 uid=(some 56bc8aed-fc9b-467d-a1c3-bf6289f4f851) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1703ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 11 cycles remaining
+#   [TopologyAudit] node=wal-purged-nodes-1.wal-purged-nodes.flare-wal-purged.svc.cluster.local:12121 uid=(some 1678564d-d781-4489-8228-d0b8cbde5ac1) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1680ms (nodes=4 M=2 S=2 D=0 P=0)
+#   
+# Deleting slave pod: wal-purged-nodes-2
+# Waiting 15s for WAL files to be purged (TTL=1s)...
+# Waiting for: all pods ready (timeout: 180s)
+#   OK after 0s
+# wal_sync_lsn_purged=0, wal_fallback_to_dump=0
+# Cleaning up cluster 'wal-purged'
+# === Suite: resync-failure-self-demote ===
+# Cleaning up cluster 'resync-demote'
+# Deploying cluster 'resync-demote' in namespace 'flare-resync-demote'
+# Waiting for: namespace flare-resync-demote not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-resync-demote (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap resync-demote-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet resync-demote-nodes to be ready...
+# Waiting for: all 4 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 4 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 50s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator-resync-demote) ---
+#   [DEBUG] Sending response: NODE resync-demote-nodes-3.resync-demote-nodes.flare-resync-demote.svc.cluster.local 12121 1 0 1 0 19 | NODE resync-demote-nodes-1.resync-demote-nodes.flare-resync-demote.svc.cluster.local 12121 1 0 0 0 17 | NODE resync-demote-nodes-2.resync-demote-nodes.flare-resync-demote.svc.cluster.local 12121 0 0 1 100 18 | NODE resync-demote-nodes-0.resync-demote-nodes.flare-resync-demote.svc.cluster.local 12121 0 0 0 100 16 | END | 
+#   [flare-operator] continuous-replication probe: 1 stats read(s) in 168ms (tick 6; in-mode remembered: 0, out-of-mode remembered: 1)
+#   [flare-operator] grace period: 17 cycles remaining
+#   [TopologyAudit] node=resync-demote-nodes-3.resync-demote-nodes.flare-resync-demote.svc.cluster.local:12121 uid=(some 8003611d-ea39-4e79-8086-d97c132f948b) desired=4294967313 reported=(some 4294967313) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1861ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 16 cycles remaining
+#   [TopologyAudit] node=resync-demote-nodes-1.resync-demote-nodes.flare-resync-demote.svc.cluster.local:12121 uid=(some 88f12327-94c3-45d9-afc1-3b00491637c3) desired=4294967313 reported=(some 4294967313) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1721ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 15 cycles remaining
+#   [TopologyAudit] node=resync-demote-nodes-2.resync-demote-nodes.flare-resync-demote.svc.cluster.local:12121 uid=(some 276bbe19-c57b-42bc-8630-fcbe6258cdf2) desired=4294967313 reported=(some 4294967313) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1698ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 14 cycles remaining
+#   [TopologyAudit] node=resync-demote-nodes-0.resync-demote-nodes.flare-resync-demote.svc.cluster.local:12121 uid=(some e67aed0b-800b-4120-b03e-c5d4b085e91c) desired=4294967313 reported=(some 4294967313) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 2103ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 13 cycles remaining
+#   [TopologyAudit] node=resync-demote-nodes-3.resync-demote-nodes.flare-resync-demote.svc.cluster.local:12121 uid=(some 8003611d-ea39-4e79-8086-d97c132f948b) desired=4294967313 reported=(some 4294967313) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1717ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 12 cycles remaining
+#   [TopologyAudit] node=resync-demote-nodes-1.resync-demote-nodes.flare-resync-demote.svc.cluster.local:12121 uid=(some 88f12327-94c3-45d9-afc1-3b00491637c3) desired=4294967313 reported=(some 4294967313) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1716ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 11 cycles remaining
+#   [TopologyAudit] node=resync-demote-nodes-2.resync-demote-nodes.flare-resync-demote.svc.cluster.local:12121 uid=(some 276bbe19-c57b-42bc-8630-fcbe6258cdf2) desired=4294967313 reported=(some 4294967313) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1720ms (nodes=4 M=2 S=2 D=0 P=0)
+#   
+# Slave resync-demote-nodes-1: resync_failure_threshold=2
+# Baseline resync_failure_count=0
+# Corrupting data dir on resync-demote-nodes-1...
+# Data dir corrupted, waiting for resync failures...
+# Down nodes: 0
+# Cleaning up cluster 'resync-demote'
+# === Suite: orphan-scan-purge ===
+# Cleaning up cluster 'orphan-mgmt'
+# Deploying cluster 'orphan-mgmt' in namespace 'flare-orphan-mgmt'
+# Waiting for: namespace flare-orphan-mgmt not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-orphan-mgmt (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap orphan-mgmt-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet orphan-mgmt-nodes to be ready...
+# Waiting for: all 4 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 4 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 50s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator-orphan-mgmt) ---
+#   [DEBUG] Sending response: NODE orphan-mgmt-nodes-3.orphan-mgmt-nodes.flare-orphan-mgmt.svc.cluster.local 12121 1 0 1 0 19 | NODE orphan-mgmt-nodes-2.orphan-mgmt-nodes.flare-orphan-mgmt.svc.cluster.local 12121 1 0 0 0 18 | NODE orphan-mgmt-nodes-1.orphan-mgmt-nodes.flare-orphan-mgmt.svc.cluster.local 12121 0 0 1 100 17 | NODE orphan-mgmt-nodes-0.orphan-mgmt-nodes.flare-orphan-mgmt.svc.cluster.local 12121 0 0 0 100 16 | END | 
+#   [flare-operator] continuous-replication probe: 1 stats read(s) in 149ms (tick 9; in-mode remembered: 0, out-of-mode remembered: 1)
+#   [flare-operator] grace period: 14 cycles remaining
+#   [TopologyAudit] node=orphan-mgmt-nodes-0.orphan-mgmt-nodes.flare-orphan-mgmt.svc.cluster.local:12121 uid=(some ec1b0adf-237f-41a5-8f12-665a593fb2c0) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1898ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 13 cycles remaining
+#   [TopologyAudit] node=orphan-mgmt-nodes-3.orphan-mgmt-nodes.flare-orphan-mgmt.svc.cluster.local:12121 uid=(some 0b305fb1-56d6-4dd7-9d57-a408b174c478) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1710ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 12 cycles remaining
+#   [TopologyAudit] node=orphan-mgmt-nodes-2.orphan-mgmt-nodes.flare-orphan-mgmt.svc.cluster.local:12121 uid=(some 65b89766-da38-4abf-903f-7dd1b668072f) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1798ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 11 cycles remaining
+#   [TopologyAudit] node=orphan-mgmt-nodes-1.orphan-mgmt-nodes.flare-orphan-mgmt.svc.cluster.local:12121 uid=(some 2362009c-5e52-4500-aa8f-bce93e52382b) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 2030ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 10 cycles remaining
+#   [TopologyAudit] node=orphan-mgmt-nodes-0.orphan-mgmt-nodes.flare-orphan-mgmt.svc.cluster.local:12121 uid=(some ec1b0adf-237f-41a5-8f12-665a593fb2c0) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1702ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 9 cycles remaining
+#   [TopologyAudit] node=orphan-mgmt-nodes-3.orphan-mgmt-nodes.flare-orphan-mgmt.svc.cluster.local:12121 uid=(some 0b305fb1-56d6-4dd7-9d57-a408b174c478) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1713ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 8 cycles remaining
+#   [TopologyAudit] node=orphan-mgmt-nodes-2.orphan-mgmt-nodes.flare-orphan-mgmt.svc.cluster.local:12121 uid=(some 65b89766-da38-4abf-903f-7dd1b668072f) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1804ms (nodes=4 M=2 S=2 D=0 P=0)
+#   
+# Killing P0 master: orphan-mgmt-nodes-0
+# Waiting for: P0 master available (timeout: 90s)
+#   OK after 0s
+# Waiting for: all pods ready (timeout: 180s)
+#   OK after 15s
+# orphan_scan on orphan-mgmt-nodes-0:
+#   STAT orphan_scan_token da80ec07-a336-40b6-a4aa-8fcfcc704350
+#   STAT orphan_scan_node_map_version 4294967327
+#   STAT orphan_scan_scanned_keys 50
+#   STAT orphan_scan_orphan_count 0
+#   STAT orphan_scan_orphan_bytes 0
+#   STAT orphan_scan_partition 0
+#   END
+# orphan_scan on orphan-mgmt-nodes-1:
+#   STAT orphan_scan_token 07fbc1b8-c779-4468-b116-a115ff7edbde
+#   STAT orphan_scan_node_map_version 4294967327
+#   STAT orphan_scan_scanned_keys 50
+#   STAT orphan_scan_orphan_count 0
+#   STAT orphan_scan_orphan_bytes 0
+#   STAT orphan_scan_partition 1
+#   END
+# orphan_scan on orphan-mgmt-nodes-2:
+#   STAT orphan_scan_token 90c657ed-6d1f-450d-93d1-8c7e9d677c5a
+#   STAT orphan_scan_node_map_version 4294967327
+#   STAT orphan_scan_scanned_keys 50
+#   STAT orphan_scan_orphan_count 0
+#   STAT orphan_scan_orphan_bytes 0
+#   STAT orphan_scan_partition 0
+#   END
+# orphan_scan on orphan-mgmt-nodes-3:
+#   STAT orphan_scan_token c030f3b7-d1d0-4a60-b732-d7e44cd80aa7
+#   STAT orphan_scan_node_map_version 4294967327
+#   STAT orphan_scan_scanned_keys 50
+#   STAT orphan_scan_orphan_count 0
+#   STAT orphan_scan_orphan_bytes 0
+#   STAT orphan_scan_partition 1
+#   END
+# Cleaning up cluster 'orphan-mgmt'
+# === Suite: terminating-pod-handling ===
+# Cleaning up cluster 'term-pod'
+# Deploying cluster 'term-pod' in namespace 'flare-term-pod'
+# Waiting for: namespace flare-term-pod not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-term-pod (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap term-pod-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet term-pod-nodes to be ready...
+# Waiting for: all 4 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 4 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 130s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator-term-pod) ---
+#   [TopologyAudit] node=term-pod-nodes-0.term-pod-nodes.flare-term-pod.svc.cluster.local:12121 uid=(some d5642f94-601e-4ee3-8fa4-179add3d1d78) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1769ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 5 cycles remaining
+#   [TopologyAudit] node=term-pod-nodes-3.term-pod-nodes.flare-term-pod.svc.cluster.local:12121 uid=(some 965906a8-05e0-4960-a78c-774e5643677f) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1730ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 4 cycles remaining
+#   [TopologyAudit] node=term-pod-nodes-2.term-pod-nodes.flare-term-pod.svc.cluster.local:12121 uid=(some 6d82f644-2179-4ab2-90e5-e467a3b46f69) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1763ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 3 cycles remaining
+#   [TopologyAudit] node=term-pod-nodes-1.term-pod-nodes.flare-term-pod.svc.cluster.local:12121 uid=(some ef1c88b7-4a34-4a04-8019-24058b8a76f3) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 2070ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 2 cycles remaining
+#   [TopologyAudit] node=term-pod-nodes-0.term-pod-nodes.flare-term-pod.svc.cluster.local:12121 uid=(some d5642f94-601e-4ee3-8fa4-179add3d1d78) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1754ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 1 cycles remaining
+#   [TopologyAudit] node=term-pod-nodes-3.term-pod-nodes.flare-term-pod.svc.cluster.local:12121 uid=(some 965906a8-05e0-4960-a78c-774e5643677f) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1745ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 0 cycles remaining
+#   [TopologyAudit] node=term-pod-nodes-2.term-pod-nodes.flare-term-pod.svc.cluster.local:12121 uid=(some 6d82f644-2179-4ab2-90e5-e467a3b46f69) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1764ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [TopologyAudit] node=term-pod-nodes-1.term-pod-nodes.flare-term-pod.svc.cluster.local:12121 uid=(some ef1c88b7-4a34-4a04-8019-24058b8a76f3) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 2140ms (nodes=4 M=2 S=2 D=0 P=0)
+#   
+# deleting P0 master term-pod-nodes-0 (grace, preStop 20s)
+# Waiting for: drain: new P0 master while old pod present (timeout: 25s)
+#   OK after 10s
+# drain observed: new master promoted + old master → Proxy while still Terminating
+# Waiting for: all pods ready (timeout: 240s)
+#   OK after 0s
+# Cleaning up cluster 'term-pod'
+# === Suite: failover-during-replication ===
+# Cleaning up cluster 'fdr-v1'
+# Cleaning up cluster 'fdr-v2'
+# Deploying cluster 'fdr-v1' in namespace 'flare-fdr-v1'
+# Waiting for: namespace flare-fdr-v1 not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-fdr-v1 (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap fdr-v1-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet fdr-v1-nodes to be ready...
+# Waiting for: all 4 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 4 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 50s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator-fdr-v1) ---
+#   [flare-operator] continuous-replication probe: 1 stats read(s) in 166ms (tick 6; in-mode remembered: 0, out-of-mode remembered: 1)
+#   [flare-operator] grace period: 17 cycles remaining
+#   [TopologyAudit] node=fdr-v1-nodes-3.fdr-v1-nodes.flare-fdr-v1.svc.cluster.local:12121 uid=(some a505d677-75e8-4545-b140-841845d443d5) desired=4294967313 reported=(some 4294967313) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 2128ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 16 cycles remaining
+#   [TopologyAudit] node=fdr-v1-nodes-2.fdr-v1-nodes.flare-fdr-v1.svc.cluster.local:12121 uid=(some efa39e30-bfb3-4d9c-b40a-32a8b4220dc2) desired=4294967313 reported=(some 4294967313) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1627ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 15 cycles remaining
+#   [TopologyAudit] node=fdr-v1-nodes-1.fdr-v1-nodes.flare-fdr-v1.svc.cluster.local:12121 uid=(some cb7a745c-eeba-40bd-bce6-0843c4674dec) desired=4294967313 reported=(some 4294967313) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1714ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 14 cycles remaining
+#   [TopologyAudit] node=fdr-v1-nodes-0.fdr-v1-nodes.flare-fdr-v1.svc.cluster.local:12121 uid=(some 1b4d6872-6faa-48b0-a408-851f7edea60a) desired=4294967313 reported=(some 4294967313) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1709ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 13 cycles remaining
+#   [TopologyAudit] node=fdr-v1-nodes-3.fdr-v1-nodes.flare-fdr-v1.svc.cluster.local:12121 uid=(some a505d677-75e8-4545-b140-841845d443d5) desired=4294967313 reported=(some 4294967313) verdict=current
+#   [flare-operator] replica repair ledger initialized from fdr-v1-nodes-2.fdr-v1-nodes.flare-fdr-v1.svc.cluster.local:12121: 0 destination counter(s) recorded as baseline, none attributed
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 2623ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 12 cycles remaining
+#   [TopologyAudit] node=fdr-v1-nodes-2.fdr-v1-nodes.flare-fdr-v1.svc.cluster.local:12121 uid=(some efa39e30-bfb3-4d9c-b40a-32a8b4220dc2) desired=4294967313 reported=(some 4294967313) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1634ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 11 cycles remaining
+#   [TopologyAudit] node=fdr-v1-nodes-1.fdr-v1-nodes.flare-fdr-v1.svc.cluster.local:12121 uid=(some cb7a745c-eeba-40bd-bce6-0843c4674dec) desired=4294967313 reported=(some 4294967313) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1685ms (nodes=4 M=2 S=2 D=0 P=0)
+#   
+# Deploying second cluster 'fdr-v2'
+# Waiting for StatefulSet fdr-v2-nodes to be ready...
+# Waiting for: all 2 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 2 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 50s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator-fdr-v2) ---
+#   [flare-operator] grace period: 19 cycles remaining
+#   [TopologyAudit] node=fdr-v2-nodes-1.fdr-v2-nodes.flare-fdr-v2.svc.cluster.local:12121 uid=(some ea0aa1b5-c2d9-4ce9-a7c1-bcb163abe83b) desired=4294967304 reported=(some 4294967303) verdict=behind
+#   [flare-operator] retrying an unconfirmed topology send (pending v4294967304; publishing v4294967304)
+#   [flare-operator] topology changed (v4294967304 → v4294967304), broadcasting
+#   [TopologyBroadcast] Broadcasting node sync v4294967304 (2 nodes) to 2 pods
+#   [TcpClient] node sync v4294967304 to 10.244.0.86:12121: reply-confirmed=true
+#   [TcpClient] node sync v4294967304 to 10.244.0.87:12121: reply-confirmed=true
+#   [TopologyBroadcast] Broadcast attempt complete (v4294967304); all targets reply-confirmed=true
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 2399ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 18 cycles remaining
+#   [TopologyAudit] node=fdr-v2-nodes-0.fdr-v2-nodes.flare-fdr-v2.svc.cluster.local:12121 uid=(some 39962dc2-5345-47e3-9999-83cf292fba7d) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1723ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 17 cycles remaining
+#   [TopologyAudit] node=fdr-v2-nodes-1.fdr-v2-nodes.flare-fdr-v2.svc.cluster.local:12121 uid=(some ea0aa1b5-c2d9-4ce9-a7c1-bcb163abe83b) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1608ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 16 cycles remaining
+#   [TopologyAudit] node=fdr-v2-nodes-0.fdr-v2-nodes.flare-fdr-v2.svc.cluster.local:12121 uid=(some 39962dc2-5345-47e3-9999-83cf292fba7d) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1694ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 15 cycles remaining
+#   [TopologyAudit] node=fdr-v2-nodes-1.fdr-v2-nodes.flare-fdr-v2.svc.cluster.local:12121 uid=(some ea0aa1b5-c2d9-4ce9-a7c1-bcb163abe83b) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1593ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 14 cycles remaining
+#   [TopologyAudit] node=fdr-v2-nodes-0.fdr-v2-nodes.flare-fdr-v2.svc.cluster.local:12121 uid=(some 39962dc2-5345-47e3-9999-83cf292fba7d) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1618ms (nodes=2 M=1 S=1 D=0 P=0)
+#   
+# Waiting for: migrationPhase=Dumping (timeout: 60s)
+#   OK after 5s
+# Killing v1 P0 master fdr-v1-nodes-0 during Dumping...
+# Waiting for: P0 master available (timeout: 90s)
+#   OK after 0s
+# Waiting for: phase in {None,Dumping,Forwarding} (timeout: 60s)
+#   OK after 0s
+# Replication phase after failover: Dumping (OK — abort-on-master-change is the designed safe response)
+# Cleaning up cluster 'fdr-v1'
+# Cleaning up cluster 'fdr-v2'
+# === Suite: data-survival-failover ===
+# Cleaning up cluster 'data-survival'
+# Deploying cluster 'data-survival' in namespace 'flare-data-survival'
+# Waiting for: namespace flare-data-survival not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-data-survival (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap data-survival-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet data-survival-nodes to be ready...
+# Waiting for: all 4 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 4 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 50s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator) ---
+#   [flare-operator] retrying an unconfirmed topology send (pending v4294967318; publishing v4294967318)
+#   [flare-operator] topology changed (v4294967318 → v4294967318), broadcasting
+#   [TopologyBroadcast] Broadcasting node sync v4294967318 (4 nodes) to 4 pods
+#   [TcpClient] node sync v4294967318 to 10.244.0.91:12121: reply-confirmed=true
+#   [TcpClient] node sync v4294967318 to 10.244.0.94:12121: reply-confirmed=true
+#   [TcpClient] node sync v4294967318 to 10.244.0.93:12121: reply-confirmed=true
+#   [TcpClient] node sync v4294967318 to 10.244.0.92:12121: reply-confirmed=true
+#   [TopologyBroadcast] Broadcast attempt complete (v4294967318); all targets reply-confirmed=true
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 2506ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 16 cycles remaining
+#   [TopologyAudit] node=data-survival-nodes-2.data-survival-nodes.flare-data-survival.svc.cluster.local:12121 uid=(some e8f0db5f-44d2-479a-a731-8147ce13f35b) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1719ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 15 cycles remaining
+#   [TopologyAudit] node=data-survival-nodes-1.data-survival-nodes.flare-data-survival.svc.cluster.local:12121 uid=(some 316d2812-00cd-4109-9d1e-a4adc2f8f6c2) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 2035ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 14 cycles remaining
+#   [TopologyAudit] node=data-survival-nodes-0.data-survival-nodes.flare-data-survival.svc.cluster.local:12121 uid=(some 8b1c6351-7c29-46c8-8b12-e08f7dfa8218) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1709ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 13 cycles remaining
+#   [TopologyAudit] node=data-survival-nodes-3.data-survival-nodes.flare-data-survival.svc.cluster.local:12121 uid=(some 262db9ef-c9db-4298-80d6-1e2c65ee3d83) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1696ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 12 cycles remaining
+#   [TopologyAudit] node=data-survival-nodes-2.data-survival-nodes.flare-data-survival.svc.cluster.local:12121 uid=(some e8f0db5f-44d2-479a-a731-8147ce13f35b) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1700ms (nodes=4 M=2 S=2 D=0 P=0)
+#   
+# Wrote via data-survival-nodes-0: stored 100/100
+# Waiting for: all P0 replicas Active before kill (timeout: 180s)
+#   OK after 0s
+# Killing P0 master: data-survival-nodes-0
+# Waiting for: P0 master available after kill (timeout: 120s)
+#   OK after 10s
+# P0 master after failover: data-survival-nodes-2 (killed data-survival-nodes-0)
+# P0 curr_items after failover: 57
+# Cleaning up cluster 'data-survival'
+# === Suite: pvc-data-survival ===
+# Cleaning up cluster 'pvc-survival'
+# Deploying cluster 'pvc-survival' in namespace 'flare-pvc-survival'
+# Waiting for: namespace flare-pvc-survival not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-pvc-survival (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap pvc-survival-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet pvc-survival-nodes to be ready...
+# Waiting for: all 4 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 4 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 50s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator) ---
+#   [DEBUG] Sending response: NODE pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 1 0 1 0 19 | NODE pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 1 0 0 0 18 | NODE pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 0 0 1 100 17 | NODE pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 0 0 0 100 16 | END | 
+#   [flare-operator] continuous-replication probe: 1 stats read(s) in 162ms (tick 9; in-mode remembered: 0, out-of-mode remembered: 1)
+#   [flare-operator] grace period: 14 cycles remaining
+#   [TopologyAudit] node=pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121 uid=(some b20c6958-5b81-4643-b4b8-fef456f582f7) desired=4294967319 reported=(some 4294967319) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1964ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 13 cycles remaining
+#   [TopologyAudit] node=pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121 uid=(some cb95cb1e-7b72-41f7-802b-8009a1086595) desired=4294967319 reported=(some 4294967319) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 2104ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 12 cycles remaining
+#   [TopologyAudit] node=pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121 uid=(some ef709fb9-f625-4637-97aa-6eabb33c40d4) desired=4294967319 reported=(some 4294967319) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1641ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 11 cycles remaining
+#   [TopologyAudit] node=pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121 uid=(some b09a72f1-b0dc-476e-b93e-99f79a5efdc1) desired=4294967319 reported=(some 4294967319) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1799ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 10 cycles remaining
+#   [TopologyAudit] node=pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121 uid=(some b20c6958-5b81-4643-b4b8-fef456f582f7) desired=4294967319 reported=(some 4294967319) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1698ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 9 cycles remaining
+#   [TopologyAudit] node=pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121 uid=(some cb95cb1e-7b72-41f7-802b-8009a1086595) desired=4294967319 reported=(some 4294967319) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 2003ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 8 cycles remaining
+#   [TopologyAudit] node=pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121 uid=(some ef709fb9-f625-4637-97aa-6eabb33c40d4) desired=4294967319 reported=(some 4294967319) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1724ms (nodes=4 M=2 S=2 D=0 P=0)
+#   
+# Wrote via pvc-survival-nodes-0: stored 100/100
+# Killing ALL P0 nodes simultaneously: [pvc-survival-nodes-2, pvc-survival-nodes-0]
+# Waiting for: P0 master available after total P0 loss (timeout: 420s)
+#   OK after 15s
+# P0 master after total-P0 restart: pvc-survival-nodes-0
+#   reason: DATA LOSS: 10 missing, 0 mismatched (missing=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9], mismatched=[])
+# P0 curr_items: 49
+# Waiting for: all nodes Active (timeout: 180s)
+#   OK after 0s
+# Gracefully restarting P0 slave pvc-survival-nodes-2 (master pvc-survival-nodes-0 stays up)
+# Waiting for: cluster all-Active after slave restart (timeout: 240s)
+#   OK after 0s
+# --- diagnostics for failing suite 'pvc-data-survival' ---
+# === operator logs (flare-pvc-survival, app=flare-operator) ===
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TcpClient] node sync v4294967318 to 10.244.0.101:12121: reply-confirmed=true
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TcpClient] node sync v4294967318 to 10.244.0.103:12121: reply-confirmed=true
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TcpClient] node sync v4294967318 to 10.244.0.99:12121: reply-confirmed=true
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TcpClient] node sync v4294967318 to 10.244.0.105:12121: reply-confirmed=true
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Received command: node state pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 active
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeState
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator]   "pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local"
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator]   12121
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator]   (FlareOperator.K8s
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TRACE] Event: NodeState pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121 | Result: Prepare->Active | Reason: reconstruction complete
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v4294967318); all targets reply-confirmed=true
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] reconcile slow: 2485ms (nodes=4 M=2 S=2 D=0 P=0)
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] CONTINUOUS REPLICATION eligibility pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121: reads unknown: not probed this pass; promotion unknown: not probed this pass
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] grace period: 15 cycles remaining
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TopologyAudit] node=pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121 uid=(some b09a72f1-b0dc-476e-b93e-99f79a5efdc1) desired=4294967319 reported=(some 4294967318) verdict=behind
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] retrying an unconfirmed topology send (pending v4294967319; publishing v4294967319)
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] topology changed (v4294967319 → v4294967319), broadcasting
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TopologyBroadcast] Broadcasting node sync v4294967319 (4 nodes) to 4 pods
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TcpClient] node sync v4294967319 to 10.244.0.99:12121: reply-confirmed=true
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TcpClient] node sync v4294967319 to 10.244.0.103:12121: reply-confirmed=true
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TcpClient] node sync v4294967319 to 10.244.0.101:12121: reply-confirmed=true
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TcpClient] node sync v4294967319 to 10.244.0.105:12121: reply-confirmed=true
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v4294967319); all targets reply-confirmed=true
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] reconcile slow: 2295ms (nodes=4 M=2 S=2 D=0 P=0)
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Received command: node sync
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Sending response: NODE pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 1 0 1 0 19 | NODE pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 1 0 0 0 18 | NODE pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 0 0 1 100 17 | NODE pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 0 0 0 100 16 | END | 
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] continuous-replication probe: 1 stats read(s) in 162ms (tick 9; in-mode remembered: 0, out-of-mode remembered: 1)
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] grace period: 14 cycles remaining
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TopologyAudit] node=pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121 uid=(some b20c6958-5b81-4643-b4b8-fef456f582f7) desired=4294967319 reported=(some 4294967319) verdict=current
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] reconcile slow: 1964ms (nodes=4 M=2 S=2 D=0 P=0)
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] grace period: 13 cycles remaining
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TopologyAudit] node=pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121 uid=(some cb95cb1e-7b72-41f7-802b-8009a1086595) desired=4294967319 reported=(some 4294967319) verdict=current
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] reconcile slow: 2104ms (nodes=4 M=2 S=2 D=0 P=0)
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] grace period: 12 cycles remaining
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TopologyAudit] node=pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121 uid=(some ef709fb9-f625-4637-97aa-6eabb33c40d4) desired=4294967319 reported=(some 4294967319) verdict=current
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] reconcile slow: 1641ms (nodes=4 M=2 S=2 D=0 P=0)
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] grace period: 11 cycles remaining
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TopologyAudit] node=pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121 uid=(some b09a72f1-b0dc-476e-b93e-99f79a5efdc1) desired=4294967319 reported=(some 4294967319) verdict=current
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] reconcile slow: 1799ms (nodes=4 M=2 S=2 D=0 P=0)
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] grace period: 10 cycles remaining
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TopologyAudit] node=pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121 uid=(some b20c6958-5b81-4643-b4b8-fef456f582f7) desired=4294967319 reported=(some 4294967319) verdict=current
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] reconcile slow: 1698ms (nodes=4 M=2 S=2 D=0 P=0)
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] grace period: 9 cycles remaining
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TopologyAudit] node=pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121 uid=(some cb95cb1e-7b72-41f7-802b-8009a1086595) desired=4294967319 reported=(some 4294967319) verdict=current
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] reconcile slow: 2003ms (nodes=4 M=2 S=2 D=0 P=0)
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] grace period: 8 cycles remaining
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TopologyAudit] node=pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121 uid=(some ef709fb9-f625-4637-97aa-6eabb33c40d4) desired=4294967319 reported=(some 4294967319) verdict=current
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] reconcile slow: 1724ms (nodes=4 M=2 S=2 D=0 P=0)
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Received command: node sync
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Sending response: NODE pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 1 0 1 0 19 | NODE pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 1 0 0 0 18 | NODE pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 0 0 1 100 17 | NODE pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 0 0 0 100 16 | END | 
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] grace period: 7 cycles remaining
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TopologyAudit] node=pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121 uid=(some b09a72f1-b0dc-476e-b93e-99f79a5efdc1) desired=4294967319 reported=(some 4294967319) verdict=current
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] reconcile slow: 2101ms (nodes=4 M=2 S=2 D=0 P=0)
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] grace period: 6 cycles remaining
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TopologyAudit] node=pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121 uid=(some b20c6958-5b81-4643-b4b8-fef456f582f7) desired=4294967319 reported=(some 4294967319) verdict=current
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] reconcile slow: 2093ms (nodes=4 M=2 S=2 D=0 P=0)
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] grace period: 5 cycles remaining
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Received command: node sync
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Sending response: NODE pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 1 0 1 0 19 | NODE pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 1 0 0 0 18 | NODE pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 0 0 1 100 17 | NODE pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 0 0 0 100 16 | END | 
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Received command: shutdown pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.ParseError
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator]   "shutdown pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121"
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Received command: shutdown pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.ParseError
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator]   "shutdown pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121"
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Received command: node sync
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Sending response: NODE pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 1 0 1 0 19 | NODE pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 1 0 0 0 18 | NODE pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 0 0 1 100 17 | NODE pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 0 0 0 100 16 | END | 
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TopologyAudit] node=pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121 uid=(some cb95cb1e-7b72-41f7-802b-8009a1086595) desired=4294967319 reported=(some 4294967319) verdict=current
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Received command: node add pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeAdd
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator]   "pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local"
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator]   12121
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TRACE] Event: NodeAdd pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121 | Result: Slave P0 (Prepare) | Reason: partition needed slave
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Sending response: NODE pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 1 1 0 100 16 | NODE pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 1 0 1 0 19 | NODE pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 1 0 0 0 18 | NODE pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 0 0 1 100 17 | END | 
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Received command: meta
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.Meta
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TRACE] Event: Meta | CRD partitions=2 replicas=2 | State partitionSize=1024 | Returning partition-size 1024
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Received command: node role pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 proxy 0
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.MutationAttempt
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator]   "node role pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 proxy 0
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] CRITICAL: node pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121 (10.244.0.99:12121) is READY but the OPERATOR cannot connect to it (1 consecutive probes, ~30s). Topology pushes are not landing — that node is running on a stale map. NOT failing it over: the fault may be on our side. See RUNBOOK #node-unreachable
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Received command: node sync
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Sending response: NODE pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 1 1 0 100 16 | NODE pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 1 0 1 0 19 | NODE pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 1 0 0 0 18 | NODE pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 0 0 1 100 17 | END | 
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Received command: node add pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeAdd
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator]   "pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local"
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator]   12121
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TRACE] Event: NodeAdd pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121 | Result: Slave P0 (Prepare) | Reason: partition needed slave
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Sending response: NODE pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 1 1 0 0 18 | NODE pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 1 1 0 100 16 | NODE pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 1 0 1 0 19 | NODE pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 0 0 1 100 17 | END | 
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Received command: meta
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.Meta
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TRACE] Event: Meta | CRD partitions=2 replicas=2 | State partitionSize=1024 | Returning partition-size 1024
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Received command: node role pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 proxy 0
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.MutationAttempt
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator]   "node role pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 proxy 0
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] CRITICAL: node pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121 (10.244.0.103:12121) is READY but the OPERATOR cannot connect to it (1 consecutive probes, ~30s). Topology pushes are not landing — that node is running on a stale map. NOT failing it over: the fault may be on our side. See RUNBOOK #node-unreachable
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] reconcile slow: 10536ms (nodes=4 M=1 S=3 D=0 P=2)
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Received command: node sync
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Sending response: NODE pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 1 1 0 0 18 | NODE pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 1 1 0 100 16 | NODE pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 1 0 1 0 19 | NODE pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 0 0 1 100 17 | END | 
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] continuous-replication probe: 1 stats read(s) in 125ms (tick 19; in-mode remembered: 0, out-of-mode remembered: 2)
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] grace period: 4 cycles remaining
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Received command: node sync
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Sending response: NODE pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 0 0 0 100 16 | NODE pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 1 1 0 0 18 | NODE pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 1 0 1 0 19 | NODE pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 0 0 1 100 17 | END | 
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Received command: node sync
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Sending response: NODE pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 0 0 0 100 16 | NODE pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 1 1 0 0 18 | NODE pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 1 0 1 0 19 | NODE pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 0 0 1 100 17 | END | 
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TopologyAudit] node=pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121 uid=(some 73d583e5-babd-49a3-bdbb-ae0d8a468dac) desired=4294967328 reported=(some 0) verdict=behind
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] retrying an unconfirmed topology send (pending v4294967328; publishing v4294967328)
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] topology changed (v4294967321 → v4294967328), broadcasting
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TopologyBroadcast] Broadcasting node sync v4294967328 (4 nodes) to 4 pods
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TcpClient] node sync v4294967328 to 10.244.0.101:12121: reply-confirmed=true
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Received command: node state pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 active
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeState
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator]   "pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local"
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator]   12121
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator]   (FlareOperator.K8s
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TRACE] Event: NodeState pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121 | Result: Prepare->Active | Reason: reconstruction complete
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TcpClient] node sync v4294967328 to 10.244.0.105:12121: reply-confirmed=true
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TcpClient] node sync v4294967328 to 10.244.0.106:12121: reply-confirmed=true
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TcpClient] node sync v4294967328 to 10.244.0.107:12121: reply-confirmed=true
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v4294967328); all targets reply-confirmed=true
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] reconcile slow: 3338ms (nodes=4 M=2 S=2 D=0 P=0)
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] grace period: 3 cycles remaining
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TopologyAudit] node=pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121 uid=(some cb95cb1e-7b72-41f7-802b-8009a1086595) desired=4294967329 reported=(some 4294967328) verdict=behind
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] retrying an unconfirmed topology send (pending v4294967329; publishing v4294967329)
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] topology changed (v4294967329 → v4294967329), broadcasting
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TopologyBroadcast] Broadcasting node sync v4294967329 (4 nodes) to 4 pods
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TcpClient] node sync v4294967329 to 10.244.0.105:12121: reply-confirmed=true
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TcpClient] node sync v4294967329 to 10.244.0.107:12121: reply-confirmed=true
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TcpClient] node sync v4294967329 to 10.244.0.101:12121: reply-confirmed=true
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TcpClient] node sync v4294967329 to 10.244.0.106:12121: reply-confirmed=true
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Received command: node sync
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Sending response: NODE pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 1 0 0 0 18 | NODE pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 0 0 0 100 16 | NODE pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 1 0 1 0 19 | NODE pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 0 0 1 100 17 | END | 
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v4294967329); all targets reply-confirmed=true
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Received command: node sync
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Sending response: NODE pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 1 0 0 0 18 | NODE pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 0 0 0 100 16 | NODE pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 1 0 1 0 19 | NODE pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 0 0 1 100 17 | END | 
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] reconcile slow: 2889ms (nodes=4 M=2 S=2 D=0 P=0)
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Received command: node sync
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Sending response: NODE pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 1 0 0 0 18 | NODE pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 0 0 0 100 16 | NODE pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 1 0 1 0 19 | NODE pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 0 0 1 100 17 | END | 
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] grace period: 2 cycles remaining
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TopologyAudit] node=pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121 uid=(some b09a72f1-b0dc-476e-b93e-99f79a5efdc1) desired=4294967329 reported=(some 4294967329) verdict=current
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] reconcile slow: 2700ms (nodes=4 M=2 S=2 D=0 P=0)
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Received command: shutdown pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.ParseError
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator]   "shutdown pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121"
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Received command: node sync
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Sending response: NODE pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 1 0 0 0 18 | NODE pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 0 0 0 100 16 | NODE pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 1 0 1 0 19 | NODE pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 0 0 1 100 17 | END | 
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Received command: node add pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeAdd
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator]   "pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local"
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator]   12121
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TRACE] Event: NodeAdd pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121 | Result: Slave P0 (Prepare) | Reason: partition needed slave
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Sending response: NODE pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 1 1 0 0 18 | NODE pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 0 0 0 100 16 | NODE pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 1 0 1 0 19 | NODE pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 0 0 1 100 17 | END | 
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Received command: meta
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.Meta
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TRACE] Event: Meta | CRD partitions=2 replicas=2 | State partitionSize=1024 | Returning partition-size 1024
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Received command: node state pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local 12121 active
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeState
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator]   "pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local"
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator]   12121
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator]   (FlareOperator.K8s
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TRACE] Event: NodeState pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121 | Result: Prepare->Active | Reason: reconstruction complete
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] grace period: 1 cycles remaining
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TopologyAudit] node=pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121 uid=(some c5e0a97a-700e-4da8-bc81-f72f82f4b1ad) desired=4294967331 reported=(some 0) verdict=behind
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] retrying an unconfirmed topology send (pending v4294967331; publishing v4294967331)
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] topology changed (v4294967331 → v4294967331), broadcasting
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TopologyBroadcast] Broadcasting node sync v4294967331 (4 nodes) to 4 pods
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TcpClient] node sync v4294967331 to 10.244.0.101:12121: reply-confirmed=true
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TcpClient] node sync v4294967331 to 10.244.0.108:12121: reply-confirmed=true
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TcpClient] node sync v4294967331 to 10.244.0.106:12121: reply-confirmed=true
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TcpClient] node sync v4294967331 to 10.244.0.105:12121: reply-confirmed=true
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v4294967331); all targets reply-confirmed=true
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-cbd7d4c6f-x5n7m/flare-operator] [flare-operator] reconcile slow: 2978ms (nodes=4 M=2 S=2 D=0 P=0)
+# 
+# === flared logs (flare-pvc-survival, tail 80 each) ===
+# [pod/pvc-survival-nodes-1/flared] [140142914127552][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-1/flared] [140142914127552][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/pvc-survival-nodes-1/flared] [140142914127552][NTC][cluster.cc:2451-_reconstruct_node_partition] 1(prepare): master (node_key=pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-1/flared] [140142914127552][NTC][cluster.cc:1786-_shift_node_state] shifting node_state (node_key=pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, old_state=active, new_state=prepare)
+# [pod/pvc-survival-nodes-1/flared] [140142914127552][NTC][cluster.cc:1803-_shift_node_role] shifting node_role (node_key=pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, old_role=proxy, old_partition=-1, new_role=master, new_partition=1)
+# [pod/pvc-survival-nodes-1/flared] [140142914127552][NTC][storage_rocksdb.cc:439-advance_source_epoch] source epoch advanced to 2:c55d506c-475f-46c2-8a59-3caf57b6828d (followers of the previous history must rebuild)
+# [pod/pvc-survival-nodes-1/flared] [140142914127552][NTC][cluster.cc:1937-_shift_node_role] master reconstruction started (n=1)
+# [pod/pvc-survival-nodes-1/flared] [140142913992384][NTC][handler_reconstruction.cc:249-_run_once] truncate skipped (master reconstruction — local data may be the last copy)
+# [pod/pvc-survival-nodes-1/flared] [140142913992384][NTC][handler_reconstruction.cc:323-_run_once] starting dump operation (master=pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, partition=1, partition_size=2, interval=0, bwlimit=0)
+# [pod/pvc-survival-nodes-1/flared] [140142913992384][NTC][op_dump.cc:286-_parse_text_client_parameters] found delimiter, dump completed (items=0)
+# [pod/pvc-survival-nodes-1/flared] [140142913992384][NTC][handler_reconstruction.cc:333-_run_once] reconstruction via full dump completed (master=pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, partition=1, partition_size=2, interval=0, bwlimit=0)
+# [pod/pvc-survival-nodes-1/flared] [140142913992384][NTC][storage_rocksdb.cc:304-set_master_id] master id updated (old=5c0c6516-bbad-4348-a4a4-097c30896446, new=73b8d5da-9179-479b-8e90-8f1752d41eb3)
+# [pod/pvc-survival-nodes-1/flared] [140142913992384][NTC][handler_reconstruction.cc:353-_run_once] adopted master_id=73b8d5da-9179-479b-8e90-8f1752d41eb3 after reconstruction
+# [pod/pvc-survival-nodes-1/flared] [140142913992384][NTC][storage_rocksdb.cc:2894-set_repl_last_lsn] repl_last_lsn seeded: 0 -> 4
+# [pod/pvc-survival-nodes-1/flared] [140142913992384][NTC][handler_reconstruction.cc:597-_seed_repl_lsn_after_dump] seeded repl_last_lsn=4 after full dump (enables incremental WAL on next sync)
+# [pod/pvc-survival-nodes-1/flared] [140142913992384][NTC][handler_reconstruction.cc:384-_run_once] master reconstruction completed (0 threads left)
+# [pod/pvc-survival-nodes-1/flared] [140142914127552][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (3 entries)
+# [pod/pvc-survival-nodes-1/flared] [140142914127552][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 3 entries in node map)
+# [pod/pvc-survival-nodes-1/flared] [140142914127552][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/pvc-survival-nodes-1/flared] [140142914127552][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-1/flared] [140142914127552][NTC][cluster.cc:2424-_reconstruct_node_partition] 1: master (node_key=pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-1/flared] [140142914127552][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/pvc-survival-nodes-1/flared] [140142914127552][NTC][cluster.cc:1786-_shift_node_state] shifting node_state (node_key=pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, old_state=prepare, new_state=active)
+# [pod/pvc-survival-nodes-1/flared] [140142914127552][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (3 entries)
+# [pod/pvc-survival-nodes-1/flared] [140142914127552][NTC][cluster.cc:1183-reconstruct_node] update: node_balance (100 -> 0)
+# [pod/pvc-survival-nodes-1/flared] [140142914127552][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 3 entries in node map)
+# [pod/pvc-survival-nodes-1/flared] [140142914127552][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/pvc-survival-nodes-1/flared] [140142914127552][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-1/flared] [140142914127552][NTC][cluster.cc:2428-_reconstruct_node_partition] 0: slave[0] (node_key=pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=0)
+# [pod/pvc-survival-nodes-1/flared] [140142914127552][NTC][cluster.cc:2424-_reconstruct_node_partition] 1: master (node_key=pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-1/flared] [140142914127552][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/pvc-survival-nodes-1/flared] [140142914127552][NTC][cluster.cc:1786-_shift_node_state] shifting node_state (node_key=pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, old_state=active, new_state=prepare)
+# [pod/pvc-survival-nodes-1/flared] [140142914127552][NTC][cluster.cc:1803-_shift_node_role] shifting node_role (node_key=pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, old_role=proxy, old_partition=-1, new_role=slave, new_partition=0)
+# [pod/pvc-survival-nodes-1/flared] [140142914127552][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (4 entries)
+# [pod/pvc-survival-nodes-1/flared] [140142914127552][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 4 entries in node map)
+# [pod/pvc-survival-nodes-1/flared] [140142914127552][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/pvc-survival-nodes-1/flared] [140142914127552][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-1/flared] [140142914127552][NTC][cluster.cc:2428-_reconstruct_node_partition] 0: slave[0] (node_key=pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=0)
+# [pod/pvc-survival-nodes-1/flared] [140142914127552][NTC][cluster.cc:2424-_reconstruct_node_partition] 1: master (node_key=pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-1/flared] [140142914127552][NTC][cluster.cc:2428-_reconstruct_node_partition] 1: slave[0] (node_key=pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=0)
+# [pod/pvc-survival-nodes-1/flared] [140142914127552][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/pvc-survival-nodes-1/flared] [140142914127552][NTC][cluster.cc:1786-_shift_node_state] shifting node_state (node_key=pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, old_state=prepare, new_state=active)
+# [pod/pvc-survival-nodes-1/flared] [140142913722048][NTC][storage_rocksdb.cc:1385-create_snapshot_checkpoint] snapshot checkpoint created (path=/data/flare/snapshot.serve.tmp, seq=6)
+# [pod/pvc-survival-nodes-1/flared] [140142913722048][NTC][op_repl_snapshot.cc:145-_run_server] snapshot stream bwlimit: 32768 KB/s (server=32768, requested=0; 0=unlimited)
+# [pod/pvc-survival-nodes-1/flared] [140142913722048][NTC][op_repl_snapshot.cc:229-_run_server] snapshot streamed to peer (files=4, seq=6)
+# [pod/pvc-survival-nodes-1/flared] [140142913857216][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (4 entries)
+# [pod/pvc-survival-nodes-1/flared] [140142913857216][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 4 entries in node map)
+# [pod/pvc-survival-nodes-1/flared] [140142913857216][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/pvc-survival-nodes-1/flared] [140142913857216][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-1/flared] [140142913857216][NTC][cluster.cc:2428-_reconstruct_node_partition] 0: slave[0] (node_key=pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=0)
+# [pod/pvc-survival-nodes-1/flared] [140142913857216][NTC][cluster.cc:2424-_reconstruct_node_partition] 1: master (node_key=pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-1/flared] [140142913857216][NTC][cluster.cc:2428-_reconstruct_node_partition] 1: slave[0] (node_key=pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=0)
+# [pod/pvc-survival-nodes-1/flared] [140142913857216][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/pvc-survival-nodes-1/flared] [140142913857216][NTC][cluster.cc:1786-_shift_node_state] shifting node_state (node_key=pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, old_state=prepare, new_state=active)
+# [pod/pvc-survival-nodes-1/flared] [140142913857216][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (4 entries)
+# [pod/pvc-survival-nodes-1/flared] [140142913857216][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 4 entries in node map)
+# [pod/pvc-survival-nodes-1/flared] [140142913857216][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/pvc-survival-nodes-1/flared] [140142913857216][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-1/flared] [140142913857216][NTC][cluster.cc:2428-_reconstruct_node_partition] 0: slave[0] (node_key=pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=0)
+# [pod/pvc-survival-nodes-1/flared] [140142913857216][NTC][cluster.cc:2424-_reconstruct_node_partition] 1: master (node_key=pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-1/flared] [140142913857216][NTC][cluster.cc:2428-_reconstruct_node_partition] 1: slave[0] (node_key=pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=0)
+# [pod/pvc-survival-nodes-1/flared] [140142913857216][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/pvc-survival-nodes-1/flared] [140142913857216][NTC][cluster.cc:1786-_shift_node_state] shifting node_state (node_key=pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, old_state=active, new_state=prepare)
+# [pod/pvc-survival-nodes-1/flared] [140142913722048][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (4 entries)
+# [pod/pvc-survival-nodes-1/flared] [140142913722048][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 4 entries in node map)
+# [pod/pvc-survival-nodes-1/flared] [140142913722048][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/pvc-survival-nodes-1/flared] [140142913722048][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-1/flared] [140142913722048][NTC][cluster.cc:2428-_reconstruct_node_partition] 0: slave[0] (node_key=pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=0)
+# [pod/pvc-survival-nodes-1/flared] [140142913722048][NTC][cluster.cc:2424-_reconstruct_node_partition] 1: master (node_key=pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-1/flared] [140142913722048][NTC][cluster.cc:2428-_reconstruct_node_partition] 1: slave[0] (node_key=pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=0)
+# [pod/pvc-survival-nodes-1/flared] [140142913722048][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/pvc-survival-nodes-1/flared] [140142913722048][NTC][cluster.cc:1786-_shift_node_state] shifting node_state (node_key=pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, old_state=prepare, new_state=active)
+# [pod/pvc-survival-nodes-1/flared] [140142913722048][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (4 entries)
+# [pod/pvc-survival-nodes-1/flared] [140142913722048][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 4 entries in node map)
+# [pod/pvc-survival-nodes-1/flared] [140142913722048][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/pvc-survival-nodes-1/flared] [140142913722048][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-1/flared] [140142913722048][NTC][cluster.cc:2428-_reconstruct_node_partition] 0: slave[0] (node_key=pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=0)
+# [pod/pvc-survival-nodes-1/flared] [140142913722048][NTC][cluster.cc:2424-_reconstruct_node_partition] 1: master (node_key=pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-1/flared] [140142913722048][NTC][cluster.cc:2428-_reconstruct_node_partition] 1: slave[0] (node_key=pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=0)
+# [pod/pvc-survival-nodes-1/flared] [140142913722048][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:177-startup] flared version 1.3.4 - system logger started
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:179-startup] application startup in progress...
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:183-startup]   back_log:               30
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:183-startup]   config_path:            /etc/flared/extra.conf
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:183-startup]   pid_path:               
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:183-startup]   daemonize:              false
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:183-startup]   data_dir:               /data/flare
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:183-startup]   index_server(s):        flare-operator.flare-pvc-survival.svc.cluster.local:12120
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:183-startup]   max_connection:         128
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:183-startup]   mutex_slot:             64
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:183-startup]   noreply_window_limit:   0
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:183-startup]   net_read_timeout:       600
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:183-startup]   proxy_concurrency:      2
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:183-startup]   reconstruction_interval:0
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:183-startup]   reconstruction_bwlimit: 0
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:183-startup]   replication_type:       async
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:183-startup]   server_name:            pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:183-startup]   server_port:            12121
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:183-startup]   server_socket:          
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:183-startup]   stack_size:             128
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:183-startup]   storage_ap:             4
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:183-startup]   storage_bucket_size:    131071
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:183-startup]   storage_cache_size:     65536
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:183-startup]   storage_compress:       
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:183-startup]   storage_large:          false
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:183-startup]   storage_lmemb:          128
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:183-startup]   storage_nmemb:          256
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:183-startup]   storage_dfunit:         0
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:183-startup]   storage_type:           rocksdb
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:183-startup]   thread_pool_size:       5
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:183-startup]   proxy_prior_netmask:    0
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:183-startup]   max_total_thread_queue: 0
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:183-startup]   time_watcher_enabled:   false
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:183-startup]   time_watcher_polling_interval_msec: 0
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:183-startup]   storage_access_watch_threshold_warn_msec: 0
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:183-startup]   storage_access_watch_threshold_ping_ng_msec: 0
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:183-startup]   cluster_replication:    0
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:183-startup]   cluster_replication_server_name: 
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:183-startup]   cluster_replication_server_port: 12121
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:183-startup]   cluster_replication_concurrency: 2
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:183-startup]   cluster_replication_mode: duplicate
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][cluster.cc:279-startup_node] setting up cluster node... (type=1, index_server_name=flare-operator.flare-pvc-survival.svc.cluster.local, index_server_port=12120)
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][cluster.cc:310-startup_node] meta data from index server:
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][cluster.cc:311-startup_node]   partition_size:                 1024
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][cluster.cc:312-startup_node]   key_hash_algorithm:             jenkins
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][cluster.cc:313-startup_node]   key_resolver_type:              modular
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][cluster.cc:314-startup_node]   key_resolver_modular_hint:      1
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][cluster.cc:315-startup_node]   key_resolver_modular_virtual:   4096
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (4 entries)
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][cluster.cc:1148-reconstruct_node] boot map already assigns my role (role=slave, partition=0) — deferring role shift until storage is attached
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 4 entries in node map)
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][cluster.cc:2428-_reconstruct_node_partition] 0: slave[0] (node_key=pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=0)
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][cluster.cc:2424-_reconstruct_node_partition] 1: master (node_key=pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][cluster.cc:2428-_reconstruct_node_partition] 1: slave[0] (node_key=pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=0)
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][storage_rocksdb.cc:598-open] curr_items seeded by an exact scan: 49 live key(s) in 0 ms
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][storage_rocksdb.cc:392-_load_or_init_generations] replication generations (source_epoch=4:1f563d36-3277-418b-9f89-42dc0a79a9ea, incarnation=3:4d6ed623-2284-48d9-8bc9-a7db81a79e4e)
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][storage_rocksdb.cc:618-open] storage open (path=/data/flare/flare.rocksdb, type=rocksdb, master_id=73b8d5da-9179-479b-8e90-8f1752d41eb3, sync_writes=false, wal_ttl=86400s, wal_size_limit=10240MB)
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][cluster.cc:1803-_shift_node_role] shifting node_role (node_key=pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, old_role=proxy, old_partition=-1, new_role=slave, new_partition=0)
+# [pod/pvc-survival-nodes-2/flared] [140383499265728][NTC][handler_metrics.cc:69-run] metrics endpoint ready (port=9150, self-scrape port=12121)
+# [pod/pvc-survival-nodes-2/flared] [140383533382784][NTC][flared.cc:428-run] entering running loop
+# [pod/pvc-survival-nodes-2/flared] [140383499806400][NTC][handler_reconstruction.cc:520-_try_wal_reconstruction] attempting reconstruction via WAL incremental sync (master=pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, lsn=55, master_id=73b8d5da-9179-479b-8e90-8f1752d41eb3)
+# [pod/pvc-survival-nodes-2/flared] [140383499806400][NTC][op_repl_sync_wal.cc:646-_parse_text_client_parameters] WAL sync completed successfully (last_applied_lsn=104, master_id=73b8d5da-9179-479b-8e90-8f1752d41eb3)
+# [pod/pvc-survival-nodes-2/flared] [140383499806400][NTC][handler_reconstruction.cc:546-_try_wal_reconstruction] reconstruction via WAL incremental sync completed (master=pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, from_lsn=55, now_lsn=104)
+# [pod/pvc-survival-nodes-2/flared] [140383499130560][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (4 entries)
+# [pod/pvc-survival-nodes-2/flared] [140383499130560][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 4 entries in node map)
+# [pod/pvc-survival-nodes-2/flared] [140383499130560][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/pvc-survival-nodes-2/flared] [140383499130560][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-2/flared] [140383499130560][NTC][cluster.cc:2428-_reconstruct_node_partition] 0: slave[0] (node_key=pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=0)
+# [pod/pvc-survival-nodes-2/flared] [140383499130560][NTC][cluster.cc:2424-_reconstruct_node_partition] 1: master (node_key=pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-2/flared] [140383499130560][NTC][cluster.cc:2428-_reconstruct_node_partition] 1: slave[0] (node_key=pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=0)
+# [pod/pvc-survival-nodes-2/flared] [140383499130560][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/pvc-survival-nodes-2/flared] [140383499130560][NTC][cluster.cc:1786-_shift_node_state] shifting node_state (node_key=pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, old_state=prepare, new_state=active)
+# [pod/pvc-survival-nodes-3/flared] [140461613583488][NTC][cluster.cc:279-startup_node] setting up cluster node... (type=1, index_server_name=flare-operator.flare-pvc-survival.svc.cluster.local, index_server_port=12120)
+# [pod/pvc-survival-nodes-3/flared] [140461613583488][NTC][cluster.cc:310-startup_node] meta data from index server:
+# [pod/pvc-survival-nodes-3/flared] [140461613583488][NTC][cluster.cc:311-startup_node]   partition_size:                 1024
+# [pod/pvc-survival-nodes-3/flared] [140461613583488][NTC][cluster.cc:312-startup_node]   key_hash_algorithm:             jenkins
+# [pod/pvc-survival-nodes-3/flared] [140461613583488][NTC][cluster.cc:313-startup_node]   key_resolver_type:              modular
+# [pod/pvc-survival-nodes-3/flared] [140461613583488][NTC][cluster.cc:314-startup_node]   key_resolver_modular_hint:      1
+# [pod/pvc-survival-nodes-3/flared] [140461613583488][NTC][cluster.cc:315-startup_node]   key_resolver_modular_virtual:   4096
+# [pod/pvc-survival-nodes-3/flared] [140461613583488][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (4 entries)
+# [pod/pvc-survival-nodes-3/flared] [140461613583488][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 4 entries in node map)
+# [pod/pvc-survival-nodes-3/flared] [140461613583488][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/pvc-survival-nodes-3/flared] [140461613583488][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-3/flared] [140461613583488][NTC][cluster.cc:2428-_reconstruct_node_partition] 0: slave[0] (node_key=pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=0)
+# [pod/pvc-survival-nodes-3/flared] [140461613583488][NTC][cluster.cc:2424-_reconstruct_node_partition] 1: master (node_key=pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-3/flared] [140461613583488][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/pvc-survival-nodes-3/flared] [140461613583488][NTC][storage_rocksdb.cc:598-open] curr_items seeded by an exact scan: 0 live key(s) in 0 ms
+# [pod/pvc-survival-nodes-3/flared] [140461613583488][NTC][storage_rocksdb.cc:272-_load_or_generate_master_id] generated new master id (id=f4db5790-6677-4c14-a5d4-e97b9dbe9db5)
+# [pod/pvc-survival-nodes-3/flared] [140461613583488][NTC][storage_rocksdb.cc:392-_load_or_init_generations] replication generations (source_epoch=1:adbc5ac5-d904-411e-be19-5405455bfd54, incarnation=1:f022146b-b498-4e5b-90cd-dc9fd4631bcb)
+# [pod/pvc-survival-nodes-3/flared] [140461613583488][NTC][storage_rocksdb.cc:618-open] storage open (path=/data/flare/flare.rocksdb, type=rocksdb, master_id=f4db5790-6677-4c14-a5d4-e97b9dbe9db5, sync_writes=false, wal_ttl=86400s, wal_size_limit=10240MB)
+# [pod/pvc-survival-nodes-3/flared] [140461613583488][NTC][flared.cc:428-run] entering running loop
+# [pod/pvc-survival-nodes-3/flared] [140461579601600][NTC][handler_metrics.cc:69-run] metrics endpoint ready (port=9150, self-scrape port=12121)
+# [pod/pvc-survival-nodes-3/flared] [140461579466432][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (3 entries)
+# [pod/pvc-survival-nodes-3/flared] [140461579466432][NTC][cluster.cc:1197-reconstruct_node] detecting removed node [node_key=pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121]
+# [pod/pvc-survival-nodes-3/flared] [140461579466432][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 3 entries in node map)
+# [pod/pvc-survival-nodes-3/flared] [140461579466432][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/pvc-survival-nodes-3/flared] [140461579466432][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-3/flared] [140461579466432][NTC][cluster.cc:2428-_reconstruct_node_partition] 0: slave[0] (node_key=pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=0)
+# [pod/pvc-survival-nodes-3/flared] [140461579466432][NTC][cluster.cc:2424-_reconstruct_node_partition] 1: master (node_key=pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-3/flared] [140461579466432][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/pvc-survival-nodes-3/flared] [140461579466432][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (4 entries)
+# [pod/pvc-survival-nodes-3/flared] [140461579466432][NTC][cluster.cc:1148-reconstruct_node] boot map already assigns my role (role=slave, partition=1) — deferring role shift until storage is attached
+# [pod/pvc-survival-nodes-3/flared] [140461579466432][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 4 entries in node map)
+# [pod/pvc-survival-nodes-3/flared] [140461579466432][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/pvc-survival-nodes-3/flared] [140461579466432][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-3/flared] [140461579466432][NTC][cluster.cc:2428-_reconstruct_node_partition] 0: slave[0] (node_key=pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=0)
+# [pod/pvc-survival-nodes-3/flared] [140461579466432][NTC][cluster.cc:2424-_reconstruct_node_partition] 1: master (node_key=pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-3/flared] [140461579466432][NTC][cluster.cc:2428-_reconstruct_node_partition] 1: slave[0] (node_key=pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=0)
+# [pod/pvc-survival-nodes-3/flared] [140461579466432][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/pvc-survival-nodes-3/flared] [140461579466432][NTC][cluster.cc:1786-_shift_node_state] shifting node_state (node_key=pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, old_state=prepare, new_state=active)
+# [pod/pvc-survival-nodes-3/flared] [140461579466432][NTC][cluster.cc:1803-_shift_node_role] shifting node_role (node_key=pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, old_role=proxy, old_partition=-1, new_role=slave, new_partition=1)
+# [pod/pvc-survival-nodes-3/flared] [140461579331264][NTC][handler_reconstruction.cc:260-_run_once] attempting snapshot bootstrap (physical reseed + WAL catch-up) instead of truncate+full-dump
+# [pod/pvc-survival-nodes-3/flared] [140461579331264][NTC][op_repl_snapshot.cc:301-_run_client] snapshot bootstrap: receiving 4 files (seq=6, source master_id=73b8d5da-9179-479b-8e90-8f1752d41eb3)
+# [pod/pvc-survival-nodes-3/flared] [140461579331264][NTC][storage_rocksdb.cc:1661-swap_in_snapshot] restore completed (cursor=6, source_epoch=2:c55d506c-475f-46c2-8a59-3caf57b6828d, incarnation=2:ad77596e-e7bb-417a-942d-2f6e2478dff7)
+# [pod/pvc-survival-nodes-3/flared] [140461579331264][NTC][storage_rocksdb.cc:1711-swap_in_snapshot] snapshot bootstrap complete (seq=6, master_id=73b8d5da-9179-479b-8e90-8f1752d41eb3)
+# [pod/pvc-survival-nodes-3/flared] [140461579331264][NTC][op_repl_snapshot.cc:412-_run_client] snapshot bootstrap: swapped in 13364 bytes, replication cursor at 6
+# [pod/pvc-survival-nodes-3/flared] [140461579331264][NTC][handler_reconstruction.cc:276-_run_once] snapshot bootstrap succeeded; skipping full dump (cursor and lineage seeded by the swap)
+# [pod/pvc-survival-nodes-3/flared] [140461579466432][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (4 entries)
+# [pod/pvc-survival-nodes-3/flared] [140461579466432][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 4 entries in node map)
+# [pod/pvc-survival-nodes-3/flared] [140461579466432][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/pvc-survival-nodes-3/flared] [140461579466432][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-3/flared] [140461579466432][NTC][cluster.cc:2428-_reconstruct_node_partition] 0: slave[0] (node_key=pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=0)
+# [pod/pvc-survival-nodes-3/flared] [140461579466432][NTC][cluster.cc:2424-_reconstruct_node_partition] 1: master (node_key=pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-3/flared] [140461579466432][NTC][cluster.cc:2428-_reconstruct_node_partition] 1: slave[0] (node_key=pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=0)
+# [pod/pvc-survival-nodes-3/flared] [140461579466432][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/pvc-survival-nodes-3/flared] [140461579466432][NTC][cluster.cc:1786-_shift_node_state] shifting node_state (node_key=pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, old_state=prepare, new_state=active)
+# [pod/pvc-survival-nodes-3/flared] [140461578008256][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (4 entries)
+# [pod/pvc-survival-nodes-3/flared] [140461578008256][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 4 entries in node map)
+# [pod/pvc-survival-nodes-3/flared] [140461578008256][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/pvc-survival-nodes-3/flared] [140461578008256][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-3/flared] [140461578008256][NTC][cluster.cc:2428-_reconstruct_node_partition] 0: slave[0] (node_key=pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=0)
+# [pod/pvc-survival-nodes-3/flared] [140461578008256][NTC][cluster.cc:2424-_reconstruct_node_partition] 1: master (node_key=pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-3/flared] [140461578008256][NTC][cluster.cc:2428-_reconstruct_node_partition] 1: slave[0] (node_key=pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=0)
+# [pod/pvc-survival-nodes-3/flared] [140461578008256][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/pvc-survival-nodes-3/flared] [140461578008256][NTC][cluster.cc:1786-_shift_node_state] shifting node_state (node_key=pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, old_state=active, new_state=prepare)
+# [pod/pvc-survival-nodes-3/flared] [140461579466432][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (4 entries)
+# [pod/pvc-survival-nodes-3/flared] [140461579466432][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 4 entries in node map)
+# [pod/pvc-survival-nodes-3/flared] [140461579466432][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/pvc-survival-nodes-3/flared] [140461579466432][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-3/flared] [140461579466432][NTC][cluster.cc:2428-_reconstruct_node_partition] 0: slave[0] (node_key=pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=0)
+# [pod/pvc-survival-nodes-3/flared] [140461579466432][NTC][cluster.cc:2424-_reconstruct_node_partition] 1: master (node_key=pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-3/flared] [140461579466432][NTC][cluster.cc:2428-_reconstruct_node_partition] 1: slave[0] (node_key=pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=0)
+# [pod/pvc-survival-nodes-3/flared] [140461579466432][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/pvc-survival-nodes-3/flared] [140461579466432][NTC][cluster.cc:1786-_shift_node_state] shifting node_state (node_key=pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, old_state=prepare, new_state=active)
+# [pod/pvc-survival-nodes-3/flared] [140461578008256][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (4 entries)
+# [pod/pvc-survival-nodes-3/flared] [140461578008256][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 4 entries in node map)
+# [pod/pvc-survival-nodes-3/flared] [140461578008256][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/pvc-survival-nodes-3/flared] [140461578008256][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-3/flared] [140461578008256][NTC][cluster.cc:2428-_reconstruct_node_partition] 0: slave[0] (node_key=pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=0)
+# [pod/pvc-survival-nodes-3/flared] [140461578008256][NTC][cluster.cc:2424-_reconstruct_node_partition] 1: master (node_key=pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-3/flared] [140461578008256][NTC][cluster.cc:2428-_reconstruct_node_partition] 1: slave[0] (node_key=pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=0)
+# [pod/pvc-survival-nodes-3/flared] [140461578008256][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/pvc-survival-nodes-0/flared] [139869546855552][NTC][cluster.cc:279-startup_node] setting up cluster node... (type=1, index_server_name=flare-operator.flare-pvc-survival.svc.cluster.local, index_server_port=12120)
+# [pod/pvc-survival-nodes-0/flared] [139869546855552][NTC][cluster.cc:310-startup_node] meta data from index server:
+# [pod/pvc-survival-nodes-0/flared] [139869546855552][NTC][cluster.cc:311-startup_node]   partition_size:                 1024
+# [pod/pvc-survival-nodes-0/flared] [139869546855552][NTC][cluster.cc:312-startup_node]   key_hash_algorithm:             jenkins
+# [pod/pvc-survival-nodes-0/flared] [139869546855552][NTC][cluster.cc:313-startup_node]   key_resolver_type:              modular
+# [pod/pvc-survival-nodes-0/flared] [139869546855552][NTC][cluster.cc:314-startup_node]   key_resolver_modular_hint:      1
+# [pod/pvc-survival-nodes-0/flared] [139869546855552][NTC][cluster.cc:315-startup_node]   key_resolver_modular_virtual:   4096
+# [pod/pvc-survival-nodes-0/flared] [139869546855552][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (4 entries)
+# [pod/pvc-survival-nodes-0/flared] [139869546855552][NTC][cluster.cc:1148-reconstruct_node] boot map already assigns my role (role=slave, partition=0) — deferring role shift until storage is attached
+# [pod/pvc-survival-nodes-0/flared] [139869546855552][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 4 entries in node map)
+# [pod/pvc-survival-nodes-0/flared] [139869546855552][ERR][cluster.cc:2411-_reconstruct_node_partition] no node partition for this slave [node_key=pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, state=1, role=1, partition=0]
+# [pod/pvc-survival-nodes-0/flared] [139869546855552][ERR][cluster.cc:2411-_reconstruct_node_partition] no node partition for this slave [node_key=pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, state=0, role=1, partition=0]
+# [pod/pvc-survival-nodes-0/flared] [139869546855552][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/pvc-survival-nodes-0/flared] [139869546855552][NTC][cluster.cc:2424-_reconstruct_node_partition] 1: master (node_key=pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-0/flared] [139869546855552][NTC][cluster.cc:2428-_reconstruct_node_partition] 1: slave[0] (node_key=pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=0)
+# [pod/pvc-survival-nodes-0/flared] [139869546855552][ERR][cluster.cc:2433-_reconstruct_node_partition] possibly missing partition (partition=1, size=1)
+# [pod/pvc-survival-nodes-0/flared] [139869546855552][NTC][storage_rocksdb.cc:598-open] curr_items seeded by an exact scan: 49 live key(s) in 0 ms
+# [pod/pvc-survival-nodes-0/flared] [139869546855552][NTC][storage_rocksdb.cc:392-_load_or_init_generations] replication generations (source_epoch=2:87eb8db1-084c-4ce3-8190-7bbd58be27fb, incarnation=1:c3a939b5-b7bd-4be7-8228-64b962bd783e)
+# [pod/pvc-survival-nodes-0/flared] [139869546855552][NTC][storage_rocksdb.cc:618-open] storage open (path=/data/flare/flare.rocksdb, type=rocksdb, master_id=73b8d5da-9179-479b-8e90-8f1752d41eb3, sync_writes=false, wal_ttl=86400s, wal_size_limit=10240MB)
+# [pod/pvc-survival-nodes-0/flared] [139869546855552][NTC][cluster.cc:1803-_shift_node_role] shifting node_role (node_key=pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, old_role=proxy, old_partition=-1, new_role=slave, new_partition=0)
+# [pod/pvc-survival-nodes-0/flared] [139869546855552][ERR][cluster.cc:1958-_shift_node_role] could not find reconstruction source node (node_key=pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, new_role=slave, new_partition=0) -> deactivating node
+# [pod/pvc-survival-nodes-0/flared] [139869546855552][ERR][cluster.cc:1406-deactivate_node] failed to deactivate node
+# [pod/pvc-survival-nodes-0/flared] [139869546855552][NTC][cluster.cc:1317-_run_boot_shift_locked] boot role shift could not run yet (no reconstruction source for partition 0?) — retrying on the next node map broadcast
+# [pod/pvc-survival-nodes-0/flared] [139869529654976][NTC][handler_metrics.cc:69-run] metrics endpoint ready (port=9150, self-scrape port=12121)
+# [pod/pvc-survival-nodes-0/flared] [139869546855552][NTC][flared.cc:428-run] entering running loop
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][WRN][cluster.cc:2582-_determine_partition] no partition is available
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][WRN][op_get.cc:131-_run_server] partition error (key=pvc_0) -> continue processing (pretending not found)
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][WRN][cluster.cc:2582-_determine_partition] no partition is available
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][WRN][op_get.cc:131-_run_server] partition error (key=pvc_1) -> continue processing (pretending not found)
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][WRN][cluster.cc:2582-_determine_partition] no partition is available
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][WRN][op_get.cc:131-_run_server] partition error (key=pvc_2) -> continue processing (pretending not found)
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][WRN][cluster.cc:2582-_determine_partition] no partition is available
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][WRN][op_get.cc:131-_run_server] partition error (key=pvc_3) -> continue processing (pretending not found)
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][WRN][cluster.cc:2582-_determine_partition] no partition is available
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][WRN][op_get.cc:131-_run_server] partition error (key=pvc_4) -> continue processing (pretending not found)
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][WRN][cluster.cc:2582-_determine_partition] no partition is available
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][WRN][op_get.cc:131-_run_server] partition error (key=pvc_5) -> continue processing (pretending not found)
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][WRN][cluster.cc:2582-_determine_partition] no partition is available
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][WRN][op_get.cc:131-_run_server] partition error (key=pvc_6) -> continue processing (pretending not found)
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][WRN][cluster.cc:2582-_determine_partition] no partition is available
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][WRN][op_get.cc:131-_run_server] partition error (key=pvc_7) -> continue processing (pretending not found)
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][WRN][cluster.cc:2582-_determine_partition] no partition is available
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][WRN][op_get.cc:131-_run_server] partition error (key=pvc_8) -> continue processing (pretending not found)
+# [pod/pvc-survival-nodes-0/flared] [139869529384640][WRN][cluster.cc:2582-_determine_partition] no partition is available
+# [pod/pvc-survival-nodes-0/flared] [139869529384640][WRN][op_get.cc:131-_run_server] partition error (key=pvc_9) -> continue processing (pretending not found)
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (4 entries)
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 4 entries in node map)
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][NTC][cluster.cc:2428-_reconstruct_node_partition] 0: slave[0] (node_key=pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=0)
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][NTC][cluster.cc:2424-_reconstruct_node_partition] 1: master (node_key=pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][NTC][cluster.cc:2428-_reconstruct_node_partition] 1: slave[0] (node_key=pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=0)
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][NTC][cluster.cc:1786-_shift_node_state] shifting node_state (node_key=pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, old_state=active, new_state=prepare)
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][NTC][cluster.cc:1786-_shift_node_state] shifting node_state (node_key=pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, old_state=prepare, new_state=active)
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][NTC][cluster.cc:1803-_shift_node_role] shifting node_role (node_key=pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, old_role=slave, old_partition=0, new_role=master, new_partition=0)
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][NTC][storage_rocksdb.cc:439-advance_source_epoch] source epoch advanced to 3:939152c1-e1aa-49ae-9160-d900095cd867 (followers of the previous history must rebuild)
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][NTC][cluster.cc:1803-_shift_node_role] shifting node_role (node_key=pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, old_role=proxy, old_partition=-1, new_role=master, new_partition=0)
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][NTC][storage_rocksdb.cc:439-advance_source_epoch] source epoch advanced to 4:1f563d36-3277-418b-9f89-42dc0a79a9ea (followers of the previous history must rebuild)
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][NTC][cluster.cc:1894-_shift_node_role] assigned master with state active — skipping reconstruction (operator designated this node the source of truth; local data is authoritative)
+# [pod/pvc-survival-nodes-0/flared] [139869529384640][NTC][storage_rocksdb.cc:1385-create_snapshot_checkpoint] snapshot checkpoint created (path=/data/flare/snapshot.serve.tmp, seq=55)
+# [pod/pvc-survival-nodes-0/flared] [139869529384640][NTC][op_repl_snapshot.cc:145-_run_server] snapshot stream bwlimit: 32768 KB/s (server=32768, requested=0; 0=unlimited)
+# [pod/pvc-survival-nodes-0/flared] [139869529384640][NTC][op_repl_snapshot.cc:229-_run_server] snapshot streamed to peer (files=6, seq=55)
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (4 entries)
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 4 entries in node map)
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][NTC][cluster.cc:2428-_reconstruct_node_partition] 0: slave[0] (node_key=pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=0)
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][NTC][cluster.cc:2424-_reconstruct_node_partition] 1: master (node_key=pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][NTC][cluster.cc:2428-_reconstruct_node_partition] 1: slave[0] (node_key=pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=0)
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][NTC][cluster.cc:1786-_shift_node_state] shifting node_state (node_key=pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, old_state=prepare, new_state=active)
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (4 entries)
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 4 entries in node map)
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=pvc-survival-nodes-0.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][NTC][cluster.cc:2428-_reconstruct_node_partition] 0: slave[0] (node_key=pvc-survival-nodes-2.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=0)
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][NTC][cluster.cc:2424-_reconstruct_node_partition] 1: master (node_key=pvc-survival-nodes-1.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=100)
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][NTC][cluster.cc:2428-_reconstruct_node_partition] 1: slave[0] (node_key=pvc-survival-nodes-3.pvc-survival-nodes.flare-pvc-survival.svc.cluster.local:12121, node_balance=0)
+# [pod/pvc-survival-nodes-0/flared] [139869529519808][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# 
+# === pods (flare-pvc-survival) ===
+# NAME                             READY   STATUS    RESTARTS   AGE     IP             NODE                      NOMINATED NODE   READINESS GATES
+# debug-pvc-survival               1/1     Running   0          3m2s    10.244.0.96    flare-e2e-control-plane   <none>           <none>
+# flare-operator-cbd7d4c6f-x5n7m   1/1     Running   0          3m1s    10.244.0.97    flare-e2e-control-plane   <none>           <none>
+# pvc-survival-nodes-0             1/1     Running   0          46s     10.244.0.106   flare-e2e-control-plane   <none>           <none>
+# pvc-survival-nodes-1             1/1     Running   0          2m37s   10.244.0.101   flare-e2e-control-plane   <none>           <none>
+# pvc-survival-nodes-2             0/1     Running   0          10s     10.244.0.108   flare-e2e-control-plane   <none>           <none>
+# pvc-survival-nodes-3             1/1     Running   0          2m18s   10.244.0.105   flare-e2e-control-plane   <none>           <none>
+# 
+# === events (flare-pvc-survival, by time) ===
+# LAST SEEN   TYPE      REASON                  OBJECT                                            MESSAGE
+# 3m2s        Normal    Scheduled               pod/debug-pvc-survival                            Successfully assigned flare-pvc-survival/debug-pvc-survival to flare-e2e-control-plane
+# 3m2s        Normal    Started                 pod/debug-pvc-survival                            Started container debug-pvc-survival
+# 3m2s        Normal    Created                 pod/debug-pvc-survival                            Created container debug-pvc-survival
+# 3m2s        Normal    Pulled                  pod/debug-pvc-survival                            Container image "busybox:1.36" already present on machine
+# 3m1s        Normal    SuccessfulCreate        replicaset/flare-operator-cbd7d4c6f               Created pod: flare-operator-cbd7d4c6f-x5n7m
+# 3m1s        Normal    Scheduled               pod/flare-operator-cbd7d4c6f-x5n7m                Successfully assigned flare-pvc-survival/flare-operator-cbd7d4c6f-x5n7m to flare-e2e-control-plane
+# 3m1s        Normal    ScalingReplicaSet       deployment/flare-operator                         Scaled up replica set flare-operator-cbd7d4c6f to 1
+# 3m1s        Normal    Started                 pod/flare-operator-cbd7d4c6f-x5n7m                Started container flare-operator
+# 3m1s        Normal    Created                 pod/flare-operator-cbd7d4c6f-x5n7m                Created container flare-operator
+# 3m1s        Normal    Pulled                  pod/flare-operator-cbd7d4c6f-x5n7m                Container image "flare-operator:test" already present on machine
+# 2m50s       Normal    ExternalProvisioning    persistentvolumeclaim/data-pvc-survival-nodes-0   Waiting for a volume to be created either by the external provisioner 'rancher.io/local-path' or manually by the system administrator. If volume creation is delayed, please verify that the provisioner is running and correctly registered.
+# 2m50s       Normal    SuccessfulCreate        statefulset/pvc-survival-nodes                    create Claim data-pvc-survival-nodes-0 Pod pvc-survival-nodes-0 in StatefulSet pvc-survival-nodes success
+# 2m50s       Normal    WaitForFirstConsumer    persistentvolumeclaim/data-pvc-survival-nodes-0   waiting for first consumer to be created before binding
+# 2m50s       Normal    Provisioning            persistentvolumeclaim/data-pvc-survival-nodes-0   External provisioner is provisioning volume for claim "flare-pvc-survival/data-pvc-survival-nodes-0"
+# 2m48s       Normal    ProvisioningSucceeded   persistentvolumeclaim/data-pvc-survival-nodes-0   Successfully provisioned volume pvc-3ca8c0c8-aafc-42ea-82ca-13c35ded0427
+# 2m47s       Normal    Scheduled               pod/pvc-survival-nodes-0                          Successfully assigned flare-pvc-survival/pvc-survival-nodes-0 to flare-e2e-control-plane
+# 2m47s       Normal    Created                 pod/pvc-survival-nodes-0                          Created container flared
+# 2m47s       Normal    Pulled                  pod/pvc-survival-nodes-0                          Container image "flare-node-rocksdb:test" already present on machine
+# 2m46s       Normal    Started                 pod/pvc-survival-nodes-0                          Started container flared
+# 2m37s       Normal    WaitForFirstConsumer    persistentvolumeclaim/data-pvc-survival-nodes-1   waiting for first consumer to be created before binding
+# 2m37s       Normal    SuccessfulCreate        statefulset/pvc-survival-nodes                    create Pod pvc-survival-nodes-1 in StatefulSet pvc-survival-nodes successful
+# 2m37s       Normal    SuccessfulCreate        statefulset/pvc-survival-nodes                    create Claim data-pvc-survival-nodes-1 Pod pvc-survival-nodes-1 in StatefulSet pvc-survival-nodes success
+# 2m37s       Normal    ExternalProvisioning    persistentvolumeclaim/data-pvc-survival-nodes-1   Waiting for a volume to be created either by the external provisioner 'rancher.io/local-path' or manually by the system administrator. If volume creation is delayed, please verify that the provisioner is running and correctly registered.
+# 2m37s       Normal    Provisioning            persistentvolumeclaim/data-pvc-survival-nodes-1   External provisioner is provisioning volume for claim "flare-pvc-survival/data-pvc-survival-nodes-1"
+# 2m34s       Normal    ProvisioningSucceeded   persistentvolumeclaim/data-pvc-survival-nodes-1   Successfully provisioned volume pvc-4662e000-904a-473d-a296-33edf0016a43
+# 2m33s       Normal    Scheduled               pod/pvc-survival-nodes-1                          Successfully assigned flare-pvc-survival/pvc-survival-nodes-1 to flare-e2e-control-plane
+# 2m32s       Normal    Started                 pod/pvc-survival-nodes-1                          Started container flared
+# 2m32s       Normal    Created                 pod/pvc-survival-nodes-1                          Created container flared
+# 2m32s       Normal    Pulled                  pod/pvc-survival-nodes-1                          Container image "flare-node-rocksdb:test" already present on machine
+# 2m27s       Normal    WaitForFirstConsumer    persistentvolumeclaim/data-pvc-survival-nodes-2   waiting for first consumer to be created before binding
+# 2m27s       Normal    SuccessfulCreate        statefulset/pvc-survival-nodes                    create Claim data-pvc-survival-nodes-2 Pod pvc-survival-nodes-2 in StatefulSet pvc-survival-nodes success
+# 2m27s       Normal    Provisioning            persistentvolumeclaim/data-pvc-survival-nodes-2   External provisioner is provisioning volume for claim "flare-pvc-survival/data-pvc-survival-nodes-2"
+# 2m27s       Normal    ExternalProvisioning    persistentvolumeclaim/data-pvc-survival-nodes-2   Waiting for a volume to be created either by the external provisioner 'rancher.io/local-path' or manually by the system administrator. If volume creation is delayed, please verify that the provisioner is running and correctly registered.
+# 2m24s       Normal    ProvisioningSucceeded   persistentvolumeclaim/data-pvc-survival-nodes-2   Successfully provisioned volume pvc-a268d438-51f0-46cd-8503-c279779d3fbb
+# 2m23s       Normal    Scheduled               pod/pvc-survival-nodes-2                          Successfully assigned flare-pvc-survival/pvc-survival-nodes-2 to flare-e2e-control-plane
+# 2m23s       Normal    Pulled                  pod/pvc-survival-nodes-2                          Container image "flare-node-rocksdb:test" already present on machine
+# 2m23s       Normal    Created                 pod/pvc-survival-nodes-2                          Created container flared
+# 2m23s       Normal    Started                 pod/pvc-survival-nodes-2                          Started container flared
+# 2m18s       Normal    SuccessfulCreate        statefulset/pvc-survival-nodes                    create Pod pvc-survival-nodes-3 in StatefulSet pvc-survival-nodes successful
+# 2m18s       Normal    WaitForFirstConsumer    persistentvolumeclaim/data-pvc-survival-nodes-3   waiting for first consumer to be created before binding
+# 2m18s       Normal    ExternalProvisioning    persistentvolumeclaim/data-pvc-survival-nodes-3   Waiting for a volume to be created either by the external provisioner 'rancher.io/local-path' or manually by the system administrator. If volume creation is delayed, please verify that the provisioner is running and correctly registered.
+# 2m18s       Normal    SuccessfulCreate        statefulset/pvc-survival-nodes                    create Claim data-pvc-survival-nodes-3 Pod pvc-survival-nodes-3 in StatefulSet pvc-survival-nodes success
+# 2m18s       Normal    Provisioning            persistentvolumeclaim/data-pvc-survival-nodes-3   External provisioner is provisioning volume for claim "flare-pvc-survival/data-pvc-survival-nodes-3"
+# 2m16s       Normal    ProvisioningSucceeded   persistentvolumeclaim/data-pvc-survival-nodes-3   Successfully provisioned volume pvc-5a0cf3db-27e7-44ae-8fb7-64129bb59e30
+# 2m15s       Normal    Scheduled               pod/pvc-survival-nodes-3                          Successfully assigned flare-pvc-survival/pvc-survival-nodes-3 to flare-e2e-control-plane
+# 2m14s       Normal    Started                 pod/pvc-survival-nodes-3                          Started container flared
+# 2m14s       Normal    Created                 pod/pvc-survival-nodes-3                          Created container flared
+# 2m14s       Normal    Pulled                  pod/pvc-survival-nodes-3                          Container image "flare-node-rocksdb:test" already present on machine
+# 2m8s        Warning   Unhealthy               pod/pvc-survival-nodes-2                          Readiness probe failed:
+# 2m          Warning   Unhealthy               pod/pvc-survival-nodes-3                          Readiness probe failed:
+# 46s         Normal    Killing                 pod/pvc-survival-nodes-2                          Stopping container flared
+# 46s         Normal    Killing                 pod/pvc-survival-nodes-0                          Stopping container flared
+# 46s         Normal    SuccessfulCreate        statefulset/pvc-survival-nodes                    create Pod pvc-survival-nodes-0 in StatefulSet pvc-survival-nodes successful
+# 46s         Normal    Scheduled               pod/pvc-survival-nodes-0                          Successfully assigned flare-pvc-survival/pvc-survival-nodes-0 to flare-e2e-control-plane
+# 45s         Normal    Created                 pod/pvc-survival-nodes-0                          Created container flared
+# 45s         Normal    Pulled                  pod/pvc-survival-nodes-0                          Container image "flare-node-rocksdb:test" already present on machine
+# 45s         Normal    Started                 pod/pvc-survival-nodes-0                          Started container flared
+# 40s         Normal    Started                 pod/pvc-survival-nodes-2                          Started container flared
+# 40s         Normal    Scheduled               pod/pvc-survival-nodes-2                          Successfully assigned flare-pvc-survival/pvc-survival-nodes-2 to flare-e2e-control-plane
+# 40s         Normal    Pulled                  pod/pvc-survival-nodes-2                          Container image "flare-node-rocksdb:test" already present on machine
+# 40s         Normal    Created                 pod/pvc-survival-nodes-2                          Created container flared
+# 25s         Warning   Unhealthy               pod/pvc-survival-nodes-2                          Readiness probe failed:
+# 11s         Normal    Killing                 pod/pvc-survival-nodes-2                          Stopping container flared
+# 10s         Normal    Scheduled               pod/pvc-survival-nodes-2                          Successfully assigned flare-pvc-survival/pvc-survival-nodes-2 to flare-e2e-control-plane
+# 10s         Normal    SuccessfulCreate        statefulset/pvc-survival-nodes                    create Pod pvc-survival-nodes-2 in StatefulSet pvc-survival-nodes successful
+# 9s          Normal    Pulled                  pod/pvc-survival-nodes-2                          Container image "flare-node-rocksdb:test" already present on machine
+# 9s          Normal    Created                 pod/pvc-survival-nodes-2                          Created container flared
+# 9s          Normal    Started                 pod/pvc-survival-nodes-2                          Started container flared
+# 4s          Warning   Unhealthy               pod/pvc-survival-nodes-2                          Readiness probe failed:
+# 
+# === describe flared pods (flare-pvc-survival) ===
+# Name:             pvc-survival-nodes-0
+# Namespace:        flare-pvc-survival
+# Priority:         0
+# Service Account:  default
+# Node:             flare-e2e-control-plane/172.18.0.2
+# Start Time:       Wed, 30 Sep 2026 12:02:50 +0000
+# Labels:           app=flare
+#                   apps.kubernetes.io/pod-index=0
+#                   cluster=pvc-survival
+#                   controller-revision-hash=pvc-survival-nodes-6fc794c89d
+#                   statefulset.kubernetes.io/pod-name=pvc-survival-nodes-0
+# Annotations:      <none>
+# Status:           Running
+# IP:               10.244.0.106
+# IPs:
+#   IP:           10.244.0.106
+# Controlled By:  StatefulSet/pvc-survival-nodes
+# Containers:
+#   flared:
+#     Container ID:  containerd://fa44e9302825c3490a6e1ab1bfd12da4176575a337b9c716080306575738d374
+#     Image:         flare-node-rocksdb:test
+#     Image ID:      docker.io/library/import-2026-09-30@sha256:ce2489ff4f3a831a0f9d6e8f9f08536f448888942050804a580d2bbbae29f6d0
+#     Ports:         12121/TCP (flare), 9150/TCP (metrics)
+#     Host Ports:    0/TCP (flare), 0/TCP (metrics)
+#     Command:
+#       sh
+#       -c
+#       if [ -f /data/flare/RESTORE ]; then SRC=$(cat /data/flare/RESTORE) && rm -rf /data/flare/flare.rocksdb && cp -a $SRC /data/flare/flare.rocksdb && rm -f /data/flare/RESTORE; fi; mkdir -p /data/flare; rm -f /data/flare/flared.pid && exec flared --config=/etc/flared/extra.conf --data-dir /data/flare --server-port 12121 --index-server-name flare-operator.flare-pvc-survival.svc.cluster.local --index-server-port 12120 --storage-type=rocksdb --metrics-server-port 9150 --stderr
+#     State:          Running
+#       Started:      Wed, 30 Sep 2026 12:02:51 +0000
+#     Ready:          True
+#     Restart Count:  0
+#     Limits:
+#       cpu:     500m
+#       memory:  512Mi
+#     Requests:
+#       cpu:      100m
+#       memory:   256Mi
+#     Liveness:   tcp-socket :12121 delay=10s timeout=1s period=5s successThreshold=1 failureThreshold=6
+#     Readiness:  exec [/bin/bash -c exec 3<>/dev/tcp/127.0.0.1/12121 || exit 1
+# printf 'stats nodes\r\nquit\r\n' >&3
+# out=$(tr -d '\r' <&3)
+# me="$(hostname -f):12121"
+# case "$out" in *"STAT $me:state active"*) exit 0;; esac
+# # Limbo clause (mirrors the helm chart): a syncing member of a
+# # partition with NO active master has nothing to sync from —
+# # total-partition recovery. Report Ready so the OrderedReady
+# # StatefulSet can recreate the peer that will become master.
+# mypart=$(printf '%s\n' "$out" | sed -n "s/^STAT $me:partition //p")
+# [ -n "$mypart" ] || exit 1
+# [ "$mypart" != "-1" ] || exit 1
+# for key in $(printf '%s\n' "$out" | sed -n "s/^STAT \(.*\):partition $mypart$/\1/p"); do
+#   printf '%s\n' "$out" | grep -q "^STAT $key:role master$" || continue
+#   printf '%s\n' "$out" | grep -q "^STAT $key:state active$" && exit 1
+# done
+# exit 0
+# ] delay=5s timeout=4s period=5s successThreshold=1 failureThreshold=3
+#     Environment:  <none>
+#     Mounts:
+#       /data from data (rw)
+#       /etc/flared from flared-config (rw)
+#       /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-8lnzz (ro)
+# Conditions:
+#   Type                        Status
+#   PodReadyToStartContainers   True 
+#   Initialized                 True 
+#   Ready                       True 
+#   ContainersReady             True 
+#   PodScheduled                True 
+# Volumes:
+#   data:
+#     Type:       PersistentVolumeClaim (a reference to a PersistentVolumeClaim in the same namespace)
+#     ClaimName:  data-pvc-survival-nodes-0
+#     ReadOnly:   false
+#   flared-config:
+#     Type:      ConfigMap (a volume populated by a ConfigMap)
+#     Name:      pvc-survival-config
+#     Optional:  false
+#   kube-api-access-8lnzz:
+#     Type:                    Projected (a volume that contains injected data from multiple sources)
+#     TokenExpirationSeconds:  3607
+#     ConfigMapName:           kube-root-ca.crt
+#     Optional:                false
+#     DownwardAPI:             true
+# QoS Class:                   Burstable
+# Node-Selectors:              <none>
+# Tolerations:                 node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+#                              node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
+# 
+# 
+# Name:             pvc-survival-nodes-1
+# Namespace:        flare-pvc-survival
+# Priority:         0
+# Service Account:  default
+# Node:             flare-e2e-control-plane/172.18.0.2
+# Start Time:       Wed, 30 Sep 2026 12:01:03 +0000
+# Labels:           app=flare
+#                   apps.kubernetes.io/pod-index=1
+#                   cluster=pvc-survival
+#                   controller-revision-hash=pvc-survival-nodes-6fc794c89d
+#                   statefulset.kubernetes.io/pod-name=pvc-survival-nodes-1
+# Annotations:      <none>
+# Status:           Running
+# IP:               10.244.0.101
+# IPs:
+#   IP:           10.244.0.101
+# Controlled By:  StatefulSet/pvc-survival-nodes
+# Containers:
+#   flared:
+#     Container ID:  containerd://e4dc9cdb7e4de1b5f0f8b73f8ac4c77dea6a5d0c5612dda8e65de33733a49c9b
+#     Image:         flare-node-rocksdb:test
+#     Image ID:      docker.io/library/import-2026-09-30@sha256:ce2489ff4f3a831a0f9d6e8f9f08536f448888942050804a580d2bbbae29f6d0
+#     Ports:         12121/TCP (flare), 9150/TCP (metrics)
+#     Host Ports:    0/TCP (flare), 0/TCP (metrics)
+#     Command:
+#       sh
+#       -c
+#       if [ -f /data/flare/RESTORE ]; then SRC=$(cat /data/flare/RESTORE) && rm -rf /data/flare/flare.rocksdb && cp -a $SRC /data/flare/flare.rocksdb && rm -f /data/flare/RESTORE; fi; mkdir -p /data/flare; rm -f /data/flare/flared.pid && exec flared --config=/etc/flared/extra.conf --data-dir /data/flare --server-port 12121 --index-server-name flare-operator.flare-pvc-survival.svc.cluster.local --index-server-port 12120 --storage-type=rocksdb --metrics-server-port 9150 --stderr
+#     State:          Running
+#       Started:      Wed, 30 Sep 2026 12:01:04 +0000
+#     Ready:          True
+#     Restart Count:  0
+#     Limits:
+#       cpu:     500m
+#       memory:  512Mi
+#     Requests:
+#       cpu:      100m
+#       memory:   256Mi
+#     Liveness:   tcp-socket :12121 delay=10s timeout=1s period=5s successThreshold=1 failureThreshold=6
+#     Readiness:  exec [/bin/bash -c exec 3<>/dev/tcp/127.0.0.1/12121 || exit 1
+# printf 'stats nodes\r\nquit\r\n' >&3
+# out=$(tr -d '\r' <&3)
+# me="$(hostname -f):12121"
+# case "$out" in *"STAT $me:state active"*) exit 0;; esac
+# # Limbo clause (mirrors the helm chart): a syncing member of a
+# # partition with NO active master has nothing to sync from —
+# # total-partition recovery. Report Ready so the OrderedReady
+# # StatefulSet can recreate the peer that will become master.
+# mypart=$(printf '%s\n' "$out" | sed -n "s/^STAT $me:partition //p")
+# [ -n "$mypart" ] || exit 1
+# [ "$mypart" != "-1" ] || exit 1
+# for key in $(printf '%s\n' "$out" | sed -n "s/^STAT \(.*\):partition $mypart$/\1/p"); do
+#   printf '%s\n' "$out" | grep -q "^STAT $key:role master$" || continue
+#   printf '%s\n' "$out" | grep -q "^STAT $key:state active$" && exit 1
+# done
+# exit 0
+# ] delay=5s timeout=4s period=5s successThreshold=1 failureThreshold=3
+#     Environment:  <none>
+#     Mounts:
+#       /data from data (rw)
+#       /etc/flared from flared-config (rw)
+#       /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-7dvc2 (ro)
+# Conditions:
+#   Type                        Status
+#   PodReadyToStartContainers   True 
+#   Initialized                 True 
+#   Ready                       True 
+#   ContainersReady             True 
+#   PodScheduled                True 
+# Volumes:
+#   data:
+#     Type:       PersistentVolumeClaim (a reference to a PersistentVolumeClaim in the same namespace)
+#     ClaimName:  data-pvc-survival-nodes-1
+#     ReadOnly:   false
+#   flared-config:
+#     Type:      ConfigMap (a volume populated by a ConfigMap)
+#     Name:      pvc-survival-config
+#     Optional:  false
+#   kube-api-access-7dvc2:
+#     Type:                    Projected (a volume that contains injected data from multiple sources)
+#     TokenExpirationSeconds:  3607
+#     ConfigMapName:           kube-root-ca.crt
+#     Optional:                false
+#     DownwardAPI:             true
+# QoS Class:                   Burstable
+# Node-Selectors:              <none>
+# Tolerations:                 node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+#                              node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
+# 
+# 
+# Name:             pvc-survival-nodes-2
+# Namespace:        flare-pvc-survival
+# Priority:         0
+# Service Account:  default
+# Node:             flare-e2e-control-plane/172.18.0.2
+# Start Time:       Wed, 30 Sep 2026 12:03:26 +0000
+# Labels:           app=flare
+#                   apps.kubernetes.io/pod-index=2
+#                   cluster=pvc-survival
+#                   controller-revision-hash=pvc-survival-nodes-6fc794c89d
+#                   statefulset.kubernetes.io/pod-name=pvc-survival-nodes-2
+# Annotations:      <none>
+# Status:           Running
+# IP:               10.244.0.108
+# IPs:
+#   IP:           10.244.0.108
+# Controlled By:  StatefulSet/pvc-survival-nodes
+# Containers:
+#   flared:
+#     Container ID:  containerd://14d8780d59abd25d67d19972565874e512dc2ae78932a8fe7c0ede0a99ff8de4
+#     Image:         flare-node-rocksdb:test
+#     Image ID:      docker.io/library/import-2026-09-30@sha256:ce2489ff4f3a831a0f9d6e8f9f08536f448888942050804a580d2bbbae29f6d0
+#     Ports:         12121/TCP (flare), 9150/TCP (metrics)
+#     Host Ports:    0/TCP (flare), 0/TCP (metrics)
+#     Command:
+#       sh
+#       -c
+#       if [ -f /data/flare/RESTORE ]; then SRC=$(cat /data/flare/RESTORE) && rm -rf /data/flare/flare.rocksdb && cp -a $SRC /data/flare/flare.rocksdb && rm -f /data/flare/RESTORE; fi; mkdir -p /data/flare; rm -f /data/flare/flared.pid && exec flared --config=/etc/flared/extra.conf --data-dir /data/flare --server-port 12121 --index-server-name flare-operator.flare-pvc-survival.svc.cluster.local --index-server-port 12120 --storage-type=rocksdb --metrics-server-port 9150 --stderr
+#     State:          Running
+#       Started:      Wed, 30 Sep 2026 12:03:27 +0000
+#     Ready:          False
+#     Restart Count:  0
+#     Limits:
+#       cpu:     500m
+#       memory:  512Mi
+#     Requests:
+#       cpu:      100m
+#       memory:   256Mi
+#     Liveness:   tcp-socket :12121 delay=10s timeout=1s period=5s successThreshold=1 failureThreshold=6
+#     Readiness:  exec [/bin/bash -c exec 3<>/dev/tcp/127.0.0.1/12121 || exit 1
+# printf 'stats nodes\r\nquit\r\n' >&3
+# out=$(tr -d '\r' <&3)
+# me="$(hostname -f):12121"
+# case "$out" in *"STAT $me:state active"*) exit 0;; esac
+# # Limbo clause (mirrors the helm chart): a syncing member of a
+# # partition with NO active master has nothing to sync from —
+# # total-partition recovery. Report Ready so the OrderedReady
+# # StatefulSet can recreate the peer that will become master.
+# mypart=$(printf '%s\n' "$out" | sed -n "s/^STAT $me:partition //p")
+# [ -n "$mypart" ] || exit 1
+# [ "$mypart" != "-1" ] || exit 1
+# for key in $(printf '%s\n' "$out" | sed -n "s/^STAT \(.*\):partition $mypart$/\1/p"); do
+#   printf '%s\n' "$out" | grep -q "^STAT $key:role master$" || continue
+#   printf '%s\n' "$out" | grep -q "^STAT $key:state active$" && exit 1
+# done
+# exit 0
+# ] delay=5s timeout=4s period=5s successThreshold=1 failureThreshold=3
+#     Environment:  <none>
+#     Mounts:
+#       /data from data (rw)
+#       /etc/flared from flared-config (rw)
+#       /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-qdtrb (ro)
+# Conditions:
+#   Type                        Status
+#   PodReadyToStartContainers   True 
+#   Initialized                 True 
+#   Ready                       False 
+#   ContainersReady             False 
+#   PodScheduled                True 
+# Volumes:
+#   data:
+#     Type:       PersistentVolumeClaim (a reference to a PersistentVolumeClaim in the same namespace)
+#     ClaimName:  data-pvc-survival-nodes-2
+#     ReadOnly:   false
+#   flared-config:
+#     Type:      ConfigMap (a volume populated by a ConfigMap)
+#     Name:      pvc-survival-config
+#     Optional:  false
+#   kube-api-access-qdtrb:
+#     Type:                    Projected (a volume that contains injected data from multiple sources)
+#     TokenExpirationSeconds:  3607
+#     ConfigMapName:           kube-root-ca.crt
+#     Optional:                false
+#     DownwardAPI:             true
+# QoS Class:                   Burstable
+# Node-Selectors:              <none>
+# Tolerations:                 node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+#                              node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
+# 
+# 
+# Name:             pvc-survival-nodes-3
+# Namespace:        flare-pvc-survival
+# Priority:         0
+# Service Account:  default
+# Node:             flare-e2e-control-plane/172.18.0.2
+# Start Time:       Wed, 30 Sep 2026 12:01:21 +0000
+# Labels:           app=flare
+#                   apps.kubernetes.io/pod-index=3
+#                   cluster=pvc-survival
+#                   controller-revision-hash=pvc-survival-nodes-6fc794c89d
+#                   statefulset.kubernetes.io/pod-name=pvc-survival-nodes-3
+# Annotations:      <none>
+# Status:           Running
+# IP:               10.244.0.105
+# IPs:
+#   IP:           10.244.0.105
+# Controlled By:  StatefulSet/pvc-survival-nodes
+# Containers:
+#   flared:
+#     Container ID:  containerd://cb4973eb0c15d2e98476eb7930155b0cb2b194048b06f8cbdda31fe2d7e97411
+#     Image:         flare-node-rocksdb:test
+#     Image ID:      docker.io/library/import-2026-09-30@sha256:ce2489ff4f3a831a0f9d6e8f9f08536f448888942050804a580d2bbbae29f6d0
+#     Ports:         12121/TCP (flare), 9150/TCP (metrics)
+#     Host Ports:    0/TCP (flare), 0/TCP (metrics)
+#     Command:
+#       sh
+#       -c
+#       if [ -f /data/flare/RESTORE ]; then SRC=$(cat /data/flare/RESTORE) && rm -rf /data/flare/flare.rocksdb && cp -a $SRC /data/flare/flare.rocksdb && rm -f /data/flare/RESTORE; fi; mkdir -p /data/flare; rm -f /data/flare/flared.pid && exec flared --config=/etc/flared/extra.conf --data-dir /data/flare --server-port 12121 --index-server-name flare-operator.flare-pvc-survival.svc.cluster.local --index-server-port 12120 --storage-type=rocksdb --metrics-server-port 9150 --stderr
+#     State:          Running
+#       Started:      Wed, 30 Sep 2026 12:01:22 +0000
+#     Ready:          True
+#     Restart Count:  0
+#     Limits:
+#       cpu:     500m
+#       memory:  512Mi
+#     Requests:
+#       cpu:      100m
+#       memory:   256Mi
+#     Liveness:   tcp-socket :12121 delay=10s timeout=1s period=5s successThreshold=1 failureThreshold=6
+#     Readiness:  exec [/bin/bash -c exec 3<>/dev/tcp/127.0.0.1/12121 || exit 1
+# printf 'stats nodes\r\nquit\r\n' >&3
+# out=$(tr -d '\r' <&3)
+# me="$(hostname -f):12121"
+# case "$out" in *"STAT $me:state active"*) exit 0;; esac
+# # Limbo clause (mirrors the helm chart): a syncing member of a
+# # partition with NO active master has nothing to sync from —
+# # total-partition recovery. Report Ready so the OrderedReady
+# # StatefulSet can recreate the peer that will become master.
+# mypart=$(printf '%s\n' "$out" | sed -n "s/^STAT $me:partition //p")
+# [ -n "$mypart" ] || exit 1
+# [ "$mypart" != "-1" ] || exit 1
+# for key in $(printf '%s\n' "$out" | sed -n "s/^STAT \(.*\):partition $mypart$/\1/p"); do
+#   printf '%s\n' "$out" | grep -q "^STAT $key:role master$" || continue
+#   printf '%s\n' "$out" | grep -q "^STAT $key:state active$" && exit 1
+# done
+# exit 0
+# ] delay=5s timeout=4s period=5s successThreshold=1 failureThreshold=3
+#     Environment:  <none>
+#     Mounts:
+#       /data from data (rw)
+#       /etc/flared from flared-config (rw)
+#       /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-42794 (ro)
+# Conditions:
+#   Type                        Status
+#   PodReadyToStartContainers   True 
+#   Initialized                 True 
+#   Ready                       True 
+#   ContainersReady             True 
+#   PodScheduled                True 
+# Volumes:
+#   data:
+#     Type:       PersistentVolumeClaim (a reference to a PersistentVolumeClaim in the same namespace)
+#     ClaimName:  data-pvc-survival-nodes-3
+#     ReadOnly:   false
+#   flared-config:
+#     Type:      ConfigMap (a volume populated by a ConfigMap)
+#     Name:      pvc-survival-config
+#     Optional:  false
+#   kube-api-access-42794:
+#     Type:                    Projected (a volume that contains injected data from multiple sources)
+#     TokenExpirationSeconds:  3607
+#     ConfigMapName:           kube-root-ca.crt
+#     Optional:                false
+#     DownwardAPI:             true
+# QoS Class:                   Burstable
+# Node-Selectors:              <none>
+# Tolerations:                 node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+#                              node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
+# 
+# Cleaning up cluster 'pvc-survival'
+# === Suite: backup-restore ===
+# Cleaning up cluster 'backup-restore'
+# Deploying cluster 'backup-restore' in namespace 'flare-backup-restore'
+# Waiting for: namespace flare-backup-restore not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-backup-restore (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap backup-restore-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet backup-restore-nodes to be ready...
+# Waiting for: all 2 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 2 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 50s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator) ---
+#   [flare-operator] grace period: 18 cycles remaining
+#   [TopologyAudit] node=backup-restore-nodes-0.backup-restore-nodes.flare-backup-restore.svc.cluster.local:12121 uid=(some 93ef9ad8-2870-4e85-ad20-b4c2955800dd) desired=4294967304 reported=(some 4294967303) verdict=behind
+#   [flare-operator] retrying an unconfirmed topology send (pending v4294967304; publishing v4294967304)
+#   [flare-operator] topology changed (v4294967304 → v4294967304), broadcasting
+#   [TopologyBroadcast] Broadcasting node sync v4294967304 (2 nodes) to 2 pods
+#   [TcpClient] node sync v4294967304 to 10.244.0.116:12121: reply-confirmed=true
+#   [TcpClient] node sync v4294967304 to 10.244.0.118:12121: reply-confirmed=true
+#   [TopologyBroadcast] Broadcast attempt complete (v4294967304); all targets reply-confirmed=true
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 2504ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 17 cycles remaining
+#   [TopologyAudit] node=backup-restore-nodes-1.backup-restore-nodes.flare-backup-restore.svc.cluster.local:12121 uid=(some a6fc3aae-2c8f-4806-9bc2-cee7cc0c40c0) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1623ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 16 cycles remaining
+#   [TopologyAudit] node=backup-restore-nodes-0.backup-restore-nodes.flare-backup-restore.svc.cluster.local:12121 uid=(some 93ef9ad8-2870-4e85-ad20-b4c2955800dd) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1671ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 15 cycles remaining
+#   [TopologyAudit] node=backup-restore-nodes-1.backup-restore-nodes.flare-backup-restore.svc.cluster.local:12121 uid=(some a6fc3aae-2c8f-4806-9bc2-cee7cc0c40c0) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1628ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 14 cycles remaining
+#   [TopologyAudit] node=backup-restore-nodes-0.backup-restore-nodes.flare-backup-restore.svc.cluster.local:12121 uid=(some 93ef9ad8-2870-4e85-ad20-b4c2955800dd) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1732ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 13 cycles remaining
+#   [TopologyAudit] node=backup-restore-nodes-1.backup-restore-nodes.flare-backup-restore.svc.cluster.local:12121 uid=(some a6fc3aae-2c8f-4806-9bc2-cee7cc0c40c0) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1708ms (nodes=2 M=1 S=1 D=0 P=0)
+#   
+# backup on backup-restore-nodes-0: STAT backup_path /data/flare/backups/e2e-restore-point
+END
+# backup on backup-restore-nodes-1: STAT backup_path /data/flare/backups/e2e-restore-point
+END
+# Waiting for: cluster recovered after restore (timeout: 180s)
+#   OK after 20s
+# P0 master after restore: backup-restore-nodes-0
+# Cleaning up cluster 'backup-restore'
+# Tests: 48, Failures: 1
+# RESULT: FAIL
+1..48
+ok 1 - pre-flight: ConfigMap exists with extra.conf key
+ok 2 - patch spec.rocksdb.walSyncBwlimit is propagated
+ok 3 - patch spec.rocksdb.walSyncInterval preserves walSyncBwlimit
+ok 4 - explicit zero for walSyncBwlimit is rendered, not elided
+ok 5 - flared stats expose rocksdb_wal_sync_bwlimit
+ok 6 - write keys to advance master LSN
+ok 7 - slave has RocksDB backend active
+ok 8 - record baseline WAL sync counters
+ok 9 - delete slave pod and wait for re-registration
+ok 10 - WAL sync success counter incremented after slave restart
+ok 11 - flared booted with rocksdb-wal-ttl-seconds=1 (boot config)
+ok 12 - write keys to advance master LSN
+ok 13 - delete slave pod
+ok 14 - slave pod recovers after WAL purge
+ok 15 - rocksdb_wal_fallback_to_dump incremented # SKIP slave recovered but WAL was not purged (TTL may not have taken effect via reload); purged=0, fallback=0
+ok 16 - set resyncFailureThreshold=2 via CRD
+ok 17 - slave is active with RocksDB backend
+ok 18 - baseline resync_failure_count is 0
+ok 19 - corrupt slave data dir to induce resync failures
+ok 20 - slave self-demoted to state_down after resync failures # SKIP no nodes self-demoted yet; resync_failure_threshold may not have been applied via reload (flared-side limitation)
+ok 21 - write keys to both partitions
+ok 22 - kill P0 master and wait for failover
+ok 23 - killed pod restarts and rejoins cluster
+ok 24 - orphan_scan detects orphan keys # SKIP no orphan keys detected (may need longer reconstruction or different failover pattern)
+ok 25 - orphan_purge removes orphan keys # SKIP no orphans to purge (test 4 may have skipped)
+ok 26 - pre-flight: one-master-per-partition
+ok 27 - delete P0 master (graceful, preStop window)
+ok 28 - old master drained to Proxy + new master promoted DURING the window
+ok 29 - one-master-per-partition during/after drain
+ok 30 - cluster recovers after Terminating pod replaced
+ok 31 - write test data to v1
+ok 32 - trigger cluster replication v1→v2
+ok 33 - migrationPhase transitions to Dumping
+ok 34 - kill v1 P0 master during Dumping phase
+ok 35 - v1 failover: new P0 master elected
+ok 36 - replication handles failover safely (abort + auto-restart)
+ok 37 - write 100 keys and verify baseline integrity
+ok 38 - all 100 keys survive P0 master failover with exact values
+ok 39 - P0 master holds data after failover
+ok 40 - write 100 keys and verify baseline integrity (PVC, rocksdb)
+not ok 41 - all 100 keys survive SIMULTANEOUS death of P0 master and slave
+ok 42 - P0 master holds data after total-P0 restart
+ok 43 - all replicas return to Active after total-P0 restart
+ok 44 - all 100 keys survive a graceful restart of the P0 slave
+ok 45 - write 50 keys and verify baseline
+ok 46 - checkpoint 'e2e-restore-point' created on every replica
+ok 47 - flush_all destroys live data on all replicas
+ok 48 - all 50 keys restored from checkpoint after pod recreation

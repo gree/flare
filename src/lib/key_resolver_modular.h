@@ -55,6 +55,7 @@ public:
 	int startup();
 	type get_type() { return this->_type; };
 	int get_partition_size() { return this->_partition_size; };
+	virtual int get_partition_size_capacity() { return this->_partition_size; }
 	int get_hint() { return this->_hint; };
 	int get_virtual() { return this->_virtual; };
 	int resolve(int key_hash_value, int partition_size);

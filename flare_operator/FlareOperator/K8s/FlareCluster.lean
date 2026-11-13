@@ -1,0 +1,587 @@
+/-
+  FlareOperator - Flare Cluster Domain Types
+  Based on C++ src/lib/cluster.h (role, state, node, partition)
+-/
+
+import FlareOperator.K8s.Types
+
+namespace FlareOperator.K8s
+
+/-! ## Flare Role (wire: master=0, slave=1, proxy=2) -/
+
+inductive FlareRole where
+  | Master
+  | Slave
+  | Proxy
+  deriving Repr, BEq, DecidableEq
+
+def FlareRole.toNat : FlareRole → Nat
+  | .Master => 0
+  | .Slave => 1
+  | .Proxy => 2
+
+def FlareRole.fromNat : Nat → Option FlareRole
+  | 0 => some .Master
+  | 1 => some .Slave
+  | 2 => some .Proxy
+  | _ => none
+
+/-! ## Flare State (wire: active=0, prepare=1, down=2, ready=3) -/
+
+inductive FlareState where
+  | Active
+  | Prepare
+  | Down
+  | Ready
+  deriving Repr, BEq, DecidableEq
+
+def FlareState.toNat : FlareState → Nat
+  | .Active => 0
+  | .Prepare => 1
+  | .Down => 2
+  | .Ready => 3
+
+def FlareState.fromNat : Nat → Option FlareState
+  | 0 => some .Active
+  | 1 => some .Prepare
+  | 2 => some .Down
+  | 3 => some .Ready
+  | _ => none
+
+/-! ## Flare Node -/
+
+structure FlareNode where
+  serverName : String
+  serverPort : Nat
+  role : FlareRole
+  state : FlareState
+  partition : Int  -- -1 = unassigned proxy
+  balance : Nat := 100
+  threadType : Nat := 16
+  /-- Registration epoch: bumped on every TCP (re-)registration of this key
+      and NEVER serialized to the wire. Lets the FSM-commit merge tell a
+      LATER registration from its own stale snapshot: without it the merge
+      resurrected ghost Master/Slave roles over a pod's fresh Proxy
+      re-registration every tick — the root cause of the pvc-data-survival
+      DATA LOSS churn (operator log: re-adds flip to Proxy, next commit
+      flips them back, M=2 S=2 P=0 forever). -/
+  regEpoch : Nat := 0
+  /-- Partition this key most recently held the Master role for, or -1.
+      Set when a re-registration turns an ex-master into a syncing slave;
+      read by the reconcile loop to pick the freshest live candidate when a
+      partition has lost every master (total-partition restart). NEVER
+      serialized (same policy as regEpoch): after an operator restart the
+      roles themselves reload intact, so the marker only matters within the
+      lifetime that witnessed the demotion. -/
+  lastMasterOf : Int := -1
+  /-- Partition this key was an ACTIVE SLAVE of when it was declared dead
+      (demoted to Proxy/Down), or -1. Decision 2026-10-16: the attribution
+      of a returning ex-slave to its partition comes from this PERSISTED
+      record (node map token `slaveOf=`), never from its name. Set ONLY by
+      the dead-node demotion of an Active slave; every other demotion to
+      Proxy clears it (a repair-held or drained copy is not attributed), and
+      activation or a seat as master clears it. A rejoin re-seats the key in
+      that partition as Slave/Prepare and the classifier then demands full
+      copy proof (PromotionEvidence.Observed.attributedRejoin). -/
+  formerSlaveOf : Int := -1
+  deriving Repr, BEq
+
+/-! ## Cluster Replication (Blue/Green Migration) -/
+
+structure ClusterReplicationSpec where
+  enabled : Bool := false
+  serverName : String := ""
+  port : Nat := 12121
+  mode : String := "duplicate"  -- "duplicate" or "forward"
+  concurrency : Nat := 2
+  /-- Opt-in `false`: a cross-cluster seed never uses a snapshot push (per-key
+      merge dump only; the destination keeps its own history). Default
+      `true` renders nothing (config unchanged). Needs a flared that knows
+      `cluster-replication-snapshot-push`: an older flared rejects a config
+      file with an unknown key. -/
+  snapshotPush : Bool := true
+  deriving Repr, BEq
+
+/-! ## RocksDB Storage Backend Configuration
+
+    Maps 1:1 to flared's `rocksdb-*` ini options. Fields are `Option` so an
+    unset field produces no line in the generated `extra.conf`, preserving
+    flared's built-in defaults. See `ROCKSDB_REPLICATION.md` for semantics. -/
+
+structure RocksdbConfigSpec where
+  /-- Startup-only block cache budget in MiB; requires DB reopen. -/
+  blockCacheSizeMb : Option Nat := none
+  /-- Startup-only per-memtable size in MiB; requires DB reopen. -/
+  writeBufferSizeMb : Option Nat := none
+  /-- Startup-only maximum write buffers per column family. -/
+  maxWriteBufferNumber : Option Nat := none
+  /-- WAL retention time in seconds. flared: `rocksdb-wal-ttl-seconds`. -/
+  walTtlSeconds : Option Nat := none
+  /-- WAL size cap in megabytes. flared: `rocksdb-wal-size-limit-mb`. -/
+  walSizeLimitMb : Option Nat := none
+  /-- Force `sync=true` on every write for strict durability.
+      flared: `rocksdb-sync-writes`. -/
+  syncWrites : Option Bool := none
+  /-- Consecutive resync failures before the slave self-demotes.
+      flared: `rocksdb-resync-failure-threshold`. -/
+  resyncFailureThreshold : Option Nat := none
+  /-- Per-WriteBatch size ceiling (bytes) for WAL replication.
+      flared: `rocksdb-wal-max-batch-bytes`. -/
+  walMaxBatchBytes : Option Nat := none
+  /-- Bandwidth cap (KB/s) for WAL-sync streaming.
+      flared: `rocksdb-wal-sync-bwlimit`. -/
+  walSyncBwlimit : Option Nat := none
+  /-- Inter-batch delay (usec) for WAL-sync streaming.
+      flared: `rocksdb-wal-sync-interval`. -/
+  walSyncInterval : Option Nat := none
+  /-- Bandwidth cap (KB/s) for serving a snapshot-bootstrap stream; the SENDER
+      throttles. flared default is ~1/4 of a 1 Gbps link — override per
+      cluster to ~1/4 of the actual node NIC. flared: `rocksdb-snapshot-bwlimit`. -/
+  snapshotBwlimit : Option Nat := none
+  /-- Administrative gate for the (unauthenticated) flush_all op: false makes
+      flared refuse it with SERVER_ERROR. Toggle cluster-wide in seconds with
+      `kubectl patch flarecluster ... spec.rocksdb.flushAllEnabled` — the
+      operator rewrites extra.conf + SIGHUPs, no restarts. (The flared option
+      `flush-all-enabled` is backend-agnostic; it lives under `rocksdb` here
+      because this block is the CRD's flared-tuning passthrough.) -/
+  flushAllEnabled : Option Bool := none
+  /-- On-disk named backups (checkpoints) retained under data-dir/backups/;
+      flared prunes to the newest N after each `backup` op. flared default is
+      7 — sized for PVC. On tmpfs the checkpoints live in RAM and hardlink-pin
+      compacted-away SSTs, so 7 generations ballooned to >2x the live DB and
+      OOMed the pod (observed live on pf-dev); set 1-2 there.
+      flared: `rocksdb-backup-keep` (dynamic, SIGHUP). -/
+  backupKeep : Option Nat := none
+  /-- Answer SERVER_ERROR instead of a miss when a `get` cannot be served
+      (forward to the master failed, no partition, enqueue or storage
+      error). For flare used as the primary store, where a miss reads as
+      "the key does not exist". Backend-agnostic like flushAllEnabled.
+      flared: `read-unavailable-error` (dynamic, SIGHUP; default false). -/
+  readUnavailableError : Option Bool := none
+  /-- Continuous WAL replication flags (SAF-10). The operator owns
+      `extra.conf` and rewrites the whole file from this spec, so these must
+      be declared here or a later spec change drops them from the file (a
+      SIGHUP keeps the in-memory value, the next restart loses it). Enable
+      identity forwarding on every node BEFORE following. flared:
+      `repl-identity-forward`, `repl-follow-enabled`,
+      `repl-follow-poll-interval-usec` (dynamic). -/
+  replIdentityForward : Option Bool := none
+  replFollowEnabled : Option Bool := none
+  replFollowPollIntervalUsec : Option Nat := none
+  /-- Upper bound on queued proxy requests in flared (forwards to replicas
+      included). Unbounded (flared default 0) the master buffered every
+      forward a slow follower could not take: ~600 B each, 1.7 GB at 6M keys
+      (scale evaluation 2026-10-02). At the bound a forward is dropped and
+      counted (proxy_write_dropped), and the follower fills it from the WAL.
+      flared: `max-total-thread-queue` (dynamic). -/
+  maxTotalThreadQueue : Option Nat := none
+  /-- Pipeline forwards to a replica: send up to N-1 without waiting for a
+      reply, then one with a reply. Raises forward throughput, but a forward
+      that fails inside the window is not counted as dropped, so enable it
+      only with continuous replication (the follower repairs from the WAL).
+      flared: `noreply-window-limit` (dynamic; 0 = off). -/
+  noreplyWindowLimit : Option Nat := none
+  /-- Copy retention (docs/design-copy-retention.md §9): bytes kept free
+      besides the staging copy while a replica rebuilds (compaction, the WAL
+      catch-up, quarantine). UNSET = staged rebuilds STOP (stats
+      `rebuild_blocked=reserve_unset`): no default is assumed until the R7
+      load test measures one. A rebuild needs the source's copy size plus
+      this, free under the data dir (tmpfs: also within the memory limit).
+      flared: `rocksdb-rebuild-reserve-bytes` (dynamic, SIGHUP). -/
+  rebuildReserveBytes : Option Nat := none
+  /-- Idle timeout of the client connections flared accepts, in seconds
+      (unset = net_read_timeout, 600 s). A cordon move waits for the moved
+      pod's connections to reach 0, so an idle persistent client delays it by
+      up to this long; shorter closes idle clients sooner, and a client behind
+      a load balancer that forgets the half-closed flow may then hang in
+      close() (libmemcached SO_LINGER). Backend-agnostic.
+      flared: `client-idle-timeout` (dynamic, SIGHUP; removing it goes back to
+      net_read_timeout). -/
+  clientIdleTimeoutSeconds : Option Nat := none
+  deriving Repr, BEq
+
+/-- True when at least one rocksdb field has been set by the user. -/
+def RocksdbConfigSpec.hasAny (r : RocksdbConfigSpec) : Bool :=
+  r.blockCacheSizeMb.isSome || r.writeBufferSizeMb.isSome || r.maxWriteBufferNumber.isSome ||
+  r.walTtlSeconds.isSome || r.walSizeLimitMb.isSome || r.syncWrites.isSome ||
+  r.resyncFailureThreshold.isSome || r.walMaxBatchBytes.isSome ||
+  r.walSyncBwlimit.isSome || r.walSyncInterval.isSome || r.snapshotBwlimit.isSome ||
+  r.flushAllEnabled.isSome || r.backupKeep.isSome || r.readUnavailableError.isSome ||
+  r.replIdentityForward.isSome || r.replFollowEnabled.isSome || r.replFollowPollIntervalUsec.isSome ||
+  r.maxTotalThreadQueue.isSome || r.noreplyWindowLimit.isSome || r.rebuildReserveBytes.isSome ||
+  r.clientIdleTimeoutSeconds.isSome
+
+/-- Render the rocksdb spec as `extra.conf` lines (one per set field).
+    Returns an empty string when no fields are set. Lines are joined with "\n";
+    the caller is responsible for joining with other sections. -/
+def RocksdbConfigSpec.toExtraConf (r : RocksdbConfigSpec) : String :=
+  let lines : List String := []
+  let lines := match r.blockCacheSizeMb with
+    | some n => lines ++ [s!"rocksdb-block-cache-size-mb = {n}"]
+    | none => lines
+  let lines := match r.writeBufferSizeMb with
+    | some n => lines ++ [s!"rocksdb-write-buffer-size-mb = {n}"]
+    | none => lines
+  let lines := match r.maxWriteBufferNumber with
+    | some n => lines ++ [s!"rocksdb-max-write-buffer-number = {n}"]
+    | none => lines
+  let lines := match r.walTtlSeconds with
+    | some n => lines ++ [s!"rocksdb-wal-ttl-seconds = {n}"]
+    | none => lines
+  let lines := match r.walSizeLimitMb with
+    | some n => lines ++ [s!"rocksdb-wal-size-limit-mb = {n}"]
+    | none => lines
+  let lines := match r.syncWrites with
+    | some b =>
+      let v := if b then "true" else "false"
+      lines ++ [s!"rocksdb-sync-writes = {v}"]
+    | none => lines
+  let lines := match r.resyncFailureThreshold with
+    | some n => lines ++ [s!"rocksdb-resync-failure-threshold = {n}"]
+    | none => lines
+  let lines := match r.walMaxBatchBytes with
+    | some n => lines ++ [s!"rocksdb-wal-max-batch-bytes = {n}"]
+    | none => lines
+  let lines := match r.walSyncBwlimit with
+    | some n => lines ++ [s!"rocksdb-wal-sync-bwlimit = {n}"]
+    | none => lines
+  let lines := match r.walSyncInterval with
+    | some n => lines ++ [s!"rocksdb-wal-sync-interval = {n}"]
+    | none => lines
+  let lines := match r.snapshotBwlimit with
+    | some n => lines ++ [s!"rocksdb-snapshot-bwlimit = {n}"]
+    | none => lines
+  let lines := match r.flushAllEnabled with
+    | some b =>
+      let v := if b then "true" else "false"
+      lines ++ [s!"flush-all-enabled = {v}"]
+    | none => lines
+  let lines := match r.backupKeep with
+    | some n => lines ++ [s!"rocksdb-backup-keep = {n}"]
+    | none => lines
+  let lines := match r.rebuildReserveBytes with
+    | some n => lines ++ [s!"rocksdb-rebuild-reserve-bytes = {n}"]
+    | none => lines
+  let lines := match r.readUnavailableError with
+    | some b =>
+      let v := if b then "true" else "false"
+      lines ++ [s!"read-unavailable-error = {v}"]
+    | none => lines
+  let boolLine := fun (key : String) (b : Bool) => s!"{key} = {if b then "true" else "false"}"
+  let lines := match r.replIdentityForward with
+    | some b => lines ++ [boolLine "repl-identity-forward" b]
+    | none => lines
+  let lines := match r.replFollowEnabled with
+    | some b => lines ++ [boolLine "repl-follow-enabled" b]
+    | none => lines
+  let lines := match r.replFollowPollIntervalUsec with
+    | some n => lines ++ [s!"repl-follow-poll-interval-usec = {n}"]
+    | none => lines
+  let lines := match r.maxTotalThreadQueue with
+    | some n => lines ++ [s!"max-total-thread-queue = {n}"]
+    | none => lines
+  let lines := match r.noreplyWindowLimit with
+    | some n => lines ++ [s!"noreply-window-limit = {n}"]
+    | none => lines
+  let lines := match r.clientIdleTimeoutSeconds with
+    | some n => lines ++ [s!"client-idle-timeout = {n}"]
+    | none => lines
+  String.intercalate "\n" lines
+
+inductive MigrationPhase where
+  | None | Dumping | Forwarding
+  deriving Repr, BEq
+
+def MigrationPhase.toString : MigrationPhase → String
+  | .None => "None"
+  | .Dumping => "Dumping"
+  | .Forwarding => "Forwarding"
+
+/-! ## Circuit Breaker Configuration -/
+
+/-- Circuit breaker configuration for AZ-level failure protection.
+    Prevents automatic recovery during infrastructure failures.
+
+    Hysteresis (tripThreshold ≠ resetThreshold) prevents flapping. -/
+structure CircuitBreakerConfig where
+  /-- Enable/disable circuit breaker. Default: true (enabled for production) -/
+  enabled : Bool := true
+
+  /-- Percentage of dead nodes that trips the breaker (0-100).
+      Default: 50 (trip when ≥50% nodes are dead) -/
+  tripThresholdPercent : Nat := 50
+
+  /-- Percentage of healthy nodes required to auto-reset breaker (0-100).
+      Default: 80 (reset when ≥80% nodes healthy, i.e., ≤20% dead)
+      Must be > (100 - tripThresholdPercent) to prevent flapping. -/
+  resetThresholdPercent : Nat := 80
+
+  /-- Enable automatic reset when cluster recovers.
+      If false, breaker requires manual pod restart even after recovery.
+      Default: true -/
+  autoResetEnabled : Bool := true
+
+  /-- Fewest unavailable nodes that can trip the breaker (default 2). A
+      single node failing is never an AZ-scale event; without this floor a
+      1-partition x 2-replica cluster tripped on one death (1 of 2 = 50%)
+      and never failed over (user decision 2026-10-02). -/
+  minUnavailableToTrip : Nat := 2
+  deriving Repr, BEq
+
+/-! ## Read-balance policy -/
+
+/-- One standby selector: matches a node by its pod name (the STS ordinal
+    name — stable across pod recreation) or by its zone. Matched nodes are
+    forced to balance 0 and are picked for promotion only when no
+    non-standby slave exists (availability still wins over locality). -/
+structure StandbySelector where
+  podName : Option String := none
+  zone : Option String := none
+  deriving Repr
+
+/-- Declarative read-routing policy. flared distributes reads by balance
+    weight, and the operator normalizes every committed node map to THIS
+    policy (level-triggered), so manual flare-admin balance edits are
+    intentionally reverted — change the CR instead (applies in seconds).
+    Defaults preserve the classic wg-dev shape: reads on the master only. -/
+structure ReadBalanceSpec where
+  master : Nat := 100
+  slave : Nat := 0
+  standby : List StandbySelector := []
+  deriving Repr
+
+structure FlareClusterSpecView where
+  partitions : Nat := 1
+  replicas : Nat := 1  -- 1 Master + (N-1) Slaves per partition
+  clusterReplication : ClusterReplicationSpec := {}
+  circuitBreaker : CircuitBreakerConfig := {}
+  rocksdb : RocksdbConfigSpec := {}
+  readBalance : ReadBalanceSpec := {}
+  deriving Repr
+
+structure FlareClusterView where
+  metadata : ObjectMetaView
+  spec : FlareClusterSpecView
+  deriving Repr
+
+/-! ## Partition State -/
+
+structure FlarePartition where
+  master : Option String := none
+  slaves : List String := []
+  deriving Repr, BEq
+
+/-! ## Cluster State -/
+
+structure FlareClusterState where
+  nodeMap : List (String × FlareNode) := []
+  partitionMap : List (Nat × FlarePartition) := []
+  nodeMapVersion : Nat := 0
+  partitionSize : Nat := 1024
+  keyHashAlgorithm : String := "simple"
+  /-- Ids of the history transitions (promotion intents) committed with this
+      map, the last 16 (docs/design-authoritative-history.md): the persisted
+      map PROVES which intent's commit happened. -/
+  transitions : List String := []
+  deriving Repr
+
+namespace FlareClusterState
+
+def default : FlareClusterState := {}
+
+def toNodeKey (name : String) (port : Nat) : String :=
+  name ++ ":" ++ toString port
+
+def lookupNode (state : FlareClusterState) (key : String) : Option FlareNode :=
+  state.nodeMap.lookup key
+
+def addNode (state : FlareClusterState) (key : String) (node : FlareNode) : FlareClusterState :=
+  let filtered := state.nodeMap.filter (·.1 != key)
+  { state with nodeMap := (key, node) :: filtered, nodeMapVersion := state.nodeMapVersion + 1 }
+
+def removeNode (state : FlareClusterState) (key : String) : FlareClusterState :=
+  { state with nodeMap := state.nodeMap.filter (·.1 != key), nodeMapVersion := state.nodeMapVersion + 1 }
+
+def getNodes (state : FlareClusterState) : List FlareNode :=
+  state.nodeMap.map Prod.snd
+
+def lookupPartition (state : FlareClusterState) (idx : Nat) : Option FlarePartition :=
+  state.partitionMap.lookup idx
+
+def setPartition (state : FlareClusterState) (idx : Nat) (p : FlarePartition) : FlareClusterState :=
+  let filtered := state.partitionMap.filter (·.1 != idx)
+  { state with partitionMap := (idx, p) :: filtered }
+
+/-- Parse a node key "host:port" into (host, port). -/
+def fromNodeKey (key : String) : Option (String × Nat) :=
+  match key.splitOn ":" with
+  | [name, portStr] => portStr.toNat?.map fun port => (name, port)
+  | _ => none
+
+private def stripPrefix (s pfx : String) : Option String :=
+  if s.startsWith pfx then some (s.drop pfx.length) else none
+
+private def parseIntStr (s : String) : Option Int :=
+  if s.startsWith "-" then
+    (s.drop 1).toNat?.map fun n => -(Int.ofNat n)
+  else
+    s.toNat?.map Int.ofNat
+
+/-- Parse a single serialized node-map line:
+    "host:port role=R state=S partition=P [lastMasterOf=L] [slaveOf=F] [thread=T]"
+    → (key, FlareNode). Tokens after the fixed prefix are optional and
+    scanned by name, so older lines (without them) still parse:
+    - lastMasterOf: emitted only while a rejoined ex-master waits for the
+      masterless-partition refill, so an operator restart in exactly that
+      window no longer forgets which candidate holds the newest copy.
+    - thread: the node's UNIQUE proxy-channel number (flared keys its proxy
+      connection pools by it). Missing token (pre-thread persistence) falls
+      back to 16, the classic default_thread_type. -/
+def parseNodeMapLine (line : String) : Option (String × FlareNode) :=
+  match line.trim.splitOn " " with
+  | key :: roleStr :: stateStr :: partStr :: rest => do
+    let roleVal ← stripPrefix roleStr "role=" >>= fun (s : String) => s.toNat? >>= FlareRole.fromNat
+    let stateVal ← stripPrefix stateStr "state=" >>= fun (s : String) => s.toNat? >>= FlareState.fromNat
+    let partVal ← stripPrefix partStr "partition=" >>= parseIntStr
+    let (host, port) ← fromNodeKey key
+    let lastMasterVal := (rest.findSome? fun t =>
+      stripPrefix t "lastMasterOf=" >>= parseIntStr).getD (-1)
+    let threadVal := (rest.findSome? fun t =>
+      stripPrefix t "thread=" >>= fun (s : String) => s.toNat?).getD 16
+    let slaveOfVal := (rest.findSome? fun t =>
+      stripPrefix t "slaveOf=" >>= parseIntStr).getD (-1)
+    -- balance: the committed read weight, INCLUDING SAF-10c withholding
+    -- (a WAL follower not proven eligible is at 0). Missing token (maps
+    -- persisted before balance was) falls back conservatively: a master
+    -- keeps 100, every other node gets 0 until the first pass re-applies
+    -- spec.readBalance — never more read exposure than before the restart.
+    let balanceVal := (rest.findSome? fun t =>
+      stripPrefix t "balance=" >>= fun (s : String) => s.toNat?).getD
+        (if roleVal == FlareRole.Master then 100 else 0)
+    return (key, { serverName := host, serverPort := port, role := roleVal,
+                   state := stateVal, partition := partVal,
+                   lastMasterOf := lastMasterVal, threadType := threadVal,
+                   formerSlaveOf := slaveOfVal,
+                   balance := balanceVal })
+  | _ => none
+
+/-- Serialize a node map to the ConfigMap line format that `fromNodeMapData`
+    parses back: one `host:port role=R state=S partition=P` line per node.
+    This is the exact inverse of `parseNodeMapLine`; the FSM reconcile path MUST
+    use this (not `repr`) or the persisted `{cr}-node-map` ConfigMap can't be
+    reloaded on operator restart and the in-memory topology is lost. -/
+def serializeNodeMap (state : FlareClusterState) : String :=
+  let lines := state.nodeMap.map fun (key, node) =>
+    let base := s!"{key} role={node.role.toNat} state={node.state.toNat} partition={node.partition}"
+    let base := if node.lastMasterOf != -1 then base ++ s!" lastMasterOf={node.lastMasterOf}" else base
+    -- slaveOf=: the dead ex-slave's partition (formerSlaveOf), emitted only
+    -- while set, so an operator restart keeps the attribution
+    let base := if node.formerSlaveOf != -1 then base ++ s!" slaveOf={node.formerSlaveOf}" else base
+    -- thread= is always emitted: threadType must survive the restart
+    -- roundtrip or every node degrades to the shared default 16 and the
+    -- proxy channels collapse again. (A DOWNGRADED operator's arity-based
+    -- parser drops lines carrying unknown tokens — acceptable; we only
+    -- roll forward.)
+    -- balance= is always emitted: without it a reloaded map had every node
+    -- at the struct default 100 until the first pass, so read withholding
+    -- (SAF-10c) and spec.readBalance were lost across a restart, and the
+    -- `node add` reply to a pod booting in that window carried balance 100
+    -- for withheld followers (CI 36831110279 finding).
+    base ++ s!" thread={node.threadType} balance={node.balance}"
+  -- The broadcast version MUST survive an operator restart. flared drops
+  -- any `node sync` whose version is not newer than the last one it saw
+  -- (cluster.cc reconstruct_node "ignored: ... newer than"); an operator
+  -- that reloads the map but restarts the counter at zero broadcasts into
+  -- the void until it out-counts the previous incarnation — observed live
+  -- as a cluster that could not converge for hours after an operator
+  -- replacement (flared at v10280, fresh operator at v189).
+  s!"version={state.nodeMapVersion}\n" ++ "\n".intercalate (lines ++ state.transitions.map (s!"transition={·}"))
+
+/-- Rebuild FlareClusterState from serialized ConfigMap data. -/
+def fromNodeMapData (data : String) : FlareClusterState :=
+  let lines := data.splitOn "\n" |>.filter (· != "")
+  let version := (lines.findSome? fun l =>
+    if l.startsWith "version=" then (l.drop "version=".length).toNat? else none).getD 0
+  let nodes := lines.filterMap parseNodeMapLine
+  let transitions := lines.filterMap fun l => if l.startsWith "transition=" then some (l.drop "transition=".length) else none
+  { FlareClusterState.default with nodeMap := nodes, nodeMapVersion := version, transitions := transitions }
+
+/-- One-shot migration for node maps persisted by operators that hardcoded
+    threadType 16 for every node: flared keys its per-destination proxy
+    connection pools by thread_type, so DUPLICATE numbers collapse all
+    destinations into one pool and forwards/relays land on hash-picked wrong
+    peers. If (and only if) any duplicate exists, re-number every node
+    sequentially from 16 in map order and bump the version so the corrected
+    channels are re-broadcast; an already-unique map is returned unchanged. -/
+def normalizeThreadTypes (state : FlareClusterState) : FlareClusterState :=
+  let tts := state.nodeMap.map (·.2.threadType)
+  let hasDup := tts.length != tts.eraseDups.length
+  if !hasDup then state
+  else
+    let renumbered := state.nodeMap.zipIdx.map fun ((key, n), i) =>
+      (key, { n with threadType := 16 + i })
+    { state with nodeMap := renumbered, nodeMapVersion := state.nodeMapVersion + 1 }
+
+private def roundtripSample : FlareClusterState :=
+  { FlareClusterState.default with
+    nodeMap := [("h:12121", { serverName := "h", serverPort := 12121, role := FlareRole.Master, state := FlareState.Active, partition := 0, threadType := 17 }),
+                ("i:12121", { serverName := "i", serverPort := 12121, role := FlareRole.Slave, state := FlareState.Prepare, partition := 0, lastMasterOf := 0, threadType := 18, balance := 0 }),
+                ("j:12121", { serverName := "j", serverPort := 12121, role := FlareRole.Slave, state := FlareState.Active, partition := 0, threadType := 19, balance := 25 })],
+    nodeMapVersion := 10280 }
+
+/-- The broadcast version survives the persist/reload roundtrip. Regression
+    guard for the operator-restart version reset (flared ignores broadcasts
+    whose version is not newer than the last it saw, so losing the counter
+    silences the operator for hours). -/
+theorem nodeMapVersion_roundtrip :
+    (fromNodeMapData (serializeNodeMap roundtripSample)).nodeMapVersion = 10280
+      ∧ (fromNodeMapData (serializeNodeMap roundtripSample)).nodeMap.length = 3
+      ∧ ((fromNodeMapData (serializeNodeMap roundtripSample)).nodeMap.lookup "i:12121").map (·.lastMasterOf) = some 0
+      -- threadType must roundtrip too: degrading to the shared default 16 on
+      -- reload collapses every proxy channel into one pool (misrouted relays).
+      ∧ ((fromNodeMapData (serializeNodeMap roundtripSample)).nodeMap.lookup "h:12121").map (·.threadType) = some 17
+      ∧ ((fromNodeMapData (serializeNodeMap roundtripSample)).nodeMap.lookup "i:12121").map (·.threadType) = some 18
+      -- balance must roundtrip: a withheld follower (0) stays withheld and a
+      -- spec weight (25) is not reset to the struct default 100 on reload.
+      ∧ ((fromNodeMapData (serializeNodeMap roundtripSample)).nodeMap.lookup "i:12121").map (·.balance) = some 0
+      ∧ ((fromNodeMapData (serializeNodeMap roundtripSample)).nodeMap.lookup "j:12121").map (·.balance) = some 25
+      ∧ ((fromNodeMapData (serializeNodeMap roundtripSample)).nodeMap.lookup "h:12121").map (·.balance) = some 100 := by
+  native_decide
+
+/-- A map persisted before `balance=` existed loads conservatively: the
+    master keeps 100, a slave gets 0 (no read exposure the old map did not
+    already have) until the first pass re-applies spec.readBalance. -/
+theorem legacy_line_balance_fallback :
+    ((fromNodeMapData "version=7\nh:12121 role=0 state=0 partition=0 thread=16\ni:12121 role=1 state=0 partition=0 thread=17").nodeMap.lookup "h:12121").map (·.balance) = some 100
+      ∧ ((fromNodeMapData "version=7\nh:12121 role=0 state=0 partition=0 thread=16\ni:12121 role=1 state=0 partition=0 thread=17").nodeMap.lookup "i:12121").map (·.balance) = some 0 := by
+  native_decide
+
+/-- FENCING ARITHMETIC: any version from generation `g` (base g·2³² plus a
+    counter that stays below 2³²) is strictly below every version of
+    generation `g+1`. This is the whole correctness argument for the
+    broadcast fencing: flared's existing "ignore non-newer versions" gate
+    therefore rejects every broadcast of a deposed leader once it has
+    heard the successor. The counter bound holds for ~95 years of 5s ticks. -/
+theorem generation_fences (g v : Nat) (h : v < 4294967296) :
+    g * 4294967296 + v < (g + 1) * 4294967296 := by omega
+
+/-- Rebuild partitionMap deterministically from nodeMap.
+    Scans all nodes and groups masters/slaves by partition index. -/
+def rebuildPartitionMap (state : FlareClusterState) : FlareClusterState :=
+  let partMap := state.nodeMap.foldl (fun acc entry =>
+    let (key, node) := entry
+    if node.partition < 0 then acc
+    else
+      let idx := node.partition.toNat
+      let current := acc.lookup idx |>.getD { master := none, slaves := [] }
+      let updated := match node.role with
+        | .Master => { current with master := some key }
+        | .Slave  => { current with slaves := current.slaves ++ [key] }
+        | .Proxy  => current
+      acc.filter (fun p => p.1 != idx) ++ [(idx, updated)]
+  ) ([] : List (Nat × FlarePartition))
+  { state with partitionMap := partMap }
+
+end FlareClusterState
+
+end FlareOperator.K8s

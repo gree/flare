@@ -49,7 +49,8 @@ queue_proxy_read::queue_proxy_read(cluster* cl, storage* st, vector<string> prox
 		_parameter(parameter),
 		_op_ident(op_ident),
 		_result(op::result_none),
-		_result_message("") {
+		_result_message(""),
+		_strict(false) {
 }
 
 /**

@@ -1,0 +1,51 @@
+# GitHub Actions on PR #143 at da840c084fd5f5fc1b0f023b597e6378b8ee3582 — ALL CHECKS PASS (third fully green matrix; second in a row for the code)
+# tested revision: da840c084fd5f5fc1b0f023b597e6378b8ee3582
+# runs: e2e-tests 35098123078 (4 legs), nix-linux 35098123065 (both builds incl. cutter make check), safety-evidence 35098123063
+# date: 2026-09-16
+# leg breaker-migration 37/37 below; replication leg green including partition-reduction (the run-7 failure) ; circuit-breaker tripped.
+# SAF-05 save-failure test with the outcome-based landing check (first CI execution): see the timings below — the landing path is reported, so a silent per-pass persist can no longer be read as a failure.
+
+# Tests: 37, Failures: 0
+ok 1 - baseline: two active masters
+ok 2 - wait out the operator startup grace period
+ok 3 - majority outage (scale 4→1) trips the breaker
+ok 4 - no live-topology churn while tripped
+ok 5 - restoring capacity resumes recovery automatically
+ok 6 - cluster shape survives an operator restart (state reload)
+ok 7 - writes still served after operator restart
+ok 8 - failover still works after the restart (reloaded state is live)
+ok 9 - flared rejects a topology push carrying a stale version
+ok 10 - control: holding the lease, the stopped pass does broadcast
+ok 11 - lease taken by another identity: the pass fences, the process exits, and the restarted leader re-applies the topology
+ok 12 - lease unreadable: the stopped pass fails closed and does not send
+ok 13 - control: writes to the master replicate to the slave
+ok 14 - cut link: the master drops replica writes and the operator requests a repair
+ok 15 - the repair runs: held as proxy, confirmed, re-seated, reconstructed; keys recovered without another drop
+ok 16 - SAF-05: a drop seen while resync is disabled is held, survives an operator restart, and is repaired once the gate opens
+ok 17 - SAF-05: a ledger save that fails is marked unsaved, retried every pass, lands when allowed, and survives a restart
+ok 18 - SAF-05: a corrupt ledger is held as unavailable, never replaced by an empty one; the drop seen meanwhile is recovered once it is readable
+ok 19 - SAF-06: the delete carries the observed pod UID as an API precondition; a same-name pod with another UID is refused by the apiserver
+ok 20 - SAF-06: the UID-precondition delete has a deadline — a server that accepts and never answers returns within it
+ok 21 - the lost-activation condition is staged: the activation is dropped and a reconstruction completed
+ok 22 - the repair re-derives Prepare→Active from completion evidence and names it
+ok 23 - GET /metrics answers HTTP 200 with Prometheus text
+ok 24 - memcached_current_items equals stats curr_items verbatim
+ok 25 - writes are reflected in /metrics (curr_items grows, set counter present)
+ok 26 - flared_version and rocksdb passthrough are exported
+ok 27 - /metrics still answers with the operator scaled to 0 (SPOF removed)
+ok 28 - seed 60 keys across both source partitions
+ok 29 - migration CR accepted; target provisioned and Ready (phase Duplicating)
+ok 30 - counts converge and source flips to forward (phase AwaitingCutover)
+ok 31 - every key re-hashed into the 1-partition target (master AND slave)
+ok 32 - parked at AwaitingCutover until approval (gate honored)
+ok 33 - approveCutover flips the entry Service to the target
+ok 34 - reads through the entry Service hit the target cluster
+ok 35 - approveRetire deletes the source StatefulSet (phase Retired)
+ok 36 - provisioned operator self-retires when a helm successor appears
+ok 37 - abort rolls a migration back (target resources deleted)
+# RESULT: PASS
+# --- timings ---
+# RBAC restore became effective for the operator's SA after 0s
+# unsaved ledger landed 15s after the permission became effective for the operator (via the top-of-pass retry)
+# black-hole delete returned in 3146ms; server accepted 517 byte(s):  | 000 | curl_exit=28 | 
+#   OK after 10s

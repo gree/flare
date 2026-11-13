@@ -26,6 +26,7 @@
  *
  *	$Id$
  */
+#include "signal_interrupt.h"
 #include "flarei.h"
 #include "coordinator_factory.h"
 #include "connection_tcp.h"
@@ -66,9 +67,9 @@ void sa_hup_handler(int sig) {
  *	signal handler (SIGUSR1)
  */
 void sa_usr1_handler(int sig) {
-	log_notice("received signal [SIGUSR1]", 0);
-
-	// just interrupting -> nothing to do
+	// just interrupting -> nothing to do. Async-signal-safe only: no logging
+	// (it allocated and locked inside the handler; see signal_interrupt.h)
+	sigusr1_interrupt_handler(sig);
 }
 // }}}
 
@@ -235,6 +236,7 @@ int flarei::startup(int argc, char **argv) {
 
 	// application objects
 	connection_tcp::read_timeout = ini_option_object().get_net_read_timeout() * 1000;		// -> msec
+	connection_tcp::accepted_read_timeout = connection_tcp::read_timeout;
 	this->_server = new server();
 	if (this->_server->listen(ini_option_object().get_server_port()) < 0) {
 		return -1;
@@ -357,6 +359,7 @@ int flarei::reload() {
 
 	// net_read_timeout
 	connection_tcp::read_timeout = ini_option_object().get_net_read_timeout() * 1000;		// -> msec
+	connection_tcp::accepted_read_timeout = connection_tcp::read_timeout;
 
 	// thread_pool_size
 	this->_req_thread_pool->set_max_pool_size(ini_option_object().get_thread_pool_size());

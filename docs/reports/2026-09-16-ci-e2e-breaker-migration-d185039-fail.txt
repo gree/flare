@@ -1,0 +1,57 @@
+# GitHub Actions e2e-test (breaker-migration) leg on PR #143, eighth run — FAIL (2 of 37): replica-repair tests 5 (and 6 by cascade)
+# tested revision: d185039c3fbe5e4099b7954371f2669e73ac8126
+# run: https://github.com/gree/flare/actions/runs/35091218808/job/104777719101
+# command: timeout 4500 .lake/build/bin/flare_e2e --filter "circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration"
+# date: 2026-09-16
+# other legs (incl. replication with the fixed partition-reduction), both builds and the evidence job passed; the breaker tripped (10s).
+#
+# failure: replica-repair test 5 — "the unsaved ledger never landed after the permission became effective for the operator's own service account" after a 300s wait. HARNESS, and it corrects the reading of CI run 5:
+#   12:09:17.6  grant restored ("fault cleared")
+#   12:09:18.0  in-pod probe (kubectl auth can-i, as the operator's own SA, inside its pod): yes after 0s
+#   12:09:18 .. 12:14:34  test waits for the log line "ledger persisted on retry" AND an entry in status; times out at 300s
+#   12:14:35    test 6's precondition finds the entry IN status (ledger not empty) — the request HAD landed.
+#   Operator log (pod d57lr, RESTARTS 0, running since 12:08:15 — replaced at test 5's start by the gate rollout, no restart during the wait), last 200 lines ≈ 23 ticks: "could not persist ... marked unsaved" once, "still unsaved (Forbidden)" ONCE, then no ledger line for 20+ ticks. The top-of-pass retry logs "still unsaved" on every failing pass, so after that single line the dirty flag was clear: the write had succeeded. Main.persistLedger — the normal per-pass persist, taken whenever the ledger changed (e.g. a counter observation) — writes the same ledger and clears the flag SILENTLY (no log on success); the retry line the test keyed on is only emitted when the top-of-pass retry wins the race. In the green run 6 the retry won (line seen, 15s); here the silent path won within a pass or two.
+#   Consequence for the earlier reading: CI run 5's ">124s Forbidden for the operator" was the same silent landing (its last captured ledger line was the stale "still unsaved"; can-i had been right). The only real latency observation remains the local one of 2026-09-13 (~131s on an impersonated can-i, single observation). The register is corrected accordingly.
+#   Harness fix: landing is judged by the OUTCOME (entry in status), the path that wrote it is reported, and the operator must not log a new "still unsaved" in the following probe interval (dirty flag cleared).
+#   Observability gap (operator, NOT changed here — proposed follow-up): after "marked unsaved and will retry every pass — an operator restart before that lands would lose ...", a landing through the normal persist path is never announced; an on-call reader cannot tell from the log that the exposure ended.
+
+# Tests: 37, Failures: 2
+# RESULT: FAIL
+ok 1 - baseline: two active masters
+ok 2 - wait out the operator startup grace period
+ok 3 - majority outage (scale 4→1) trips the breaker
+ok 4 - no live-topology churn while tripped
+ok 5 - restoring capacity resumes recovery automatically
+ok 6 - cluster shape survives an operator restart (state reload)
+ok 7 - writes still served after operator restart
+ok 8 - failover still works after the restart (reloaded state is live)
+ok 9 - flared rejects a topology push carrying a stale version
+ok 10 - control: holding the lease, the stopped pass does broadcast
+ok 11 - lease taken by another identity: the pass fences, the process exits, and the restarted leader re-applies the topology
+ok 12 - lease unreadable: the stopped pass fails closed and does not send
+ok 13 - control: writes to the master replicate to the slave
+ok 14 - cut link: the master drops replica writes and the operator requests a repair
+ok 15 - the repair runs: held as proxy, confirmed, re-seated, reconstructed; keys recovered without another drop
+ok 16 - SAF-05: a drop seen while resync is disabled is held, survives an operator restart, and is repaired once the gate opens
+not ok 17 - SAF-05: a ledger save that fails is marked unsaved, retried every pass, lands when allowed, and survives a restart
+not ok 18 - SAF-05: a corrupt ledger is held as unavailable, never replaced by an empty one; the drop seen meanwhile is recovered once it is readable
+ok 19 - SAF-06: the delete carries the observed pod UID as an API precondition; a same-name pod with another UID is refused by the apiserver
+ok 20 - SAF-06: the UID-precondition delete has a deadline — a server that accepts and never answers returns within it
+ok 21 - the lost-activation condition is staged: the activation is dropped and a reconstruction completed
+ok 22 - the repair re-derives Prepare→Active from completion evidence and names it
+ok 23 - GET /metrics answers HTTP 200 with Prometheus text
+# --- test 5 harness lines ---
+e2e-test (breaker-migration)	Run E2E tests (breaker-migration)	2026-09-16T12:09:17.6035296Z # fault cleared: status write allowed again
+e2e-test (breaker-migration)	Run E2E tests (breaker-migration)	2026-09-16T12:09:18.0358210Z # RBAC restore became effective for the operator's SA after 0s
+e2e-test (breaker-migration)	Run E2E tests (breaker-migration)	2026-09-16T12:09:18.0360680Z # Waiting for: the unsaved ledger lands once the write is allowed (timeout: 300s)
+e2e-test (breaker-migration)	Run E2E tests (breaker-migration)	2026-09-16T12:14:34.3377003Z #   TIMEOUT after 300s waiting for: the unsaved ledger lands once the write is allowed
+e2e-test (breaker-migration)	Run E2E tests (breaker-migration)	2026-09-16T12:14:34.3378285Z # unsaved ledger landed 316s after the permission became effective for the operator
+e2e-test (breaker-migration)	Run E2E tests (breaker-migration)	2026-09-16T12:14:34.8974556Z #   reason: the unsaved ledger never landed after the permission became effective for the operator's own ser
+e2e-test (breaker-migration)	Run E2E tests (breaker-migration)	2026-09-16T12:14:35.2384780Z #   reason: precondition: the ledger is not empty ([repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.
+# --- operator ledger lines in the diagnostics (pod d57lr, last 200 lines) ---
+e2e-test (breaker-migration)	Run E2E tests (breaker-migration)	2026-09-16T12:04:08.0228672Z #   [flare-operator] replica repair ledger initialized from repl-repair-nodes-0.repl-repair-nodes.flare-repl-repair.svc.cluster.
+e2e-test (breaker-migration)	Run E2E tests (breaker-migration)	2026-09-16T12:15:23.0950633Z # [pod/flare-operator-66d5694b85-d57lr/flare-operator] [flare-operator] replica repair ledger restored from status: no replica r
+e2e-test (breaker-migration)	Run E2E tests (breaker-migration)	2026-09-16T12:15:23.0966946Z # [pod/flare-operator-66d5694b85-d57lr/flare-operator] [flare-operator] WARNING: could not persist the replica repair ledger (ku
+e2e-test (breaker-migration)	Run E2E tests (breaker-migration)	2026-09-16T12:15:23.0970888Z # [pod/flare-operator-66d5694b85-d57lr/flare-operator] ); marked unsaved and will retry every pass — an operator restart before 
+e2e-test (breaker-migration)	Run E2E tests (breaker-migration)	2026-09-16T12:15:23.0975866Z # [pod/flare-operator-66d5694b85-d57lr/flare-operator] [flare-operator] WARNING: replica repair ledger still unsaved (kubectl fa
+# reconcile ticks in that tail: 38; 'still unsaved' lines: 1

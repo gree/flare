@@ -1,0 +1,174 @@
+/-
+  E2E/Tests/FirstBuildBusyPool.lean — the first build of a new cluster while
+  the operator's shared task pool is busy (flare-bug-first-build-node-add-timeout).
+
+  On a fresh helm install (CI 41186795576) a flared's first `node add` sat
+  unread ~1 s while the operator ran its first pass: the TCP server's handlers
+  ran on the shared task pool, whose workers the servers' accept loops held
+  for good. flared gave up at its 1 s read timeout, exited and registered
+  again; the first build had seated it as the master and its history was
+  never recorded, so the partition stayed masterless (PROMOTION ABORTED).
+
+  The seam FLARE_TEST_POOL_BUSY fills the shared pool at the operator's start
+  with tasks that sleep 60 s, so a handler on that pool cannot run while the
+  flared pods register. The servers run on dedicated threads: registration
+  must not notice — the partition gets a master and an Active slave, and no
+  flared pod restarts.
+-/
+import FlareOperator.E2E.Framework
+import FlareOperator.E2E.Helpers
+import FlareOperator.E2E.Setup
+
+namespace FlareOperator.E2E.Tests.FirstBuildBusyPool
+
+open FlareOperator.E2E
+open FlareOperator.E2E.Helpers
+open FlareOperator.E2E.Setup
+open FlareOperator.Kubectl
+
+private def cfg : ClusterConfig := {
+  name := "fb-busy"
+  «namespace» := "flare-fb-busy"
+  partitions := 1
+  replicas := 2
+  operatorName := "flare-operator"
+  debugPod := "debug-fb-busy"
+  storageBackend := "rocksdb"
+  -- more sleeping tasks than CI's cores: the pool stays full ~2 rounds of 60 s
+  operatorEnv := [("FLARE_TEST_POOL_BUSY", "16")]
+}
+
+private def podOf (fqdn : String) : String := (fqdn.splitOn ".").head?.getD fqdn
+
+/-- restart counts of the cluster's flared pods ("name=count" each) -/
+private def restarts : IO (List (String × Nat)) := do
+  match ← kubectl ["get", "pods", "-n", cfg.«namespace», "-l", s!"cluster={cfg.name}", "-o",
+      "jsonpath={range .items[*]}{.metadata.name}={.status.containerStatuses[0].restartCount}{\"\\n\"}{end}"] with
+  | .ok o => return (o.splitOn "\n").filterMap fun l =>
+      match l.trim.splitOn "=" with
+      | [n, c] => c.toNat?.map (n, ·)
+      | _ => none
+  | .error _ => return []
+
+def suite : TestSuite := {
+  name := "first-build-busy-pool"
+  setup := deployCluster cfg
+  teardown := cleanupCluster cfg
+  onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
+  tests := [
+    { name := "first build with the operator's shared task pool full (FLARE_TEST_POOL_BUSY): every flared registers at its first node add (no pod restarts), partition 0 gets an Active master and an Active slave"
+      run := do
+        let logs ← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 400000
+        if !containsSubstr logs "TEST SEAM: occupying the shared task pool" then
+          return .fail "precondition: the operator did not arm the busy-pool seam"
+        let built ← waitForCondition "partition 0 has an Active master and an Active slave" 300 do
+          let es := parseNodeSync (← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync")
+          let p0 := es.filter (·.partition == 0)
+          return p0.any (fun e => e.role == 0 && e.state == 0) && p0.any (fun e => e.role == 1 && e.state == 0)
+        let rs ← restarts
+        IO.eprintln s!"# flared restarts: {rs}"
+        -- the node add timings (7d00123) on a pass as well: the operator's log
+        -- reaches the job log only on a failure (41208964188 had none)
+        let full ← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 400000
+        for l in (full.splitOn "\n").filter (containsSubstr · "[TcpServer]") |>.take 40 do
+          IO.eprintln s!"# {l.trim.take 300}"
+        if !built then return .fail s!"partition 0 never got an Active master and an Active slave (restarts {rs})"
+        if rs.length != cfg.partitions * cfg.replicas then return .fail s!"precondition: expected {cfg.partitions * cfg.replicas} flared pods, saw {rs}"
+        if rs.any (·.2 > 0) then return .fail s!"a flared pod restarted during the first build (its node add went unanswered?): {rs}"
+        let late := (logs.splitOn "\n").filter (containsSubstr · "failed to add node")
+        if !late.isEmpty then return .fail s!"a flared failed to add itself: {late.take 2}"
+        return .pass }
+  ]
+}
+
+/-- The first master's flared gives up on its first node add (the seam
+    FLARE_TEST_DROP_FIRST_NODE_ADD applies it and closes the connection
+    unanswered) and restarts before its history is recorded; it comes back a
+    replica (41211110343). The partition, never recorded and empty on every
+    copy, must still get a master: seated as a first build's
+    (AuthoritativeHistory.firstBuildUnrecordedEmpty), not held masterless. -/
+private def cfgDropped : ClusterConfig := {
+  name := "fb-drop"
+  «namespace» := "flare-fb-drop"
+  partitions := 1
+  replicas := 2
+  operatorName := "flare-operator"
+  debugPod := "debug-fb-drop"
+  storageBackend := "rocksdb"
+  useTmpfs := true
+  operatorEnv := [("FLARE_TEST_DROP_FIRST_NODE_ADD", "1")]
+}
+
+def suiteDroppedAdd : TestSuite := {
+  name := "first-build-dropped-add"
+  setup := deployCluster cfgDropped
+  teardown := cleanupCluster cfgDropped
+  onFailure := dumpClusterDiagnostics cfgDropped.«namespace» s!"app={cfgDropped.operatorName}"
+  tests := [
+    { name := "first build where the first master's flared never gets its node add answered (FLARE_TEST_DROP_FIRST_NODE_ADD) and restarts before the partition's history is recorded: partition 0 still gets an Active master and an Active slave, seated as a first build's"
+      run := do
+        let built ← waitForCondition "partition 0 has an Active master and an Active slave" 300 do
+          let es := parseNodeSync (← operatorTcpCmd cfgDropped.debugPod cfgDropped.«namespace» cfgDropped.operatorName cfgDropped.operatorPort "node sync")
+          let p0 := es.filter (·.partition == 0)
+          return p0.any (fun e => e.role == 0 && e.state == 0) && p0.any (fun e => e.role == 1 && e.state == 0)
+        let logs ← kubectlLogsLabel s!"app={cfgDropped.operatorName}" cfgDropped.«namespace» 400000
+        let lines := logs.splitOn "\n"
+        for l in (lines.filter fun l => containsSubstr l "TEST SEAM: the first node add" || containsSubstr l "seated as a first build's master"
+            || containsSubstr l "PROMOTION ABORTED" || containsSubstr l "Result: Master P0" || containsSubstr l "Result: Slave P0").take 20 do
+          IO.eprintln s!"# {l.trim.take 300}"
+        if !lines.any (containsSubstr · "TEST SEAM: the first node add") then
+          return .fail "precondition: the operator did not drop a node add (seam not armed)"
+        if !built then return .fail "partition 0 never got an Active master and an Active slave after the first master's registration was dropped"
+        return .pass }
+  ]
+}
+
+/-- As first-build-dropped-add, and the candidate's pass evidence carries a
+    stale boot id once (FLARE_TEST_STALE_FIRST_BUILD_EVIDENCE): the commit
+    re-reads every copy and must REJECT the first build exception for it
+    (review of 89cf9d9: stale EMPTY evidence must never authorize the
+    promotion); a later pass with matching readings seats the master. -/
+private def cfgStale : ClusterConfig := {
+  name := "fb-stale"
+  «namespace» := "flare-fb-stale"
+  partitions := 1
+  replicas := 2
+  operatorName := "flare-operator"
+  debugPod := "debug-fb-stale"
+  storageBackend := "rocksdb"
+  useTmpfs := true
+  operatorEnv := [("FLARE_TEST_DROP_FIRST_NODE_ADD", "1"), ("FLARE_TEST_STALE_FIRST_BUILD_EVIDENCE", "1")]
+}
+
+def suiteStaleEvidence : TestSuite := {
+  name := "first-build-stale-evidence"
+  setup := deployCluster cfgStale
+  teardown := cleanupCluster cfgStale
+  onFailure := dumpClusterDiagnostics cfgStale.«namespace» s!"app={cfgStale.operatorName}"
+  tests := [
+    { name := "the first build exception with a copy's pass evidence from another flared boot (FLARE_TEST_STALE_FIRST_BUILD_EVIDENCE): the commit re-read refuses it (REJECTED, nothing committed); a later pass whose readings match seats the master; partition 0 gets an Active master and an Active slave"
+      run := do
+        let built ← waitForCondition "partition 0 has an Active master and an Active slave" 300 do
+          let es := parseNodeSync (← operatorTcpCmd cfgStale.debugPod cfgStale.«namespace» cfgStale.operatorName cfgStale.operatorPort "node sync")
+          let p0 := es.filter (·.partition == 0)
+          return p0.any (fun e => e.role == 0 && e.state == 0) && p0.any (fun e => e.role == 1 && e.state == 0)
+        let logs ← kubectlLogsLabel s!"app={cfgStale.operatorName}" cfgStale.«namespace» 400000
+        let lines := logs.splitOn "\n"
+        for l in (lines.filter fun l => containsSubstr l "TEST SEAM" || containsSubstr l "first build exception"
+            || containsSubstr l "seated as a first build's master").take 20 do
+          IO.eprintln s!"# {l.trim.take 400}"
+        let idx := fun (pat : String) => lines.findIdx? (containsSubstr · pat)
+        match idx "TEST SEAM: the pass evidence", idx "is REJECTED", idx "seated as a first build's master" with
+        | none, _, _ => return .fail "precondition: the stale-evidence seam was not applied (the exception was never reached)"
+        | some _, none, _ => return .fail "the first build exception was NOT rejected although the candidate's pass evidence was from another boot"
+        | some si, some ri, seated =>
+          if ri < si then return .fail "a rejection was logged before the seam was applied"
+          match seated with
+          | some ai => if ai < ri then return .fail "the master was seated by the exception before its stale evidence was rejected"
+          | none => return .fail "the master was never seated as a first build's after the stale evidence was rejected"
+          if !built then return .fail "partition 0 never got an Active master and an Active slave"
+          return .pass }
+  ]
+}
+
+end FlareOperator.E2E.Tests.FirstBuildBusyPool

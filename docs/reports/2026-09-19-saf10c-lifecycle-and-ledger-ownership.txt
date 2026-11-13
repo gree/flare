@@ -1,0 +1,63 @@
+# SAF-10c — follower lifecycle in flared, and the operator's ledger ownership rule
+# host: local darwin arm64, nix devShell (RocksDB unit tests); lake (operator)
+# builds: RocksDB unit tests as before (C++17 + libc++ compat defines); whole tree via nix build .#flare (pass, doCheck cutter suite ran); flare_operator via lake build flare_unit
+# date: 2026-09-19
+
+=== flared: lifecycle ===
+* cluster::_reconcile_wal_follower_locked() runs after every accepted node map and on every change of the flag:
+  an ACTIVE SLAVE on a RocksDB backend follows its partition's master; a master, a proxy, a preparing slave or a
+  partition without a master does not. A follower that declared needs_rebuild is NOT restarted on the same source —
+  the rebuild path (demote -> hold -> reseat) cycles the node's role, and that cycle is the fresh start.
+* Options (dynamic, all OFF/bounded by default): repl-follow-enabled=false, repl-follow-max-batches=256,
+  repl-follow-max-bytes=4194304, repl-follow-poll-interval-usec=200000. The follower applies only through the common
+  rule, so it must not be enabled before repl-identity-forward is on cluster-wide (stated in the option help).
+* flared stops the follower before telling the index it is leaving, so no batch lands on a node that is shutting down.
+* stats gains repl_follow_enabled so the operator can tell the mode from the state.
+
+=== operator: ownership (design §5.4) ===
+* A drop observed for a destination whose own stats say the follower owns it (repl_follow_enabled=1 and state in
+  following/initial_sync/disconnected/error) is RECORDED and HELD with the reason "owned by continuous replication"
+  and the bar it must reach — the master's rocksdb_latest_sequence_number at observation, which the dropped write is
+  at or below. No demotion, no reconstruction. plan() never acts on an owned entry, gate open or not.
+* Closing needs the follower to be `following` (a disconnected follower's position is stale by definition), a recorded
+  bar, and repl_applied_lsn at or past it: REPLICA REPAIR CLOSED by continuous replication, without a rebuild.
+* needs_rebuild, the mode going off, or UNREADABLE stats end ownership and hand the entry — drops and node key kept —
+  to the ordinary path. Unreadable stats never CLAIM ownership: fail closed to the path that does not depend on them.
+* A drop while the mode is on but the follower is `disconnected` is still owned: the follower resumes from its
+  position; starting a reconstruction there would be the blip-costs-a-rebuild failure this work exists to remove.
+
+=== tests ===
+flare_unit (FlareOperator/UnitTests.lean), 8 new checks: ownership by state; hold records reason and bar; a later drop
+raises the bar and never lowers it; an owned request is never planned for demotion with the gate open; following at
+99 keeps / at 100 closes and removes the entry; a disconnected follower's position is not trusted for closing but
+ownership continues; needs_rebuild hands over keeping drops and node key, after which plan() acts on it; an owned
+entry with no recorded bar is handed over rather than trusted.
+RESULT: 95 checks passed, 0 failed.
+RocksDB unit set (clean rebuild after the stats.h/cluster.h changes): 88 test(s), 906 assertion(s), 0 failure(s).
+Whole tree: nix build .#flare pass.
+
+=== NOT executed / still open ===
+* No E2E yet. Neither the follower lifecycle nor the ownership rule has been observed on a running cluster; both are
+  OFF by default (repl-follow-enabled, repl-identity-forward). SAF-10d is where the link-cut scenarios run.
+* Eligibility for reads/promotion/deletion (design §5.3) is NOT implemented: the operator does not yet read
+  repl_follow_state for those decisions, and a WAL-mode replica is not yet removed from the read set by the operator —
+  today that has to be done by configuration. Recorded as the remaining SAF-10c item.
+* The wire handshake (EPOCH / MORE / epoch_mismatch) still has unit coverage of the decision table only.
+* Lock-hold time and writer starvation bounds (design §3.8, T17): deferred by agreement.
+
+=== 2026-09-20 review fixes (two defects in the ownership rule) ===
+1. A TRANSIENT stats failure ended ownership: advanceOwned handed an owned entry to the ordinary path when the
+   follower's stats could not be read, and a request whose follower could not be read at observation time went
+   straight to the ordinary path. Both would have turned a probe hiccup into a demotion and a reconstruction —
+   the failure this design removes. Now: unreadable is Unknown. At request time the drop is HELD as
+   "follower state unknown (stats unreadable)"; at advance time the hold is kept and nothing is handed over. Only an
+   EXPLICIT reading (needs_rebuild, idle, mode off) ends ownership.
+2. Closing compared positions without the history they belong to: after a master change a follower can report a
+   large repl_applied_lsn from ANOTHER epoch. The bar now records the master's rocksdb_source_epoch and closing
+   requires the follower's repl_follow_source_epoch to match it; a later drop in a new epoch replaces the bar
+   instead of being max'd with an incomparable one. Ownership, bar and epoch are also persisted to status so an
+   operator restart cannot turn an owned entry into an ordinary request.
+New flare_unit checks: Unknown at request time; a held-unknown request is never planned; a transient failure keeps
+the hold and hands nothing over, and a later readable pass closes; a bigger position in another epoch does not
+close; a new epoch replaces the bar; the status round trip preserves ownership, bar and epoch.
+RESULT: flare_unit 101 checks passed, 0 failed.

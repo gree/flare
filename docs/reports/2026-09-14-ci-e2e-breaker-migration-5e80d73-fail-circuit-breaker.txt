@@ -1,0 +1,35 @@
+# GitHub Actions e2e-test (breaker-migration) leg on PR #143, third run — FAIL (1 of 37): circuit-breaker test 3
+# tested revision: 5e80d73c09385330c0ee897096bb86d28e32f728
+# run: https://github.com/gree/flare/actions/runs/34806038692/job/103858004390
+# command: timeout 4500 .lake/build/bin/flare_e2e --filter "circuit-breaker,operator-restart,topology-authority,replica-repair,prepare-evidence,native-metrics,blue-green-migration"
+# date: 2026-09-14
+# topology-authority passed 4/4 at this revision (both harness fixes); replica-repair 8/8; prepare-evidence 2/2; other legs, builds, evidence job passed.
+# failure: circuit-breaker test 3 "majority outage (scale 4→1) trips the breaker": no CIRCUIT BREAKER TRIPPED within 480s. Re-run of the same leg at the same revision: this test PASSED (trip after 15s) — see the companion report for that re-run's own failure.
+# finding (pre-existing, not from this branch): K8sReconciler.detectDeadNodesPure excludes nodes already Down and nodes in Prepare (since 52d409e, 2026-07-03), so circuitBreakerDecision's deadCount is the number of nodes that became dead THIS tick while totalNodes is the whole map. The 50% trip therefore needs 2 of 4 pods to vanish inside one 5s tick. Locally today all 3 vanished in one tick (3/4, 75%, tripped); CI runs 1, 2 and this re-run tripped at 10-15s; in this run the deaths straddled ticks (25% each, failover proceeded, never tripped). The diag tail shows a steady (nodes=4 M=2 S=0 D=2 P=1) with the map version advancing +7 per tick and no breaker line at all — one pod-less node sat in Prepare (never counted dead by the same exclusion); the trip window itself is outside the ~200-line tail, so that part is inferred. This branch's K8sReconciler.lean diff touches only repairHeld and the broadcast removal; the operator image is unchanged since 3320546.
+
+# Tests: 37, Failures: 1
+# RESULT: FAIL
+ok 1 - baseline: two active masters
+ok 2 - wait out the operator startup grace period
+not ok 3 - majority outage (scale 4→1) trips the breaker
+ok 4 - no live-topology churn while tripped
+ok 5 - restoring capacity resumes recovery automatically
+ok 6 - cluster shape survives an operator restart (state reload)
+ok 7 - writes still served after operator restart
+ok 8 - failover still works after the restart (reloaded state is live)
+ok 9 - flared rejects a topology push carrying a stale version
+ok 10 - control: holding the lease, the stopped pass does broadcast
+# --- circuit-breaker harness lines ---
+# Waiting for: grace countdown finished (timeout: 120s)
+# Waiting for: breaker tripped in operator log (timeout: 480s)
+#   TIMEOUT after 480s waiting for: breaker tripped in operator log
+#   reason: no CIRCUIT BREAKER TRIPPED log within 480s of majority outage
+# Waiting for: cluster recovered after scale-up (timeout: 480s)
+# --- operator diag tail: reconcile summaries and version deltas ---
+   6 (nodes=4 M=2 S=2 D=0 P=0)
+  21 (nodes=4 M=2 S=0 D=2 P=1)
+   1 (nodes=4 M=2 S=0 D=1 P=0)
+  10 (nodes=4 M=2 S=2 D=0 P=0)
+  25 (nodes=2 M=1 S=1 D=0 P=0)
+   8 (nodes=4 M=2 S=2 D=0 P=0)
+# version deltas per broadcast in the diag tail: {0: 8, 7: 22, 6: 1}

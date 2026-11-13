@@ -1,0 +1,262 @@
+# Operator safety improvement backlog
+
+This is the current safety backlog. The older operator TODO is historical.
+The runtime fixes below are **not implemented by introducing this backlog**.
+The evidence register in [safety-evidence.json](safety-evidence.json) owns control
+status; [STPA-node-state.md](STPA-node-state.md) owns the hazard analysis.
+
+## Merge gate
+
+For deployment rather than code integration, use the consolidated
+[production enablement gate](PRODUCTION-READINESS.md). It separates guarantee
+decisions, incomplete implementation, missing runtime evidence and rollout work.
+
+2026-10-01: startup-republish-alone E2E added to topology-authority (operator
+replaced while a committed pass is held before its send; audit off via a test
+seam; first send must be pending-only and every pod must adopt the withheld
+read-balance weight), plus a logged send-trigger record. CI pending.
+[Scope and residuals](reports/2026-10-01-startup-republish-e2e.md).
+
+2026-09-27: added fresh round-robin recipient topology observations bracketed
+by Pod UID reads, and startup republish through the existing lease fence.
+Lower applied versions request retry; Unknown/ahead do not trigger destructive
+actions. [Scope and residuals](reports/2026-09-27-topology-observation.md).
+SAF-09 remains partial (generation recovery and isolated restart E2E pending).
+
+2026-09-27: SAF-09 transport increment implemented: explicit node-sync reply
+confirmation, propagated send errors, and retention of failed deliveries for
+retry through the existing lease fence. [Scope and residuals](reports/2026-09-27-topology-delivery-retry.md).
+Per-Pod applied-generation tracking and restart/generation recovery remain open.
+
+2026-09-27: memory-budget CRD/Helm configuration and initial startup seeding
+are implemented; existing pods require a planned restart/migration. Runtime
+budget validation is still open, and these knobs are not an RSS cap. See
+[scope and tests](reports/2026-09-27-memory-config.md). The selective read
+E2E now isolates both index request replies and topology pushes; CI pending.
+
+### SAF-10 audit follow-ups (2026-09-24)
+
+Integrated `saf-10-audit-followups` through `89f3cff` into the PR #144 branch
+on 2026-09-26. The earlier SAF-10d status below describes the pre-integration
+evaluation: its "parked" follow-ups are now included, but performance must be
+remeasured after the MORE scheduling fix. Merge-revision CI is still pending;
+this integration does not mark any EV verified or approve PR #144 for merge.
+See [working-tree report](reports/2026-09-24-saf10-audit-followups.md).
+
+2026-09-26: added the isolated stale-positive-balance read-routing E2E
+([scenario and limitations](reports/2026-09-26-local-read-guard-e2e.md)).
+It requires the master's new value while both replication apply paths remain
+stopped, and observes the replica's local map before and after GET. Implemented
+and compiled, not yet executed in CI; the acceptance item below remains open.
+
+| Ordinary failure | Required behavior / current audit change | Remaining acceptance |
+|---|---|---|
+| Forwarding succeeded but WAL cursor trails | Drain MORE without a 200ms sleep even when all values were skipped as superseded | Rerun sustained 900/2000 writes/s and backlog drain |
+| Slave disconnected or lagging | Keep Slave role and cursor; local reads proxy to master, operator withholds read balance; no automatic full rebuild for a blip | Execute updated read-value E2E and isolate local guard with stale positive-balance map |
+| Master unreachable from slave | Do not return known-stale local content; forwarding can fail | Legacy read errors may appear as cache misses; protocol compatibility decision remains |
+| Operator restart with unreadable stats | Never-observed replicas are Unknown, not read-eligible; restore after a complete eligible reading | Cold-start unit tests pass; stage the combined restart/stats-failure E2E |
+| Source observation lies in the future | Unknown, not fresh via saturating subtraction | Unit-pinned; no clock-fault E2E |
+| WAL purged / source history changed | Explicit needs_rebuild with safe reseed, no retry forever | Preserve existing T6 evidence; re-run regressions after integrating changes |
+
+Before production enablement: T17, large-DB boot/probes, RocksDB memory-budget
+configuration, WAL retention/compaction under sustained lag, simultaneous
+repair-request staging, and remaining promotion/deletion safety gaps remain
+open. No asynchronous-failover loss-free guarantee is added by these changes.
+
+SAF-01 through SAF-07 block the operator merge until their acceptance scenarios
+have passed on the candidate implementation and a reviewer has assessed the
+linked safety constraints. A library build alone does not close these tasks.
+All tasks below are open; record completion with evidence IDs and a PR reference.
+
+| Task | Priority | Change and acceptance criteria | Constraints / evidence | Dependencies |
+|---|---|---|---|---|
+| SAF-01 | Before merge | Consolidate topology sends onto committed state and check leadership on that path. Pause an old reconcile across takeover and resume it; no send after confirmed loss. Document the check/send race and generation fencing limits. | SC-01 / EV-01, SC-02 / EV-02 | None |
+| SAF-02 | Before merge | Make reconstruction requests observable by flared even when the replica returns to the same partition. Inject missing writes, verify reconstruction starts and missing keys recover; distinguish requested, started and completed metrics/logs. | SC-03 / EV-03 | Design together with SAF-05 |
+| SAF-03 | Before merge | Replace numerical LSN proximity with reconstruction completion evidence bound to master identity and sync generation. Reject close-but-incomplete cursors, different lineages and master changes during observation. | SC-04 / EV-04 | None |
+| SAF-04 | Before merge | Represent missing stats as Unknown. Reject empty, truncated, malformed and stale observations for deletion; revalidate target Pod identity and successor before acting. | SC-05 / EV-05 | Design together with SAF-06 |
+| SAF-05 | Before merge | Retain pending replica repair until completion, including operator/master restart and counter reset. A drop observed while the breaker is held or a destination cannot be resolved must be repaired later without another drop. | SC-03 / EV-03 | SAF-02 |
+| SAF-06 | Before merge | Arbitrate competing repairs. When resync demotes a successor in the same tick as empty-master repair, do not delete using the previous successor snapshot. Cover concurrent re-registration and leadership loss before deletion. | SC-05 / EV-05 | SAF-04 |
+| SAF-07 | Before merge | Align documentation with actual guarantees: committed-map uniqueness is not distributed writer fencing; masterless refill can deliberately promote partial Prepare data. State the loss/availability tradeoff and residual risks. Re-audit all old DONE claims. | SC-01, SC-02, SC-04, SC-06 / EV-01, EV-02, EV-04, EV-06 | Final review after SAF-01–06 |
+| SAF-08 | Partial. 2026-10-02: follow evidence bound to the flared process (boot id). 2026-10-05 (CI pending, audit docs/reports/2026-10-05-saf08-copy-identity-audit.md): NotReady Active slaves are not promotion candidates (same-name replacement); repair demotion checks its rebuild source and re-checks atomically; PREPARE-REPAIR re-checks the process before activating; E2E copy-identity (same-name replacement, process restart). Open: audit rows 1, 2, 6, 9, 13; typed Pod observation record and pure repair decisions (structural, later) | Type Pod observations, including identity, readiness, data knowledge and observation time; move repair decisions into pure functions. Unknown must not become healthy or empty. | SC-05, SC-07 / EV-05, EV-07 | SAF-03–06 |
+| SAF-09 | Partial. 2026-10-02: new leader generation above the persisted record; send only persisted versions. 2026-10-05 (CI pending): the startup map read tells a failed read (retry, then exit), invalid content (halt), an actual loss (halt) and a first build (fresh) apart, with a Lease marker and the pods' own map versions as history; FLARE_NODE_MAP_RESET for a deliberate fresh start. Open: automatic reconstruction of a lost map; per-node applied generation persisted | Separate desired topology from per-node applied generation. Retry failed application and expose lag; specify delayed command handling and verify reconnect convergence. | SC-01, SC-02 / EV-01, EV-02 | SAF-01 |
+| SAF-10 | Separate design | Parent task: op-level forwarding for low-latency propagation KEPT, plus continuous WAL replication for gap-free recovery, so a replica that lost connectivity catches up automatically while the master survives. Both paths must deliver identified changes through one apply rule; the current verbatim WriteBatch apply must not run alongside forwarding. Decomposed into SAF-10a..d below. Guarantees excluded up front: acknowledged-write survival against master data loss, synchronous ACK, latest-read from coexistence alone, cross-partition placement, Tokyo Cabinet. | SC-03, SC-04, SC-13 / EV-03, EV-04, EV-13 (+ proposed SC-14..16) | No dependency for the design |
+| SAF-10a | Separate design | Audit the existing recovery code with call paths and produce the continuous-replication design: replication path choice (WAL-only for WAL-mode replicas vs. coexistence with op-level proxy), guarantee scope, open hazards. Review gate before any implementation. | SC-13 / EV-13 | None |
+| SAF-10b | Implemented on the branch (stages 1-3b), unverified: unit-tested and exercised by the SAF-10d acceptance suite (12/12 on one revision) | flared: the COMMON APPLY RULE for both delivery paths (decode every change to `{key, type, value, flag, expire, version, session, src_seq}`; apply iff `src_seq` exceeds the key's applied source sequence; persistent tombstones carrying the delete's sequence, dropped only once the applied position has passed the delete; a change at or below the applied position is refused whichever path delivered it; read-decide-write in one critical section with GC inside the applier's exclusive window; reserved keys never applied as data) plus continuous fetch/apply — follow mode with bounded responses, contiguous cursor that no forwarded write may advance, crash-atomic position in one WriteBatch with the changes, self-driven reconnect that needs no new writes, session validation at apply time, explicit needs-rebuild on lost history, resource ceilings and tombstone GC. Verbatim WriteBatch application is removed. | SC-03, SC-13 / EV-03, EV-13 (+ SC-16..20 proposed) | SAF-10a |
+| SAF-10c | Implemented on the branch, unverified: lifecycle, ledger ownership, follower-declared rebuild, and read/promotion/deletion eligibility (StateMachine/FollowEvidence); unit-pinned and exercised by the SAF-10d suite (read withholding, promotion/epoch, ownership, Unknown handling); drain exclusion and the survivor gate are unit-only | Operator interface: source/generation, contiguous applied position, master position with observation time, stream state, last progress, reason codes; purpose-specific eligibility for reads, promotion and copy deletion with Unknown handling; suppress the replica-repair ledger for WAL-mode nodes so only one rebuild runs. | SC-04, SC-05 / EV-04, EV-05, EV-11, EV-15 | SAF-10b |
+| SAF-10d | Acceptance suites pass locally and on CI: continuous-replication 13/13, continuous-replication-purge (T6), continuous-replication-limits (T9, bounded); full CI matrix green on 41ea98e (pull_request, 5 legs) together with the non-WAL and RocksDB regression suites. Five defects found by these tests and fixed on the branch (follower thread lifecycle 325a2f8; drop observation hidden by an unreadable replica eb2ba17; tch follower reading held as Unknown + 3 s-per-probe cost 2379cff; curr_items estimate blind to WAL-only keys d9d1285; a served WAL gap treated as a retryable error instead of history loss 3b7f38c). Evaluations, not acceptance: scale (2M keys — follow ceiling ≈1,280 changes/s at the default 256 batches per 200 ms poll, boot scan 0.48-0.98 µs/key, ≈8-16 s extrapolated for 15.8M keys) and sustained load (lag 0 at 300 and 900 keys/s, falls behind monotonically at 2000 keys/s, drains in 442 s after the load stops; disk figures not established — no flush in the window, and WAL retention for a trailing follower untested). Open: T17 lock-hold measurement (deferred by agreement); true concurrency of the two rebuild-request routes; the RocksDB memory floor (≈704 MB at flared defaults, chart limit 1Gi, no CRD knob); WAL retention and compaction under sustained load with a trailing follower; and the audit follow-ups parked on branch saf-10-audit-followups (flared-side read guard, follower retry_immediately, never-read withholding) — all before enabling anywhere real. PR #144 open as Draft; author-run only, nothing verified. Reports: docs/reports/2026-09-20-saf10d-*.txt, docs/reports/2026-09-21-saf10d-*.txt |
+| SAF-11 | Implemented 2026-10-01, CI pending: breaker counts nodes unavailable now (dead this tick + Down + pod-less Prepare); definition to be confirmed by the reviewer ([report](reports/2026-10-01-saf11-breaker-unavailable.md)). History: 5 CI no-trips (2026-09-14 ×2, runs 36719136539, 36741543371, 36796752122) | SC-09 / EV-09 | None |
+
+**Status (this branch).** SAF-01 through SAF-07 are implemented with tests on
+this branch. A review of the first cut (HEAD ffa2a05) reopened SAF-02 to
+SAF-06 with six findings, all confirmed and fixed on the same branch in three
+groups: sync-evidence generation (a past reconstruction credited as the
+current copy; missing RocksDB lineage/cursor accepted), ledger fault
+tolerance (late drops declared recovered; a failed save never retried; a
+failed or corrupt read treated as "no ledger"), and delete revalidation (live
+map read before the stats; no lease or pod-UID check). A second review (HEAD
+ccca200) found four more, fixed in three commits: the pod UID is now an
+API-side delete precondition (DeleteOptions.preconditions.uid, refused with
+409 for a same-name replacement) instead of a client re-read; a partially
+corrupt ledger fails as a whole instead of loading smaller; and completion is
+judged from an explicit per-process reconstruction record flared now exposes
+(boot id, latest id and state, last success id and source) instead of
+cumulative counters, which could neither recognise a success after a failure
+nor tell a restart with identical counters. A third review (HEAD d08fe06)
+found two defects in that new code, fixed in two commits: flared's completion
+notifications now carry the handler's own id (an older handler finishing
+after a newer one started can no longer record the newer id as succeeded;
+the record is read as one locked snapshot), and the direct-API UID-precondition
+delete has connect/overall deadlines and reports transport failures instead
+of stalling the reconcile. A fourth review (HEAD 48245be) confirmed those two
+and asked for two finishing touches, done on the same branch: a timed-out or
+failed DELETE is reported as an UNKNOWN deletion outcome (the API may have
+accepted it and only the reply was lost; re-observe before retry), and the
+deadline E2E now requires a timeout (curl exit 28) on a connection the black
+hole provably accepted, so a refused connection no longer passes it. A last
+harness-only fix (22fd148) captures that acceptance evidence before the black
+hole's pod is deleted, not after. The first CI run of the branch (PR #143)
+failed one test, the SAF-01 lease-takeover scenario, on a harness race
+(the fence line was read from the wrong container after the designed exit)
+fixed together with a second ordering fault it uncovered; the second CI
+run failed the sibling read-failure scenario on a negative check that also
+matched the operator's legitimate retry. All three are harness-only, the
+operator's logged behaviour was the specified one in every run, and the runs
+are recorded under EV-01 with the log-timing dependence added as a residual
+risk. The third CI run and its re-run (same revision) each failed one
+different thing: the pre-existing circuit-breaker E2E once (a FINDING, recorded
+under EV-09: the breaker counts nodes that became dead in one tick, not the
+cluster's dead fraction, so a 4→1 outage whose deaths straddle ticks never trips;
+not changed on this branch), and the replica-repair harness once (its `pair`
+helper required role Slave in the instant after the repair had demoted the
+replica to a held Proxy — fixed in the harness). The fourth CI run
+(c148c6c) was the branch's first fully green matrix; the register records it
+per control, with the reviewer's assessment of the round-4 fixes, and nothing
+is promoted to `verified` by it. The fifth run (docs-only) failed again: the
+breaker did not trip a second time (2 of 6 executions), and the SAF-05
+save-failure test had assumed a runner-side impersonated `can-i` mirrors the
+operator's authorization — it does not: the operator's own status patch stayed
+Forbidden for over two minutes after the grant returned. The test now probes
+from inside the operator pod as its own service account; the two-minute
+window is recorded as a residual risk under EV-03. The PR went back to draft.
+The sixth run (f7d327f, 2026-09-16) was fully green; the two-minute RBAC
+latency did not occur in it, so the in-pod probe remains unexercised under
+that condition (noted in EV-03). Still nothing promoted to `verified`. The
+seventh run (evidence-only commit) failed a general E2E outside the SAF
+controls, partition-reduction test 5: a fixed 15s sleep raced a 14s reconcile
+tick, so the operator had not yet seen the patched CRD when the log was read
+once (the diagnostics confirm neither the 'CRD changed' line nor the warning
+existed yet). The suite now waits for the operator's own evidence; harness
+only (docs/reports/2026-09-16-ci-e2e-replication-685853e-fail.txt). The PR
+went back to draft again. The eighth run failed the SAF-05 save-failure test
+again, and this time the cause corrects an earlier reading: the request HAD
+landed (silently, through the normal per-pass persist) while the test waited
+for the retry path's log line; the "~2 minutes of RBAC latency for the
+operator" attributed to CI runs 5 and 8 was that harness artefact, and the
+only real latency observation is a single local one. The test now judges the
+outcome. The operator's silence about a landing after it announced an
+unsaved ledger is recorded under EV-03 as an observability gap with a
+proposed one-line follow-up (not made here). The ninth run (da840c0) was
+green across all seven checks, the third green matrix and the second in a row
+for this operator image; the breaker tally on this PR is 7 tripped / 2 not,
+now tracked as SAF-11. The evidence register
+owns exact implementation and verification state, which stays `unverified`
+until a reviewer signs off; EV-03 is held at `partial` because two scenarios
+are pinned only by `flare_unit` and not staged end to end (a drop in the last
+stretch of a reconstruction; a change interposed between the delete's
+observation and the delete). SAF-07 is the "Guarantees, and what they are
+not" section of the [README](../README.md). SAF-08 through SAF-10 remain out
+of scope; SAF-10 is now decomposed (SAF-10a..d) and its design stage is
+[design-continuous-wal-replication.md](design-continuous-wal-replication.md),
+which is a DRAFT for review — audit and design only, no implementation, and
+no register entry is promoted by it. Revision 2 records the reviewer's
+decision to keep both delivery paths and adds the common apply rule they
+require; the audit establishes that the existing per-key `version` orders
+updates of a live key and nothing else (delete/re-create, touch, incr,
+internal deletes and a master change are all outside it), which is why the
+rule uses the master's commit sequence instead. Revision 3 replaces the
+time-based tombstone GC with refusal by applied position, specifies the
+serialization from decision to write, and records the four preconditions
+without which the sequence comparison is unsound — session identity needs a
+generation token (`regenerate_master_id` fires only when the cursor exceeds
+the node's own sequence, so two DBs can share a `master_id` over unrelated
+sequence spaces — revision 4 splits this into a source epoch for the master's
+history and a receiver incarnation for the replica's copy, neither of which
+changes on a plain process restart), the label must be captured inside the
+key's critical section by EVERY path that can change a key (bulk operations
+switch the epoch instead) (otherwise a set and the delete that follows it can carry the
+same number and a deleted key is resurrected), per-entry numbering must match
+the batch's own count, and metadata inherited through a snapshot swap must be
+cleared. Revision 4 also records that a transient disconnection must never be
+a repair trigger — the stream owns the decision while the mode is on, and only
+an explicit needs-rebuild hands the node over — that such a replica stays out
+of the read set until SAF-10c, and that the new constraints are SC-16..20
+(SC-14/15 were already in use). Re-audit of older DONE claims lives in
+[STPA-node-state.md](STPA-node-state.md#8-what-this-document-got-wrong).
+
+## Evidence workflow
+
+Each control records a bounded claim, scenarios, assumptions, residual risks,
+code references **and the production call path**, proposed verification and
+immutable execution evidence. Paths plus symbols identify code; a branch name
+or line number alone is insufficient. Empty execution evidence means unverified.
+
+Implementation: `gap`, `partial`, `implemented`. Verification: `unverified`,
+`verified`, `stale`. These are independent: a tested partial mitigation still
+leaves its stated residual risk. A hazard is never closed just because one
+linked control exists. An alert proves detection only, and only when deployed
+and routed; a theorem proves its stated model property under its assumptions.
+
+1. Identify the affected SC/EV IDs in the PR (or explain why none apply).
+2. Change implementation, tests and the relevant register entries together.
+   Update each affected entry's `review` with the inspected full commit SHA,
+   date and a substantive impact note. Documentation-only changes in a referenced
+   file also need an impact note, but need not run unrelated E2E suites.
+3. If previous evidence no longer supports the claim, mark it `stale`. Keep old
+   runs as history; add new runs after verification. Each run names the planned
+   verification ID, full tested commit SHA, date, command, result and durable
+   report location (repository report path or immutable CI run URL).
+4. Use `verified` only after every listed verification has a passing run on one
+   tested revision and a reviewer has checked reachability, bypasses, failure
+   behavior and assumptions. `skip`, failures, static reading and unexecuted
+   test definitions are not passing runtime evidence. Narrow theorem evidence
+   must not be presented as end-to-end safety.
+5. Record results in the same PR where possible. A follow-up evidence-only PR
+   may reference the original CI-tested SHA; do not invent a self-referential
+   commit SHA. Before merging the operator, rerun required checks on the final
+   candidate and reassess evidence after intervening changes.
+
+Run records use the fields `check` (a CHECK ID), `commit` (40 hexadecimal
+characters), `date` (YYYY-MM-DD), `command`, `result` (`pass`, `fail`, `skip`)
+and `report` (a repository-relative report file or a GitHub Actions run URL).
+Append reruns in execution order: the latest recorded revision must have a
+passing result for every check before using `verified`. Preserve failed and
+skipped attempts. CI URLs identify executions, but their output may expire;
+archive important output and reassess evidence if its report is no longer
+available. Never place credentials or production data in reports.
+
+From the repository root:
+
+```sh
+python3 scripts/check_safety_evidence.py --write
+python3 scripts/check_safety_evidence.py
+python3 scripts/check_safety_evidence.py --base <base-commit>
+python3 -m unittest discover -s scripts/tests -p 'test_safety_evidence.py'
+```
+
+`--write` updates only the generated control table in STPA. CI checks structure,
+unique IDs, references, required evidence fields, generated-table consistency
+and review updates for changed referenced files (using both base and head
+references). It does not execute commands from the register or decide whether
+a proof, report, or review note is sufficient. For a changed verified control,
+provide new execution evidence or mark it stale. Reviewer judgement is still
+required for all claims, including newly added code not yet in the register.
+
+## Initial audit
+
+The register is seeded from static inspection of commit
+`aaf0b8568b25b1be84c771fc4ea8b1118bee5ff7`. No runtime guarantee is marked verified.
+The successful Lean library build reported during review is not an archived
+per-control execution report. Existing E2E suites are verification candidates,
+not proof that these fault scenarios passed; notably a self-demotion test can
+skip the very behavior it names. Deployment-specific alert enablement and
+sampled data measurements have no archived evidence here and remain unverified.

@@ -1,0 +1,519 @@
+# === Suite: continuous-replication ===
+# Cleaning up cluster 'cont-repl'
+# Deploying cluster 'cont-repl' in namespace 'flare-cont-repl'
+# Waiting for: namespace flare-cont-repl not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-cont-repl (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap cont-repl-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet cont-repl-nodes to be ready...
+# Waiting for: all 2 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 2 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 50s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator) ---
+#   [TopologyBroadcast] Broadcast attempt complete (v4294967304); all targets reply-confirmed=true
+#   [flare-operator] replica repair ledger initialized from cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121: 0 destination counter(s) recorded as baseline, none attributed
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 3015ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] continuous-replication probe: 2 stats read(s) in 277ms (tick 6; in-mode remembered: 1, out-of-mode remembered: 0)
+#   [flare-operator] CONTINUOUS REPLICATION eligibility cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121: reads eligible: following epoch 2:f9baadb6-5fa2-499c-b174-445fdeaf4a8f; position observed 0s ago; lag 0 ≤ 1000 (read); promotion eligible: following epoch 2:f9baadb6-5fa2-499c-b174-445fdeaf4a8f; position observed 0s ago; lag 0 ≤ 100 (promotion)
+#   [flare-operator] grace period: 17 cycles remaining
+#   [TopologyAudit] node=cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121 uid=(some 2cd65809-e1f8-443f-a877-035b906d85a1) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1829ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] continuous-replication probe: 2 stats read(s) in 261ms (tick 7; in-mode remembered: 1, out-of-mode remembered: 0)
+#   [flare-operator] grace period: 16 cycles remaining
+#   [TopologyAudit] node=cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121 uid=(some 5c283e57-a4b0-414a-8ec6-fb04c4064df7) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 2099ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] continuous-replication probe: 2 stats read(s) in 263ms (tick 8; in-mode remembered: 1, out-of-mode remembered: 0)
+#   [flare-operator] grace period: 15 cycles remaining
+#   [TopologyAudit] node=cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121 uid=(some 2cd65809-e1f8-443f-a877-035b906d85a1) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1815ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] continuous-replication probe: 2 stats read(s) in 258ms (tick 9; in-mode remembered: 1, out-of-mode remembered: 0)
+#   [flare-operator] grace period: 14 cycles remaining
+#   [TopologyAudit] node=cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121 uid=(some 5c283e57-a4b0-414a-8ec6-fb04c4064df7) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 2210ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] continuous-replication probe: 2 stats read(s) in 276ms (tick 10; in-mode remembered: 1, out-of-mode remembered: 0)
+#   [flare-operator] grace period: 13 cycles remaining
+#   [TopologyAudit] node=cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121 uid=(some 2cd65809-e1f8-443f-a877-035b906d85a1) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1924ms (nodes=2 M=1 S=1 D=0 P=0)
+#   
+# Waiting for: replica's follower is following (timeout: 120s)
+#   OK after 0s
+# Waiting for: replica's local items match the master's (timeout: 60s)
+#   OK after 0s
+# following: replica applied 30 forwarded change(s); applied_lsn=(some 34) master latest=(some 34) source_epoch=(some 2:f9baadb6-5fa2-499c-b174-445fdeaf4a8f)
+# Waiting for: operator observes applied topology with Pod identity (timeout: 90s)
+#   OK after 0s
+# fault: rejecting 10.244.0.10 ⇄ 10.244.0.12:12121 on flare-e2e-control-plane (both directions)
+# Waiting for: master counts dropped forwarded writes (was 0) (timeout: 120s)
+#   OK after 20s
+# forwarding retries settled at 2 dropped write(s)
+# under the cut: created 10/10, updated 5/5, deleted 5/5; master dropped 2; master latest=54 items=35; replica items=30 applied_lsn=(some 34) (was 34) state=(some disconnected); replica pod uid=2cd65809-e1f8-443f-a877-035b906d85a1 reconstruction_started=1
+# fault cleared: 10.244.0.10 ⇄ 10.244.0.12 forwards again
+# Waiting for: replica applied past the master's position at the cut (54) while following (timeout: 240s)
+#   OK after 0s
+# after heal: resumed from applied_lsn=34 (cut started at 34) → 54 (bar 54); state=(some following) reason=none; wal_applied=(some 7) wal_skipped=(some 70); items master=35 replica=35; reconstruction_started 1→1; pod uid 2cd65809-e1f8-443f-a877-035b906d85a1→2cd65809-e1f8-443f-a877-035b906d85a1
+# Waiting for: operator held the drop as owned by continuous replication (timeout: 60s)
+#   OK after 0s
+# Waiting for: operator closed the owned request by position (timeout: 240s)
+#   OK after 0s
+# Waiting for: ledger persisted as empty (timeout: 60s)
+#   OK after 0s
+# fault: the operator may exec only into the master cont-repl-nodes-0 (rule 5: ["pods/exec"] → ["pods/e2e-revoked-exec"]; added a resourceNames-restricted pods/exec rule)
+# fault: rejecting 10.244.0.10 ⇄ 10.244.0.12:12121 on flare-e2e-control-plane (both directions)
+# Waiting for: master counts dropped writes (was 4) (timeout: 120s)
+#   OK after 20s
+# Waiting for: operator holds the drop as follower-state-unknown (timeout: 150s)
+#   OK after 0s
+# with pods/exec revoked: held-as-unknown=true; ledger holds: follower state unknown (stats unreadable)
+# fault cleared: 10.244.0.10 ⇄ 10.244.0.12 forwards again
+# Waiting for: replica catches up (follower does not depend on the operator's probe) (timeout: 240s)
+#   OK after 10s
+# fault cleared: pods/exec restored
+# Waiting for: once the probe works again the owned request closes by position (timeout: 300s)
+#   OK after 0s
+# after restoring pods/exec: closed=true; reconstruction_started 1→1; pod uid 2cd65809-e1f8-443f-a877-035b906d85a1→2cd65809-e1f8-443f-a877-035b906d85a1
+# Waiting for: no repair entry pending before the bulk operation (timeout: 180s)
+#   OK after 5s
+# flush_all on the master: source_epoch 2:f9baadb6-5fa2-499c-b174-445fdeaf4a8f → 3:78300944-6b18-4b55-8297-40585efcf4a8; master items=0
+# Waiting for: follower declares needs_rebuild (timeout: 90s)
+#   OK after 0s
+# follower: state=(some needs_rebuild) reason=(some epoch_mismatch)
+# Waiting for: operator requests the rebuild (ledger entry for the follower) (timeout: 120s)
+#   OK after 5s
+# request evidence: ledger entry seen=cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121=0/{"kind":"requested"}; follower-declared path=true (false = the drop path won the race); master drops now=6
+# Waiting for: follower reconstructed and follows the new epoch (timeout: 420s)
+#   OK after 20s
+# after the rebuild: reconstruction_started 1→2; state=(some following) epoch=(some 3:78300944-6b18-4b55-8297-40585efcf4a8) (master 3:78300944-6b18-4b55-8297-40585efcf4a8); ledger request observed=true
+# Waiting for: new writes reach the rebuilt follower (timeout: 90s)
+#   OK after 0s
+# Waiting for: ledger persisted as empty (timeout: 180s)
+#   OK after 0s
+# post-flush writes: master=10 replica=10; ledger empty=true; pod uid 2cd65809-e1f8-443f-a877-035b906d85a1→2cd65809-e1f8-443f-a877-035b906d85a1
+# Waiting for: following replica gets balance 50 (timeout: 150s)
+#   OK after 5s
+# with slave=50: replica balance=(some 50) state=(some following)
+# Waiting for: read control succeeds before the cut (timeout: 120s)
+#   OK after 0s
+# fault: rejecting 10.244.0.10 ⇄ 10.244.0.12:12121 on flare-e2e-control-plane (both directions)
+# Waiting for: cut replica is withheld from reads (balance 0) (timeout: 150s)
+#   OK after 10s
+# under the cut: replica balance=(some 0) state=(some disconnected) eligibility-logged=true
+# fault cleared: 10.244.0.10 ⇄ 10.244.0.12 forwards again
+# Waiting for: healed replica is served again (balance 50) (timeout: 240s)
+#   OK after 5s
+# after the heal: replica balance=(some 50) state=(some following)
+# Waiting for: spec restored to slave=0 (timeout: 120s)
+#   OK after 10s
+# Waiting for: replica itself has balance 50 and a caught-up follower (timeout: 150s)
+#   OK after 5s
+# Waiting for: WAL requests actually rejected (timeout: 90s)
+#   OK after 0s
+# Waiting for: forwarded test write is dropped (timeout: 90s)
+#   OK after 20s
+# isolated read guard: local balance=(some 50), cursor=123→(some 123), head=124, forwards=63→(some 63), read=(some from_master)
+# Waiting for: blocked topology is retained for retry (timeout: 90s)
+#   OK after 0s
+# fault cleared: 10.244.0.10 ⇄ 10.244.0.12 forwards again
+# Waiting for: isolated read-guard fault is fully restored (timeout: 240s)
+#   OK after 5s
+# fault: rejecting 10.244.0.10 ⇄ 10.244.0.12:12121 on flare-e2e-control-plane (both directions)
+# Waiting for: cycle 0: master counts a dropped forwarded write (timeout: 90s)
+#   OK after 0s
+# fault cleared: 10.244.0.10 ⇄ 10.244.0.12 forwards again
+# Waiting for: cycle 0: replica converges while following (timeout: 180s)
+#   OK after 5s
+# cycle 0: stored 10/10, drop counted=true, replica resumed from 124 → 134; items master=22 replica=22; converged=true
+# fault: rejecting 10.244.0.10 ⇄ 10.244.0.12:12121 on flare-e2e-control-plane (both directions)
+# Waiting for: cycle 1: master counts a dropped forwarded write (timeout: 90s)
+#   OK after 0s
+# fault cleared: 10.244.0.10 ⇄ 10.244.0.12 forwards again
+# Waiting for: cycle 1: replica converges while following (timeout: 180s)
+#   OK after 0s
+# cycle 1: stored 10/10, drop counted=true, replica resumed from 134 → 146; items master=31 replica=31; converged=true
+# fault: rejecting 10.244.0.10 ⇄ 10.244.0.12:12121 on flare-e2e-control-plane (both directions)
+# Waiting for: cycle 2: master counts a dropped forwarded write (timeout: 90s)
+#   OK after 0s
+# fault cleared: 10.244.0.10 ⇄ 10.244.0.12 forwards again
+# Waiting for: cycle 2: replica converges while following (timeout: 180s)
+#   OK after 0s
+# cycle 2: stored 10/10, drop counted=true, replica resumed from 146 → 158; items master=40 replica=40; converged=true
+# after 3 cycles: content mismatches=[]; reconstruction_started 2→2; pod uid 2cd65809-e1f8-443f-a877-035b906d85a1→2cd65809-e1f8-443f-a877-035b906d85a1; wal_applied=(some 16) forward_applied=(some 91)
+# Waiting for: ledger closes every counted drop by position (timeout: 300s)
+#   OK after 0s
+# fault: rejecting 10.244.0.10 ⇄ 10.244.0.12:12121 on flare-e2e-control-plane (both directions)
+# Waiting for: master counts a dropped forwarded write (timeout: 90s)
+#   OK after 20s
+# Waiting for: operator holds the drop as owned (timeout: 120s)
+#   OK after 10s
+# before the restart: stored 10/10, drop counted=true, ledger holds: owned by continuous replication
+# Waiting for: a new operator pod is Ready (timeout: 180s)
+#   OK after 35s
+# operator restarted (old pod flare-operator-89d7c66df-hknx2); ready=true; ledger after restart: dests=[cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121] holds=owned by continuous replication
+# fault cleared: 10.244.0.10 ⇄ 10.244.0.12 forwards again
+# Waiting for: replica converges while following (timeout: 180s)
+#   OK after 25s
+# Waiting for: the restarted operator closes the entry by position (timeout: 400s)
+#   OK after 0s
+# after the heal: converged=true; ledger empty=true; reconstruction_started 2→2; pod uid 2cd65809-e1f8-443f-a877-035b906d85a1→2cd65809-e1f8-443f-a877-035b906d85a1
+# fault: rejecting 10.244.0.10 ⇄ 10.244.0.12:12121 on flare-e2e-control-plane (both directions)
+# fault cleared: 10.244.0.10 ⇄ 10.244.0.12 forwards again
+# backlog: stored 300/300, updated 5/5, deleted 5/5 under the cut (master latest 478, replica applied 168); healed; killed=1
+
+# Waiting for: replica container restarted (restartCount +1) and Ready (timeout: 240s)
+#   OK after 10s
+# after the kill: restartCount 0→1; ready-again=true; pod uid 2cd65809-e1f8-443f-a877-035b906d85a1→2cd65809-e1f8-443f-a877-035b906d85a1
+# Waiting for: replica follows again and matches the master's items (timeout: 420s)
+#   OK after 0s
+# after the restart: state=(some following) applied=(some 478) (master latest (some 478)); items master=345 replica=345; new process: reconstruction_completed=1 wal_fallback_to_dump=0 wal_applied=(some 0)
+# Waiting for: ledger closes the drops counted under the cut (timeout: 300s)
+#   OK after 0s
+# deleted master pod cont-repl-nodes-0 (graceful, preStop 30s); follower cont-repl-nodes-1 was following epoch 3:78300944-6b18-4b55-8297-40585efcf4a8
+# Waiting for: the follower is promoted to master (drain) (timeout: 180s)
+#   OK after 35s
+# promotion: follower promoted=true; drain logged=false; drain blocked (guard refused)=false; NOT LOSS-FREE logged=false; new master epoch=(some 4:22ab19ec-5b56-4366-a40e-2c2208e59301)
+# Waiting for: the promoted node advances its source epoch (timeout: 120s)
+#   OK after 0s
+# Waiting for: ex-master returns, rebuilds and follows the new epoch (timeout: 480s)
+#   OK after 5s
+# ex-master cont-repl-nodes-0: state=(some following) epoch=(some 4:22ab19ec-5b56-4366-a40e-2c2208e59301) (new master 4:22ab19ec-5b56-4366-a40e-2c2208e59301); items new-master=345 ex-master=345
+# Waiting for: new writes reach the ex-master as a follower (timeout: 90s)
+#   OK after 0s
+# Waiting for: newcomer follows (timeout: 300s)
+#   OK after 0s
+# Waiting for: newcomer's local items match the master's (timeout: 180s)
+#   OK after 0s
+# newcomer cont-repl-nodes-2: 10 batches of 20 written during its copy; state=(some following) epoch=(some 4:22ab19ec-5b56-4366-a40e-2c2208e59301) (master (some 4:22ab19ec-5b56-4366-a40e-2c2208e59301)); items master=555 newcomer=555; reconstruction_completed=(some 1) wal_applied=(some 0)
+# fault cleared: 10.244.0.12 ⇄ 10.244.0.16 forwards again
+# Cleaning up cluster 'cont-repl'
+# === Suite: continuous-replication-scale ===
+# FLARE_E2E_SCALE_KEYS unset: the scale evaluation deploys nothing and its tests are skipped
+# === Suite: continuous-replication-sustained ===
+# FLARE_E2E_SUSTAINED unset: the sustained-load evaluation deploys nothing and its tests are skipped
+# === Suite: continuous-replication-outage ===
+# Deploying cluster 'cont-repl-outage' in namespace 'flare-cont-repl-outage'
+# Waiting for: namespace flare-cont-repl-outage not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-cont-repl-outage (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap cont-repl-outage-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting 50s grace period for operator reconciliation...
+# Waiting for: replica following (timeout: 120s)
+#   OK after 0s
+# before the cut: WAL live=0kB archive=8kB sst=1 data=4196kB RSS=33804kB; applied=4
+# fault: rejecting 10.244.0.22 ⇄ 10.244.0.24:12121 on flare-e2e-control-plane (both directions)
+# under the cut, after 50 MB: WAL live=72092kB archive=8kB sst=1 data=76288kB RSS=134736kB; master latest=1004
+# under the cut, after 100 MB: WAL live=72092kB archive=62400kB sst=2 data=201092kB RSS=175384kB; master latest=2004
+# under the cut, after 150 MB: WAL live=72092kB archive=124792kB sst=3 data=325896kB RSS=237176kB; master latest=3004
+# phase A written: 3000 keys (~150 MB); master latest=3004; replica applied=(some 4) state=disconnected; high-water: WAL live=72092kB archive=124792kB sst=3 data=325896kB RSS=237176kB
+# fault cleared: 10.244.0.22 ⇄ 10.244.0.24 forwards again
+# Waiting for: follower catches up FROM ITS CURSOR to the master's head with equal items (timeout: 900s)
+#   OK after 10s
+# phase A heal: caught up=true in 11s; state=following reason=; applied 4→3004 (head 3004); items master=3000 replica=3000; reconstruction_started 1→1; wal_applied=(some 16) wal_skipped=(some 3041); master after: WAL live=72092kB archive=124792kB sst=3 data=325904kB RSS=237928kB; master restarts 0→0
+# Waiting for: no repair entry pending (timeout: 180s)
+#   OK after 0s
+# fault: rejecting 10.244.0.22 ⇄ 10.244.0.24:12121 on flare-e2e-control-plane (both directions)
+# under the cut, after 50 MB: WAL live=72092kB archive=187184kB sst=4 data=450708kB RSS=275080kB; master latest=4004
+# under the cut, after 100 MB: WAL live=72092kB archive=187184kB sst=4 data=450708kB RSS=276256kB; master latest=5004
+# under the cut, after 150 MB: WAL live=72092kB archive=249576kB sst=5 data=575516kB RSS=276808kB; master latest=6004
+# under the cut, after 200 MB: WAL live=72092kB archive=311968kB sst=2 data=700284kB RSS=300696kB; master latest=7004
+# under the cut, after 250 MB: WAL live=72092kB archive=374360kB sst=3 data=825088kB RSS=368136kB; master latest=8004
+# under the cut, after 300 MB: WAL live=72092kB archive=436752kB sst=4 data=949896kB RSS=469692kB; master latest=9004
+# under the cut, after 350 MB: WAL live=72092kB archive=436752kB sst=4 data=949896kB RSS=514856kB; master latest=10004
+# under the cut, after 400 MB: WAL live=72092kB archive=499144kB sst=5 data=1074704kB RSS=555984kB; master latest=11004
+# phase B written: 8000 keys (~400 MB); master latest=11004; replica applied=3004; high-water: WAL live=72092kB archive=499144kB sst=5 data=1074704kB RSS=555984kB
+# Waiting for: archived WAL falls under the 256 MB cap while the replica is still cut (timeout: 1200s)
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074704kB RSS=555984kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074712kB RSS=555988kB
+# purge watch: archive=499144kB data=1074716kB RSS=555988kB
+# purge watch: archive=499144kB data=1074716kB RSS=555988kB
+# purge watch: archive=499144kB data=1074716kB RSS=555988kB
+# purge watch: archive=499144kB data=1074716kB RSS=555988kB
+# purge watch: archive=499144kB data=1074716kB RSS=555988kB
+# purge watch: archive=499144kB data=1074716kB RSS=555988kB
+# purge watch: archive=499144kB data=1074716kB RSS=555988kB
+# purge watch: archive=499144kB data=1074716kB RSS=555988kB
+# purge watch: archive=499144kB data=1074716kB RSS=555988kB
+# purge watch: archive=499144kB data=1074716kB RSS=555988kB
+# purge watch: archive=499144kB data=1074716kB RSS=555988kB
+# purge watch: archive=499144kB data=1074716kB RSS=555988kB
+# purge watch: archive=499144kB data=1074716kB RSS=555988kB
+# purge watch: archive=499144kB data=1074716kB RSS=555988kB
+# purge watch: archive=499144kB data=1074716kB RSS=555988kB
+# purge watch: archive=499144kB data=1074716kB RSS=555988kB
+# purge watch: archive=499144kB data=1074716kB RSS=555988kB
+# purge watch: archive=499144kB data=1074716kB RSS=555988kB
+# purge watch: archive=499144kB data=1074716kB RSS=555988kB
+# purge watch: archive=499144kB data=1074716kB RSS=555988kB
+# purge watch: archive=499144kB data=1074716kB RSS=555988kB
+# purge watch: archive=499144kB data=1074716kB RSS=555988kB
+# purge watch: archive=499144kB data=1074716kB RSS=555988kB
+# purge watch: archive=499144kB data=1074716kB RSS=555988kB
+# purge watch: archive=499144kB data=1074716kB RSS=555988kB
+#   TIMEOUT after 1200s waiting for: archived WAL falls under the 256 MB cap while the replica is still cut
+# purge watch ended after 1312s: under cap=false; archive now=499144kB (high-water 499144kB, cap 262144kB)
+# fault cleared: 10.244.0.22 ⇄ 10.244.0.24 forwards again
+# Waiting for: follower declares needs_rebuild with reason lsn_purged (timeout: 300s)
+#   TIMEOUT after 300s waiting for: follower declares needs_rebuild with reason lsn_purged
+# phase B heal: declared lsn_purged=false; state=following reason=; applied=(some 11004) (head 11004); archive now=499144kB
+#   reason: the WAL past the 256 MB cap was still served: the follower caught up from 3004 instead of being told lsn_purged (archive under cap before the heal=false after 1312s; high-water 499144 kB)
+# --- diagnostics for failing suite 'continuous-replication-outage' ---
+# Cleaning up cluster 'cont-repl-outage'
+# Tests: 20, Failures: 1
+# RESULT: FAIL
+1..20
+ok 1 - precondition: both flags are on for every node and the replica's read balance is 0
+ok 2 - normal following: writes reach the replica and its follower reports following
+ok 3 - cut: create, update and delete on the master while the replica is unreachable; then new writes stop
+ok 4 - heal: with NO new writes the replica catches up from its position — no rebuild, no pod recreation
+ok 5 - ledger: the counted drop was HELD under the follower's ownership and CLOSED without a demotion
+ok 6 - operator stats fetch failure: a drop whose follower cannot be probed is held as Unknown, never demoted, and closes when the probe returns
+ok 7 - bulk operation: flush_all on the master advances the epoch; the follower declares needs_rebuild; the operator rebuilds it; it follows the new epoch
+ok 8 - read eligibility: a following replica gets the spec's slave balance; a cut replica is withheld to 0; healing restores it
+ok 9 - local read guard: stale positive balance proxies a missing value to the master while WAL remains blocked
+ok 10 - repeated cuts: three cut/write/heal cycles converge from the position each time; no rebuild, no pod recreation
+ok 11 - operator restart during a cut: the owned hold survives the restart; the follower catches up; the entry closes; no rebuild
+ok 12 - replica crash with a backlog pending: flared killed -9 after the heal; restarts on its PVC, converges without a full dump; pod not recreated
+ok 13 - planned promotion: the master pod is deleted (graceful drain); the proven follower is promoted through the gate, its epoch advances; the returning ex-master rebuilds and follows the new epoch
+ok 14 - initial copy under load: a third replica joins by snapshot while writes flow, then follows and matches
+ok 15 - scale: load FLARE_E2E_SCALE_KEYS keys (pipelined) and let the follower converge # SKIP FLARE_E2E_SCALE_KEYS unset (evaluation only)
+ok 16 - scale: exact key scan at open (kill -9 on the PVC-backed replica) — duration recorded # SKIP FLARE_E2E_SCALE_KEYS unset (evaluation only)
+ok 17 - scale: operator probe cost at this size — recorded from the operator's own timing lines # SKIP FLARE_E2E_SCALE_KEYS unset (evaluation only)
+ok 18 - sustained load: does the follow stream keep up at a steady write rate, and do WAL/RSS/disk stay bounded until it does? (evaluation) # SKIP FLARE_E2E_SUSTAINED unset (evaluation only)
+ok 19 - outage phase A: ~150 MB written while cut under a 256 MB WAL cap — several flushes, WAL retained; on healing the follower catches up from its cursor (no rebuild); disk/RSS high-water recorded
+not ok 20 - outage phase B: ~400 MB written while cut, past the 256 MB WAL cap — archived WAL purged; the follower declares needs_rebuild/lsn_purged, is rebuilt and converges; disk/RSS high-water recorded

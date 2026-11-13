@@ -1,0 +1,30 @@
+{{- if .Values.operator.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "flare-operator.fullname" . }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "flare-operator.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.targetPort }}
+      protocol: TCP
+      name: flare-index
+    - port: {{ .Values.metricsPort }}
+      targetPort: metrics
+      protocol: TCP
+      name: metrics
+    - port: {{ .Values.healthPort }}
+      targetPort: health
+      protocol: TCP
+      name: health
+  selector:
+    {{- include "flare-operator.selectorLabels" . | nindent 4 }}
+    # Only the elected leader runs the TCP index server; it labels its own
+    # pod on lease acquisition (and resets to standby on boot/step-down).
+    flare.gree.net/role: leader
+
+{{- end }}

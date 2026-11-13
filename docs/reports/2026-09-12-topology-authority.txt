@@ -1,0 +1,81 @@
+# topology-authority E2E — tested revision ca56b0e (operator image flare-operator:test built from this tree; flare-node:test built from the branch base, the suite does not depend on flared changes)
+# host: local kind cluster flare-e2e (single node, arm64), harness operator memory limit 1Gi
+# command: cd flare_operator && .lake/build/bin/flare_e2e --filter topology-authority
+# === Suite: topology-authority ===
+# Cleaning up cluster 'topo-auth'
+# Deploying cluster 'topo-auth' in namespace 'flare-topo-auth'
+# Waiting for: namespace flare-topo-auth not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-topo-auth (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap topo-auth-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet topo-auth-nodes to be ready...
+# Waiting for: all 2 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 2 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 50s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator) ---
+#   [DEBUG] Sending response: NODE topo-auth-nodes-1.topo-auth-nodes.flare-topo-auth.svc.cluster.local 12121 2 0 -1 100 17 | NODE topo-auth-nodes-0.topo-auth-nodes.flare-topo-auth.svc.cluster.local 12121 0 0 0 100 16 | END | 
+#   [DEBUG] Received command: meta
+#   [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.Meta
+#   [TRACE] Event: Meta | CRD partitions=1 replicas=2 | State partitionSize=1024 | Returning partition-size 1024
+#   [flare-operator] grace period: 22 cycles remaining
+#   [DEBUG] Received command: node sync
+#   [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+#   [DEBUG] Sending response: NODE topo-auth-nodes-1.topo-auth-nodes.flare-topo-auth.svc.cluster.local 12121 1 1 0 0 17 | NODE topo-auth-nodes-0.topo-auth-nodes.flare-topo-auth.svc.cluster.local 12121 0 0 0 100 16 | END | 
+#   [flare-operator] topology changed (v4294967298 → v4294967303), broadcasting
+#   [TopologyBroadcast] Broadcasting node sync v4294967303 (2 nodes) to 2 pods
+#   [DEBUG] Received command: node state topo-auth-nodes-1.topo-auth-nodes.flare-topo-auth.svc.cluster.local 12121 active
+#   [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeState
+#     "topo-auth-nodes-1.topo-auth-nodes.flare-topo-auth.svc.cluster.local"
+#     12121
+#     (FlareOperator.K8s.FlareSta
+#   [TRACE] Event: NodeState topo-auth-nodes-1.topo-auth-nodes.flare-topo-auth.svc.cluster.local:12121 | Result: Prepare->Active | Reason: reconstruction complete
+#   [TcpClient] Sent node sync v4294967303 (2 nodes) to 10.244.0.27:12121
+#   [TcpClient] Sent node sync v4294967303 (2 nodes) to 10.244.0.28:12121
+#   [TopologyBroadcast] Broadcast complete (v4294967303)
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 6965ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 21 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 4613ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 20 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 4605ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 19 cycles remaining
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 11799ms (nodes=2 M=1 S=1 D=0 P=0)
+#   
+# pushing a mutated map to topo-auth-nodes-0 at stale version 4294967302 (its current version is 4294967303)
+# pass held at the pre-send point with version 4294967305
+# pass held at the pre-send point with version 4294967306; taking the lease away now
+# lease deleted to restore authority: lease.coordination.k8s.io "topo-auth-operator-lease" deleted from flare-topo-auth namespace
+# Waiting for: operator container restarted after losing the lease (timeout: 180s)
+#   OK after 0s
+# Waiting for: restarted operator acquired the lease (timeout: 120s)
+#   OK after 5s
+# Waiting for: topology re-applied after leadership is restored (timeout: 240s)
+#   OK after 5s
+# pass held at the pre-send point with version 4294967307; deleting the lease so the read fails
+# Waiting for: the withheld topology is retried by the same process (timeout: 180s)
+#   OK after 15s
+# Waiting for: topology re-applied after the lease is recreated (timeout: 240s)
+#   OK after 0s
+# Cleaning up cluster 'topo-auth'
+# Tests: 4, Failures: 0
+# RESULT: PASS
+1..4
+ok 1 - flared rejects a topology push carrying a stale version
+ok 2 - control: holding the lease, the stopped pass does broadcast
+ok 3 - lease taken by another identity: the pass fences, the process exits, and the restarted leader re-applies the topology
+ok 4 - lease unreadable: the stopped pass fails closed and does not send
+EXIT=0

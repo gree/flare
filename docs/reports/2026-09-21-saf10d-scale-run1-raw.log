@@ -1,0 +1,50 @@
+# === Suite: continuous-replication-scale ===
+# Deploying cluster 'cont-repl-scale' in namespace 'flare-cont-repl-scale'
+# Waiting for: namespace flare-cont-repl-scale not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-cont-repl-scale (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap cont-repl-scale-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting 50s grace period for operator reconciliation...
+# chunk at 1300000 failed: kubectl failed (exit 1): command terminated with exit code 1
+
+# chunk at 1400000 failed: kubectl failed (exit 1): command terminated with exit code 1
+
+# chunk at 1500000 failed: kubectl failed (exit 1): command terminated with exit code 1
+
+# chunk at 1600000 failed: kubectl failed (exit 1): command terminated with exit code 1
+
+# chunk at 1700000 failed: kubectl failed (exit 1): command terminated with exit code 1
+
+# chunk at 1800000 failed: kubectl failed (exit 1): command terminated with exit code 1
+
+# chunk at 1900000 failed: kubectl failed (exit 1): command terminated with exit code 1
+
+# Waiting for: follower converges at scale (timeout: 1800s)
+#   TIMEOUT after 1800s waiting for: follower converges at scale
+# scale load: 1223165/2000000 STORED in 150655 ms; master items=797756 replica=797756; follower converged=false 5118031 ms after the load ended; applied=(some 142549) wal_applied=(some 0) forward_applied=(some 797756)
+#   reason: loaded only 1223165/2000000
+# killed=1
+# Waiting for: replica restarted and Ready (timeout: 600s)
+#   OK after 15s
+# Waiting for: follower following again with equal items (timeout: 900s)
+#   OK after 0s
+# boot scan: [140737454126464][NTC][storage_rocksdb.cc:598-open] curr_items seeded by an exact scan: 797756 live key(s) in 854 ms
+# after the restart: ready=true; following+equal=true; items master=797756 replica=797756; wal_fallback_to_dump=(some 0) reconstruction_completed=(some 1)
+# probe timing lines: 179; max 5452 ms; 'reconcile slow' lines: 182; last: tor] continuous-replication probe: 1 stats read(s) in 961ms (tick 181; in-mode remembered: 2, out-of-mode remembered: 0)
+# --- diagnostics for failing suite 'continuous-replication-scale' ---
+# Cleaning up cluster 'cont-repl-scale'
+# Tests: 3, Failures: 1
+# RESULT: FAIL
+1..3
+not ok 1 - scale: load FLARE_E2E_SCALE_KEYS keys (pipelined) and let the follower converge
+ok 2 - scale: exact key scan at open (kill -9 on the PVC-backed replica) — duration recorded
+ok 3 - scale: operator probe cost at this size — recorded from the operator's own timing lines
+EXIT=1

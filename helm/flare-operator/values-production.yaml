@@ -1,0 +1,65 @@
+# Production values for flare-operator.
+# This is an example of production-ready configuration.
+
+# High availability with 3 replicas
+replicaCount: 3
+
+image:
+  repository: your-registry/flare-operator
+  pullPolicy: IfNotPresent
+  tag: "v0.1.0"
+
+# Use image pull secrets if your registry requires authentication
+imagePullSecrets:
+  - name: registry-secret
+
+namespace: flare-system
+
+clusterName: "production"
+
+# Production resource limits
+resources:
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+  requests:
+    cpu: 200m
+    memory: 256Mi
+
+# Anti-affinity to spread replicas across nodes
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - flare-operator
+          topologyKey: kubernetes.io/hostname
+
+# Tolerations for dedicated nodes
+tolerations:
+  - key: "flare-operator"
+    operator: "Equal"
+    value: "true"
+    effect: "NoSchedule"
+
+# Node selector for dedicated nodes
+nodeSelector:
+  workload: flare-operator
+
+# Additional environment variables
+env:
+  - name: LOG_LEVEL
+    value: "info"
+  - name: RECONCILE_INTERVAL
+    value: "5s"
+
+# Add Prometheus scrape annotations
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "8081"
+  prometheus.io/path: "/metrics"

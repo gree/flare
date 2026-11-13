@@ -1,0 +1,76 @@
+# === Suite: continuous-replication-sustained ===
+# Deploying cluster 'cont-repl-sustained' in namespace 'flare-cont-repl-sustained'
+# Waiting for: namespace flare-cont-repl-sustained not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-cont-repl-sustained (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap cont-repl-sustained-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting 50s grace period for operator reconciliation...
+# Waiting for: replica following (timeout: 120s)
+#   OK after 0s
+# T17 300/s window 0: get latency replica [no nanosecond clock in the debug pod] master [no nanosecond clock in the debug pod]; reconcile 4 passes, mean 2209.000000ms; lease age 0s
+# sustain 300/s window 0: state=following lag=0 (head 9004, applied 9004) items master=9000 replica=9000 master RSS=37976kB WAL=72092kB data=76296kB replica RSS=36040kB tombstones=0 wal_skipped=9169
+# T17 300/s window 1: get latency replica [no nanosecond clock in the debug pod] master [no nanosecond clock in the debug pod]; reconcile 4 passes, mean 2214.000000ms; lease age 1s
+# sustain 300/s window 1: state=following lag=0 (head 18004, applied 18004) items master=18000 replica=18000 master RSS=39208kB WAL=72092kB data=76312kB replica RSS=37868kB tombstones=0 wal_skipped=18340
+# T17 300/s window 2: get latency replica [no nanosecond clock in the debug pod] master [no nanosecond clock in the debug pod]; reconcile 4 passes, mean 2157.000000ms; lease age 3s
+# sustain 300/s window 2: state=following lag=0 (head 27004, applied 27004) items master=27000 replica=27000 master RSS=42316kB WAL=72092kB data=76324kB replica RSS=39708kB tombstones=0 wal_skipped=27485
+# T17 300/s window 3: get latency replica [no nanosecond clock in the debug pod] master [no nanosecond clock in the debug pod]; reconcile 4 passes, mean 2240.000000ms; lease age 5s
+# sustain 300/s window 3: state=following lag=0 (head 36004, applied 36004) items master=36000 replica=36000 master RSS=45668kB WAL=72092kB data=76336kB replica RSS=41528kB tombstones=0 wal_skipped=36056
+# T17 300/s window 4: get latency replica [no nanosecond clock in the debug pod] master [no nanosecond clock in the debug pod]; reconcile 4 passes, mean 2282.000000ms; lease age 6s
+# sustain 300/s window 4: state=following lag=0 (head 45004, applied 45004) items master=45000 replica=45000 master RSS=46204kB WAL=72092kB data=76348kB replica RSS=43380kB tombstones=0 wal_skipped=42289
+# T17 300/s window 5: get latency replica [no nanosecond clock in the debug pod] master [no nanosecond clock in the debug pod]; reconcile 4 passes, mean 2458.000000ms; lease age 7s
+# sustain 300/s window 5: state=following lag=0 (head 54004, applied 54004) items master=54000 replica=54000 master RSS=46916kB WAL=72092kB data=76360kB replica RSS=45212kB tombstones=0 wal_skipped=51453
+# T17 300/s window 6: get latency replica [no nanosecond clock in the debug pod] master [no nanosecond clock in the debug pod]; reconcile 4 passes, mean 2370.000000ms; lease age 7s
+# sustain 300/s window 6: state=following lag=0 (head 63004, applied 63004) items master=63000 replica=63000 master RSS=47628kB WAL=72092kB data=76372kB replica RSS=47044kB tombstones=0 wal_skipped=60619
+# T17 300/s window 7: get latency replica [no nanosecond clock in the debug pod] master [no nanosecond clock in the debug pod]; reconcile 4 passes, mean 2283.000000ms; lease age 1s
+# sustain 300/s window 7: state=following lag=0 (head 72004, applied 72004) items master=72000 replica=72000 master RSS=48348kB WAL=72092kB data=76388kB replica RSS=48872kB tombstones=0 wal_skipped=69784
+# sustain 300/s: 300/s: lag first-minute max 0, last-minute max 0 → KEPT UP (bounded)
+# T17 900/s window 0: get latency replica [no nanosecond clock in the debug pod] master [no nanosecond clock in the debug pod]; reconcile 4 passes, mean 2311.000000ms; lease age 3s
+# sustain 900/s window 0: state=following lag=0 (head 99004, applied 99004) items master=99000 replica=99000 master RSS=54940kB WAL=72092kB data=76404kB replica RSS=54352kB tombstones=0 wal_skipped=96975
+# T17 900/s window 1: get latency replica [no nanosecond clock in the debug pod] master [no nanosecond clock in the debug pod]; reconcile 4 passes, mean 2370.000000ms; lease age 3s
+# sustain 900/s window 1: state=following lag=0 (head 126004, applied 126004) items master=126000 replica=126000 master RSS=57840kB WAL=72092kB data=76416kB replica RSS=59808kB tombstones=0 wal_skipped=124159
+# T17 900/s window 2: get latency replica [no nanosecond clock in the debug pod] master [no nanosecond clock in the debug pod]; reconcile 4 passes, mean 2381.000000ms; lease age 4s
+# sustain 900/s window 2: state=following lag=0 (head 153004, applied 153004) items master=153000 replica=153000 master RSS=63132kB WAL=72092kB data=76428kB replica RSS=65316kB tombstones=0 wal_skipped=151339
+# T17 900/s window 3: get latency replica [no nanosecond clock in the debug pod] master [no nanosecond clock in the debug pod]; reconcile 4 passes, mean 2455.000000ms; lease age 5s
+# sustain 900/s window 3: state=following lag=0 (head 180004, applied 180004) items master=180000 replica=180000 master RSS=63308kB WAL=72092kB data=76444kB replica RSS=70804kB tombstones=0 wal_skipped=178515
+# T17 900/s window 4: get latency replica [no nanosecond clock in the debug pod] master [no nanosecond clock in the debug pod]; reconcile 4 passes, mean 2492.000000ms; lease age 5s
+# sustain 900/s window 4: state=following lag=0 (head 207004, applied 207004) items master=207000 replica=207000 master RSS=69756kB WAL=72092kB data=76456kB replica RSS=76264kB tombstones=0 wal_skipped=205683
+# T17 900/s window 5: get latency replica [no nanosecond clock in the debug pod] master [no nanosecond clock in the debug pod]; reconcile 4 passes, mean 2800.000000ms; lease age 5s
+# sustain 900/s window 5: state=following lag=0 (head 234004, applied 234004) items master=234000 replica=234000 master RSS=79784kB WAL=72092kB data=76468kB replica RSS=81724kB tombstones=0 wal_skipped=232847
+# T17 900/s window 6: get latency replica [no nanosecond clock in the debug pod] master [no nanosecond clock in the debug pod]; reconcile 4 passes, mean 2557.000000ms; lease age 5s
+# sustain 900/s window 6: state=following lag=0 (head 261004, applied 261004) items master=261000 replica=261000 master RSS=80712kB WAL=72092kB data=76480kB replica RSS=87236kB tombstones=0 wal_skipped=260008
+# T17 900/s window 7: get latency replica [no nanosecond clock in the debug pod] master [no nanosecond clock in the debug pod]; reconcile 4 passes, mean 2729.000000ms; lease age 5s
+# sustain 900/s window 7: state=following lag=0 (head 288004, applied 288004) items master=288000 replica=288000 master RSS=80800kB WAL=72092kB data=76492kB replica RSS=92728kB tombstones=0 wal_skipped=287161
+# sustain 900/s: 900/s: lag first-minute max 0, last-minute max 0 → KEPT UP (bounded)
+# T17 2000/s window 0: get latency replica [no nanosecond clock in the debug pod] master [no nanosecond clock in the debug pod]; reconcile 4 passes, mean 2915.000000ms; lease age 4s
+# sustain 2000/s window 0: state=following lag=30675 (head 348004, applied 317329) items master=348000 replica=348000 master RSS=88608kB WAL=72092kB data=76500kB replica RSS=103460kB tombstones=0 wal_skipped=318907
+# T17 2000/s window 1: get latency replica [no nanosecond clock in the debug pod] master [no nanosecond clock in the debug pod]; reconcile 3 passes, mean 3225.000000ms; lease age 3s
+# sustain 2000/s window 1: state=following lag=62370 (head 408004, applied 345634) items master=408000 replica=408000 master RSS=96056kB WAL=72092kB data=76516kB replica RSS=114056kB tombstones=0 wal_skipped=347835
+# T17 2000/s window 2: get latency replica [no nanosecond clock in the debug pod] master [no nanosecond clock in the debug pod]; reconcile 3 passes, mean 3558.000000ms; lease age 0s
+# sustain 2000/s window 2: state=following lag=93555 (head 468004, applied 374449) items master=468000 replica=468000 master RSS=97424kB WAL=72092kB data=76524kB replica RSS=124648kB tombstones=0 wal_skipped=376507
+# T17 2000/s window 3: get latency replica [no nanosecond clock in the debug pod] master [no nanosecond clock in the debug pod]; reconcile 4 passes, mean 3393.000000ms; lease age 8s
+# sustain 2000/s window 3: state=following lag=126525 (head 528004, applied 401479) items master=528000 replica=528000 master RSS=110788kB WAL=72092kB data=76532kB replica RSS=74984kB tombstones=0 wal_skipped=403643
+# T17 2000/s window 4: get latency replica [no nanosecond clock in the debug pod] master [no nanosecond clock in the debug pod]; reconcile 4 passes, mean 3454.000000ms; lease age 6s
+# sustain 2000/s window 4: state=following lag=161535 (head 588004, applied 426469) items master=588000 replica=588000 master RSS=111252kB WAL=72092kB data=76540kB replica RSS=85720kB tombstones=0 wal_skipped=428479
+# T17 2000/s window 5: get latency replica [no nanosecond clock in the debug pod] master [no nanosecond clock in the debug pod]; reconcile 4 passes, mean 3195.000000ms; lease age 5s
+# sustain 2000/s window 5: state=following lag=198075 (head 648004, applied 449929) items master=648000 replica=648000 master RSS=118652kB WAL=72092kB data=76544kB replica RSS=96372kB tombstones=0 wal_skipped=452283
+# T17 2000/s window 6: get latency replica [no nanosecond clock in the debug pod] master [no nanosecond clock in the debug pod]; reconcile 3 passes, mean 3581.000000ms; lease age 3s
+# sustain 2000/s window 6: state=following lag=235635 (head 708004, applied 472369) items master=708000 replica=708000 master RSS=129108kB WAL=72092kB data=76552kB replica RSS=106960kB tombstones=0 wal_skipped=474811
+# T17 2000/s window 7: get latency replica [no nanosecond clock in the debug pod] master [no nanosecond clock in the debug pod]; reconcile 3 passes, mean 3660.000000ms; lease age 1s
+# sustain 2000/s window 7: state=following lag=274215 (head 768004, applied 493789) items master=768000 replica=768000 master RSS=131916kB WAL=72092kB data=76556kB replica RSS=117456kB tombstones=0 wal_skipped=497595
+# sustain 2000/s: 2000/s: lag first-minute max 62370, last-minute max 274215 → FELL BEHIND (growing)
+# Waiting for: follow stream drains the backlog after the load stops (timeout: 1200s)
+#   OK after 200s
+# sustained summary: 300/s: lag first-minute max 0, last-minute max 0 → KEPT UP (bounded) | 900/s: lag first-minute max 0, last-minute max 0 → KEPT UP (bounded) | 2000/s: lag first-minute max 62370, last-minute max 274215 → FELL BEHIND (growing); drained after the load stopped=true in 267s; master RSS 33728→131916 kB; WAL 72092 kB; data 76640 kB; items master=768000 replica=768000; master restarts 0→0; reconstruction_started 1→1; wal_applied=(some 3557) wal_skipped=(some 769059) forward_applied=(some 764443)
+# Cleaning up cluster 'cont-repl-sustained'
+# Tests: 1, Failures: 0
+# RESULT: PASS
+1..1
+ok 1 - sustained load: does the follow stream keep up at a steady write rate, and do WAL/RSS/disk stay bounded until it does? (evaluation)

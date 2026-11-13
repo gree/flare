@@ -1,0 +1,70 @@
+# flare-tools (ruby: flare-stats / flare-admin) as an ephemeral debug image.
+#
+# The classic operational view of a flare cluster:
+#   kubectl debug -it <operator-pod> --image=ghcr.io/gree/flare-tools:<tag> \
+#     --target=flare-operator -- flare-stats
+# (an ephemeral container shares the pod's network namespace, so the default
+#  index server 127.0.0.1:12120 is the operator itself), or as a one-off pod:
+#   kubectl run flare-stats --rm -it --image=... -- \
+#     flare-stats --index-server=<release>-flare-operator.<ns>.svc --index-server-port=12120
+#
+# NOTE: use READ-ONLY commands only (flare-stats, flare-admin list/ping).
+# flare-admin's mutating subcommands (master/slave/balance/reconstruct/down)
+# fight the operator's reconcile loop, which owns role assignment here.
+#
+# ruby:2.7 on purpose: the flare-tools gem predates ruby 3's breaking changes.
+# The gem pulls in the `tokyocabinet` native extension, hence the build-deps
+# dance (installed, used for the gem build, then removed to keep the image small).
+FROM ruby:2.7-slim
+
+# Debian bullseye (what ruby:2.7-slim is built on) reached EOL: its packages
+# moved off deb.debian.org to archive.debian.org (404 on every .deb) and the
+# Release files there are permanently past Valid-Until. Both have to be
+# handled or this image cannot build at all.
+#
+# There is no non-EOL base available: ruby 2.7 never got a bookworm variant,
+# and the flare-tools gem predates ruby 3's breaking changes (see the note
+# above), so bumping the base image means losing the tool.
+#
+# Check-Valid-Until=false disables only the EXPIRY check — package signatures
+# are still verified, so this accepts "this suite stopped being refreshed",
+# not "install anything unsigned".
+#
+# bullseye-security and bullseye-updates are dropped rather than redirected:
+# neither is published on the archive (the security suite 404s there), and
+# both stopped receiving anything at EOL, so they carry nothing the frozen
+# main archive lacks. Everything installed is either purged in the same layer
+# or is a runtime lib for a read-only debug tool that never sits in the
+# serving path. Revisit if flare-tools is ever ported to a supported ruby.
+RUN sed -i -e 's|http://deb.debian.org|http://archive.debian.org|g' \
+           -e '/-security/d' \
+           -e '/bullseye-updates/d' \
+           /etc/apt/sources.list \
+    && apt-get -o Acquire::Check-Valid-Until=false update \
+    && apt-get install -y --no-install-recommends \
+         build-essential libtokyocabinet-dev zlib1g-dev libbz2-dev netcat-openbsd \
+    && gem install flare-tools --no-document \
+    && apt-get purge -y build-essential libtokyocabinet-dev zlib1g-dev libbz2-dev \
+    && apt-get install -y --no-install-recommends libtokyocabinet9 \
+    && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/* \
+    # Upstream gem bug: `threads.has_key?(k) || threads[k].has_key?(...)` —
+    # the || should be && (crashes with NoMethodError on nil when the index
+    # returns no `stats threads` entry for a node, which this operator
+    # legitimately does). Real flarei always returned an entry per node, so
+    # the short-circuit hid it. One-line patch in the installed gem.
+    && sed -i "s/threads.has_key?(k) || threads\[k\].has_key?('behind')/threads.has_key?(k) \&\& threads[k].has_key?('behind')/" \
+         /usr/local/bundle/gems/flare-tools-0.7.3/lib/flare/tools/cli/stats.rb \
+    # Same unguarded-nil in enqueueing_node_stats: the exception was rescued
+    # and swallowed the whole per-node stats fetch (items/conn/version all
+    # rendered empty).
+    && sed -i "s/behind = threads\[hostname_port\].has_key?('behind')/behind = threads.has_key?(hostname_port) \&\& threads[hostname_port].has_key?('behind')/" \
+         /usr/local/bundle/gems/flare-tools-0.7.3/lib/flare/tools/cli/stats.rb \
+    && grep -c "threads.has_key?(k) && threads\[k\]" /usr/local/bundle/gems/flare-tools-0.7.3/lib/flare/tools/cli/stats.rb \
+    && ruby -c /usr/local/bundle/gems/flare-tools-0.7.3/lib/flare/tools/cli/stats.rb >/dev/null \
+    # sanity: the gem loads (NOTE --help exits 1 by design in this old CLI)
+    && flare-stats --help 2>&1 | grep -q "Flare-tools version"
+
+# No entrypoint: kubectl debug/run passes the command.
+ENTRYPOINT []
+CMD ["flare-stats", "--help"]

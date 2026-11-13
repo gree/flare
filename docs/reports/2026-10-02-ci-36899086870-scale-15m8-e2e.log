@@ -1,0 +1,1405 @@
+# === Suite: continuous-replication ===
+# Cleaning up cluster 'cont-repl'
+# Deploying cluster 'cont-repl' in namespace 'flare-cont-repl'
+# Waiting for: namespace flare-cont-repl not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-cont-repl (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap cont-repl-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet cont-repl-nodes to be ready...
+# Waiting for: all 2 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 2 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 50s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator) ---
+#   [flare-operator] replica repair ledger initialized from cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121: 0 destination counter(s) recorded as baseline, none attributed
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 2797ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] continuous-replication probe: 2 stats read(s) in 259ms (tick 6; in-mode remembered: 1, out-of-mode remembered: 0)
+#   [flare-operator] CONTINUOUS REPLICATION eligibility cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121: reads eligible: following epoch 2:ee1ab64d-1d88-438a-be9a-c932e406b918; position observed 0s ago; lag 0 ≤ 1000 (read); promotion eligible: following epoch 2:ee1ab64d-1d88-438a-be9a-c932e406b918; position observed 0s ago; lag 0 ≤ 100 (promotion)
+#   [flare-operator] grace period: 17 cycles remaining
+#   [TopologyAudit] node=cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121 uid=(some b8313a61-88ec-472b-902d-3b4e6b747fca) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1823ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] continuous-replication probe: 2 stats read(s) in 278ms (tick 7; in-mode remembered: 1, out-of-mode remembered: 0)
+#   [flare-operator] grace period: 16 cycles remaining
+#   [TopologyAudit] node=cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121 uid=(some 1d0a04d5-a99c-4414-9c28-f1f24e9977e7) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 2296ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] continuous-replication probe: 2 stats read(s) in 256ms (tick 8; in-mode remembered: 1, out-of-mode remembered: 0)
+#   [flare-operator] grace period: 15 cycles remaining
+#   [TopologyAudit] node=cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121 uid=(some b8313a61-88ec-472b-902d-3b4e6b747fca) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1821ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] continuous-replication probe: 2 stats read(s) in 256ms (tick 9; in-mode remembered: 1, out-of-mode remembered: 0)
+#   [flare-operator] grace period: 14 cycles remaining
+#   [TopologyAudit] node=cont-repl-nodes-0.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121 uid=(some 1d0a04d5-a99c-4414-9c28-f1f24e9977e7) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 2038ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] continuous-replication probe: 2 stats read(s) in 260ms (tick 10; in-mode remembered: 1, out-of-mode remembered: 0)
+#   [flare-operator] CONTINUOUS REPLICATION eligibility cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121: reads eligible: following epoch 2:ee1ab64d-1d88-438a-be9a-c932e406b918; position observed 1s ago; lag 0 ≤ 1000 (read); promotion eligible: following epoch 2:ee1ab64d-1d88-438a-be9a-c932e406b918; position observed 1s ago; lag 0 ≤ 100 (promotion)
+#   [flare-operator] grace period: 13 cycles remaining
+#   [TopologyAudit] node=cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121 uid=(some b8313a61-88ec-472b-902d-3b4e6b747fca) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 2006ms (nodes=2 M=1 S=1 D=0 P=0)
+#   
+# Waiting for: replica's follower is following (timeout: 120s)
+#   OK after 0s
+# Waiting for: replica's local items match the master's (timeout: 60s)
+#   OK after 0s
+# following: replica applied 30 forwarded change(s); applied_lsn=(some 34) master latest=(some 34) source_epoch=(some 2:ee1ab64d-1d88-438a-be9a-c932e406b918)
+# Waiting for: operator observes applied topology with Pod identity (timeout: 90s)
+#   OK after 0s
+# fault: rejecting 10.244.0.10 ⇄ 10.244.0.12:12121 on flare-e2e-control-plane (both directions)
+# Waiting for: master counts dropped forwarded writes (was 0) (timeout: 120s)
+#   OK after 20s
+# forwarding retries settled at 2 dropped write(s)
+# under the cut: created 10/10, updated 5/5, deleted 5/5; master dropped 2; master latest=54 items=35; replica items=30 applied_lsn=(some 34) (was 34) state=(some disconnected); replica pod uid=b8313a61-88ec-472b-902d-3b4e6b747fca reconstruction_started=1
+# fault cleared: 10.244.0.10 ⇄ 10.244.0.12 forwards again
+# Waiting for: replica applied past the master's position at the cut (54) while following (timeout: 240s)
+#   OK after 5s
+# after heal: resumed from applied_lsn=34 (cut started at 34) → 54 (bar 54); state=(some following) reason=none; wal_applied=(some 4) wal_skipped=(some 96); items master=35 replica=35; reconstruction_started 1→1; pod uid b8313a61-88ec-472b-902d-3b4e6b747fca→b8313a61-88ec-472b-902d-3b4e6b747fca
+# Waiting for: operator held the drop as owned by continuous replication (timeout: 60s)
+#   OK after 0s
+# Waiting for: operator closed the owned request by position (timeout: 240s)
+#   OK after 0s
+# Waiting for: ledger persisted as empty (timeout: 60s)
+#   OK after 10s
+# fault: the operator may exec only into the master cont-repl-nodes-0 (rule 5: ["pods/exec"] → ["pods/e2e-revoked-exec"]; added a resourceNames-restricted pods/exec rule)
+# fault: rejecting 10.244.0.10 ⇄ 10.244.0.12:12121 on flare-e2e-control-plane (both directions)
+# Waiting for: master counts dropped writes (was 4) (timeout: 120s)
+#   OK after 20s
+# Waiting for: operator holds the drop as follower-state-unknown (timeout: 150s)
+#   OK after 10s
+# with pods/exec revoked: held-as-unknown=true; ledger holds: follower state unknown (stats unreadable)
+# fault cleared: 10.244.0.10 ⇄ 10.244.0.12 forwards again
+# Waiting for: replica catches up (follower does not depend on the operator's probe) (timeout: 240s)
+#   OK after 20s
+# fault cleared: pods/exec restored
+# Waiting for: once the probe works again the owned request closes by position (timeout: 300s)
+#   OK after 0s
+# after restoring pods/exec: closed=true; reconstruction_started 1→1; pod uid b8313a61-88ec-472b-902d-3b4e6b747fca→b8313a61-88ec-472b-902d-3b4e6b747fca
+# Waiting for: no repair entry pending before the bulk operation (timeout: 180s)
+#   OK after 5s
+# flush_all on the master: source_epoch 2:ee1ab64d-1d88-438a-be9a-c932e406b918 → 3:ee6df04b-c40c-450b-a988-e1199ada4486; master items=0
+# Waiting for: follower declares needs_rebuild (timeout: 90s)
+#   OK after 0s
+# follower: state=(some needs_rebuild) reason=(some epoch_mismatch)
+# Waiting for: operator requests the rebuild (ledger entry for the follower) (timeout: 120s)
+#   OK after 10s
+# request evidence: ledger entry seen=cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121=0/{"kind":"requested"}; follower-declared path=true (false = the drop path won the race); master drops now=8
+# Waiting for: follower reconstructed and follows the new epoch (timeout: 420s)
+#   OK after 20s
+# after the rebuild: reconstruction_started 1→2; state=(some following) epoch=(some 3:ee6df04b-c40c-450b-a988-e1199ada4486) (master 3:ee6df04b-c40c-450b-a988-e1199ada4486); ledger request observed=true
+# Waiting for: new writes reach the rebuilt follower (timeout: 90s)
+#   OK after 0s
+# Waiting for: ledger persisted as empty (timeout: 180s)
+#   OK after 0s
+# post-flush writes: master=10 replica=10; ledger empty=true; pod uid b8313a61-88ec-472b-902d-3b4e6b747fca→b8313a61-88ec-472b-902d-3b4e6b747fca
+# Waiting for: following replica gets balance 50 (timeout: 150s)
+#   OK after 5s
+# with slave=50: replica balance=(some 50) state=(some following)
+# Waiting for: read control succeeds before the cut (timeout: 120s)
+#   OK after 0s
+# fault: rejecting 10.244.0.10 ⇄ 10.244.0.12:12121 on flare-e2e-control-plane (both directions)
+# Waiting for: cut replica is withheld from reads (balance 0) (timeout: 150s)
+#   OK after 5s
+# under the cut: replica balance=(some 0) state=(some disconnected) eligibility-logged=true
+# fault cleared: 10.244.0.10 ⇄ 10.244.0.12 forwards again
+# Waiting for: healed replica is served again (balance 50) (timeout: 240s)
+#   OK after 5s
+# after the heal: replica balance=(some 50) state=(some following)
+# Waiting for: spec restored to slave=0 (timeout: 120s)
+#   OK after 5s
+# Waiting for: replica itself has balance 50 and a caught-up follower (timeout: 150s)
+#   OK after 10s
+# Waiting for: WAL requests actually rejected (timeout: 90s)
+#   OK after 5s
+# Waiting for: forwarded test write is dropped (timeout: 90s)
+#   OK after 20s
+# isolated read guard: local balance=(some 50), cursor=123→(some 123), head=124, forwards=63→(some 63), read=(some from_master)
+# Waiting for: blocked topology is retained for retry (timeout: 90s)
+#   OK after 0s
+# fault cleared: 10.244.0.10 ⇄ 10.244.0.12 forwards again
+# Waiting for: isolated read-guard fault is fully restored (timeout: 240s)
+#   OK after 30s
+# fault: rejecting 10.244.0.10 ⇄ 10.244.0.12:12121 on flare-e2e-control-plane (both directions)
+# Waiting for: cycle 0: master counts a dropped forwarded write (timeout: 90s)
+#   OK after 0s
+# fault cleared: 10.244.0.10 ⇄ 10.244.0.12 forwards again
+# Waiting for: cycle 0: replica converges while following (timeout: 180s)
+#   OK after 0s
+# cycle 0: stored 10/10, drop counted=true, replica resumed from 124 → 134; items master=22 replica=22; converged=true
+# fault: rejecting 10.244.0.10 ⇄ 10.244.0.12:12121 on flare-e2e-control-plane (both directions)
+# Waiting for: cycle 1: master counts a dropped forwarded write (timeout: 90s)
+#   OK after 0s
+# fault cleared: 10.244.0.10 ⇄ 10.244.0.12 forwards again
+# Waiting for: cycle 1: replica converges while following (timeout: 180s)
+#   OK after 0s
+# cycle 1: stored 10/10, drop counted=true, replica resumed from 134 → 146; items master=31 replica=31; converged=true
+# fault: rejecting 10.244.0.10 ⇄ 10.244.0.12:12121 on flare-e2e-control-plane (both directions)
+# Waiting for: cycle 2: master counts a dropped forwarded write (timeout: 90s)
+#   OK after 0s
+# fault cleared: 10.244.0.10 ⇄ 10.244.0.12 forwards again
+# Waiting for: cycle 2: replica converges while following (timeout: 180s)
+#   OK after 0s
+# cycle 2: stored 10/10, drop counted=true, replica resumed from 146 → 158; items master=40 replica=40; converged=true
+# after 3 cycles: content mismatches=[]; reconstruction_started 2→2; pod uid b8313a61-88ec-472b-902d-3b4e6b747fca→b8313a61-88ec-472b-902d-3b4e6b747fca; wal_applied=(some 28) forward_applied=(some 79)
+# Waiting for: ledger closes every counted drop by position (timeout: 300s)
+#   OK after 0s
+# fault: rejecting 10.244.0.10 ⇄ 10.244.0.12:12121 on flare-e2e-control-plane (both directions)
+# Waiting for: master counts a dropped forwarded write (timeout: 90s)
+#   OK after 20s
+# Waiting for: operator holds the drop as owned (timeout: 120s)
+#   OK after 20s
+# before the restart: stored 10/10, drop counted=true, ledger holds: owned by continuous replication
+# Waiting for: a new operator pod is Ready (timeout: 180s)
+#   OK after 35s
+# operator restarted (old pod flare-operator-89d7c66df-4l9c8); ready=true; ledger after restart: dests=[cont-repl-nodes-1.cont-repl-nodes.flare-cont-repl.svc.cluster.local:12121] holds=owned by continuous replication
+# fault cleared: 10.244.0.10 ⇄ 10.244.0.12 forwards again
+# Waiting for: replica converges while following (timeout: 180s)
+#   OK after 15s
+# Waiting for: the restarted operator closes the entry by position (timeout: 400s)
+#   OK after 5s
+# after the heal: converged=true; ledger empty=true; reconstruction_started 2→2; pod uid b8313a61-88ec-472b-902d-3b4e6b747fca→b8313a61-88ec-472b-902d-3b4e6b747fca
+# Waiting for: precondition: following replica gets balance 50 (timeout: 150s)
+#   OK after 5s
+# fault: the operator may exec only into the master cont-repl-nodes-0 (rule 5: ["pods/exec"] → ["pods/e2e-revoked-exec"]; added a resourceNames-restricted pods/exec rule)
+# Waiting for: a new operator pod is Ready and the old one is gone (timeout: 180s)
+#   OK after 35s
+# Waiting for: the fresh operator withholds the unreadable replica (balance 0) (timeout: 150s)
+#   OK after 10s
+# Waiting for: the follower keeps following without the operator (timeout: 120s)
+#   OK after 0s
+# blind fresh operator: replica balance=(some 0) withheld=true; stored 10/10; follower caught up=true; master=(some cont-repl-nodes-0)
+# fault cleared: pods/exec restored
+# Waiting for: once stats return the replica is served again (balance 50) (timeout: 240s)
+#   OK after 5s
+# after restoring pods/exec: balance=(some 50) restored=true; reconstruction_started 2→2; pod uid b8313a61-88ec-472b-902d-3b4e6b747fca→b8313a61-88ec-472b-902d-3b4e6b747fca
+# Waiting for: spec restored to slave=0 (timeout: 120s)
+#   OK after 10s
+# fault: rejecting 10.244.0.10 ⇄ 10.244.0.12:12121 on flare-e2e-control-plane (both directions)
+# fault cleared: 10.244.0.10 ⇄ 10.244.0.12 forwards again
+# backlog: stored 300/300, updated 5/5, deleted 5/5 under the cut (master latest 488, replica applied 178); healed; killed=1
+
+# Waiting for: replica container restarted (restartCount +1) and Ready (timeout: 240s)
+#   OK after 10s
+# after the kill: restartCount 0→1; ready-again=true; pod uid b8313a61-88ec-472b-902d-3b4e6b747fca→b8313a61-88ec-472b-902d-3b4e6b747fca
+# Waiting for: replica follows again and matches the master's items (timeout: 420s)
+#   OK after 0s
+# after the restart: state=(some following) applied=(some 488) (master latest (some 488)); items master=355 replica=355; new process: reconstruction_completed=1 wal_fallback_to_dump=0 wal_applied=(some 0)
+# Waiting for: ledger closes the drops counted under the cut (timeout: 300s)
+#   OK after 0s
+# Waiting for: operator logged the end of its startup grace period (timeout: 360s)
+#   OK after 95s
+# operator pod age before the delete: (some 232)s (grace ended per its log=true)
+# deleted master pod cont-repl-nodes-0 (graceful, preStop 30s); follower cont-repl-nodes-1 was following epoch 3:ee6df04b-c40c-450b-a988-e1199ada4486
+# Waiting for: the follower is promoted to master (drain) (timeout: 180s)
+#   OK after 5s
+# promotion: follower promoted=true; drain logged=true; drain blocked (guard refused)=false; NOT LOSS-FREE logged=false; new master epoch=(some 4:34634c58-06d6-41a9-aa0a-5f8958f13cf8)
+# Waiting for: the promoted node advances its source epoch (timeout: 120s)
+#   OK after 0s
+# Waiting for: ex-master returns, rebuilds and follows the new epoch (timeout: 480s)
+#   OK after 30s
+# ex-master cont-repl-nodes-0: state=(some following) epoch=(some 4:34634c58-06d6-41a9-aa0a-5f8958f13cf8) (new master 4:34634c58-06d6-41a9-aa0a-5f8958f13cf8); items new-master=355 ex-master=355
+# Waiting for: new writes reach the ex-master as a follower (timeout: 90s)
+#   OK after 0s
+# Waiting for: newcomer follows (timeout: 300s)
+#   OK after 0s
+# Waiting for: newcomer's local items match the master's (timeout: 180s)
+#   OK after 0s
+# newcomer cont-repl-nodes-2: 11 batches of 20 written during its copy; state=(some following) epoch=(some 4:34634c58-06d6-41a9-aa0a-5f8958f13cf8) (master (some 4:34634c58-06d6-41a9-aa0a-5f8958f13cf8)); items master=585 newcomer=585; reconstruction_completed=(some 1) wal_applied=(some 0)
+# fault cleared: 10.244.0.12 ⇄ 10.244.0.17 forwards again
+# Cleaning up cluster 'cont-repl'
+# === Suite: continuous-replication-scale ===
+# Deploying cluster 'cont-repl-scale' in namespace 'flare-cont-repl-scale'
+# Waiting for: namespace flare-cont-repl-scale not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-cont-repl-scale (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap cont-repl-scale-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting 50s grace period for operator reconciliation...
+# chunk at 4600000 failed: kubectl failed (exit 137): command terminated with exit code 137
+
+# chunk at 4620000 failed: kubectl failed (exit 1): error: Internal error occurred: unable to upgrade connection: container not found ("debug-cont-repl-scale")
+
+# chunk at 4640000 failed: kubectl failed (exit 1): error: Internal error occurred: unable to upgrade connection: container not found ("debug-cont-repl-scale")
+
+# chunk at 4660000 failed: kubectl failed (exit 1): error: Internal error occurred: unable to upgrade connection: container not found ("debug-cont-repl-scale")
+
+# chunk at 4680000 failed: kubectl failed (exit 1): error: Internal error occurred: unable to upgrade connection: container not found ("debug-cont-repl-scale")
+
+# chunk at 4700000 failed: kubectl failed (exit 1): error: Internal error occurred: unable to upgrade connection: container not found ("debug-cont-repl-scale")
+
+# chunk at 4720000 failed: kubectl failed (exit 1): error: Internal error occurred: unable to upgrade connection: container not found ("debug-cont-repl-scale")
+
+# chunk at 4740000 failed: kubectl failed (exit 1): error: Internal error occurred: unable to upgrade connection: container not found ("debug-cont-repl-scale")
+
+# chunk at 4760000 failed: kubectl failed (exit 1): error: Internal error occurred: unable to upgrade connection: container not found ("debug-cont-repl-scale")
+
+# chunk at 4780000 failed: kubectl failed (exit 1): error: Internal error occurred: unable to upgrade connection: container not found ("debug-cont-repl-scale")
+
+# chunk at 4800000 failed: kubectl failed (exit 1): error: Internal error occurred: unable to upgrade connection: container not found ("debug-cont-repl-scale")
+
+# chunk at 4820000 failed: kubectl failed (exit 1): error: Internal error occurred: unable to upgrade connection: container not found ("debug-cont-repl-scale")
+
+# chunk at 4840000 failed: kubectl failed (exit 1): error: Internal error occurred: unable to upgrade connection: container not found ("debug-cont-repl-scale")
+
+# chunk at 4860000 failed: kubectl failed (exit 1): error: Internal error occurred: unable to upgrade connection: container not found ("debug-cont-repl-scale")
+
+# chunk at 4880000 failed: kubectl failed (exit 1): error: Internal error occurred: unable to upgrade connection: container not found ("debug-cont-repl-scale")
+
+# chunk at 4900000 failed: kubectl failed (exit 1): error: Internal error occurred: unable to upgrade connection: container not found ("debug-cont-repl-scale")
+
+# chunk at 4920000 failed: kubectl failed (exit 1): error: Internal error occurred: unable to upgrade connection: container not found ("debug-cont-repl-scale")
+
+# chunk at 4940000 failed: kubectl failed (exit 1): error: Internal error occurred: unable to upgrade connection: container not found ("debug-cont-repl-scale")
+
+# chunk at 4960000 failed: kubectl failed (exit 1): error: Internal error occurred: unable to upgrade connection: container not found ("debug-cont-repl-scale")
+
+# chunk at 4980000 failed: kubectl failed (exit 1): error: Internal error occurred: unable to upgrade connection: container not found ("debug-cont-repl-scale")
+
+# chunk at 5000000 failed: kubectl failed (exit 1): error: Internal error occurred: unable to upgrade connection: container not found ("debug-cont-repl-scale")
+
+# chunk at 5020000 failed: kubectl failed (exit 1): error: Internal error occurred: unable to upgrade connection: container not found ("debug-cont-repl-scale")
+
+# chunk at 5040000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5060000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5080000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5100000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5120000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5140000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5160000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5180000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5200000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5220000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5240000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5260000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5280000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5300000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5320000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5340000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5360000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5380000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5400000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5420000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5440000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5460000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5480000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5500000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5520000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5540000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5560000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5580000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5600000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5620000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5640000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5660000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5680000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5700000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5720000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5740000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5760000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5780000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5800000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5820000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5840000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5860000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5880000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5900000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5920000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5940000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5960000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 5980000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6000000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6020000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6040000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6060000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6080000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6100000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6120000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6140000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6160000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6180000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6200000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6220000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6240000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6260000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6280000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6300000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6320000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6340000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6360000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6380000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6400000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6420000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6440000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6460000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6480000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6500000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6520000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6540000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6560000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6580000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6600000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6620000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6640000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6660000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6680000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6700000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6720000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6740000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6760000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6780000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6800000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6820000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6840000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6860000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6880000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6900000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6920000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6940000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6960000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 6980000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7000000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7020000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7040000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7060000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7080000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7100000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7120000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7140000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7160000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7180000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7200000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7220000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7240000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7260000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7280000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7300000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7320000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7340000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7360000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7380000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7400000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7420000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7440000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7460000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7480000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7500000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7520000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7540000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7560000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7580000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7600000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7620000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7640000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7660000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7680000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7700000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7720000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7740000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7760000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7780000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7800000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7820000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7840000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7860000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7880000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7900000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7920000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7940000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7960000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 7980000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8000000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8020000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8040000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8060000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8080000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8100000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8120000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8140000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8160000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8180000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8200000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8220000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8240000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8260000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8280000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8300000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8320000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8340000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8360000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8380000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8400000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8420000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8440000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8460000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8480000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8500000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8520000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8540000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8560000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8580000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8600000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8620000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8640000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8660000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8680000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8700000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8720000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8740000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8760000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8780000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8800000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8820000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8840000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8860000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8880000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8900000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8920000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8940000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8960000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 8980000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9000000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9020000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9040000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9060000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9080000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9100000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9120000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9140000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9160000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9180000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9200000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9220000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9240000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9260000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9280000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9300000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9320000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9340000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9360000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9380000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9400000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9420000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9440000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9460000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9480000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9500000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9520000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9540000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9560000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9580000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9600000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9620000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9640000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9660000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9680000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9700000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9720000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9740000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9760000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9780000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9800000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9820000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9840000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9860000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9880000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9900000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9920000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9940000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9960000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 9980000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10000000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10020000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10040000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10060000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10080000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10100000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10120000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10140000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10160000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10180000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10200000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10220000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10240000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10260000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10280000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10300000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10320000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10340000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10360000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10380000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10400000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10420000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10440000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10460000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10480000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10500000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10520000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10540000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10560000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10580000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10600000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10620000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10640000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10660000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10680000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10700000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10720000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10740000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10760000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10780000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10800000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10820000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10840000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10860000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10880000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10900000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10920000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10940000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10960000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 10980000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11000000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11020000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11040000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11060000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11080000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11100000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11120000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11140000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11160000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11180000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11200000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11220000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11240000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11260000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11280000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11300000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11320000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11340000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11360000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11380000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11400000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11420000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11440000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11460000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11480000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11500000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11520000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11540000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11560000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11580000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11600000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11620000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11640000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11660000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11680000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11700000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11720000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11740000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11760000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11780000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11800000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11820000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11840000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11860000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11880000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11900000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11920000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11940000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11960000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 11980000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12000000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12020000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12040000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12060000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12080000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12100000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12120000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12140000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12160000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12180000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12200000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12220000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12240000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12260000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12280000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12300000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12320000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12340000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12360000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12380000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12400000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12420000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12440000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12460000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12480000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12500000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12520000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12540000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12560000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12580000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12600000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12620000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12640000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12660000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12680000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12700000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12720000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12740000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12760000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12780000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12800000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12820000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12840000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12860000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12880000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12900000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12920000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12940000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12960000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 12980000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13000000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13020000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13040000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13060000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13080000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13100000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13120000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13140000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13160000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13180000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13200000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13220000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13240000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13260000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13280000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13300000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13320000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13340000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13360000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13380000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13400000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13420000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13440000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13460000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13480000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13500000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13520000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13540000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13560000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13580000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13600000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13620000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13640000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13660000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13680000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13700000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13720000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13740000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13760000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13780000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13800000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13820000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13840000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13860000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13880000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13900000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13920000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13940000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13960000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 13980000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14000000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14020000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14040000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14060000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14080000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14100000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14120000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14140000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14160000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14180000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14200000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14220000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14240000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14260000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14280000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14300000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14320000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14340000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14360000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14380000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14400000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14420000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14440000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14460000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14480000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14500000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14520000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14540000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14560000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14580000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14600000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14620000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14640000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14660000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14680000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14700000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14720000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14740000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14760000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14780000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14800000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14820000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14840000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14860000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14880000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14900000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14920000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14940000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14960000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 14980000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 15000000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 15020000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 15040000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 15060000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 15080000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 15100000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 15120000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 15140000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 15160000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 15180000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 15200000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 15220000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 15240000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 15260000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 15280000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 15300000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 15320000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 15340000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 15360000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 15380000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 15400000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 15420000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 15440000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 15460000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 15480000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 15500000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 15520000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 15540000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 15560000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 15580000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 15600000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 15620000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 15640000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 15660000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 15680000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 15700000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 15720000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 15740000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 15760000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# chunk at 15780000 failed: kubectl failed (exit 1): error: cannot exec into a container in a completed pod; current phase is Succeeded
+
+# scale follow: state=? reason= applied=0 source_lsn=0 master latest=0 items master=0 replica=0 wal_applied=0 wal_skipped=0 decode_refused=0 forward_applied=0 forward_skipped=0
+# scale follow: state=? reason= applied=0 source_lsn=0 master latest=0 items master=0 replica=0 wal_applied=0 wal_skipped=0 decode_refused=0 forward_applied=0 forward_skipped=0
+# scale follow: state=? reason= applied=0 source_lsn=0 master latest=0 items master=0 replica=0 wal_applied=0 wal_skipped=0 decode_refused=0 forward_applied=0 forward_skipped=0
+# scale follow: state=? reason= applied=0 source_lsn=0 master latest=0 items master=0 replica=0 wal_applied=0 wal_skipped=0 decode_refused=0 forward_applied=0 forward_skipped=0
+# scale follow: state=? reason= applied=0 source_lsn=0 master latest=0 items master=0 replica=0 wal_applied=0 wal_skipped=0 decode_refused=0 forward_applied=0 forward_skipped=0
+# scale follow: the applied position has not moved for 5 min — stopping the wait
+# scale load: 4600000/15800000 STORED in 3573665 ms; master items=0 replica=0; follower converged=false 244293 ms after the load ended; applied=none wal_applied=none forward_applied=none
+# master cont-repl-scale-nodes-0: restartCount 0→0; last termination reason: 
+# --- replica follower lifecycle (filtered) ---
+[140082805229248][NTC][cluster.cc:1803-_shift_node_role] shifting node_role (node_key=cont-repl-scale-nodes-1.cont-repl-scale-nodes.flare-cont-repl-scale.svc.cluster.local:12121, old_role=proxy, old_partition=-1, new_role=slave, new_partition=0)
+[140082805229248][NTC][cluster.cc:1778-_reconcile_wal_follower_locked] starting continuous replication follower (source=cont-repl-scale-nodes-0.cont-repl-scale-nodes.flare-cont-repl-scale.svc.cluster.local:12121, max_batches=256, max_bytes=4194304, poll=200000us)
+[140082805094080][NTC][stats.cc:276-follow_set_state] replication follow state: initial_sync
+[140082805094080][NTC][stats.cc:276-follow_set_state] replication follow state: following
+
+# scale load: master items grew by 0 (loader saw 4600000 STORED)
+#   reason: the master holds only 0/15800000 new keys after the load
+#   reason: no Active P0 master in the operator's map
+# probe timing lines: 299; max 3679 ms; 'reconcile slow' lines: 305; last: or] continuous-replication probe: 2 stats read(s) in 3396ms (tick 304; in-mode remembered: 1, out-of-mode remembered: 0)
+# --- diagnostics for failing suite 'continuous-replication-scale' ---
+# Cleaning up cluster 'cont-repl-scale'
+# === Suite: continuous-replication-sustained ===
+# FLARE_E2E_SUSTAINED unset: the sustained-load evaluation deploys nothing and its tests are skipped
+# === Suite: continuous-replication-outage ===
+# FLARE_E2E_OUTAGE unset: the long-outage evaluation deploys nothing and its tests are skipped
+# Tests: 21, Failures: 2
+# RESULT: FAIL
+1..21
+ok 1 - precondition: both flags are on for every node and the replica's read balance is 0
+ok 2 - normal following: writes reach the replica and its follower reports following
+ok 3 - cut: create, update and delete on the master while the replica is unreachable; then new writes stop
+ok 4 - heal: with NO new writes the replica catches up from its position — no rebuild, no pod recreation
+ok 5 - ledger: the counted drop was HELD under the follower's ownership and CLOSED without a demotion
+ok 6 - operator stats fetch failure: a drop whose follower cannot be probed is held as Unknown, never demoted, and closes when the probe returns
+ok 7 - bulk operation: flush_all on the master advances the epoch; the follower declares needs_rebuild; the operator rebuilds it; it follows the new epoch
+ok 8 - read eligibility: a following replica gets the spec's slave balance; a cut replica is withheld to 0; healing restores it
+ok 9 - local read guard: stale positive balance proxies a missing value to the master while WAL remains blocked
+ok 10 - repeated cuts: three cut/write/heal cycles converge from the position each time; no rebuild, no pod recreation
+ok 11 - operator restart during a cut: the owned hold survives the restart; the follower catches up; the entry closes; no rebuild
+ok 12 - operator restart while the replica's stats cannot be read: the fresh operator withholds its reads (Unknown) and demotes, promotes and rebuilds nothing; once stats return the replica is served again
+ok 13 - replica crash with a backlog pending: flared killed -9 after the heal; restarts on its PVC, converges without a full dump; pod not recreated
+ok 14 - planned promotion: the master pod is deleted (graceful drain); the proven follower is promoted through the gate, its epoch advances; the returning ex-master rebuilds and follows the new epoch
+ok 15 - initial copy under load: a third replica joins by snapshot while writes flow, then follows and matches
+not ok 16 - scale: load FLARE_E2E_SCALE_KEYS keys (pipelined) and let the follower converge
+not ok 17 - scale: exact key scan at open (kill -9 on the PVC-backed replica) — duration recorded
+ok 18 - scale: operator probe cost at this size — recorded from the operator's own timing lines
+ok 19 - sustained load: does the follow stream keep up at a steady write rate, and do WAL/RSS/disk stay bounded until it does? (evaluation) # SKIP FLARE_E2E_SUSTAINED unset (evaluation only)
+ok 20 - outage phase A: ~150 MB written while cut under a 256 MB WAL cap — several flushes, WAL retained; on healing the follower catches up from its cursor (no rebuild); disk/RSS high-water recorded # SKIP FLARE_E2E_OUTAGE unset (evaluation only)
+ok 21 - outage phase B: ~400 MB written while cut, past the 256 MB WAL cap — archived WAL purged; the follower declares needs_rebuild/lsn_purged, is rebuilt and converges; disk/RSS high-water recorded # SKIP FLARE_E2E_OUTAGE unset (evaluation only)

@@ -27,6 +27,7 @@
  *	$Id$
  */
 #include "app.h"
+#include <sys/statvfs.h>
 #include "storage.h"
 #include "binary_request_header.h"
 #include "binary_response_header.h"
@@ -48,7 +49,8 @@ storage::storage(string data_dir, int mutex_slot_size, int header_cache_size):
 		_mutex_slot(NULL),
 		_iter_lock(false),
 		_header_cache_size(header_cache_size),
-		_header_cache_map(NULL) {
+		_header_cache_map(NULL),
+		_listener(NULL) {
 	this->_mutex_slot = new pthread_rwlock_t[mutex_slot_size];
 	int i;
 	for (i = 0; i < this->_mutex_slot_size; i++) {
@@ -176,6 +178,17 @@ int storage::entry::parse(const char*p, parse_type t) {
 			// option
 			n += util::next_word(p+n, q, sizeof(q));
 			while (q[0]) {
+				// Replication identity of a forwarded change (SAF-10b): not
+				// an option, and recognised before the option cast so an
+				// older build's "unknown option" path is never reached for
+				// it — a node that does not understand it is never sent it
+				// (the sender only adds it when the feature is enabled).
+				if (strncmp(q, "rl=", 3) == 0) {
+					this->repl_tag = q + 3;
+					log_debug("storing replication tag [%s]", this->repl_tag.c_str());
+					n += util::next_word(p+n, q, sizeof(q));
+					continue;
+				}
 				storage::option r = storage::option_none;
 				if (storage::option_cast(q, r) < 0) {
 					log_debug("unknown option [%s] (cast failed)", q);
@@ -343,6 +356,22 @@ int storage::_set_header_cache(string key, entry& e) {
 
 // {{{ private methods
 // }}}
+
+uint64_t storage::get_data_dir_used_bytes() {
+	struct statvfs vfs;
+	if (statvfs(this->_data_dir.c_str(), &vfs) != 0) {
+		return 0;
+	}
+	return static_cast<uint64_t>(vfs.f_blocks - vfs.f_bfree) * vfs.f_frsize;
+}
+
+uint64_t storage::get_data_dir_capacity_bytes() {
+	struct statvfs vfs;
+	if (statvfs(this->_data_dir.c_str(), &vfs) != 0) {
+		return 0;
+	}
+	return static_cast<uint64_t>(vfs.f_blocks) * vfs.f_frsize;
+}
 
 }	// namespace flare
 }	// namespace gree

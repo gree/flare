@@ -1,0 +1,1485 @@
+# === Suite: circuit-breaker ===
+# Cleaning up cluster 'breaker'
+# Deploying cluster 'breaker' in namespace 'flare-breaker'
+# Waiting for: namespace flare-breaker not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-breaker (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap breaker-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet breaker-nodes to be ready...
+# Waiting for: all 4 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 4 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 50s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator) ---
+#   [TcpClient] node sync v4294967318 to 10.244.0.11:12121: reply-confirmed=true
+#   [TcpClient] node sync v4294967318 to 10.244.0.12:12121: reply-confirmed=true
+#   [TcpClient] node sync v4294967318 to 10.244.0.10:12121: reply-confirmed=true
+#   [TopologyBroadcast] Broadcast attempt complete (v4294967318); all targets reply-confirmed=true
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 2104ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 16 cycles remaining
+#   [TopologyAudit] node=breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local:12121 uid=(some 129adc74-a53f-446e-8533-223efaaae978) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1113ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 15 cycles remaining
+#   [TopologyAudit] node=breaker-nodes-1.breaker-nodes.flare-breaker.svc.cluster.local:12121 uid=(some 5611853a-4792-4b85-9389-e367cf1f6eeb) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1137ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 14 cycles remaining
+#   [TopologyAudit] node=breaker-nodes-0.breaker-nodes.flare-breaker.svc.cluster.local:12121 uid=(some 45a5bab8-eb9d-49c8-b1a4-c8142e3432d3) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1201ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 13 cycles remaining
+#   [TopologyAudit] node=breaker-nodes-3.breaker-nodes.flare-breaker.svc.cluster.local:12121 uid=(some 04739095-72dc-418b-8e62-0b6828fdf36d) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1501ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 12 cycles remaining
+#   [TopologyAudit] node=breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local:12121 uid=(some 129adc74-a53f-446e-8533-223efaaae978) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1188ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 11 cycles remaining
+#   [TopologyAudit] node=breaker-nodes-1.breaker-nodes.flare-breaker.svc.cluster.local:12121 uid=(some 5611853a-4792-4b85-9389-e367cf1f6eeb) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1198ms (nodes=4 M=2 S=2 D=0 P=0)
+#   
+# Waiting for: grace countdown finished (timeout: 120s)
+#   OK after 0s
+# Waiting for: breaker tripped in operator log (timeout: 480s)
+#   TIMEOUT after 480s waiting for: breaker tripped in operator log
+#   reason: no CIRCUIT BREAKER TRIPPED log within 480s of majority outage
+# Waiting for: cluster recovered after scale-up (timeout: 480s)
+#   OK after 25s
+# --- diagnostics for failing suite 'circuit-breaker' ---
+# === operator logs (flare-breaker, app=flare-operator) ===
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TcpClient] node sync v4294967820 to 10.244.0.9:12121: reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v4294967820); all targets reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] reconcile slow: 1518ms (nodes=4 M=2 S=0 D=2 P=1)
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyAudit] node=breaker-nodes-3.breaker-nodes.flare-breaker.svc.cluster.local:12121 uid=none desired=4294967827 reported=none verdict=unknown
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] topology changed (v4294967820 → v4294967827), broadcasting
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyBroadcast] Broadcasting node sync v4294967827 (4 nodes) to 1 pods
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TcpClient] node sync v4294967827 to 10.244.0.9:12121: reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v4294967827); all targets reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] reconcile slow: 1699ms (nodes=4 M=2 S=0 D=2 P=1)
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyAudit] node=breaker-nodes-0.breaker-nodes.flare-breaker.svc.cluster.local:12121 uid=(some 45a5bab8-eb9d-49c8-b1a4-c8142e3432d3) desired=4294967834 reported=(some 4294967827) verdict=behind
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] retrying an unconfirmed topology send (pending v4294967834; publishing v4294967834)
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] topology changed (v4294967827 → v4294967834), broadcasting
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyBroadcast] Broadcasting node sync v4294967834 (4 nodes) to 1 pods
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TcpClient] node sync v4294967834 to 10.244.0.9:12121: reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v4294967834); all targets reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] reconcile slow: 1729ms (nodes=4 M=2 S=0 D=2 P=1)
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyAudit] node=breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local:12121 uid=none desired=4294967841 reported=none verdict=unknown
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] topology changed (v4294967834 → v4294967841), broadcasting
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyBroadcast] Broadcasting node sync v4294967841 (4 nodes) to 1 pods
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TcpClient] node sync v4294967841 to 10.244.0.9:12121: reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v4294967841); all targets reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] reconcile slow: 1601ms (nodes=4 M=2 S=0 D=2 P=1)
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyAudit] node=breaker-nodes-1.breaker-nodes.flare-breaker.svc.cluster.local:12121 uid=none desired=4294967848 reported=none verdict=unknown
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] topology changed (v4294967841 → v4294967848), broadcasting
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyBroadcast] Broadcasting node sync v4294967848 (4 nodes) to 1 pods
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TcpClient] node sync v4294967848 to 10.244.0.9:12121: reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v4294967848); all targets reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] reconcile slow: 1692ms (nodes=4 M=2 S=0 D=2 P=1)
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyAudit] node=breaker-nodes-3.breaker-nodes.flare-breaker.svc.cluster.local:12121 uid=none desired=4294967855 reported=none verdict=unknown
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] topology changed (v4294967848 → v4294967855), broadcasting
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyBroadcast] Broadcasting node sync v4294967855 (4 nodes) to 1 pods
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TcpClient] node sync v4294967855 to 10.244.0.9:12121: reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v4294967855); all targets reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] reconcile slow: 1601ms (nodes=4 M=2 S=0 D=2 P=1)
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyAudit] node=breaker-nodes-0.breaker-nodes.flare-breaker.svc.cluster.local:12121 uid=(some 45a5bab8-eb9d-49c8-b1a4-c8142e3432d3) desired=4294967862 reported=(some 4294967855) verdict=behind
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] retrying an unconfirmed topology send (pending v4294967862; publishing v4294967862)
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] topology changed (v4294967855 → v4294967862), broadcasting
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyBroadcast] Broadcasting node sync v4294967862 (4 nodes) to 1 pods
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TcpClient] node sync v4294967862 to 10.244.0.9:12121: reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v4294967862); all targets reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] reconcile slow: 1715ms (nodes=4 M=2 S=0 D=2 P=1)
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyAudit] node=breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local:12121 uid=none desired=4294967869 reported=none verdict=unknown
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] topology changed (v4294967862 → v4294967869), broadcasting
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyBroadcast] Broadcasting node sync v4294967869 (4 nodes) to 1 pods
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TcpClient] node sync v4294967869 to 10.244.0.9:12121: reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v4294967869); all targets reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] reconcile slow: 1507ms (nodes=4 M=2 S=0 D=2 P=1)
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyAudit] node=breaker-nodes-1.breaker-nodes.flare-breaker.svc.cluster.local:12121 uid=none desired=4294967876 reported=none verdict=unknown
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] topology changed (v4294967869 → v4294967876), broadcasting
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyBroadcast] Broadcasting node sync v4294967876 (4 nodes) to 1 pods
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TcpClient] node sync v4294967876 to 10.244.0.9:12121: reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v4294967876); all targets reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] reconcile slow: 1598ms (nodes=4 M=2 S=0 D=2 P=1)
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyAudit] node=breaker-nodes-3.breaker-nodes.flare-breaker.svc.cluster.local:12121 uid=none desired=4294967883 reported=none verdict=unknown
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] topology changed (v4294967876 → v4294967883), broadcasting
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyBroadcast] Broadcasting node sync v4294967883 (4 nodes) to 1 pods
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TcpClient] node sync v4294967883 to 10.244.0.9:12121: reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v4294967883); all targets reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] reconcile slow: 1806ms (nodes=4 M=2 S=0 D=2 P=1)
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyAudit] node=breaker-nodes-0.breaker-nodes.flare-breaker.svc.cluster.local:12121 uid=(some 45a5bab8-eb9d-49c8-b1a4-c8142e3432d3) desired=4294967890 reported=(some 4294967883) verdict=behind
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] retrying an unconfirmed topology send (pending v4294967890; publishing v4294967890)
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] topology changed (v4294967883 → v4294967890), broadcasting
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyBroadcast] Broadcasting node sync v4294967890 (4 nodes) to 1 pods
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TcpClient] node sync v4294967890 to 10.244.0.9:12121: reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v4294967890); all targets reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] reconcile slow: 1810ms (nodes=4 M=2 S=0 D=2 P=1)
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyAudit] node=breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local:12121 uid=none desired=4294967897 reported=none verdict=unknown
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] topology changed (v4294967890 → v4294967897), broadcasting
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyBroadcast] Broadcasting node sync v4294967897 (4 nodes) to 1 pods
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TcpClient] node sync v4294967897 to 10.244.0.9:12121: reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v4294967897); all targets reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] reconcile slow: 1607ms (nodes=4 M=2 S=0 D=2 P=1)
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyAudit] node=breaker-nodes-1.breaker-nodes.flare-breaker.svc.cluster.local:12121 uid=none desired=4294967904 reported=none verdict=unknown
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] topology changed (v4294967897 → v4294967904), broadcasting
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyBroadcast] Broadcasting node sync v4294967904 (4 nodes) to 1 pods
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TcpClient] node sync v4294967904 to 10.244.0.9:12121: reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v4294967904); all targets reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] reconcile slow: 1599ms (nodes=4 M=2 S=0 D=2 P=1)
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyAudit] node=breaker-nodes-3.breaker-nodes.flare-breaker.svc.cluster.local:12121 uid=none desired=4294967911 reported=none verdict=unknown
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] topology changed (v4294967904 → v4294967911), broadcasting
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyBroadcast] Broadcasting node sync v4294967911 (4 nodes) to 1 pods
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TcpClient] node sync v4294967911 to 10.244.0.9:12121: reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v4294967911); all targets reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] reconcile slow: 1604ms (nodes=4 M=2 S=0 D=2 P=1)
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] Received command: node sync
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] Sending response: NODE breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local 12121 0 1 1 100 18 | NODE breaker-nodes-1.breaker-nodes.flare-breaker.svc.cluster.local 12121 2 2 -1 100 17 | NODE breaker-nodes-3.breaker-nodes.flare-breaker.svc.cluster.local 12121 2 2 -1 0 19 | NODE breaker-nodes-0.breaker-nodes.flare-breaker.svc.cluster.local 12121 0 0 0 100 16 | END | 
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyAudit] node=breaker-nodes-0.breaker-nodes.flare-breaker.svc.cluster.local:12121 uid=(some 45a5bab8-eb9d-49c8-b1a4-c8142e3432d3) desired=4294967918 reported=(some 4294967911) verdict=behind
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] retrying an unconfirmed topology send (pending v4294967918; publishing v4294967918)
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] topology changed (v4294967911 → v4294967918), broadcasting
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyBroadcast] Broadcasting node sync v4294967918 (4 nodes) to 1 pods
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TcpClient] node sync v4294967918 to 10.244.0.9:12121: reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v4294967918); all targets reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] reconcile slow: 1809ms (nodes=4 M=2 S=0 D=2 P=1)
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyAudit] node=breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local:12121 uid=none desired=4294967925 reported=none verdict=unknown
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] topology changed (v4294967918 → v4294967925), broadcasting
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyBroadcast] Broadcasting node sync v4294967925 (4 nodes) to 1 pods
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TcpClient] node sync v4294967925 to 10.244.0.9:12121: reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v4294967925); all targets reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] reconcile slow: 1538ms (nodes=4 M=2 S=0 D=2 P=1)
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] Received command: node sync
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] Sending response: NODE breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local 12121 0 1 1 100 18 | NODE breaker-nodes-1.breaker-nodes.flare-breaker.svc.cluster.local 12121 2 2 -1 100 17 | NODE breaker-nodes-3.breaker-nodes.flare-breaker.svc.cluster.local 12121 2 2 -1 0 19 | NODE breaker-nodes-0.breaker-nodes.flare-breaker.svc.cluster.local 12121 0 0 0 100 16 | END | 
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] Received command: node add breaker-nodes-1.breaker-nodes.flare-breaker.svc.cluster.local 12121
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeAdd "breaker-nodes-1.breaker-nodes.flare-breaker.svc.cluster.local" 12121
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TRACE] Event: NodeAdd breaker-nodes-1.breaker-nodes.flare-breaker.svc.cluster.local:12121 | Result: Proxy | Reason: all partitions full
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] Sending response: NODE breaker-nodes-1.breaker-nodes.flare-breaker.svc.cluster.local 12121 2 0 -1 100 20 | NODE breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local 12121 0 1 1 100 18 | NODE breaker-nodes-3.breaker-nodes.flare-breaker.svc.cluster.local 12121 2 2 -1 0 19 | NODE breaker-nodes-0.breaker-nodes.flare-breaker.svc.cluster.local 12121 0 0 0 100 16 | END | 
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] Received command: meta
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.Meta
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TRACE] Event: Meta | CRD partitions=2 replicas=2 | State partitionSize=1024 | Returning partition-size 1024
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyAudit] node=breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local:12121 uid=none desired=4294967933 reported=none verdict=unknown
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] topology changed (v4294967926 → v4294967933), broadcasting
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyBroadcast] Broadcasting node sync v4294967933 (4 nodes) to 2 pods
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] Received command: node state breaker-nodes-1.breaker-nodes.flare-breaker.svc.cluster.local 12121 active
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeState
+# [pod/flare-operator-84f87594df-hzm84/flare-operator]   "breaker-nodes-1.breaker-nodes.flare-breaker.svc.cluster.local"
+# [pod/flare-operator-84f87594df-hzm84/flare-operator]   12121
+# [pod/flare-operator-84f87594df-hzm84/flare-operator]   (FlareOperator.K8s.FlareState.Act
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TRACE] Event: NodeState breaker-nodes-1.breaker-nodes.flare-breaker.svc.cluster.local:12121 | Result: Prepare->Active | Reason: reconstruction complete
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TcpClient] node sync v4294967933 to 10.244.0.13:12121: reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TcpClient] node sync v4294967933 to 10.244.0.9:12121: reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v4294967933); all targets reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] reconcile slow: 1719ms (nodes=4 M=2 S=1 D=1 P=1)
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] CONTINUOUS REPLICATION eligibility breaker-nodes-1.breaker-nodes.flare-breaker.svc.cluster.local:12121: reads unknown: not probed this pass; promotion unknown: not probed this pass
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyAudit] node=breaker-nodes-3.breaker-nodes.flare-breaker.svc.cluster.local:12121 uid=none desired=4294967941 reported=none verdict=unknown
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] topology changed (v4294967934 → v4294967941), broadcasting
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyBroadcast] Broadcasting node sync v4294967941 (4 nodes) to 2 pods
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TcpClient] node sync v4294967941 to 10.244.0.9:12121: reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TcpClient] node sync v4294967941 to 10.244.0.13:12121: reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v4294967941); all targets reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] reconcile slow: 1526ms (nodes=4 M=2 S=1 D=1 P=1)
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] Received command: node add breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local 12121
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeAdd "breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local" 12121
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TRACE] Event: NodeAdd breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local:12121 | Result: Slave P1 (Prepare) | Reason: partition needed slave
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] Sending response: NODE breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local 12121 1 1 1 100 18 | NODE breaker-nodes-1.breaker-nodes.flare-breaker.svc.cluster.local 12121 1 0 0 0 20 | NODE breaker-nodes-3.breaker-nodes.flare-breaker.svc.cluster.local 12121 2 2 -1 0 19 | NODE breaker-nodes-0.breaker-nodes.flare-breaker.svc.cluster.local 12121 0 0 0 100 16 | END | 
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] Received command: meta
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.Meta
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TRACE] Event: Meta | CRD partitions=2 replicas=2 | State partitionSize=1024 | Returning partition-size 1024
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] Received command: node role breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local 12121 proxy 0 -1
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.MutationAttempt
+# [pod/flare-operator-84f87594df-hzm84/flare-operator]   "node role breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local 12121 proxy 0 -1"
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] continuous-replication probe: 1 stats read(s) in 100ms (tick 121; in-mode remembered: 0, out-of-mode remembered: 2)
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyAudit] node=breaker-nodes-0.breaker-nodes.flare-breaker.svc.cluster.local:12121 uid=(some 45a5bab8-eb9d-49c8-b1a4-c8142e3432d3) desired=4294967949 reported=(some 4294967941) verdict=behind
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] retrying an unconfirmed topology send (pending v4294967949; publishing v4294967949)
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] topology changed (v4294967942 → v4294967949), broadcasting
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] Received command: node add breaker-nodes-3.breaker-nodes.flare-breaker.svc.cluster.local 12121
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeAdd "breaker-nodes-3.breaker-nodes.flare-breaker.svc.cluster.local" 12121
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TRACE] Event: NodeAdd breaker-nodes-3.breaker-nodes.flare-breaker.svc.cluster.local:12121 | Result: Proxy | Reason: all partitions full
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] Sending response: NODE breaker-nodes-3.breaker-nodes.flare-breaker.svc.cluster.local 12121 2 0 -1 100 21 | NODE breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local 12121 0 0 1 100 18 | NODE breaker-nodes-1.breaker-nodes.flare-breaker.svc.cluster.local 12121 1 0 0 0 20 | NODE breaker-nodes-0.breaker-nodes.flare-breaker.svc.cluster.local 12121 0 0 0 100 16 | END | 
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] Received command: meta
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.Meta
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TRACE] Event: Meta | CRD partitions=2 replicas=2 | State partitionSize=1024 | Returning partition-size 1024
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyBroadcast] Broadcasting node sync v4294967949 (4 nodes) to 4 pods
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TcpClient] Invalid IP address: 
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TcpClient] node sync v4294967949 to 10.244.0.14:12121: reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TcpClient] node sync v4294967949 to 10.244.0.9:12121: reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TcpClient] node sync v4294967949 to 10.244.0.13:12121: reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v4294967949); all targets reply-confirmed=false
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] topology delivery unconfirmed (v4294967949); retained for retry through the lease fence
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] replica repair ledger initialized from breaker-nodes-0.breaker-nodes.flare-breaker.svc.cluster.local:12121: 0 destination counter(s) recorded as baseline, none attributed
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] reconcile slow: 2312ms (nodes=4 M=2 S=1 D=0 P=0)
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyAudit] node=breaker-nodes-3.breaker-nodes.flare-breaker.svc.cluster.local:12121 uid=(some 64aaaaa5-a3f9-4815-bae1-1efda8340e11) desired=4294967955 reported=(some 0) verdict=behind
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] retrying an unconfirmed topology send (pending v4294967949; publishing v4294967955)
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] topology changed (v4294967950 → v4294967955), broadcasting
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyBroadcast] Broadcasting node sync v4294967955 (4 nodes) to 4 pods
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TcpClient] node sync v4294967955 to 10.244.0.13:12121: reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TcpClient] node sync v4294967955 to 10.244.0.9:12121: reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TcpClient] node sync v4294967955 to 10.244.0.14:12121: reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TcpClient] node sync v4294967955 to 10.244.0.15:12121: reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] Received command: node state breaker-nodes-3.breaker-nodes.flare-breaker.svc.cluster.local 12121 active
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeState
+# [pod/flare-operator-84f87594df-hzm84/flare-operator]   "breaker-nodes-3.breaker-nodes.flare-breaker.svc.cluster.local"
+# [pod/flare-operator-84f87594df-hzm84/flare-operator]   12121
+# [pod/flare-operator-84f87594df-hzm84/flare-operator]   (FlareOperator.K8s.FlareState.Act
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TRACE] Event: NodeState breaker-nodes-3.breaker-nodes.flare-breaker.svc.cluster.local:12121 | Result: Prepare->Active | Reason: reconstruction complete
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [TopologyBroadcast] Broadcast attempt complete (v4294967955); all targets reply-confirmed=true
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [flare-operator] reconcile slow: 1809ms (nodes=4 M=2 S=2 D=0 P=0)
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] Received command: node sync
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+# [pod/flare-operator-84f87594df-hzm84/flare-operator] [DEBUG] Sending response: NODE breaker-nodes-3.breaker-nodes.flare-breaker.svc.cluster.local 12121 1 0 1 0 21 | NODE breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local 12121 0 0 1 100 18 | NODE breaker-nodes-1.breaker-nodes.flare-breaker.svc.cluster.local 12121 1 0 0 0 20 | NODE breaker-nodes-0.breaker-nodes.flare-breaker.svc.cluster.local 12121 0 0 0 100 16 | END | 
+# 
+# === flared logs (flare-breaker, tail 80 each) ===
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (4 entries)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 4 entries in node map)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=breaker-nodes-0.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2451-_reconstruct_node_partition] 1(prepare): master (node_key=breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (4 entries)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 4 entries in node map)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=breaker-nodes-0.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2451-_reconstruct_node_partition] 1(prepare): master (node_key=breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (4 entries)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 4 entries in node map)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=breaker-nodes-0.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2451-_reconstruct_node_partition] 1(prepare): master (node_key=breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (4 entries)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 4 entries in node map)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=breaker-nodes-0.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2451-_reconstruct_node_partition] 1(prepare): master (node_key=breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (4 entries)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 4 entries in node map)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=breaker-nodes-0.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2451-_reconstruct_node_partition] 1(prepare): master (node_key=breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (4 entries)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 4 entries in node map)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=breaker-nodes-0.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2451-_reconstruct_node_partition] 1(prepare): master (node_key=breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (4 entries)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 4 entries in node map)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=breaker-nodes-0.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2451-_reconstruct_node_partition] 1(prepare): master (node_key=breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (4 entries)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:1183-reconstruct_node] update: node_balance (100 -> 0)
+# [pod/breaker-nodes-0/flared] [140575709882048][ERR][cluster.cc:1187-reconstruct_node] update: node_thread_type (17 -> 20)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 4 entries in node map)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=breaker-nodes-0.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2428-_reconstruct_node_partition] 0: slave[0] (node_key=breaker-nodes-1.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=0)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2451-_reconstruct_node_partition] 1(prepare): master (node_key=breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:1786-_shift_node_state] shifting node_state (node_key=breaker-nodes-1.breaker-nodes.flare-breaker.svc.cluster.local:12121, old_state=down, new_state=prepare)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:1803-_shift_node_role] shifting node_role (node_key=breaker-nodes-1.breaker-nodes.flare-breaker.svc.cluster.local:12121, old_role=proxy, old_partition=-1, new_role=slave, new_partition=0)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (4 entries)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 4 entries in node map)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=breaker-nodes-0.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2428-_reconstruct_node_partition] 0: slave[0] (node_key=breaker-nodes-1.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=0)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2451-_reconstruct_node_partition] 1(prepare): master (node_key=breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:1786-_shift_node_state] shifting node_state (node_key=breaker-nodes-1.breaker-nodes.flare-breaker.svc.cluster.local:12121, old_state=prepare, new_state=active)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (4 entries)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 4 entries in node map)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=breaker-nodes-0.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2428-_reconstruct_node_partition] 0: slave[0] (node_key=breaker-nodes-1.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=0)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2424-_reconstruct_node_partition] 1: master (node_key=breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:1786-_shift_node_state] shifting node_state (node_key=breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local:12121, old_state=prepare, new_state=active)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (4 entries)
+# [pod/breaker-nodes-0/flared] [140575709882048][ERR][cluster.cc:1187-reconstruct_node] update: node_thread_type (19 -> 21)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 4 entries in node map)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=breaker-nodes-0.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2428-_reconstruct_node_partition] 0: slave[0] (node_key=breaker-nodes-1.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=0)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2424-_reconstruct_node_partition] 1: master (node_key=breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2428-_reconstruct_node_partition] 1: slave[0] (node_key=breaker-nodes-3.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=0)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:1786-_shift_node_state] shifting node_state (node_key=breaker-nodes-3.breaker-nodes.flare-breaker.svc.cluster.local:12121, old_state=down, new_state=prepare)
+# [pod/breaker-nodes-0/flared] [140575709882048][NTC][cluster.cc:1803-_shift_node_role] shifting node_role (node_key=breaker-nodes-3.breaker-nodes.flare-breaker.svc.cluster.local:12121, old_role=proxy, old_partition=-1, new_role=slave, new_partition=1)
+# [pod/breaker-nodes-1/flared] [139894707805056][NTC][flared.cc:183-startup]   server_name:            breaker-nodes-1.breaker-nodes.flare-breaker.svc.cluster.local
+# [pod/breaker-nodes-1/flared] [139894707805056][NTC][flared.cc:183-startup]   server_port:            12121
+# [pod/breaker-nodes-1/flared] [139894707805056][NTC][flared.cc:183-startup]   server_socket:          
+# [pod/breaker-nodes-1/flared] [139894707805056][NTC][flared.cc:183-startup]   stack_size:             128
+# [pod/breaker-nodes-1/flared] [139894707805056][NTC][flared.cc:183-startup]   storage_ap:             4
+# [pod/breaker-nodes-1/flared] [139894707805056][NTC][flared.cc:183-startup]   storage_bucket_size:    131071
+# [pod/breaker-nodes-1/flared] [139894707805056][NTC][flared.cc:183-startup]   storage_cache_size:     65536
+# [pod/breaker-nodes-1/flared] [139894707805056][NTC][flared.cc:183-startup]   storage_compress:       
+# [pod/breaker-nodes-1/flared] [139894707805056][NTC][flared.cc:183-startup]   storage_large:          false
+# [pod/breaker-nodes-1/flared] [139894707805056][NTC][flared.cc:183-startup]   storage_lmemb:          128
+# [pod/breaker-nodes-1/flared] [139894707805056][NTC][flared.cc:183-startup]   storage_nmemb:          256
+# [pod/breaker-nodes-1/flared] [139894707805056][NTC][flared.cc:183-startup]   storage_dfunit:         0
+# [pod/breaker-nodes-1/flared] [139894707805056][NTC][flared.cc:183-startup]   storage_type:           tch
+# [pod/breaker-nodes-1/flared] [139894707805056][NTC][flared.cc:183-startup]   thread_pool_size:       5
+# [pod/breaker-nodes-1/flared] [139894707805056][NTC][flared.cc:183-startup]   proxy_prior_netmask:    0
+# [pod/breaker-nodes-1/flared] [139894707805056][NTC][flared.cc:183-startup]   max_total_thread_queue: 0
+# [pod/breaker-nodes-1/flared] [139894707805056][NTC][flared.cc:183-startup]   time_watcher_enabled:   false
+# [pod/breaker-nodes-1/flared] [139894707805056][NTC][flared.cc:183-startup]   time_watcher_polling_interval_msec: 0
+# [pod/breaker-nodes-1/flared] [139894707805056][NTC][flared.cc:183-startup]   storage_access_watch_threshold_warn_msec: 0
+# [pod/breaker-nodes-1/flared] [139894707805056][NTC][flared.cc:183-startup]   storage_access_watch_threshold_ping_ng_msec: 0
+# [pod/breaker-nodes-1/flared] [139894707805056][NTC][flared.cc:183-startup]   cluster_replication:    0
+# [pod/breaker-nodes-1/flared] [139894707805056][NTC][flared.cc:183-startup]   cluster_replication_server_name: 
+# [pod/breaker-nodes-1/flared] [139894707805056][NTC][flared.cc:183-startup]   cluster_replication_server_port: 12121
+# [pod/breaker-nodes-1/flared] [139894707805056][NTC][flared.cc:183-startup]   cluster_replication_concurrency: 2
+# [pod/breaker-nodes-1/flared] [139894707805056][NTC][flared.cc:183-startup]   cluster_replication_mode: duplicate
+# [pod/breaker-nodes-1/flared] [139894707805056][NTC][cluster.cc:279-startup_node] setting up cluster node... (type=1, index_server_name=flare-operator.flare-breaker.svc.cluster.local, index_server_port=12120)
+# [pod/breaker-nodes-1/flared] [139894707805056][NTC][cluster.cc:310-startup_node] meta data from index server:
+# [pod/breaker-nodes-1/flared] [139894707805056][NTC][cluster.cc:311-startup_node]   partition_size:                 1024
+# [pod/breaker-nodes-1/flared] [139894707805056][NTC][cluster.cc:312-startup_node]   key_hash_algorithm:             jenkins
+# [pod/breaker-nodes-1/flared] [139894707805056][NTC][cluster.cc:313-startup_node]   key_resolver_type:              modular
+# [pod/breaker-nodes-1/flared] [139894707805056][NTC][cluster.cc:314-startup_node]   key_resolver_modular_hint:      1
+# [pod/breaker-nodes-1/flared] [139894707805056][NTC][cluster.cc:315-startup_node]   key_resolver_modular_virtual:   4096
+# [pod/breaker-nodes-1/flared] [139894707805056][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (4 entries)
+# [pod/breaker-nodes-1/flared] [139894707805056][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 4 entries in node map)
+# [pod/breaker-nodes-1/flared] [139894707805056][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/breaker-nodes-1/flared] [139894707805056][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=breaker-nodes-0.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-1/flared] [139894707805056][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/breaker-nodes-1/flared] [139894707805056][NTC][cluster.cc:2451-_reconstruct_node_partition] 1(prepare): master (node_key=breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-1/flared] [139894707805056][NTC][flared.cc:428-run] entering running loop
+# [pod/breaker-nodes-1/flared] [139894640277184][NTC][handler_metrics.cc:69-run] metrics endpoint ready (port=9150, self-scrape port=12121)
+# [pod/breaker-nodes-1/flared] [139894640142016][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (4 entries)
+# [pod/breaker-nodes-1/flared] [139894640142016][NTC][cluster.cc:1183-reconstruct_node] update: node_balance (100 -> 0)
+# [pod/breaker-nodes-1/flared] [139894640142016][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 4 entries in node map)
+# [pod/breaker-nodes-1/flared] [139894640142016][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/breaker-nodes-1/flared] [139894640142016][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=breaker-nodes-0.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-1/flared] [139894640142016][NTC][cluster.cc:2428-_reconstruct_node_partition] 0: slave[0] (node_key=breaker-nodes-1.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=0)
+# [pod/breaker-nodes-1/flared] [139894640142016][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/breaker-nodes-1/flared] [139894640142016][NTC][cluster.cc:2451-_reconstruct_node_partition] 1(prepare): master (node_key=breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-1/flared] [139894640142016][NTC][cluster.cc:1786-_shift_node_state] shifting node_state (node_key=breaker-nodes-1.breaker-nodes.flare-breaker.svc.cluster.local:12121, old_state=active, new_state=prepare)
+# [pod/breaker-nodes-1/flared] [139894640142016][NTC][cluster.cc:1803-_shift_node_role] shifting node_role (node_key=breaker-nodes-1.breaker-nodes.flare-breaker.svc.cluster.local:12121, old_role=proxy, old_partition=-1, new_role=slave, new_partition=0)
+# [pod/breaker-nodes-1/flared] [139894640006848][NTC][handler_reconstruction.cc:323-_run_once] starting dump operation (master=breaker-nodes-0.breaker-nodes.flare-breaker.svc.cluster.local:12121, partition=0, partition_size=1, interval=0, bwlimit=0)
+# [pod/breaker-nodes-1/flared] [139894640006848][NTC][op_dump.cc:286-_parse_text_client_parameters] found delimiter, dump completed (items=0)
+# [pod/breaker-nodes-1/flared] [139894640006848][NTC][handler_reconstruction.cc:333-_run_once] reconstruction via full dump completed (master=breaker-nodes-0.breaker-nodes.flare-breaker.svc.cluster.local:12121, partition=0, partition_size=1, interval=0, bwlimit=0)
+# [pod/breaker-nodes-1/flared] [139894640142016][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (4 entries)
+# [pod/breaker-nodes-1/flared] [139894640142016][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 4 entries in node map)
+# [pod/breaker-nodes-1/flared] [139894640142016][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/breaker-nodes-1/flared] [139894640142016][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=breaker-nodes-0.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-1/flared] [139894640142016][NTC][cluster.cc:2428-_reconstruct_node_partition] 0: slave[0] (node_key=breaker-nodes-1.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=0)
+# [pod/breaker-nodes-1/flared] [139894640142016][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/breaker-nodes-1/flared] [139894640142016][NTC][cluster.cc:2451-_reconstruct_node_partition] 1(prepare): master (node_key=breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-1/flared] [139894640142016][NTC][cluster.cc:1786-_shift_node_state] shifting node_state (node_key=breaker-nodes-1.breaker-nodes.flare-breaker.svc.cluster.local:12121, old_state=prepare, new_state=active)
+# [pod/breaker-nodes-1/flared] [139894640142016][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (4 entries)
+# [pod/breaker-nodes-1/flared] [139894640142016][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 4 entries in node map)
+# [pod/breaker-nodes-1/flared] [139894640142016][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/breaker-nodes-1/flared] [139894640142016][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=breaker-nodes-0.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-1/flared] [139894640142016][NTC][cluster.cc:2428-_reconstruct_node_partition] 0: slave[0] (node_key=breaker-nodes-1.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=0)
+# [pod/breaker-nodes-1/flared] [139894640142016][NTC][cluster.cc:2424-_reconstruct_node_partition] 1: master (node_key=breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-1/flared] [139894640142016][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/breaker-nodes-1/flared] [139894640142016][NTC][cluster.cc:1786-_shift_node_state] shifting node_state (node_key=breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local:12121, old_state=prepare, new_state=active)
+# [pod/breaker-nodes-1/flared] [139894640142016][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (4 entries)
+# [pod/breaker-nodes-1/flared] [139894640142016][ERR][cluster.cc:1187-reconstruct_node] update: node_thread_type (19 -> 21)
+# [pod/breaker-nodes-1/flared] [139894640142016][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 4 entries in node map)
+# [pod/breaker-nodes-1/flared] [139894640142016][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/breaker-nodes-1/flared] [139894640142016][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=breaker-nodes-0.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-1/flared] [139894640142016][NTC][cluster.cc:2428-_reconstruct_node_partition] 0: slave[0] (node_key=breaker-nodes-1.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=0)
+# [pod/breaker-nodes-1/flared] [139894640142016][NTC][cluster.cc:2424-_reconstruct_node_partition] 1: master (node_key=breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-1/flared] [139894640142016][NTC][cluster.cc:2428-_reconstruct_node_partition] 1: slave[0] (node_key=breaker-nodes-3.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=0)
+# [pod/breaker-nodes-1/flared] [139894640142016][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/breaker-nodes-1/flared] [139894640142016][NTC][cluster.cc:1786-_shift_node_state] shifting node_state (node_key=breaker-nodes-3.breaker-nodes.flare-breaker.svc.cluster.local:12121, old_state=down, new_state=prepare)
+# [pod/breaker-nodes-1/flared] [139894640142016][NTC][cluster.cc:1803-_shift_node_role] shifting node_role (node_key=breaker-nodes-3.breaker-nodes.flare-breaker.svc.cluster.local:12121, old_role=proxy, old_partition=-1, new_role=slave, new_partition=1)
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][flared.cc:183-startup]   pid_path:               
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][flared.cc:183-startup]   daemonize:              false
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][flared.cc:183-startup]   data_dir:               /tmp/flare
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][flared.cc:183-startup]   index_server(s):        flare-operator.flare-breaker.svc.cluster.local:12120
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][flared.cc:183-startup]   max_connection:         128
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][flared.cc:183-startup]   mutex_slot:             64
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][flared.cc:183-startup]   noreply_window_limit:   0
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][flared.cc:183-startup]   net_read_timeout:       600
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][flared.cc:183-startup]   proxy_concurrency:      2
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][flared.cc:183-startup]   reconstruction_interval:0
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][flared.cc:183-startup]   reconstruction_bwlimit: 0
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][flared.cc:183-startup]   replication_type:       async
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][flared.cc:183-startup]   server_name:            breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][flared.cc:183-startup]   server_port:            12121
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][flared.cc:183-startup]   server_socket:          
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][flared.cc:183-startup]   stack_size:             128
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][flared.cc:183-startup]   storage_ap:             4
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][flared.cc:183-startup]   storage_bucket_size:    131071
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][flared.cc:183-startup]   storage_cache_size:     65536
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][flared.cc:183-startup]   storage_compress:       
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][flared.cc:183-startup]   storage_large:          false
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][flared.cc:183-startup]   storage_lmemb:          128
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][flared.cc:183-startup]   storage_nmemb:          256
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][flared.cc:183-startup]   storage_dfunit:         0
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][flared.cc:183-startup]   storage_type:           tch
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][flared.cc:183-startup]   thread_pool_size:       5
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][flared.cc:183-startup]   proxy_prior_netmask:    0
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][flared.cc:183-startup]   max_total_thread_queue: 0
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][flared.cc:183-startup]   time_watcher_enabled:   false
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][flared.cc:183-startup]   time_watcher_polling_interval_msec: 0
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][flared.cc:183-startup]   storage_access_watch_threshold_warn_msec: 0
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][flared.cc:183-startup]   storage_access_watch_threshold_ping_ng_msec: 0
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][flared.cc:183-startup]   cluster_replication:    0
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][flared.cc:183-startup]   cluster_replication_server_name: 
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][flared.cc:183-startup]   cluster_replication_server_port: 12121
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][flared.cc:183-startup]   cluster_replication_concurrency: 2
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][flared.cc:183-startup]   cluster_replication_mode: duplicate
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][cluster.cc:279-startup_node] setting up cluster node... (type=1, index_server_name=flare-operator.flare-breaker.svc.cluster.local, index_server_port=12120)
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][cluster.cc:310-startup_node] meta data from index server:
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][cluster.cc:311-startup_node]   partition_size:                 1024
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][cluster.cc:312-startup_node]   key_hash_algorithm:             jenkins
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][cluster.cc:313-startup_node]   key_resolver_type:              modular
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][cluster.cc:314-startup_node]   key_resolver_modular_hint:      1
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][cluster.cc:315-startup_node]   key_resolver_modular_virtual:   4096
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (4 entries)
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][cluster.cc:1148-reconstruct_node] boot map already assigns my role (role=slave, partition=1) — deferring role shift until storage is attached
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 4 entries in node map)
+# [pod/breaker-nodes-2/flared] [139974634077056][ERR][cluster.cc:2411-_reconstruct_node_partition] no node partition for this slave [node_key=breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local:12121, state=1, role=1, partition=1]
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=breaker-nodes-0.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][cluster.cc:2428-_reconstruct_node_partition] 0: slave[0] (node_key=breaker-nodes-1.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=0)
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][cluster.cc:1803-_shift_node_role] shifting node_role (node_key=breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local:12121, old_role=proxy, old_partition=-1, new_role=slave, new_partition=1)
+# [pod/breaker-nodes-2/flared] [139974634077056][ERR][cluster.cc:1958-_shift_node_role] could not find reconstruction source node (node_key=breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local:12121, new_role=slave, new_partition=1) -> deactivating node
+# [pod/breaker-nodes-2/flared] [139974634077056][ERR][cluster.cc:1406-deactivate_node] failed to deactivate node
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][cluster.cc:1317-_run_boot_shift_locked] boot role shift could not run yet (no reconstruction source for partition 1?) — retrying on the next node map broadcast
+# [pod/breaker-nodes-2/flared] [139974634077056][NTC][flared.cc:428-run] entering running loop
+# [pod/breaker-nodes-2/flared] [139974566549184][NTC][handler_metrics.cc:69-run] metrics endpoint ready (port=9150, self-scrape port=12121)
+# [pod/breaker-nodes-2/flared] [139974566414016][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (4 entries)
+# [pod/breaker-nodes-2/flared] [139974566414016][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 4 entries in node map)
+# [pod/breaker-nodes-2/flared] [139974566414016][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/breaker-nodes-2/flared] [139974566414016][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=breaker-nodes-0.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-2/flared] [139974566414016][NTC][cluster.cc:2428-_reconstruct_node_partition] 0: slave[0] (node_key=breaker-nodes-1.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=0)
+# [pod/breaker-nodes-2/flared] [139974566414016][NTC][cluster.cc:2424-_reconstruct_node_partition] 1: master (node_key=breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-2/flared] [139974566414016][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/breaker-nodes-2/flared] [139974566414016][NTC][cluster.cc:1786-_shift_node_state] shifting node_state (node_key=breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local:12121, old_state=prepare, new_state=active)
+# [pod/breaker-nodes-2/flared] [139974566414016][NTC][cluster.cc:1803-_shift_node_role] shifting node_role (node_key=breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local:12121, old_role=slave, old_partition=1, new_role=master, new_partition=1)
+# [pod/breaker-nodes-2/flared] [139974566414016][NTC][cluster.cc:1803-_shift_node_role] shifting node_role (node_key=breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local:12121, old_role=proxy, old_partition=-1, new_role=master, new_partition=1)
+# [pod/breaker-nodes-2/flared] [139974566414016][NTC][cluster.cc:1894-_shift_node_role] assigned master with state active — skipping reconstruction (operator designated this node the source of truth; local data is authoritative)
+# [pod/breaker-nodes-2/flared] [139974566414016][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (4 entries)
+# [pod/breaker-nodes-2/flared] [139974566414016][ERR][cluster.cc:1187-reconstruct_node] update: node_thread_type (19 -> 21)
+# [pod/breaker-nodes-2/flared] [139974566414016][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 4 entries in node map)
+# [pod/breaker-nodes-2/flared] [139974566414016][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/breaker-nodes-2/flared] [139974566414016][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=breaker-nodes-0.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-2/flared] [139974566414016][NTC][cluster.cc:2428-_reconstruct_node_partition] 0: slave[0] (node_key=breaker-nodes-1.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=0)
+# [pod/breaker-nodes-2/flared] [139974566414016][NTC][cluster.cc:2424-_reconstruct_node_partition] 1: master (node_key=breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-2/flared] [139974566414016][NTC][cluster.cc:2428-_reconstruct_node_partition] 1: slave[0] (node_key=breaker-nodes-3.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=0)
+# [pod/breaker-nodes-2/flared] [139974566414016][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/breaker-nodes-2/flared] [139974566414016][NTC][cluster.cc:1786-_shift_node_state] shifting node_state (node_key=breaker-nodes-3.breaker-nodes.flare-breaker.svc.cluster.local:12121, old_state=down, new_state=prepare)
+# [pod/breaker-nodes-2/flared] [139974566414016][NTC][cluster.cc:1803-_shift_node_role] shifting node_role (node_key=breaker-nodes-3.breaker-nodes.flare-breaker.svc.cluster.local:12121, old_role=proxy, old_partition=-1, new_role=slave, new_partition=1)
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:177-startup] flared version 1.3.4 - system logger started
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:179-startup] application startup in progress...
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:183-startup]   back_log:               30
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:183-startup]   config_path:            /etc/flared/extra.conf
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:183-startup]   pid_path:               
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:183-startup]   daemonize:              false
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:183-startup]   data_dir:               /tmp/flare
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:183-startup]   index_server(s):        flare-operator.flare-breaker.svc.cluster.local:12120
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:183-startup]   max_connection:         128
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:183-startup]   mutex_slot:             64
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:183-startup]   noreply_window_limit:   0
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:183-startup]   net_read_timeout:       600
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:183-startup]   proxy_concurrency:      2
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:183-startup]   reconstruction_interval:0
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:183-startup]   reconstruction_bwlimit: 0
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:183-startup]   replication_type:       async
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:183-startup]   server_name:            breaker-nodes-3.breaker-nodes.flare-breaker.svc.cluster.local
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:183-startup]   server_port:            12121
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:183-startup]   server_socket:          
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:183-startup]   stack_size:             128
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:183-startup]   storage_ap:             4
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:183-startup]   storage_bucket_size:    131071
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:183-startup]   storage_cache_size:     65536
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:183-startup]   storage_compress:       
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:183-startup]   storage_large:          false
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:183-startup]   storage_lmemb:          128
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:183-startup]   storage_nmemb:          256
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:183-startup]   storage_dfunit:         0
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:183-startup]   storage_type:           tch
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:183-startup]   thread_pool_size:       5
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:183-startup]   proxy_prior_netmask:    0
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:183-startup]   max_total_thread_queue: 0
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:183-startup]   time_watcher_enabled:   false
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:183-startup]   time_watcher_polling_interval_msec: 0
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:183-startup]   storage_access_watch_threshold_warn_msec: 0
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:183-startup]   storage_access_watch_threshold_ping_ng_msec: 0
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:183-startup]   cluster_replication:    0
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:183-startup]   cluster_replication_server_name: 
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:183-startup]   cluster_replication_server_port: 12121
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:183-startup]   cluster_replication_concurrency: 2
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:183-startup]   cluster_replication_mode: duplicate
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][cluster.cc:279-startup_node] setting up cluster node... (type=1, index_server_name=flare-operator.flare-breaker.svc.cluster.local, index_server_port=12120)
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][cluster.cc:310-startup_node] meta data from index server:
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][cluster.cc:311-startup_node]   partition_size:                 1024
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][cluster.cc:312-startup_node]   key_hash_algorithm:             jenkins
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][cluster.cc:313-startup_node]   key_resolver_type:              modular
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][cluster.cc:314-startup_node]   key_resolver_modular_hint:      1
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][cluster.cc:315-startup_node]   key_resolver_modular_virtual:   4096
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (4 entries)
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 4 entries in node map)
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=breaker-nodes-0.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][cluster.cc:2428-_reconstruct_node_partition] 0: slave[0] (node_key=breaker-nodes-1.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=0)
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][cluster.cc:2424-_reconstruct_node_partition] 1: master (node_key=breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/breaker-nodes-3/flared] [140376980453056][NTC][handler_metrics.cc:69-run] metrics endpoint ready (port=9150, self-scrape port=12121)
+# [pod/breaker-nodes-3/flared] [140377047980928][NTC][flared.cc:428-run] entering running loop
+# [pod/breaker-nodes-3/flared] [140376980317888][NTC][cluster.cc:1123-reconstruct_node] reconstructing node map... (4 entries)
+# [pod/breaker-nodes-3/flared] [140376980317888][NTC][cluster.cc:1183-reconstruct_node] update: node_balance (100 -> 0)
+# [pod/breaker-nodes-3/flared] [140376980317888][NTC][cluster.cc:2286-_reconstruct_node_partition] reconstructing node partition map... (from 4 entries in node map)
+# [pod/breaker-nodes-3/flared] [140376980317888][NTC][cluster.cc:2419-_reconstruct_node_partition] node partition map:
+# [pod/breaker-nodes-3/flared] [140376980317888][NTC][cluster.cc:2424-_reconstruct_node_partition] 0: master (node_key=breaker-nodes-0.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-3/flared] [140376980317888][NTC][cluster.cc:2428-_reconstruct_node_partition] 0: slave[0] (node_key=breaker-nodes-1.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=0)
+# [pod/breaker-nodes-3/flared] [140376980317888][NTC][cluster.cc:2424-_reconstruct_node_partition] 1: master (node_key=breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=100)
+# [pod/breaker-nodes-3/flared] [140376980317888][NTC][cluster.cc:2428-_reconstruct_node_partition] 1: slave[0] (node_key=breaker-nodes-3.breaker-nodes.flare-breaker.svc.cluster.local:12121, node_balance=0)
+# [pod/breaker-nodes-3/flared] [140376980317888][NTC][cluster.cc:2438-_reconstruct_node_partition] node partition map (prepare):
+# [pod/breaker-nodes-3/flared] [140376980317888][NTC][cluster.cc:1786-_shift_node_state] shifting node_state (node_key=breaker-nodes-3.breaker-nodes.flare-breaker.svc.cluster.local:12121, old_state=active, new_state=prepare)
+# [pod/breaker-nodes-3/flared] [140376980317888][NTC][cluster.cc:1803-_shift_node_role] shifting node_role (node_key=breaker-nodes-3.breaker-nodes.flare-breaker.svc.cluster.local:12121, old_role=proxy, old_partition=-1, new_role=slave, new_partition=1)
+# [pod/breaker-nodes-3/flared] [140376980182720][NTC][handler_reconstruction.cc:323-_run_once] starting dump operation (master=breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local:12121, partition=1, partition_size=2, interval=0, bwlimit=0)
+# [pod/breaker-nodes-3/flared] [140376980182720][NTC][op_dump.cc:286-_parse_text_client_parameters] found delimiter, dump completed (items=0)
+# [pod/breaker-nodes-3/flared] [140376980182720][NTC][handler_reconstruction.cc:333-_run_once] reconstruction via full dump completed (master=breaker-nodes-2.breaker-nodes.flare-breaker.svc.cluster.local:12121, partition=1, partition_size=2, interval=0, bwlimit=0)
+# 
+# === pods (flare-breaker) ===
+# NAME                              READY   STATUS    RESTARTS   AGE   IP            NODE                      NOMINATED NODE   READINESS GATES
+# breaker-nodes-0                   1/1     Running   0          13m   10.244.0.9    flare-e2e-control-plane   <none>           <none>
+# breaker-nodes-1                   1/1     Running   0          25s   10.244.0.13   flare-e2e-control-plane   <none>           <none>
+# breaker-nodes-2                   1/1     Running   0          15s   10.244.0.14   flare-e2e-control-plane   <none>           <none>
+# breaker-nodes-3                   1/1     Running   0          9s    10.244.0.15   flare-e2e-control-plane   <none>           <none>
+# debug-breaker                     1/1     Running   0          13m   10.244.0.7    flare-e2e-control-plane   <none>           <none>
+# flare-operator-84f87594df-hzm84   1/1     Running   0          13m   10.244.0.8    flare-e2e-control-plane   <none>           <none>
+# 
+# === events (flare-breaker, by time) ===
+# LAST SEEN   TYPE      REASON              OBJECT                                 MESSAGE
+# 13m         Normal    Pulling             pod/debug-breaker                      Pulling image "busybox:1.36"
+# 13m         Normal    Scheduled           pod/debug-breaker                      Successfully assigned flare-breaker/debug-breaker to flare-e2e-control-plane
+# 13m         Normal    Created             pod/debug-breaker                      Created container debug-breaker
+# 13m         Normal    Started             pod/debug-breaker                      Started container debug-breaker
+# 13m         Normal    Pulled              pod/debug-breaker                      Successfully pulled image "busybox:1.36" in 1.012s (1.012s including waiting). Image size: 2217006 bytes.
+# 13m         Normal    Created             pod/flare-operator-84f87594df-hzm84    Created container flare-operator
+# 13m         Normal    Scheduled           pod/flare-operator-84f87594df-hzm84    Successfully assigned flare-breaker/flare-operator-84f87594df-hzm84 to flare-e2e-control-plane
+# 13m         Normal    Pulled              pod/flare-operator-84f87594df-hzm84    Container image "flare-operator:test" already present on machine
+# 13m         Normal    ScalingReplicaSet   deployment/flare-operator              Scaled up replica set flare-operator-84f87594df to 1
+# 13m         Normal    SuccessfulCreate    replicaset/flare-operator-84f87594df   Created pod: flare-operator-84f87594df-hzm84
+# 13m         Normal    Started             pod/flare-operator-84f87594df-hzm84    Started container flare-operator
+# 13m         Normal    Scheduled           pod/breaker-nodes-0                    Successfully assigned flare-breaker/breaker-nodes-0 to flare-e2e-control-plane
+# 13m         Normal    SuccessfulCreate    statefulset/breaker-nodes              create Pod breaker-nodes-0 in StatefulSet breaker-nodes successful
+# 13m         Normal    Started             pod/breaker-nodes-0                    Started container flared
+# 13m         Normal    Created             pod/breaker-nodes-0                    Created container flared
+# 13m         Normal    Pulled              pod/breaker-nodes-0                    Container image "flare-node:test" already present on machine
+# 13m         Normal    Started             pod/breaker-nodes-1                    Started container flared
+# 13m         Normal    Created             pod/breaker-nodes-1                    Created container flared
+# 13m         Normal    Pulled              pod/breaker-nodes-1                    Container image "flare-node:test" already present on machine
+# 13m         Normal    Scheduled           pod/breaker-nodes-1                    Successfully assigned flare-breaker/breaker-nodes-1 to flare-e2e-control-plane
+# 13m         Normal    Scheduled           pod/breaker-nodes-2                    Successfully assigned flare-breaker/breaker-nodes-2 to flare-e2e-control-plane
+# 13m         Normal    Created             pod/breaker-nodes-2                    Created container flared
+# 13m         Normal    Started             pod/breaker-nodes-2                    Started container flared
+# 13m         Normal    Pulled              pod/breaker-nodes-2                    Container image "flare-node:test" already present on machine
+# 13m         Normal    Scheduled           pod/breaker-nodes-3                    Successfully assigned flare-breaker/breaker-nodes-3 to flare-e2e-control-plane
+# 13m         Normal    Pulled              pod/breaker-nodes-3                    Container image "flare-node:test" already present on machine
+# 13m         Normal    Created             pod/breaker-nodes-3                    Created container flared
+# 13m         Normal    Started             pod/breaker-nodes-3                    Started container flared
+# 13m         Warning   Unhealthy           pod/breaker-nodes-2                    Readiness probe failed:
+# 13m         Warning   Unhealthy           pod/breaker-nodes-3                    Readiness probe failed:
+# 10m         Normal    Killing             pod/breaker-nodes-3                    Stopping container flared
+# 10m         Normal    SuccessfulDelete    statefulset/breaker-nodes              delete Pod breaker-nodes-3 in StatefulSet breaker-nodes successful
+# 10m         Normal    SuccessfulDelete    statefulset/breaker-nodes              delete Pod breaker-nodes-2 in StatefulSet breaker-nodes successful
+# 10m         Normal    Killing             pod/breaker-nodes-2                    Stopping container flared
+# 10m         Normal    Killing             pod/breaker-nodes-1                    Stopping container flared
+# 10m         Normal    SuccessfulDelete    statefulset/breaker-nodes              delete Pod breaker-nodes-1 in StatefulSet breaker-nodes successful
+# 26s         Normal    SuccessfulCreate    statefulset/breaker-nodes              create Pod breaker-nodes-1 in StatefulSet breaker-nodes successful
+# 26s         Normal    Scheduled           pod/breaker-nodes-1                    Successfully assigned flare-breaker/breaker-nodes-1 to flare-e2e-control-plane
+# 26s         Normal    Pulled              pod/breaker-nodes-1                    Container image "flare-node:test" already present on machine
+# 26s         Normal    Created             pod/breaker-nodes-1                    Created container flared
+# 26s         Normal    Started             pod/breaker-nodes-1                    Started container flared
+# 21s         Warning   Unhealthy           pod/breaker-nodes-1                    Readiness probe failed:
+# 16s         Normal    Scheduled           pod/breaker-nodes-2                    Successfully assigned flare-breaker/breaker-nodes-2 to flare-e2e-control-plane
+# 16s         Normal    SuccessfulCreate    statefulset/breaker-nodes              create Pod breaker-nodes-2 in StatefulSet breaker-nodes successful
+# 15s         Normal    Started             pod/breaker-nodes-2                    Started container flared
+# 15s         Normal    Pulled              pod/breaker-nodes-2                    Container image "flare-node:test" already present on machine
+# 15s         Normal    Created             pod/breaker-nodes-2                    Created container flared
+# 10s         Normal    Started             pod/breaker-nodes-3                    Started container flared
+# 10s         Normal    Scheduled           pod/breaker-nodes-3                    Successfully assigned flare-breaker/breaker-nodes-3 to flare-e2e-control-plane
+# 10s         Normal    Pulled              pod/breaker-nodes-3                    Container image "flare-node:test" already present on machine
+# 10s         Normal    SuccessfulCreate    statefulset/breaker-nodes              create Pod breaker-nodes-3 in StatefulSet breaker-nodes successful
+# 10s         Normal    Created             pod/breaker-nodes-3                    Created container flared
+# 
+# === describe flared pods (flare-breaker) ===
+# Name:             breaker-nodes-0
+# Namespace:        flare-breaker
+# Priority:         0
+# Service Account:  default
+# Node:             flare-e2e-control-plane/172.18.0.2
+# Start Time:       Wed, 30 Sep 2026 16:15:57 +0000
+# Labels:           app=flare
+#                   apps.kubernetes.io/pod-index=0
+#                   cluster=breaker
+#                   controller-revision-hash=breaker-nodes-79b7d6ddb5
+#                   statefulset.kubernetes.io/pod-name=breaker-nodes-0
+# Annotations:      <none>
+# Status:           Running
+# IP:               10.244.0.9
+# IPs:
+#   IP:           10.244.0.9
+# Controlled By:  StatefulSet/breaker-nodes
+# Containers:
+#   flared:
+#     Container ID:  containerd://417f176e3bdb932097bef3b2e67b488cf38f72c19809512a9bd6c177bebfd11c
+#     Image:         flare-node:test
+#     Image ID:      docker.io/library/import-2026-09-30@sha256:7409909bcf524937b94d3fe68c1ac5bb1d4dd9ed6d9ce279d4815c594287f870
+#     Ports:         12121/TCP (flare), 9150/TCP (metrics)
+#     Host Ports:    0/TCP (flare), 0/TCP (metrics)
+#     Command:
+#       sh
+#       -c
+#       rm -rf /tmp/flare/*.hdb /tmp/flare/*.hdb.wal /tmp/flare/rocksdb && mkdir -p /tmp/flare && rm -f /tmp/flare/flared.pid && exec flared --config=/etc/flared/extra.conf --data-dir /tmp/flare --server-port 12121 --index-server-name flare-operator.flare-breaker.svc.cluster.local --index-server-port 12120 --storage-type=tch --metrics-server-port 9150 --stderr
+#     State:          Running
+#       Started:      Wed, 30 Sep 2026 16:15:57 +0000
+#     Ready:          True
+#     Restart Count:  0
+#     Limits:
+#       cpu:     500m
+#       memory:  512Mi
+#     Requests:
+#       cpu:      100m
+#       memory:   256Mi
+#     Liveness:   tcp-socket :12121 delay=10s timeout=1s period=5s successThreshold=1 failureThreshold=6
+#     Readiness:  exec [/bin/bash -c exec 3<>/dev/tcp/127.0.0.1/12121 || exit 1
+# printf 'stats nodes\r\nquit\r\n' >&3
+# out=$(tr -d '\r' <&3)
+# me="$(hostname -f):12121"
+# case "$out" in *"STAT $me:state active"*) exit 0;; esac
+# # Limbo clause (mirrors the helm chart): a syncing member of a
+# # partition with NO active master has nothing to sync from —
+# # total-partition recovery. Report Ready so the OrderedReady
+# # StatefulSet can recreate the peer that will become master.
+# mypart=$(printf '%s\n' "$out" | sed -n "s/^STAT $me:partition //p")
+# [ -n "$mypart" ] || exit 1
+# [ "$mypart" != "-1" ] || exit 1
+# for key in $(printf '%s\n' "$out" | sed -n "s/^STAT \(.*\):partition $mypart$/\1/p"); do
+#   printf '%s\n' "$out" | grep -q "^STAT $key:role master$" || continue
+#   printf '%s\n' "$out" | grep -q "^STAT $key:state active$" && exit 1
+# done
+# exit 0
+# ] delay=5s timeout=4s period=5s successThreshold=1 failureThreshold=3
+#     Environment:  <none>
+#     Mounts:
+#       /etc/flared from flared-config (rw)
+#       /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-ksx68 (ro)
+# Conditions:
+#   Type                        Status
+#   PodReadyToStartContainers   True 
+#   Initialized                 True 
+#   Ready                       True 
+#   ContainersReady             True 
+#   PodScheduled                True 
+# Volumes:
+#   flared-config:
+#     Type:      ConfigMap (a volume populated by a ConfigMap)
+#     Name:      breaker-config
+#     Optional:  false
+#   kube-api-access-ksx68:
+#     Type:                    Projected (a volume that contains injected data from multiple sources)
+#     TokenExpirationSeconds:  3607
+#     ConfigMapName:           kube-root-ca.crt
+#     Optional:                false
+#     DownwardAPI:             true
+# QoS Class:                   Burstable
+# Node-Selectors:              <none>
+# Tolerations:                 node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+#                              node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
+# 
+# 
+# Name:             breaker-nodes-1
+# Namespace:        flare-breaker
+# Priority:         0
+# Service Account:  default
+# Node:             flare-e2e-control-plane/172.18.0.2
+# Start Time:       Wed, 30 Sep 2026 16:29:08 +0000
+# Labels:           app=flare
+#                   apps.kubernetes.io/pod-index=1
+#                   cluster=breaker
+#                   controller-revision-hash=breaker-nodes-79b7d6ddb5
+#                   statefulset.kubernetes.io/pod-name=breaker-nodes-1
+# Annotations:      <none>
+# Status:           Running
+# IP:               10.244.0.13
+# IPs:
+#   IP:           10.244.0.13
+# Controlled By:  StatefulSet/breaker-nodes
+# Containers:
+#   flared:
+#     Container ID:  containerd://222713732501e4bb63676ef0d8f581ea125e2f02f3358f4b68d062a553529505
+#     Image:         flare-node:test
+#     Image ID:      docker.io/library/import-2026-09-30@sha256:7409909bcf524937b94d3fe68c1ac5bb1d4dd9ed6d9ce279d4815c594287f870
+#     Ports:         12121/TCP (flare), 9150/TCP (metrics)
+#     Host Ports:    0/TCP (flare), 0/TCP (metrics)
+#     Command:
+#       sh
+#       -c
+#       rm -rf /tmp/flare/*.hdb /tmp/flare/*.hdb.wal /tmp/flare/rocksdb && mkdir -p /tmp/flare && rm -f /tmp/flare/flared.pid && exec flared --config=/etc/flared/extra.conf --data-dir /tmp/flare --server-port 12121 --index-server-name flare-operator.flare-breaker.svc.cluster.local --index-server-port 12120 --storage-type=tch --metrics-server-port 9150 --stderr
+#     State:          Running
+#       Started:      Wed, 30 Sep 2026 16:29:08 +0000
+#     Ready:          True
+#     Restart Count:  0
+#     Limits:
+#       cpu:     500m
+#       memory:  512Mi
+#     Requests:
+#       cpu:      100m
+#       memory:   256Mi
+#     Liveness:   tcp-socket :12121 delay=10s timeout=1s period=5s successThreshold=1 failureThreshold=6
+#     Readiness:  exec [/bin/bash -c exec 3<>/dev/tcp/127.0.0.1/12121 || exit 1
+# printf 'stats nodes\r\nquit\r\n' >&3
+# out=$(tr -d '\r' <&3)
+# me="$(hostname -f):12121"
+# case "$out" in *"STAT $me:state active"*) exit 0;; esac
+# # Limbo clause (mirrors the helm chart): a syncing member of a
+# # partition with NO active master has nothing to sync from —
+# # total-partition recovery. Report Ready so the OrderedReady
+# # StatefulSet can recreate the peer that will become master.
+# mypart=$(printf '%s\n' "$out" | sed -n "s/^STAT $me:partition //p")
+# [ -n "$mypart" ] || exit 1
+# [ "$mypart" != "-1" ] || exit 1
+# for key in $(printf '%s\n' "$out" | sed -n "s/^STAT \(.*\):partition $mypart$/\1/p"); do
+#   printf '%s\n' "$out" | grep -q "^STAT $key:role master$" || continue
+#   printf '%s\n' "$out" | grep -q "^STAT $key:state active$" && exit 1
+# done
+# exit 0
+# ] delay=5s timeout=4s period=5s successThreshold=1 failureThreshold=3
+#     Environment:  <none>
+#     Mounts:
+#       /etc/flared from flared-config (rw)
+#       /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-hcn4w (ro)
+# Conditions:
+#   Type                        Status
+#   PodReadyToStartContainers   True 
+#   Initialized                 True 
+#   Ready                       True 
+#   ContainersReady             True 
+#   PodScheduled                True 
+# Volumes:
+#   flared-config:
+#     Type:      ConfigMap (a volume populated by a ConfigMap)
+#     Name:      breaker-config
+#     Optional:  false
+#   kube-api-access-hcn4w:
+#     Type:                    Projected (a volume that contains injected data from multiple sources)
+#     TokenExpirationSeconds:  3607
+#     ConfigMapName:           kube-root-ca.crt
+#     Optional:                false
+#     DownwardAPI:             true
+# QoS Class:                   Burstable
+# Node-Selectors:              <none>
+# Tolerations:                 node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+#                              node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
+# 
+# 
+# Name:             breaker-nodes-2
+# Namespace:        flare-breaker
+# Priority:         0
+# Service Account:  default
+# Node:             flare-e2e-control-plane/172.18.0.2
+# Start Time:       Wed, 30 Sep 2026 16:29:18 +0000
+# Labels:           app=flare
+#                   apps.kubernetes.io/pod-index=2
+#                   cluster=breaker
+#                   controller-revision-hash=breaker-nodes-79b7d6ddb5
+#                   statefulset.kubernetes.io/pod-name=breaker-nodes-2
+# Annotations:      <none>
+# Status:           Running
+# IP:               10.244.0.14
+# IPs:
+#   IP:           10.244.0.14
+# Controlled By:  StatefulSet/breaker-nodes
+# Containers:
+#   flared:
+#     Container ID:  containerd://13621605637d6ef33dcb6012bfda3b9e5c27869c00b8a33f681fc115ca5a127e
+#     Image:         flare-node:test
+#     Image ID:      docker.io/library/import-2026-09-30@sha256:7409909bcf524937b94d3fe68c1ac5bb1d4dd9ed6d9ce279d4815c594287f870
+#     Ports:         12121/TCP (flare), 9150/TCP (metrics)
+#     Host Ports:    0/TCP (flare), 0/TCP (metrics)
+#     Command:
+#       sh
+#       -c
+#       rm -rf /tmp/flare/*.hdb /tmp/flare/*.hdb.wal /tmp/flare/rocksdb && mkdir -p /tmp/flare && rm -f /tmp/flare/flared.pid && exec flared --config=/etc/flared/extra.conf --data-dir /tmp/flare --server-port 12121 --index-server-name flare-operator.flare-breaker.svc.cluster.local --index-server-port 12120 --storage-type=tch --metrics-server-port 9150 --stderr
+#     State:          Running
+#       Started:      Wed, 30 Sep 2026 16:29:19 +0000
+#     Ready:          True
+#     Restart Count:  0
+#     Limits:
+#       cpu:     500m
+#       memory:  512Mi
+#     Requests:
+#       cpu:      100m
+#       memory:   256Mi
+#     Liveness:   tcp-socket :12121 delay=10s timeout=1s period=5s successThreshold=1 failureThreshold=6
+#     Readiness:  exec [/bin/bash -c exec 3<>/dev/tcp/127.0.0.1/12121 || exit 1
+# printf 'stats nodes\r\nquit\r\n' >&3
+# out=$(tr -d '\r' <&3)
+# me="$(hostname -f):12121"
+# case "$out" in *"STAT $me:state active"*) exit 0;; esac
+# # Limbo clause (mirrors the helm chart): a syncing member of a
+# # partition with NO active master has nothing to sync from —
+# # total-partition recovery. Report Ready so the OrderedReady
+# # StatefulSet can recreate the peer that will become master.
+# mypart=$(printf '%s\n' "$out" | sed -n "s/^STAT $me:partition //p")
+# [ -n "$mypart" ] || exit 1
+# [ "$mypart" != "-1" ] || exit 1
+# for key in $(printf '%s\n' "$out" | sed -n "s/^STAT \(.*\):partition $mypart$/\1/p"); do
+#   printf '%s\n' "$out" | grep -q "^STAT $key:role master$" || continue
+#   printf '%s\n' "$out" | grep -q "^STAT $key:state active$" && exit 1
+# done
+# exit 0
+# ] delay=5s timeout=4s period=5s successThreshold=1 failureThreshold=3
+#     Environment:  <none>
+#     Mounts:
+#       /etc/flared from flared-config (rw)
+#       /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-hg4pw (ro)
+# Conditions:
+#   Type                        Status
+#   PodReadyToStartContainers   True 
+#   Initialized                 True 
+#   Ready                       True 
+#   ContainersReady             True 
+#   PodScheduled                True 
+# Volumes:
+#   flared-config:
+#     Type:      ConfigMap (a volume populated by a ConfigMap)
+#     Name:      breaker-config
+#     Optional:  false
+#   kube-api-access-hg4pw:
+#     Type:                    Projected (a volume that contains injected data from multiple sources)
+#     TokenExpirationSeconds:  3607
+#     ConfigMapName:           kube-root-ca.crt
+#     Optional:                false
+#     DownwardAPI:             true
+# QoS Class:                   Burstable
+# Node-Selectors:              <none>
+# Tolerations:                 node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+#                              node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
+# 
+# 
+# Name:             breaker-nodes-3
+# Namespace:        flare-breaker
+# Priority:         0
+# Service Account:  default
+# Node:             flare-e2e-control-plane/172.18.0.2
+# Start Time:       Wed, 30 Sep 2026 16:29:24 +0000
+# Labels:           app=flare
+#                   apps.kubernetes.io/pod-index=3
+#                   cluster=breaker
+#                   controller-revision-hash=breaker-nodes-79b7d6ddb5
+#                   statefulset.kubernetes.io/pod-name=breaker-nodes-3
+# Annotations:      <none>
+# Status:           Running
+# IP:               10.244.0.15
+# IPs:
+#   IP:           10.244.0.15
+# Controlled By:  StatefulSet/breaker-nodes
+# Containers:
+#   flared:
+#     Container ID:  containerd://314cd3d3048bed86da79d16bf7e31cd244295dee22b727683d863ad02147810c
+#     Image:         flare-node:test
+#     Image ID:      docker.io/library/import-2026-09-30@sha256:7409909bcf524937b94d3fe68c1ac5bb1d4dd9ed6d9ce279d4815c594287f870
+#     Ports:         12121/TCP (flare), 9150/TCP (metrics)
+#     Host Ports:    0/TCP (flare), 0/TCP (metrics)
+#     Command:
+#       sh
+#       -c
+#       rm -rf /tmp/flare/*.hdb /tmp/flare/*.hdb.wal /tmp/flare/rocksdb && mkdir -p /tmp/flare && rm -f /tmp/flare/flared.pid && exec flared --config=/etc/flared/extra.conf --data-dir /tmp/flare --server-port 12121 --index-server-name flare-operator.flare-breaker.svc.cluster.local --index-server-port 12120 --storage-type=tch --metrics-server-port 9150 --stderr
+#     State:          Running
+#       Started:      Wed, 30 Sep 2026 16:29:24 +0000
+#     Ready:          True
+#     Restart Count:  0
+#     Limits:
+#       cpu:     500m
+#       memory:  512Mi
+#     Requests:
+#       cpu:      100m
+#       memory:   256Mi
+#     Liveness:   tcp-socket :12121 delay=10s timeout=1s period=5s successThreshold=1 failureThreshold=6
+#     Readiness:  exec [/bin/bash -c exec 3<>/dev/tcp/127.0.0.1/12121 || exit 1
+# printf 'stats nodes\r\nquit\r\n' >&3
+# out=$(tr -d '\r' <&3)
+# me="$(hostname -f):12121"
+# case "$out" in *"STAT $me:state active"*) exit 0;; esac
+# # Limbo clause (mirrors the helm chart): a syncing member of a
+# # partition with NO active master has nothing to sync from —
+# # total-partition recovery. Report Ready so the OrderedReady
+# # StatefulSet can recreate the peer that will become master.
+# mypart=$(printf '%s\n' "$out" | sed -n "s/^STAT $me:partition //p")
+# [ -n "$mypart" ] || exit 1
+# [ "$mypart" != "-1" ] || exit 1
+# for key in $(printf '%s\n' "$out" | sed -n "s/^STAT \(.*\):partition $mypart$/\1/p"); do
+#   printf '%s\n' "$out" | grep -q "^STAT $key:role master$" || continue
+#   printf '%s\n' "$out" | grep -q "^STAT $key:state active$" && exit 1
+# done
+# exit 0
+# ] delay=5s timeout=4s period=5s successThreshold=1 failureThreshold=3
+#     Environment:  <none>
+#     Mounts:
+#       /etc/flared from flared-config (rw)
+#       /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-9lcjh (ro)
+# Conditions:
+#   Type                        Status
+#   PodReadyToStartContainers   True 
+#   Initialized                 True 
+#   Ready                       True 
+#   ContainersReady             True 
+#   PodScheduled                True 
+# Volumes:
+#   flared-config:
+#     Type:      ConfigMap (a volume populated by a ConfigMap)
+#     Name:      breaker-config
+#     Optional:  false
+#   kube-api-access-9lcjh:
+#     Type:                    Projected (a volume that contains injected data from multiple sources)
+#     TokenExpirationSeconds:  3607
+#     ConfigMapName:           kube-root-ca.crt
+#     Optional:                false
+#     DownwardAPI:             true
+# QoS Class:                   Burstable
+# Node-Selectors:              <none>
+# Tolerations:                 node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+#                              node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
+# 
+# Cleaning up cluster 'breaker'
+# === Suite: operator-restart ===
+# Cleaning up cluster 'op-restart'
+# Deploying cluster 'op-restart' in namespace 'flare-op-restart'
+# Waiting for: namespace flare-op-restart not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-op-restart (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap op-restart-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet op-restart-nodes to be ready...
+# Waiting for: all 4 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 4 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 50s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator) ---
+#   [flare-operator] continuous-replication probe: 1 stats read(s) in 96ms (tick 6; in-mode remembered: 0, out-of-mode remembered: 1)
+#   [flare-operator] grace period: 17 cycles remaining
+#   [TopologyAudit] node=op-restart-nodes-3.op-restart-nodes.flare-op-restart.svc.cluster.local:12121 uid=(some 5bfccbcf-c8b2-411d-b8fa-de2ea8474918) desired=4294967313 reported=(some 4294967313) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1714ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 16 cycles remaining
+#   [TopologyAudit] node=op-restart-nodes-2.op-restart-nodes.flare-op-restart.svc.cluster.local:12121 uid=(some be3748d8-4035-46d6-ad22-e6a2a3e2abff) desired=4294967313 reported=(some 4294967313) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1205ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 15 cycles remaining
+#   [TopologyAudit] node=op-restart-nodes-1.op-restart-nodes.flare-op-restart.svc.cluster.local:12121 uid=(some 902824ff-bebb-48a4-b0f0-1a2cd86c560e) desired=4294967313 reported=(some 4294967313) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1215ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 14 cycles remaining
+#   [TopologyAudit] node=op-restart-nodes-0.op-restart-nodes.flare-op-restart.svc.cluster.local:12121 uid=(some a3eebae4-087c-4e3c-84fb-86a2e797b916) desired=4294967313 reported=(some 4294967313) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1104ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 13 cycles remaining
+#   [TopologyAudit] node=op-restart-nodes-3.op-restart-nodes.flare-op-restart.svc.cluster.local:12121 uid=(some 5bfccbcf-c8b2-411d-b8fa-de2ea8474918) desired=4294967313 reported=(some 4294967313) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1110ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 12 cycles remaining
+#   [TopologyAudit] node=op-restart-nodes-2.op-restart-nodes.flare-op-restart.svc.cluster.local:12121 uid=(some be3748d8-4035-46d6-ad22-e6a2a3e2abff) desired=4294967313 reported=(some 4294967313) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1505ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 11 cycles remaining
+#   [TopologyAudit] node=op-restart-nodes-1.op-restart-nodes.flare-op-restart.svc.cluster.local:12121 uid=(some 902824ff-bebb-48a4-b0f0-1a2cd86c560e) desired=4294967313 reported=(some 4294967313) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1125ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 10 cycles remaining
+#   
+# masters before restart: [op-restart-nodes-0.op-restart-nodes.flare-op-restart.svc.cluster.local:0:0, op-restart-nodes-1.op-restart-nodes.flare-op-restart.svc.cluster.local:0:1]
+# Waiting for: operator back and serving node sync (timeout: 120s)
+#   OK after 20s
+# masters after restart: [op-restart-nodes-0.op-restart-nodes.flare-op-restart.svc.cluster.local:0:0, op-restart-nodes-1.op-restart-nodes.flare-op-restart.svc.cluster.local:0:1] / [op-restart-nodes-0.op-restart-nodes.flare-op-restart.svc.cluster.local:0:0, op-restart-nodes-1.op-restart-nodes.flare-op-restart.svc.cluster.local:0:1]
+# Waiting for: P0 master available after kill (timeout: 180s)
+#   OK after 10s
+# Cleaning up cluster 'op-restart'
+# === Suite: topology-authority ===
+# Cleaning up cluster 'topo-auth'
+# Deploying cluster 'topo-auth' in namespace 'flare-topo-auth'
+# Waiting for: namespace flare-topo-auth not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-topo-auth (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap topo-auth-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet topo-auth-nodes to be ready...
+# Waiting for: all 2 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 2 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 50s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator) ---
+#   [TopologyBroadcast] Broadcasting node sync v4294967304 (2 nodes) to 2 pods
+#   [TcpClient] node sync v4294967304 to 10.244.0.27:12121: reply-confirmed=true
+#   [TcpClient] node sync v4294967304 to 10.244.0.26:12121: reply-confirmed=true
+#   [TopologyBroadcast] Broadcast attempt complete (v4294967304); all targets reply-confirmed=true
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1705ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 18 cycles remaining
+#   [TopologyAudit] node=topo-auth-nodes-0.topo-auth-nodes.flare-topo-auth.svc.cluster.local:12121 uid=(some 3fb55676-c5e1-4ed9-a475-d1ab6039050e) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1128ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 17 cycles remaining
+#   [TopologyAudit] node=topo-auth-nodes-1.topo-auth-nodes.flare-topo-auth.svc.cluster.local:12121 uid=(some 5437bc74-e207-469f-8f41-da4eb2c07838) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1314ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 16 cycles remaining
+#   [TopologyAudit] node=topo-auth-nodes-0.topo-auth-nodes.flare-topo-auth.svc.cluster.local:12121 uid=(some 3fb55676-c5e1-4ed9-a475-d1ab6039050e) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1115ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 15 cycles remaining
+#   [TopologyAudit] node=topo-auth-nodes-1.topo-auth-nodes.flare-topo-auth.svc.cluster.local:12121 uid=(some 5437bc74-e207-469f-8f41-da4eb2c07838) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1117ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 14 cycles remaining
+#   [TopologyAudit] node=topo-auth-nodes-0.topo-auth-nodes.flare-topo-auth.svc.cluster.local:12121 uid=(some 3fb55676-c5e1-4ed9-a475-d1ab6039050e) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1105ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 13 cycles remaining
+#   [TopologyAudit] node=topo-auth-nodes-1.topo-auth-nodes.flare-topo-auth.svc.cluster.local:12121 uid=(some 5437bc74-e207-469f-8f41-da4eb2c07838) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1193ms (nodes=2 M=1 S=1 D=0 P=0)
+#   
+# pushing a mutated map to topo-auth-nodes-0 at stale version 4294967303 (its current version is 4294967304)
+# pass held at the pre-send point with version 4294967305
+# pass held at the pre-send point with version 4294967306; taking the lease away now
+# Waiting for: operator container restarted after losing the lease (timeout: 180s)
+#   OK after 10s
+# lease deleted to restore authority: lease.coordination.k8s.io "topo-auth-operator-lease" deleted from flare-topo-auth namespace
+# Waiting for: restarted operator acquired the lease (timeout: 120s)
+#   OK after 5s
+# Waiting for: topology re-applied after leadership is restored (timeout: 240s)
+#   OK after 0s
+# pass held at the pre-send point with version 4294967308; deleting the lease so the read fails
+# read-failure pass suppressed v4294967308; survivor version 4294967307 -> (some 4294967308) (any movement is post-restart recovery, not the suppressed pass)
+# Waiting for: the withheld topology is retried by the same process (timeout: 180s)
+#   OK after 0s
+# Waiting for: topology re-applied after the lease is recreated (timeout: 240s)
+#   OK after 0s
+# Cleaning up cluster 'topo-auth'
+# === Suite: replica-repair ===
+# Cleaning up cluster 'repl-repair'
+# Deploying cluster 'repl-repair' in namespace 'flare-repl-repair'
+# Waiting for: namespace flare-repl-repair not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-repl-repair (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap repl-repair-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet repl-repair-nodes to be ready...
+# Waiting for: all 2 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 2 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 50s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator) ---
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1098ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 17 cycles remaining
+#   [TopologyAudit] node=repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121 uid=(some 11f8a5b0-f6d6-42d1-9887-b0933d2af914) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1010ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 16 cycles remaining
+#   [TopologyAudit] node=repl-repair-nodes-0.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121 uid=(some c1fc8f93-4dec-4019-843b-e8bf89926dfe) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1217ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 15 cycles remaining
+#   [TopologyAudit] node=repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121 uid=(some 11f8a5b0-f6d6-42d1-9887-b0933d2af914) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1102ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 14 cycles remaining
+#   [TopologyAudit] node=repl-repair-nodes-0.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121 uid=(some c1fc8f93-4dec-4019-843b-e8bf89926dfe) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1417ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 13 cycles remaining
+#   [TopologyAudit] node=repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121 uid=(some 11f8a5b0-f6d6-42d1-9887-b0933d2af914) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1097ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 12 cycles remaining
+#   [TopologyAudit] node=repl-repair-nodes-0.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121 uid=(some c1fc8f93-4dec-4019-843b-e8bf89926dfe) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1024ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 11 cycles remaining
+#   [TopologyAudit] node=repl-repair-nodes-1.repl-repair-nodes.flare-repl-repair.svc.cluster.local:12121 uid=(some 11f8a5b0-f6d6-42d1-9887-b0933d2af914) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1289ms (nodes=2 M=1 S=1 D=0 P=0)
+#   
+# Waiting for: slave's local items reach the master's (timeout: 60s)
+#   OK after 0s
+# fault: rejecting 10.244.0.30 → 10.244.0.31:12121 on flare-e2e-control-plane
+# Waiting for: master counts dropped writes to the slave (was 0) (timeout: 120s)
+#   OK after 20s
+# stored 30/30 on the master; master dropped 2 write(s); local items master=70 slave=40 (gap 30)
+# fault cleared: 10.244.0.30 → 10.244.0.31 forwards again
+# slave was missing 30 item(s) locally while cut off
+# Waiting for: operator requests a replica repair (probe interval 15s) (timeout: 150s)
+#   OK after 15s
+# Waiting for: ledger in status names the slave (timeout: 60s)
+#   OK after 0s
+# Waiting for: operator records REPLICA REPAIR COMPLETE (timeout: 300s)
+#   OK after 20s
+# Waiting for: ledger persisted as empty (timeout: 60s)
+#   OK after 0s
+# Waiting for: slave's local items catch up to the master's (timeout: 120s)
+#   OK after 0s
+# Waiting for: restarted operator restores the ledger from status (timeout: 120s)
+#   OK after 45s
+# fault: rejecting 10.244.0.30 → 10.244.0.31:12121 on flare-e2e-control-plane
+# Waiting for: master counts dropped writes to the slave (was 2) (timeout: 120s)
+#   OK after 20s
+# stored 20/20 on the master; master dropped 2 write(s); local items master=90 slave=70 (gap 20)
+# fault cleared: 10.244.0.30 → 10.244.0.31 forwards again
+# Waiting for: operator HOLDS the repair (gate closed) (timeout: 150s)
+#   OK after 10s
+# Waiting for: HELD entry persisted to status with its gate reason (timeout: 90s)
+#   OK after 0s
+# Waiting for: restarted operator restores the HELD request (timeout: 120s)
+#   OK after 0s
+# Waiting for: operator records REPLICA REPAIR COMPLETE (timeout: 360s)
+#   OK after 55s
+# Waiting for: ledger persisted as empty (timeout: 60s)
+#   OK after 0s
+# Waiting for: slave's local items catch up to the master's (timeout: 120s)
+#   OK after 0s
+# fault: the operator may no longer patch flareclusters/status
+# fault: rejecting 10.244.0.30 → 10.244.0.31:12121 on flare-e2e-control-plane
+# Waiting for: master counts dropped writes to the slave (was 4) (timeout: 120s)
+#   OK after 20s
+# stored 20/20 on the master; master dropped 2 write(s); local items master=110 slave=90 (gap 20)
+# fault cleared: 10.244.0.30 → 10.244.0.31 forwards again
+# Waiting for: operator marks the ledger UNSAVED after the failed persist (timeout: 150s)
+#   OK after 25s
+# Waiting for: operator retries the unsaved ledger on a later pass (timeout: 90s)
+#   OK after 5s
+# fault cleared: status write allowed again
+# Waiting for: the unsaved ledger lands once the write is allowed (entry present in status; in-pod can-i sampled alongside) (timeout: 300s)
+#   OK after 10s
+# timeline from the restore: in-pod can-i said yes after 0s; unsaved ledger landed after 10s (via the top-of-pass retry); landed=true
+# Waiting for: restarted operator restores the HELD request from status (timeout: 120s)
+#   OK after 0s
+# Waiting for: operator records REPLICA REPAIR COMPLETE (timeout: 360s)
+#   OK after 55s
+# Waiting for: ledger persisted as empty (timeout: 60s)
+#   OK after 0s
+# Waiting for: slave's local items catch up to the master's (timeout: 120s)
+#   OK after 0s
+# fault: status.replicaRepairs.entries is now a string (unparseable)
+# Waiting for: restarted operator reports the ledger UNAVAILABLE (not absent) (timeout: 180s)
+#   OK after 80s
+# fault: rejecting 10.244.0.30 → 10.244.0.31:12121 on flare-e2e-control-plane
+# Waiting for: master counts dropped writes to the slave (was 6) (timeout: 120s)
+#   OK after 20s
+# stored 20/20 on the master; master dropped 2 write(s); local items master=130 slave=110 (gap 20)
+# fault cleared: 10.244.0.30 → 10.244.0.31 forwards again
+# fault cleared: ledger restored to its pre-corruption content
+# Waiting for: ledger RECOVERED from status (timeout: 120s)
+#   OK after 5s
+# Waiting for: the drop seen during the outage is requested after recovery (timeout: 150s)
+#   OK after 5s
+# Waiting for: operator records REPLICA REPAIR COMPLETE (timeout: 360s)
+#   OK after 20s
+# Waiting for: ledger persisted as empty (timeout: 60s)
+#   OK after 0s
+# Waiting for: slave's local items catch up to the master's (timeout: 120s)
+#   OK after 0s
+# Waiting for: victim pod has a UID (timeout: 60s)
+#   OK after 0s
+# Waiting for: victim pod gone (timeout: 90s)
+#   OK after 5s
+# Waiting for: replacement pod has a UID (timeout: 60s)
+#   OK after 0s
+# apiserver refused the stale-UID delete (409); replacement b0788b98-bda1-4a2f-b60a-fa0eed171d42 untouched
+# Waiting for: blackhole pod has an IP (timeout: 60s)
+#   OK after 5s
+# black-hole delete returned in 3064ms; server accepted 517 byte(s):  | 000 | curl_exit=28 | 
+# fault cleared: 10.244.0.30 → 10.244.0.31 forwards again
+# Cleaning up cluster 'repl-repair'
+# === Suite: prepare-evidence ===
+# Cleaning up cluster 'prep-evid'
+# Deploying cluster 'prep-evid' in namespace 'flare-prep-evid'
+# Waiting for: namespace flare-prep-evid not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-prep-evid (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap prep-evid-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet prep-evid-nodes to be ready...
+# Waiting for: all 2 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 2 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 20s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator) ---
+#   [flare-operator] PREPARE-REPAIR: prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 stuck Prepare 12 cycles; reconstruction #1 succeeded from the current master prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 and none is running (backend reports no lineage/cursor to check) -> re-derived Prepare→Active under master prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1716ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 8 cycles remaining
+#   [TopologyAudit] node=prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 uid=(some 3b91513b-50d3-4860-a074-15cdce1866d7) desired=4294967381 reported=(some 4294967380) verdict=behind
+#   [flare-operator] retrying an unconfirmed topology send (pending v4294967381; publishing v4294967381)
+#   [flare-operator] topology changed (v4294967381 → v4294967381), broadcasting
+#   [TopologyBroadcast] Broadcasting node sync v4294967381 (2 nodes) to 2 pods
+#   [TcpClient] node sync v4294967381 to 10.244.0.42:12121: reply-confirmed=true
+#   [TcpClient] node sync v4294967381 to 10.244.0.41:12121: reply-confirmed=true
+#   [DEBUG] Received command: node sync
+#   [DEBUG] Parsed to: FlareOperator.Flare.FlareEvent.NodeSync none
+#   [DEBUG] Sending response: NODE prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local 12121 1 0 0 0 17 | NODE prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local 12121 0 0 0 100 16 | END | 
+#   [TopologyBroadcast] Broadcast attempt complete (v4294967381); all targets reply-confirmed=true
+#   [flare-operator] replica repair ledger initialized from prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121: 0 destination counter(s) recorded as baseline, none attributed
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1872ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] continuous-replication probe: 1 stats read(s) in 59ms (tick 16; in-mode remembered: 0, out-of-mode remembered: 0)
+#   [flare-operator] grace period: 7 cycles remaining
+#   [TopologyAudit] node=prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 uid=(some 6d99deee-af19-4387-b878-9d0f21985985) desired=4294967381 reported=(some 4294967381) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1097ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 6 cycles remaining
+#   [TopologyAudit] node=prep-evid-nodes-0.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 uid=(some 3b91513b-50d3-4860-a074-15cdce1866d7) desired=4294967381 reported=(some 4294967381) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1014ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 5 cycles remaining
+#   [TopologyAudit] node=prep-evid-nodes-1.prep-evid-nodes.flare-prep-evid.svc.cluster.local:12121 uid=(some 6d99deee-af19-4387-b878-9d0f21985985) desired=4294967381 reported=(some 4294967381) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1026ms (nodes=2 M=1 S=1 D=0 P=0)
+#   
+# Waiting for: seam drops a node state event (timeout: 240s)
+#   OK after 0s
+# Waiting for: the slave reports a completed reconstruction (timeout: 120s)
+#   OK after 0s
+# Waiting for: PREPARE-REPAIR activates on evidence (timeout: 300s)
+#   OK after 0s
+# Waiting for: slave Active in the operator's map (timeout: 60s)
+#   OK after 0s
+# Cleaning up cluster 'prep-evid'
+# === Suite: native-metrics ===
+# Cleaning up cluster 'native-metrics'
+# Deploying cluster 'native-metrics' in namespace 'flare-native-metrics'
+# Waiting for: namespace flare-native-metrics not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-native-metrics (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap native-metrics-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet native-metrics-nodes to be ready...
+# Waiting for: all 2 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 2 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 50s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator-native-metrics) ---
+#   [flare-operator] grace period: 18 cycles remaining
+#   [TopologyAudit] node=native-metrics-nodes-0.native-metrics-nodes.flare-native-metrics.svc.cluster.local:12121 uid=(some ebe28c1e-be0f-4574-8747-6915d1a5a121) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1079ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 17 cycles remaining
+#   [TopologyAudit] node=native-metrics-nodes-1.native-metrics-nodes.flare-native-metrics.svc.cluster.local:12121 uid=(some fa18649e-8d69-48fe-abea-d3517ff14de1) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1058ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 16 cycles remaining
+#   [TopologyAudit] node=native-metrics-nodes-0.native-metrics-nodes.flare-native-metrics.svc.cluster.local:12121 uid=(some ebe28c1e-be0f-4574-8747-6915d1a5a121) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] grace period: 15 cycles remaining
+#   [TopologyAudit] node=native-metrics-nodes-1.native-metrics-nodes.flare-native-metrics.svc.cluster.local:12121 uid=(some fa18649e-8d69-48fe-abea-d3517ff14de1) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1171ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 14 cycles remaining
+#   [TopologyAudit] node=native-metrics-nodes-0.native-metrics-nodes.flare-native-metrics.svc.cluster.local:12121 uid=(some ebe28c1e-be0f-4574-8747-6915d1a5a121) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1026ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 13 cycles remaining
+#   [TopologyAudit] node=native-metrics-nodes-1.native-metrics-nodes.flare-native-metrics.svc.cluster.local:12121 uid=(some fa18649e-8d69-48fe-abea-d3517ff14de1) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] grace period: 12 cycles remaining
+#   [TopologyAudit] node=native-metrics-nodes-0.native-metrics-nodes.flare-native-metrics.svc.cluster.local:12121 uid=(some ebe28c1e-be0f-4574-8747-6915d1a5a121) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1057ms (nodes=2 M=1 S=1 D=0 P=0)
+#   [flare-operator] grace period: 11 cycles remaining
+#   [TopologyAudit] node=native-metrics-nodes-1.native-metrics-nodes.flare-native-metrics.svc.cluster.local:12121 uid=(some fa18649e-8d69-48fe-abea-d3517ff14de1) desired=4294967304 reported=(some 4294967304) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1001ms (nodes=2 M=1 S=1 D=0 P=0)
+#   
+# Cleaning up cluster 'native-metrics'
+# === Suite: blue-green-migration ===
+# Cleaning up cluster 'bg-src'
+# Deploying cluster 'bg-src' in namespace 'flare-bg-migration'
+# Waiting for: namespace flare-bg-migration not Terminating (timeout: 30s)
+#   OK after 0s
+# Waiting for: default ServiceAccount in flare-bg-migration (timeout: 120s)
+#   OK after 0s
+# Waiting for: FlareCluster CRD established (timeout: 60s)
+#   OK after 0s
+# Waiting for: ClusterRole flare-operator present (timeout: 60s)
+#   OK after 0s
+# Waiting for operator deployment to be ready...
+# Operator ready, waiting 10s for first reconcile cycle...
+# ConfigMap bg-src-config confirmed present before StatefulSet deploy
+# Deploying StatefulSet...
+# Waiting for StatefulSet bg-src-nodes to be ready...
+# Waiting for: all 4 pods ready (timeout: 180s)
+#   OK after 0s
+# Waiting for: 4 nodes registered (timeout: 300s)
+#   OK after 0s
+# Waiting 50s grace period for operator reconciliation...
+# Checking operator activity...
+# --- Operator logs (flare-operator-bg) ---
+#   [TcpClient] node sync v4294967318 to 10.244.0.52:12121: reply-confirmed=true
+#   [TcpClient] node sync v4294967318 to 10.244.0.51:12121: reply-confirmed=true
+#   [TcpClient] node sync v4294967318 to 10.244.0.50:12121: reply-confirmed=true
+#   [TopologyBroadcast] Broadcast attempt complete (v4294967318); all targets reply-confirmed=true
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1702ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 16 cycles remaining
+#   [TopologyAudit] node=bg-src-nodes-2.bg-src-nodes.flare-bg-migration.svc.cluster.local:12121 uid=(some 942f3f8c-7f48-4129-9ffa-82040fb3711b) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1121ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 15 cycles remaining
+#   [TopologyAudit] node=bg-src-nodes-1.bg-src-nodes.flare-bg-migration.svc.cluster.local:12121 uid=(some 13d69fa3-1579-44a7-a9f0-85b9ddfb3924) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1419ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 14 cycles remaining
+#   [TopologyAudit] node=bg-src-nodes-0.bg-src-nodes.flare-bg-migration.svc.cluster.local:12121 uid=(some 59d6fa4f-d3ba-4491-ad45-a582f4a4ffee) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1227ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 13 cycles remaining
+#   [TopologyAudit] node=bg-src-nodes-3.bg-src-nodes.flare-bg-migration.svc.cluster.local:12121 uid=(some 7577ec13-cc8a-4eee-97f0-8d2ae613b07d) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1211ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 12 cycles remaining
+#   [TopologyAudit] node=bg-src-nodes-2.bg-src-nodes.flare-bg-migration.svc.cluster.local:12121 uid=(some 942f3f8c-7f48-4129-9ffa-82040fb3711b) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1039ms (nodes=4 M=2 S=2 D=0 P=0)
+#   [flare-operator] grace period: 11 cycles remaining
+#   [TopologyAudit] node=bg-src-nodes-1.bg-src-nodes.flare-bg-migration.svc.cluster.local:12121 uid=(some 13d69fa3-1579-44a7-a9f0-85b9ddfb3924) desired=4294967318 reported=(some 4294967318) verdict=current
+#   [DEBUG] handleRocksdbConfig: hasAny=false walTtl=none walSize=none sync=none
+#   [flare-operator] reconcile slow: 1410ms (nodes=4 M=2 S=2 D=0 P=0)
+#   
+# Waiting for: migration phase Duplicating (timeout: 300s)
+#   OK after 30s
+# Waiting for: migration phase AwaitingCutover (timeout: 300s)
+#   OK after 120s
+# Waiting for: migration phase AwaitingRetire (timeout: 120s)
+#   OK after 15s
+# Waiting for: migration phase Retired (timeout: 120s)
+#   OK after 5s
+# Waiting for: provisioned operator deleted itself (timeout: 180s)
+#   OK after 5s
+# Waiting for: abort-me left Pending (timeout: 120s)
+#   OK after 10s
+# Waiting for: abort-me Aborted (timeout: 180s)
+#   OK after 10s
+# Cleaning up cluster 'bg-src'
+# Tests: 37, Failures: 1
+# RESULT: FAIL
+1..37
+ok 1 - baseline: two active masters
+ok 2 - wait out the operator startup grace period
+not ok 3 - majority outage (scale 4→1) trips the breaker
+ok 4 - no live-topology churn while tripped
+ok 5 - restoring capacity resumes recovery automatically
+ok 6 - cluster shape survives an operator restart (state reload)
+ok 7 - writes still served after operator restart
+ok 8 - failover still works after the restart (reloaded state is live)
+ok 9 - flared rejects a topology push carrying a stale version
+ok 10 - control: holding the lease, the stopped pass does broadcast
+ok 11 - lease taken by another identity: the pass fences, the process exits, and the restarted leader re-applies the topology
+ok 12 - lease unreadable: the stopped pass fails closed and does not send
+ok 13 - control: writes to the master replicate to the slave
+ok 14 - cut link: the master drops replica writes and the operator requests a repair
+ok 15 - the repair runs: held as proxy, confirmed, re-seated, reconstructed; keys recovered without another drop
+ok 16 - SAF-05: a drop seen while resync is disabled is held, survives an operator restart, and is repaired once the gate opens
+ok 17 - SAF-05: a ledger save that fails is marked unsaved, retried every pass, lands when allowed, and survives a restart
+ok 18 - SAF-05: a corrupt ledger is held as unavailable, never replaced by an empty one; the drop seen meanwhile is recovered once it is readable
+ok 19 - SAF-06: the delete carries the observed pod UID as an API precondition; a same-name pod with another UID is refused by the apiserver
+ok 20 - SAF-06: the UID-precondition delete has a deadline — a server that accepts and never answers returns within it
+ok 21 - the lost-activation condition is staged: the activation is dropped and a reconstruction completed
+ok 22 - the repair re-derives Prepare→Active from completion evidence and names it
+ok 23 - GET /metrics answers HTTP 200 with Prometheus text
+ok 24 - memcached_current_items equals stats curr_items verbatim
+ok 25 - writes are reflected in /metrics (curr_items grows, set counter present)
+ok 26 - flared_version and rocksdb passthrough are exported
+ok 27 - /metrics still answers with the operator scaled to 0 (SPOF removed)
+ok 28 - seed 60 keys across both source partitions
+ok 29 - migration CR accepted; target provisioned and Ready (phase Duplicating)
+ok 30 - counts converge and source flips to forward (phase AwaitingCutover)
+ok 31 - every key re-hashed into the 1-partition target (master AND slave)
+ok 32 - parked at AwaitingCutover until approval (gate honored)
+ok 33 - approveCutover flips the entry Service to the target
+ok 34 - reads through the entry Service hit the target cluster
+ok 35 - approveRetire deletes the source StatefulSet (phase Retired)
+ok 36 - provisioned operator self-retires when a helm successor appears
+ok 37 - abort rolls a migration back (target resources deleted)

@@ -1,0 +1,28 @@
+# CHECK-02 — proof elaboration at 76ce851e335408f1cf096435ab128bac8e5956c7
+# command: cd flare_operator && lake build FlareOperator
+# date: 2026-09-11
+
+✔ [47/65] Built FlareOperator.StateMachine.FlaredNode
+✔ [48/65] Built FlareOperator.StateMachine.StateMachine
+✔ [49/65] Built FlareOperator.StateMachine.CircuitBreakerSimulation
+✔ [50/65] Built FlareOperator.StateMachine.TemporalLogic
+ℹ [51/65] Built FlareOperator.StateMachine.Reconciler
+✔ [52/65] Built FlareOperator.StateMachine.CircuitBreakerSimMain
+✔ [55/65] Built FlareOperator.StateMachine.K8sReconciler
+✔ [57/65] Built FlareOperator.StateMachine.Invariants
+✔ [58/65] Built FlareOperator.StateMachine.GlobalModel
+ℹ [59/65] Built FlareOperator.StateMachine.Simulation
+✔ [60/65] Built FlareOperator.StateMachine.GeneralSafety
+✔ [61/65] Built FlareOperator.StateMachine.Safety
+✔ [62/65] Built FlareOperator.StateMachine.SafetyProofs
+✔ [63/65] Built FlareOperator.StateMachine.Liveness
+ℹ [64/65] Built FlareOperator.StateMachine.VerifiedSafety
+Build completed successfully.
+
+# sorry check (must be empty):
+flare_operator/FlareOperator/StateMachine/GeneralSafety.lean:4:  Discharges the long-standing `sorry` in Safety.lean: EVERY GlobalStep
+flare_operator/FlareOperator/StateMachine/GeneralSafety.lean:703:    inductive safety property, sorry-free. -/
+flare_operator/FlareOperator/StateMachine/SafetyProofs.lean:4:  Proves the core invariant "at most one master per partition" without axioms (no 'sorry').
+flare_operator/FlareOperator/StateMachine/SafetyProofs.lean:107:/-! ## Unbounded trace safety (formerly a bounded, sorry-backed statement) -/
+flare_operator/FlareOperator/StateMachine/SafetyProofs.lean:114:  in `sorry`; no bound is needed anymore.
+(none above = no sorry in the state machine)

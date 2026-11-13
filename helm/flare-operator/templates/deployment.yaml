@@ -1,0 +1,352 @@
+{{- if .Values.operator.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "flare-operator.fullname" . }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "flare-operator.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "flare-operator.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "flare-operator.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        # Every pod starts as standby; the leader overwrites its own label
+        # after acquiring the lease. Deliberately NOT part of matchLabels
+        # (the Deployment selector is immutable and must not track it).
+        flare.gree.net/role: standby
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "flare-operator.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: {{ include "flare-operator.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - "--namespace"
+            - {{ .Values.namespace | quote }}
+            - "--port"
+            - {{ .Values.operatorPort | quote }}
+            {{- if .Values.clusterName }}
+            - "--cluster-name"
+            - {{ .Values.clusterName | quote }}
+            {{- end }}
+            {{- with .Values.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            # Servers read their ports from these; without the injection the
+            # values only changed containerPort declarations while the
+            # processes stayed on hardcoded ports (review P2-6).
+            - name: FLARE_METRICS_PORT
+              value: {{ .Values.metricsPort | quote }}
+            - name: FLARE_HEALTH_PORT
+              value: {{ .Values.healthPort | quote }}
+            - name: FLARE_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # the node guard trusts the operator's own deletes (rolling, repair)
+            - name: FLARE_OPERATOR_SERVICE_ACCOUNT
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.serviceAccountName
+            {{- if .Values.legacyMasterSwitch }}
+            # accepted explicitly: masters on a flared from before the ordered
+            # handover are switched by the drain (NOT loss-free)
+            - name: FLARE_OPERATOR_LEGACY_MASTER_SWITCH
+              value: "allow"
+            {{- end }}
+            {{- if .Values.nodeReplacement.enabled }}
+            {{- if not .Values.nodeGuard.enabled }}
+            {{- fail "nodeReplacement.enabled needs nodeGuard.enabled: the node guard holds the eviction of a pod on a cordoned node until its move released it" }}
+            {{- end }}
+            - name: FLARE_NODE_REPLACEMENT_MIN_COPIES
+              value: {{ .Values.nodeReplacement.minCopies | quote }}
+            - name: FLARE_NODE_REPLACEMENT_DRAIN_WAIT_SECONDS
+              value: {{ .Values.nodeReplacement.drainWaitSeconds | quote }}
+            - name: FLARE_NODE_REPLACEMENT_QUIET_SECONDS
+              value: {{ .Values.nodeReplacement.quietSeconds | quote }}
+            - name: FLARE_NODE_REPLACEMENT_EVICT_WAIT_SECONDS
+              value: {{ .Values.nodeReplacement.evictWaitSeconds | quote }}
+            - name: FLARE_NODE_REPLACEMENT_UNSERVED_TIMEOUT_SECONDS
+              value: {{ .Values.nodeReplacement.unservedTimeoutSeconds | quote }}
+            - name: FLARE_NODE_REPLACEMENT_RESYNC_TIMEOUT_SECONDS
+              value: {{ .Values.nodeReplacement.resyncTimeoutSeconds | quote }}
+            {{- else }}
+            - name: FLARE_NODE_REPLACEMENT
+              value: "off"
+            {{- end }}
+            {{- if .Values.nodeGuard.enabled }}
+            - name: FLARE_NODE_GUARD
+              value: "on"
+            - name: FLARE_WEBHOOK_PORT
+              value: "9444"
+            # the break-glass receipt key of a halted handover (created once by
+            # the operator, never replaced; docs/design-handover-history-continuation.md)
+            - name: FLARE_RECEIPT_KEY_SECRET
+              value: "{{ include "flare-operator.fullname" . }}-receipt-key"
+            {{- end }}
+            {{- if .Values.clusterName }}
+            - name: FLARE_CLUSTER_NAME
+              value: {{ .Values.clusterName | quote }}
+            {{- end }}
+            {{- with .Values.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: flare-index
+              containerPort: {{ .Values.operatorPort }}
+              protocol: TCP
+            - name: metrics
+              containerPort: {{ .Values.metricsPort }}
+              protocol: TCP
+            - name: health
+              containerPort: {{ .Values.healthPort }}
+              protocol: TCP
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+        {{- if .Values.nodeGuard.enabled }}
+        {{- $tlsMode := include "flare-operator.nodeGuardTlsMode" . }}
+        # TLS for the node-guard admission webhook (A0 stage 6b): the operator
+        # serves it in plain HTTP on 127.0.0.1:9444; this sidecar terminates
+        # TLS with the chart-generated certificate.
+        - name: webhook-tls
+          image: {{ .Values.nodeGuard.tlsImage }}
+          imagePullPolicy: IfNotPresent
+          # The certificate is generated on every render (helm upgrade, an
+          # ArgoCD sync), and the API server trusts the new CA at once, while
+          # socat keeps the certificate it loaded at start: every webhook call
+          # then failed TLS and, with failurePolicy Fail, every guarded delete
+          # (the operator's rolling too) was refused until the operator pods
+          # restarted (E2E 41181975092, helm upgrade: http 500 for 15 min).
+          # socat is restarted when the mounted Secret changes (the kubelet
+          # refreshes it within about a minute).
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              sum() { cat /tls/tls.crt /tls/tls.key | md5sum; }
+              while true; do
+                {{- if ne $tlsMode "helm" }}
+                # the Secret is made by the webhook-cert container (operator)
+                # or cert-manager, maybe after this pod started: the volume is
+                # optional and empty until it exists
+                until [ -s /tls/tls.crt ] && [ -s /tls/tls.key ]; do
+                  echo "webhook-tls: waiting for {{ include "flare-operator.nodeGuardTlsSecret" . }}"
+                  sleep 5
+                done
+                {{- end }}
+                socat OPENSSL-LISTEN:9443,reuseaddr,fork,cert=/tls/tls.crt,key=/tls/tls.key,verify=0 TCP:127.0.0.1:9444 &
+                pid=$!
+                s=$(sum)
+                while kill -0 "$pid" 2>/dev/null && [ "$(sum)" = "$s" ]; do sleep 5; done
+                echo "webhook-tls: certificate changed (or socat exited); restarting socat"
+                kill "$pid" 2>/dev/null
+                wait "$pid" 2>/dev/null
+              done
+          ports:
+            - name: webhook
+              containerPort: 9443
+              protocol: TCP
+          volumeMounts:
+            - name: webhook-tls
+              mountPath: /tls
+              readOnly: true
+          resources:
+            {{- toYaml .Values.nodeGuard.tlsResources | nindent 12 }}
+        {{- if eq $tlsMode "operator" }}
+        # nodeGuard.tls.mode=operator: makes the serving certificate once and
+        # keeps the API server's trust in it. The chart renders neither the
+        # Secret nor the caBundle, so a re-render (an ArgoCD refresh) changes
+        # nothing (with genCA every render was a new CA, and each sync refused
+        # guarded operations until socat reloaded). Both replicas run it:
+        # create is atomic (the loser reads the winner's Secret), the
+        # caBundle patch is idempotent.
+        - name: webhook-cert
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          # the operator image: ubuntu noble with openssl and kubectl
+          image: {{ include "flare-operator.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: NS
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: SECRET
+              value: {{ include "flare-operator.nodeGuardTlsSecret" . | quote }}
+            - name: WEBHOOK_CONFIG
+              value: "{{ include "flare-operator.fullname" . }}-node-guard-{{ .Values.namespace }}"
+            - name: FENCE_WEBHOOK_CONFIG
+              value: "{{ include "flare-operator.fullname" . }}-handover-fence-{{ .Values.namespace }}"
+            - name: SVC
+              value: "{{ include "flare-operator.fullname" . }}-webhook"
+            - name: INTERVAL
+              value: {{ .Values.nodeGuard.tls.operator.intervalSeconds | default 10 | quote }}
+            # kubectl's cache and openssl's files; the image's user has no home
+            - name: HOME
+              value: /work
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              cd /work || exit 1
+              log() { echo "webhook-cert: $*"; }
+              # A new CA (10 years, as genCA 3650) and a serving certificate
+              # signed by it. The CN is short (openssl refuses one over 64
+              # characters, e.g. a long namespace); the names are the SANs.
+              generate() {
+                rm -rf gen && mkdir gen && cd gen || return 1
+                printf '%s\n' '[req]' 'distinguished_name=dn' 'prompt=no' 'x509_extensions=v3_ca' \
+                  '[dn]' 'CN=flare-node-guard-ca' \
+                  '[v3_ca]' 'basicConstraints=critical,CA:TRUE' 'keyUsage=critical,keyCertSign,cRLSign' 'subjectKeyIdentifier=hash' > ca.cnf
+                printf '%s\n' '[req]' 'distinguished_name=dn' 'prompt=no' '[dn]' 'CN=flare-node-guard' > req.cnf
+                printf '%s\n' '[v3]' 'basicConstraints=critical,CA:FALSE' 'keyUsage=critical,digitalSignature,keyEncipherment' \
+                  'extendedKeyUsage=serverAuth' "subjectAltName=DNS:$SVC.$NS.svc,DNS:$SVC.$NS.svc.cluster.local" > ext.cnf
+                openssl req -x509 -new -newkey rsa:2048 -nodes -days 3650 -config ca.cnf -keyout ca.key -out ca.crt 2>err.txt &&
+                openssl req -new -newkey rsa:2048 -nodes -config req.cnf -keyout tls.key -out tls.csr 2>>err.txt &&
+                openssl x509 -req -in tls.csr -CA ca.crt -CAkey ca.key -set_serial "0x$(openssl rand -hex 16)" \
+                  -days 3650 -extfile ext.cnf -extensions v3 -out tls.crt 2>>err.txt
+                rc=$?
+                cd /work
+                return $rc
+              }
+              # NOT the chart's labels: app.kubernetes.io/instance is ArgoCD's
+              # tracking label, and a tracked object the chart does not render
+              # would be pruned (the Secret in use deleted on the next sync)
+              manifest() {
+                cat <<EOF
+              apiVersion: v1
+              kind: Secret
+              type: kubernetes.io/tls
+              metadata:
+                name: $SECRET
+                namespace: $NS
+                labels:
+                  app.kubernetes.io/part-of: flare
+                  flare.gree.net/webhook-tls: operator
+              data:
+                tls.crt: $(base64 -w0 gen/tls.crt)
+                tls.key: $(base64 -w0 gen/tls.key)
+                ca.crt: $(base64 -w0 gen/ca.crt)
+              EOF
+              }
+              last=""
+              while true; do
+                ca=$(kubectl get secret "$SECRET" -n "$NS" -o 'jsonpath={.data.ca\.crt}' 2>err.txt)
+                if [ $? -ne 0 ]; then
+                  if grep -q NotFound err.txt; then
+                    # absent (first start, or deleted to rotate): create it.
+                    # Never overwrite one: create fails with AlreadyExists when
+                    # the other replica won, and the next pass reads that one.
+                    if generate; then
+                      if manifest | kubectl create -f - >/dev/null 2>err.txt; then
+                        log "created $SECRET (new CA)"
+                        rm -rf gen
+                        continue
+                      fi
+                      log "create $SECRET: $(cat err.txt)"
+                      rm -rf gen
+                      # AlreadyExists: read the winner's at once
+                      grep -q AlreadyExists err.txt && continue
+                    else
+                      log "openssl failed: $(cat gen/err.txt 2>/dev/null)"
+                    fi
+                  else
+                    log "get $SECRET: $(cat err.txt)"
+                  fi
+                elif [ -z "$ca" ]; then
+                  log "$SECRET has no ca.crt; delete it to have it made again"
+                else
+                  # every webhook whose caBundle differs, patched by index; the
+                  # test op on its name refuses the patch if the list changed
+                  # since it was read. The node guard (validating) and the
+                  # handover-fence receipt (mutating) configurations.
+                  for kc in "validatingwebhookconfiguration $WEBHOOK_CONFIG" "mutatingwebhookconfiguration $FENCE_WEBHOOK_CONFIG"; do
+                  set -- $kc
+                  kind=$1; cfg=$2
+                  ops=""
+                  i=0
+                  if kubectl get "$kind" "$cfg" \
+                      -o 'jsonpath={range .webhooks[*]}{.name}{" "}{.clientConfig.caBundle}{"\n"}{end}' > hooks.txt 2>err.txt; then
+                    while read -r name cb; do
+                      [ -n "$name" ] || continue
+                      if [ "$cb" != "$ca" ]; then
+                        ops="$ops${ops:+,}{\"op\":\"test\",\"path\":\"/webhooks/$i/name\",\"value\":\"$name\"},{\"op\":\"add\",\"path\":\"/webhooks/$i/clientConfig/caBundle\",\"value\":\"$ca\"}"
+                      fi
+                      i=$((i + 1))
+                    done < hooks.txt
+                    if [ -n "$ops" ]; then
+                      if kubectl patch "$kind" "$cfg" --type=json \
+                          --field-manager=flare-webhook-cert -p "[$ops]" >/dev/null 2>err.txt; then
+                        log "caBundle of $cfg set from $SECRET"
+                      else
+                        log "patch $cfg: $(cat err.txt)"
+                      fi
+                    elif [ "$kind" = validatingwebhookconfiguration ] && [ "$last" != "$ca" ]; then
+                      log "caBundle of $cfg matches $SECRET"
+                      last=$ca
+                    fi
+                  else
+                    log "get $cfg: $(cat err.txt)"
+                  fi
+                  done
+                fi
+                sleep "$INTERVAL"
+              done
+          volumeMounts:
+            - name: webhook-cert-work
+              mountPath: /work
+          resources:
+            {{- toYaml .Values.nodeGuard.tls.operator.resources | nindent 12 }}
+        {{- end }}
+      volumes:
+        - name: webhook-tls
+          secret:
+            secretName: {{ include "flare-operator.nodeGuardTlsSecret" . }}
+            {{- if or (eq $tlsMode "operator") (eq $tlsMode "certManager") }}
+            # made after the pod may start (by the webhook-cert container or
+            # cert-manager): socat waits for the files
+            optional: true
+            {{- end }}
+        {{- if eq $tlsMode "operator" }}
+        - name: webhook-cert-work
+          emptyDir:
+            sizeLimit: 16Mi
+        {{- end }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+{{- end }}

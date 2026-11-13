@@ -73,6 +73,11 @@ public:
 		binary,
 	};
 
+	// Reply text of a replica whose copy holds another history and is being
+	// rebuilt (storage::identified_refused_history). The master matches the
+	// PREFIX of the reply (queue_proxy_write::refused_rebuilding).
+	static const char* const				rebuild_pending_message;
+
 protected:
 	shared_connection						_connection;
 	protocol										_protocol;
@@ -100,6 +105,7 @@ public:
 	int set_proxy(string proxy);
 	int set_proxy(vector<string> proxy) { this->_proxy = proxy; return 0; };
 	inline string get_ident() { return this->_ident; };
+	shared_connection get_connection() { return this->_connection; };
 	int is_proxy_request() { return this->_proxy_request; };
 	bool is_shutdown_request() { return this->_shutdown_request; };
 	result get_result() { return this->_result; };

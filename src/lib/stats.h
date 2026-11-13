@@ -29,6 +29,9 @@
 
 #include <boost/lexical_cast.hpp>
 
+#include <map>
+#include <pthread.h>
+
 #include <sys/resource.h>
 #include <sys/time.h>
 #include <sys/types.h>
@@ -57,6 +60,125 @@ protected:
 	AtomicCounter _cmd_set;
 	AtomicCounter _get_hits;
 	AtomicCounter _get_misses;
+	// Writes the master gave up forwarding to a replica: queue_proxy_write
+	// exhausted its retries and DROPPED the op. The client already got its
+	// success (the master's own write succeeded), so this is silent replica
+	// divergence — the only signal that it happened. Monotonic.
+	AtomicCounter _proxy_write_dropped;
+	// client requests being executed now (parsed, not yet answered): on a
+	// proxy, a write being forwarded to its master is one of them
+	AtomicCounter _requests_in_progress;
+	// client DATA requests (reads and writes) received, monotonic: the cordon
+	// move's quiet check. stats/ping/quit/version and node operations are not
+	// counted, so the kubelet's probes and the operator's reads never look
+	// like a client (total_connections rises with every probe).
+	AtomicCounter _client_requests;
+	// W: writes waiting now for their partition to get a master, and how the
+	// waits ended (a master came / the wait timed out with an error)
+	AtomicCounter _writes_waiting_for_master;
+	AtomicCounter _master_waits_ok;
+	AtomicCounter _reads_waited_for_master;
+	AtomicCounter _master_waits_timeout;
+	// The same drops broken down BY DESTINATION, so a controller can tell
+	// WHICH replica is now behind and resync only that one. The aggregate
+	// counter above cannot: it says a replica diverged, not which. Drops are
+	// rare, so a mutex-guarded map costs nothing on the hot path (it is only
+	// touched after four failed retries).
+	pthread_mutex_t _mutex_proxy_write_dropped_by_dest;
+	map<string, uint64_t> _proxy_write_dropped_by_dest;
+	// DIAGNOSTIC (copy-identity 11, forward-window-steps 38040471950: writes
+	// the master acknowledged after a rejoining replica's staged switch never
+	// reached its copy, with no drop, skip or not-stored logged): where each
+	// forward went, by name ("fwd_enqueued:<dest>", "fwd_answered:<dest>:<result>",
+	// "fwd_skipped_as_proxy:<dest>", "recv_proxied:...") — only when
+	// FLARE_TEST_FORWARD_DIAG is set (a mutex per forward otherwise).
+	bool _diag_enabled;
+	pthread_mutex_t _mutex_diag;
+	map<string, uint64_t> _diag;
+	// CROSS-CLUSTER replication (cluster_replication), always on: what each
+	// forwarded op became on the destination ("forward_applied",
+	// "forward_noop_<op>_<result>", "forward_failed_<op>_<result>",
+	// "forward_dropped_<path>", "forward_enqueued") and the seed's progress,
+	// so a forward that was answered but not stored, and a seed that never
+	// started, are visible (audit 2026-10-11). Cross-cluster forwards are a
+	// network round trip each; one mutex per forward is noise beside it.
+	pthread_mutex_t _mutex_crepl;
+	map<string, uint64_t> _crepl;
+	string _crepl_seed_state;
+	// Asynchronous cross-cluster forwards that exist right now: counted when
+	// one is made (before it is queued) and uncounted when it is destroyed,
+	// whatever ended it. Kept under _mutex_crepl so a reader gets it and the
+	// counters from ONE moment (get_crepl_snapshot): the migration switch
+	// gate needs "nothing in flight" as a value, not as a difference of
+	// counters read apart (review 2026-10-12).
+	uint64_t _crepl_in_flight;
+	// In-cluster forwards to replicas (post-proxy) that exist right now, per
+	// destination node key: counted when a forward is made for that replica
+	// (before it is queued) and uncounted when the forward item is destroyed,
+	// whatever ended it (delivered, dropped, abandoned). The planned switch
+	// (NODE-OPS-LOSSLESS-PLAN 5.6) waits for 0 toward the successor before it
+	// promotes it, and preStop waits for 0 before flared exits. One item is
+	// shared by every replica of the write, so a destination stays counted
+	// until the item is released for all of them (an over-count, never under).
+	pthread_mutex_t _mutex_repl_in_flight;
+	map<string, uint64_t> _repl_in_flight;
+	// Terminal outcomes of in-cluster forwards that the replica ANSWERED, per
+	// destination (review of 8d64aaf: "in flight = 0" also follows a forward
+	// that failed). failed = any answer other than stored / deleted / touched /
+	// ok / not_found / not_stored; skipped = not_stored (the replica already
+	// holds a newer version: a set forwarded with its version is refused as
+	// "older or equal"). Drops (never delivered) are counted separately in
+	// proxy_write_dropped. Guarded by _mutex_repl_in_flight.
+	map<string, uint64_t> _proxy_write_failed;
+	map<string, uint64_t> _proxy_write_skipped;
+	// forwards the destination refused with "rebuild pending" (its copy holds
+	// another history and is being rebuilt) while the master's map shows it
+	// not Active: expected, nothing is lost (the rebuild's catch-up carries
+	// the change). Not counted in _proxy_write_failed.
+	map<string, uint64_t> _proxy_write_refused_rebuilding;
+	// forwards to a replica that needed more than one try within their hold
+	// window (queue_proxy_write::hold_window_ms), and the longest such wait
+	// (msec) per destination: how long writes queued behind a held one
+	map<string, uint64_t> _proxy_write_held;
+	map<string, uint64_t> _proxy_write_held_ms_max;
+	// Reconstruction lifecycle of THIS node, counted once per request (a
+	// request is one handler_reconstruction; its internal retries are not
+	// separate requests). "started" is what a controller compares against
+	// after it asks for a resync: without it, a resync request that never
+	// reached flared (role diff lost, map ignored, state-only change) is
+	// indistinguishable from one that ran instantly. "completed" is the
+	// evidence that a full copy or WAL catch-up finished; "failed" is the
+	// permanent give-up after retries. Monotonic for the process lifetime.
+	AtomicCounter _reconstruction_started;
+	AtomicCounter _reconstruction_completed;
+	AtomicCounter _reconstruction_failed;
+	// ONE completion record, so a controller can tell "the current
+	// reconstruction of this process succeeded from this source" apart from
+	// cumulative counters (a failed or aborted handler leaves started and
+	// completed permanently unequal, and a restart resets both to values a
+	// previous process may also have shown):
+	//   boot_id           random per process — distinguishes processes even
+	//                     when every counter happens to match;
+	//   current_id        the id (= started ordinal) of the latest handler;
+	//   current_state     none / running / succeeded / failed / aborted;
+	//   last_success_id   id of the last handler that succeeded;
+	//   last_success_source  master host:port that handler copied from.
+	pthread_mutex_t _mutex_reconstruction;
+	pthread_mutex_t _mutex_follow;
+	bool _follow_enabled;
+	string _follow_source;
+	string _follow_source_epoch;
+	int _follow_state;
+	string _follow_last_reason;
+	uint64_t _follow_applied_lsn;
+	uint64_t _follow_source_lsn;
+	time_t _follow_source_lsn_observed_at;
+	time_t _follow_last_progress_at;
+	uint64_t _reconstruction_boot_id;
+	uint64_t _reconstruction_current_id;
+	int _reconstruction_current_state;
+	uint64_t _reconstruction_last_success_id;
+	string _reconstruction_last_success_source;
 	AtomicCounter _delete_hits;
 	AtomicCounter _delete_misses;
 	AtomicCounter _incr_hits;
@@ -84,6 +206,116 @@ public:
 	inline int increment_cmd_set()               { this->_cmd_set.incr();return 0; };
 	inline int increment_get_hits()              { this->_get_hits.incr();return 0; };
 	inline int increment_get_misses()            { this->_get_misses.incr();return 0; };
+	inline int increment_proxy_write_dropped()   { this->_proxy_write_dropped.incr();return 0; };
+	inline void request_begin() { this->_requests_in_progress.incr(); };
+	inline void request_end() { this->_requests_in_progress.sub(1); };
+	inline uint64_t get_requests_in_progress() { return this->_requests_in_progress.fetch(); };
+	inline void increment_client_requests() { this->_client_requests.incr(); };
+	inline uint64_t get_client_requests() { return this->_client_requests.fetch(); };
+	inline void master_wait_begin() { this->_writes_waiting_for_master.incr(); };
+	inline void master_wait_end(bool ok) { this->_writes_waiting_for_master.sub(1); if (ok) { this->_master_waits_ok.incr(); } else { this->_master_waits_timeout.incr(); } };
+	inline uint64_t get_writes_waiting_for_master() { return this->_writes_waiting_for_master.fetch(); };
+	inline uint64_t get_master_waits_ok() { return this->_master_waits_ok.fetch(); };
+	inline uint64_t get_master_waits_timeout() { return this->_master_waits_timeout.fetch(); };
+	inline void increment_reads_waited_for_master() { this->_reads_waited_for_master.incr(); };
+	inline uint64_t get_reads_waited_for_master() { return this->_reads_waited_for_master.fetch(); };
+	int increment_proxy_write_dropped(const string& dest);
+	bool diag_enabled() const { return this->_diag_enabled; };
+	void diag_incr(const string& name);
+	map<string, uint64_t> get_diag();
+	void crepl_incr(const string& name);
+	map<string, uint64_t> get_crepl();
+	void crepl_in_flight_add();
+	void crepl_in_flight_sub();
+	map<string, uint64_t> get_crepl_snapshot(uint64_t& in_flight);
+	void repl_in_flight_add(const string& dest);
+	void repl_in_flight_sub(const string& dest);
+	map<string, uint64_t> get_repl_in_flight(uint64_t& total);
+	void increment_proxy_write_failed(const string& dest);
+	void increment_proxy_write_skipped(const string& dest);
+	void increment_proxy_write_refused_rebuilding(const string& dest);
+	void note_proxy_write_held(const string& dest, uint64_t ms);
+	map<string, uint64_t> get_proxy_write_held(uint64_t& total);
+	map<string, uint64_t> get_proxy_write_held_ms_max(uint64_t& max_all);
+	map<string, uint64_t> get_proxy_write_failed(uint64_t& total);
+	map<string, uint64_t> get_proxy_write_skipped(uint64_t& total);
+	map<string, uint64_t> get_proxy_write_refused_rebuilding(uint64_t& total);
+	void set_crepl_seed_state(const string& state);
+	string get_crepl_seed_state();
+	inline int increment_reconstruction_started()   { this->_reconstruction_started.incr();return 0; };
+	inline int increment_reconstruction_completed() { this->_reconstruction_completed.incr();return 0; };
+	inline int increment_reconstruction_failed()    { this->_reconstruction_failed.incr();return 0; };
+	enum reconstruction_state { reconstruction_none = 0, reconstruction_running, reconstruction_succeeded, reconstruction_failed_state, reconstruction_aborted };
+	// Every notification carries the id the handler was GIVEN at begin(), so
+	// an older handler finishing after a newer one started cannot write the
+	// newer id into the record (review: A begins #1, B begins #2, A succeeds
+	// must not yield "latest #2 succeeded"). Only the CURRENT handler's
+	// notification changes the current state; last_success only advances.
+	// begin() allocates the id and updates the record under ONE lock.
+	uint64_t reconstruction_begin();
+	int reconstruction_succeeded_from(uint64_t id, const string& source);
+	int reconstruction_failed_final(uint64_t id);
+	int reconstruction_aborted_by_shutdown(uint64_t id);
+	// the node stopped being the slave this reconstruction was for (demoted to
+	// a proxy): no longer running, not failed
+	int reconstruction_abandoned(uint64_t id) { return this->reconstruction_aborted_by_shutdown(id); }
+	struct reconstruction_record {
+		uint64_t boot_id;
+		uint64_t current_id;
+		string current_state;
+		uint64_t last_success_id;
+		string last_success_source;
+	};
+	/// One consistent snapshot under a single lock (for `stats`).
+	reconstruction_record get_reconstruction_record();
+
+	// ---- CONTINUOUS REPLICATION, follower side (SAF-10b stage 3b) --------
+	// What the operator needs to tell "following" from "connected" and from
+	// "caught up" (design §5.1). Every field is read as ONE snapshot: a
+	// position without the time it was observed, or a state without a
+	// reason, cannot be acted on.
+	enum follow_state {
+		follow_idle = 0,		// not following: this node is not a WAL-mode replica
+		follow_initial_sync,	// has a copy, still catching up for the first time
+		follow_following,		// connected and applying
+		follow_disconnected,	// lost the connection; RESUMES from the position, never a rebuild by itself
+		follow_needs_rebuild,	// history gone, source epoch changed, or a batch could not be decoded
+		follow_error,			// storage or protocol failure; retried
+	};
+	struct follow_record {
+		bool     enabled;				// the mode is on for this node
+		string   source;				// peer being followed, empty when idle
+		string   source_epoch;			// the history the position belongs to
+		string   state;
+		string   last_reason;			// why the last reconnect or rebuild
+		uint64_t applied_lsn;			// contiguously applied position
+		uint64_t source_lsn;			// the master's position...
+		time_t   source_lsn_observed_at;	// ...and when that was observed
+		time_t   last_progress_at;		// last time the position advanced
+	};
+	follow_record get_follow_record();
+	// Local read guard, independent of delayed operator/map delivery. A WAL
+	// replica only serves locally after reaching its last observed head.
+	// This is not a linearizable-read guarantee: the source can write again.
+	static bool follow_allows_local_read(const follow_record& r, time_t now) {
+		return !r.enabled || (r.state == "following" && !r.source_epoch.empty()
+			&& r.source_lsn > 0 && r.applied_lsn >= r.source_lsn
+			&& r.source_lsn_observed_at > 0 && now >= r.source_lsn_observed_at
+			&& now - r.source_lsn_observed_at <= 5);
+	}
+	// Transitions. follow_note_progress() is the only one that moves the
+	// applied position, and it is called after the position was durably
+	// recorded, never before.
+	int follow_set_state(follow_state st, const string& reason);
+	int follow_set_source(const string& source, const string& source_epoch);
+	int follow_note_progress(uint64_t applied_lsn);
+	int follow_note_source_position(uint64_t source_lsn);
+	int follow_set_enabled(bool enabled);
+	uint64_t get_reconstruction_boot_id();
+	uint64_t get_reconstruction_current_id();
+	string get_reconstruction_current_state();
+	uint64_t get_reconstruction_last_success_id();
+	string get_reconstruction_last_success_source();
 	inline int increment_delete_hits()           { this->_delete_hits.incr();return 0; };
 	inline int increment_delete_misses()         { this->_delete_misses.incr();return 0; };
 	inline int increment_incr_hits()             { this->_incr_hits.incr();return 0; };
@@ -117,6 +349,11 @@ public:
 	uint64_t get_cmd_set();
 	uint64_t get_get_hits();
 	uint64_t get_get_misses();
+	uint64_t get_proxy_write_dropped();
+	map<string, uint64_t> get_proxy_write_dropped_by_dest();
+	uint64_t get_reconstruction_started();
+	uint64_t get_reconstruction_completed();
+	uint64_t get_reconstruction_failed();
 	uint64_t get_delete_hits();
 	uint64_t get_delete_misses();
 	uint64_t get_incr_hits();

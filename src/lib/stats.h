@@ -131,6 +131,11 @@ protected:
 	// proxy_write_dropped. Guarded by _mutex_repl_in_flight.
 	map<string, uint64_t> _proxy_write_failed;
 	map<string, uint64_t> _proxy_write_skipped;
+	// forwards the destination refused with "rebuild pending" (its copy holds
+	// another history and is being rebuilt) while the master's map shows it
+	// not Active: expected, nothing is lost (the rebuild's catch-up carries
+	// the change). Not counted in _proxy_write_failed.
+	map<string, uint64_t> _proxy_write_refused_rebuilding;
 	// forwards to a replica that needed more than one try within their hold
 	// window (queue_proxy_write::hold_window_ms), and the longest such wait
 	// (msec) per destination: how long writes queued behind a held one
@@ -228,11 +233,13 @@ public:
 	map<string, uint64_t> get_repl_in_flight(uint64_t& total);
 	void increment_proxy_write_failed(const string& dest);
 	void increment_proxy_write_skipped(const string& dest);
+	void increment_proxy_write_refused_rebuilding(const string& dest);
 	void note_proxy_write_held(const string& dest, uint64_t ms);
 	map<string, uint64_t> get_proxy_write_held(uint64_t& total);
 	map<string, uint64_t> get_proxy_write_held_ms_max(uint64_t& max_all);
 	map<string, uint64_t> get_proxy_write_failed(uint64_t& total);
 	map<string, uint64_t> get_proxy_write_skipped(uint64_t& total);
+	map<string, uint64_t> get_proxy_write_refused_rebuilding(uint64_t& total);
 	void set_crepl_seed_state(const string& state);
 	string get_crepl_seed_state();
 	inline int increment_reconstruction_started()   { this->_reconstruction_started.incr();return 0; };

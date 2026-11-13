@@ -1,14 +1,21 @@
 /-
-  flared::reload() keeps the read timeout it started with.
+  flared::reload() keeps the read timeouts it started with.
 
-  flared.cc applies connection_tcp::effective_read_timeout_ms at startup
-  AND in reload(): in the k8s build 30 s unless net-read-timeout is set
-  explicitly. Before that fix reload() applied net_read_timeout
+  flared.cc applies connection_tcp::effective_read_timeout_ms (connections
+  flared OPENS: in the k8s build 30 s unless net-read-timeout is set
+  explicitly) and effective_accepted_read_timeout_ms (connections it
+  ACCEPTS — clients: net_read_timeout, 600 s unless set) at startup AND in
+  reload(). Before that fix reload() applied net_read_timeout
   unconditionally, so a SIGHUP (the operator sends one on every extra.conf
-  change) turned 30 s into 600 s. The rule itself has unit checks
-  (test_connection_tcp.cc); nothing exercised reload() — these tests do,
-  through behaviour: a client that sends half a command is disconnected by
-  flared after the read timeout in force, measured from the client.
+  change) turned 30 s into 600 s. Until 2026-11-11 the k8s build's 30 s also
+  closed idle CLIENT connections, and behind a load balancer that forgets the
+  half-closed flow a libmemcached close() then hung for its SO_LINGER:
+  accepted connections are
+  back at net_read_timeout. The rules have unit checks
+  (test_connection_tcp.cc); these tests exercise reload() through the log
+  lines and through behaviour: a client that sends half a command is
+  disconnected by flared after the CLIENT timeout in force, measured from
+  the client.
 
   A measurement that never sees the close (nc not exiting on a remote
   close, a timeout above the cap) reads as the cap and FAILS both the 30 s
@@ -36,6 +43,8 @@ private def cfg : ClusterConfig := {
 
 private def pod : String := s!"{cfg.name}-nodes-0"
 private def explicitSec : Nat := 8
+/-- spec.rocksdb.clientIdleTimeoutSeconds set through the FlareCluster -/
+private def clientIdleSec : Nat := 12
 /-- Measurement cap: well above 30 s, far below the 600 s default. -/
 private def capSec : Nat := 75
 
@@ -68,13 +77,19 @@ private def closeAfterPartialCommand (_ip : String) : IO (Option Nat) := do
     | .error _ => pure ()
   return none
 
-/-- `read timeout: N ms` lines flared printed (one per start / reload). -/
-private def readTimeoutLines (log : String) : List Nat :=
+/-- `<label> N ms` lines flared printed (one per start / reload). -/
+private def msLines (label : String) (log : String) : List Nat :=
   (log.splitOn "\n").filterMap fun l =>
-    if !containsSubstr l "read timeout:" then none
+    if !containsSubstr l label then none
     else
-      let rest := (l.splitOn "read timeout:").getLast!.trim
+      let rest := (l.splitOn label).getLast!.trim
       (rest.takeWhile Char.isDigit).toNat?
+
+/-- `read timeout: N ms` lines: the connections flared opens. -/
+private def readTimeoutLines (log : String) : List Nat := msLines "read timeout:" log
+
+/-- `client idle timeout: N ms` lines: the connections flared accepts. -/
+private def clientIdleLines (log : String) : List Nat := msLines "client idle timeout:" log
 
 private def hup : IO (Except String String) :=
   kubectl ["exec", pod, "-n", cfg.«namespace», "--", "kill", "-HUP", "1"]
@@ -112,30 +127,81 @@ def suite : TestSuite := {
   teardown := cleanupCluster cfg
   onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
   tests := [
-    { name := "k8s build, net-read-timeout unset: flared starts at 30 s and a SIGHUP reload keeps 30 s (not the 600 s default) — measured by when flared drops a half-sent command"
+    { name := "k8s build, net-read-timeout unset: opened connections 30 s, accepted (client) connections 600 s, and a SIGHUP reload keeps both — a half-sent client command is NOT dropped at 30 s"
       run := do
         match ← getPodIp pod cfg.«namespace» with
         | none => return .fail s!"no IP for {pod}"
         | some ip =>
           if containsSubstr (← mountedConf) "net-read-timeout" then
             return .fail "precondition: extra.conf already sets net-read-timeout"
-          let startLines := readTimeoutLines (← kubectlLogs pod cfg.«namespace» 5000)
-          IO.eprintln s!"# read timeout lines so far: {startLines}"
+          let log0 ← kubectlLogs pod cfg.«namespace» 5000
+          IO.eprintln s!"# read timeout lines so far: {readTimeoutLines log0}; client idle: {clientIdleLines log0}"
           let t0 ← closeAfterPartialCommand ip
-          IO.eprintln s!"# before the reload: closed after {t0} s"
+          IO.eprintln s!"# before the reload: closed after {t0} s (cap {capSec} = still open)"
           match ← reloadAndRead with
           | .error e => return .fail e
           | .ok ms =>
             IO.eprintln s!"# reload printed read timeout {ms} ms"
+            let client := (clientIdleLines (← kubectlLogs pod cfg.«namespace» 5000)).getLast?
+            IO.eprintln s!"# reload printed client idle timeout {client} ms"
             let t1 ← closeAfterPartialCommand ip
-            IO.eprintln s!"# after the reload: closed after {t1} s (cap {capSec})"
-            if ms != 30000 then return .fail s!"reload() set the read timeout to {ms} ms, expected 30000"
+            IO.eprintln s!"# after the reload: closed after {t1} s (cap {capSec} = still open)"
+            if ms != 30000 then return .fail s!"reload() set the read timeout of opened connections to {ms} ms, expected 30000"
+            if client != some 600000 then return .fail s!"reload() printed client idle timeout {client} ms, expected 600000"
             match t0, t1 with
             | some a, some b =>
-              if a < 25 || a > 40 then return .fail s!"before the reload the half-sent command was dropped after {a} s, expected about 30 (cap {capSec} = never seen)"
-              if b < 25 || b > 40 then return .fail s!"after the reload the half-sent command was dropped after {b} s, expected about 30 (cap {capSec} = never seen; the old reload() made it 600)"
+              if a + 1 < capSec then return .fail s!"before the reload the half-sent client command was dropped after {a} s, expected still open at the {capSec} s cap (client idle timeout 600 s)"
+              if b + 1 < capSec then return .fail s!"after the reload the half-sent client command was dropped after {b} s, expected still open at the {capSec} s cap (client idle timeout 600 s)"
               return .pass
             | _, _ => return .fail s!"could not measure from the debug pod: {t0} / {t1}" },
+
+    { name := s!"spec.rocksdb.clientIdleTimeoutSeconds = {clientIdleSec}: the operator writes client-idle-timeout, a reload closes an idle client after it while the opened connections keep 30 s; removing it goes back to 600 s"
+      run := do
+        match ← getPodIp pod cfg.«namespace» with
+        | none => return .fail s!"no IP for {pod}"
+        | some ip =>
+          -- flushAllEnabled (its default, true) stays set while the knob is
+          -- removed: the operator leaves extra.conf alone once spec.rocksdb
+          -- is empty (hand-edited keys), as the chart never leaves it (E2E
+          -- 43172827217: the removal never reached the file)
+          let patch := fun (rocksdb : String) =>
+            kubectl ["patch", "flarecluster", cfg.name, "-n", cfg.«namespace», "--type", "merge",
+              "-p", s!"\{\"spec\":\{\"rocksdb\":{rocksdb}}}"]
+          match ← patch s!"\{\"clientIdleTimeoutSeconds\":{clientIdleSec},\"flushAllEnabled\":true}" with
+          | .error e => return .fail s!"could not set clientIdleTimeoutSeconds: {e}"
+          | .ok _ => pure ()
+          let mounted ← waitForCondition "the mounted extra.conf carries client-idle-timeout" 180 do
+            return containsSubstr (← mountedConf) s!"client-idle-timeout = {clientIdleSec}"
+          if !mounted then return .fail "the operator never wrote client-idle-timeout into the pod's extra.conf"
+          match ← reloadAndRead with
+          | .error e => return .fail e
+          | .ok ms =>
+            let client := (clientIdleLines (← kubectlLogs pod cfg.«namespace» 5000)).getLast?
+            let t ← closeAfterPartialCommand ip
+            IO.eprintln s!"# set: read timeout {ms} ms, client idle {client} ms; half-sent command dropped after {t} s"
+            if ms != 30000 then return .fail s!"client-idle-timeout changed the opened connections' read timeout to {ms} ms, expected 30000"
+            if client != some (clientIdleSec * 1000) then return .fail s!"the reload printed client idle timeout {client} ms, expected {clientIdleSec * 1000}"
+            match t with
+            | some a =>
+              if !(a + 3 ≥ clientIdleSec && a ≤ clientIdleSec + 7) then
+                return .fail s!"the half-sent client command was dropped after {a} s, expected about {clientIdleSec}"
+            | none => return .fail "could not measure from the debug pod"
+            match ← patch "{\"clientIdleTimeoutSeconds\":null}" with
+            | .error e => return .fail s!"could not remove clientIdleTimeoutSeconds: {e}"
+            | .ok _ => pure ()
+            let gone ← waitForCondition "the mounted extra.conf no longer carries client-idle-timeout" 180 do
+              return !containsSubstr (← mountedConf) "client-idle-timeout"
+            if !gone then return .fail "client-idle-timeout stayed in the pod's extra.conf after it was removed from the spec"
+            match ← reloadAndRead with
+            | .error e => return .fail e
+            | .ok ms2 =>
+              let client2 := (clientIdleLines (← kubectlLogs pod cfg.«namespace» 5000)).getLast?
+              IO.eprintln s!"# removed: read timeout {ms2} ms, client idle {client2} ms"
+              if client2 != some 600000 then return .fail s!"after removing it the reload printed client idle timeout {client2} ms, expected 600000"
+              -- spec.rocksdb empty again: the next test hand-edits extra.conf,
+              -- which the operator then leaves alone
+              discard <| patch "{\"flushAllEnabled\":null}"
+              return .pass },
 
     { name := s!"net-read-timeout = {explicitSec} set explicitly: a SIGHUP reload applies it, and a second reload with the file unchanged keeps it (measured)"
       run := do
@@ -147,7 +213,15 @@ def suite : TestSuite := {
           match ← sh edit with
           | .error e => return .fail s!"could not add net-read-timeout to {cm}: {e}"
           | .ok _ => pure ()
+          -- the previous test's last spec change (spec.rocksdb emptied) may
+          -- reach the operator after this edit: while spec.rocksdb was still
+          -- set it rewrites the file and drops the hand-added line (E2E
+          -- 43180140120). Once spec.rocksdb is empty it leaves the file, so
+          -- the line is added again while it is missing.
           let mounted ← waitForCondition "the mounted extra.conf carries net-read-timeout" 180 do
+            let inMap ← sh s!"kubectl get configmap {cm} -n {cfg.«namespace»} -o jsonpath='\{.data.extra\\.conf}'"
+            if !(match inMap with | .ok t => containsSubstr t s!"net-read-timeout = {explicitSec}" | .error _ => true) then
+              discard <| sh edit
             return containsSubstr (← mountedConf) s!"net-read-timeout = {explicitSec}"
           if !mounted then return .fail "the ConfigMap change never reached the pod's extra.conf"
           match ← reloadAndRead with

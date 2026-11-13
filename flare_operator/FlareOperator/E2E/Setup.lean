@@ -563,7 +563,13 @@ spec:
           # test pods fragment memory in a way production pods do not.
           env:
             - name: MALLOC_ARENA_MAX
-              value: \"2\"{flaredEnvLines}
+              value: \"2\"
+            # the Pod's own UID (the chart sets it too): the operator's grant to
+            # discard a redundant copy names it
+            - name: FLARE_POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid{flaredEnvLines}
           ports:
             - containerPort: {cfg.flarePort}
               name: flare

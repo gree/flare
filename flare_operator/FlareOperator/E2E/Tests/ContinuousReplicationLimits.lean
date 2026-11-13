@@ -792,6 +792,12 @@ def enableSuite : TestSuite := {
             return .fail s!"value mismatch after enablement: {bad}"
           let drops1 := (← c.statNat mIp "proxy_write_dropped").getD 0
           IO.eprintln s!"# while following: stored {w2}/100; items {← c.currItems mIp}; master proxy_write_dropped {drops0}→{drops1}"
+          -- the master's mounted ConfigMap must reach "follow on" before it is
+          -- switched off: each pod's volume is refreshed on its own, and a
+          -- master still on the old file skipped "on" entirely (reloads 0 -> 0
+          -- only), so the "1 -> 0" below never came (CI 42595764031, 49b529a)
+          if !(← waitForCondition "both nodes reload repl_follow_enabled 0 -> 1" 240 do bothReloaded c "repl_follow_enabled: 0 -> 1") then
+            return .fail "following was not switched on on both nodes"
           -- rollback, reverse order
           match ← kubectlPatch "flarecluster" enableCfg.name enableCfg.«namespace» (enablePatch true false) with
           | .error e => return .fail s!"patch (follow off) failed: {e}"
@@ -1341,6 +1347,26 @@ def rebuildTmpfsSuite : TestSuite := {
           let line := match ← kubectl ["logs", "-n", rebuildTmpfsCfg.«namespace», sPod, "--tail=5000"] with
             | .ok o => (o.splitOn "\n").find? (containsSubstr · "rebuild_blocked=no_space")
             | .error _ => none
+          -- flare-parked-slave-forward-noise: writes while the replica is
+          -- parked must not raise the master's proxy_write_failed (a signal of
+          -- real failures) nor drop. Here the replica kept its copy of the
+          -- master's history (its flared restarted, same pod), so it applies
+          -- the forwards; a copy of ANOTHER history would answer "rebuild
+          -- pending" and be counted in proxy_write_refused_rebuilding, which is
+          -- shown, not required (CI 42768302400: 0→0, failed 0→0).
+          let failedP0 := (← c.statNat mIp "proxy_write_failed").getD 0
+          let droppedP0 := (← c.statNat mIp "proxy_write_dropped").getD 0
+          let refusedP0 := (← c.statNat mIp "proxy_write_refused_rebuilding").getD 0
+          let wP ← writeKeys rebuildTmpfsCfg.debugPod rebuildTmpfsCfg.«namespace» mIp rebuildTmpfsCfg.flarePort "parked" 50
+          let _ ← waitForCondition "the master has no forward in flight after the parked writes" 30 do
+            return (← c.statNat mIp "proxy_write_in_flight").getD 1 == 0
+          let failedP1 := (← c.statNat mIp "proxy_write_failed").getD 0
+          let droppedP1 := (← c.statNat mIp "proxy_write_dropped").getD 0
+          let refusedP1 := (← c.statNat mIp "proxy_write_refused_rebuilding").getD 0
+          IO.eprintln s!"# parked writes: stored {wP}/50; master proxy_write_failed {failedP0}→{failedP1}, dropped {droppedP0}→{droppedP1}, refused_rebuilding {refusedP0}→{refusedP1}"
+          if wP != 50 then return .fail s!"writes while the replica was parked: stored {wP}/50"
+          if failedP1 != failedP0 then return .fail s!"the master's proxy_write_failed rose while the replica was parked ({failedP0}→{failedP1}): a rebuilding replica's refusal is counted as a failure"
+          if droppedP1 != droppedP0 then return .fail s!"the master dropped forwards while the replica was parked ({droppedP0}→{droppedP1})"
           IO.sleep 60000
           let rc1 ← c.restartCount sPod
           let items1 ← c.currItems sIp
@@ -1358,6 +1384,21 @@ def rebuildTmpfsSuite : TestSuite := {
           if items1 < items0 then return .fail s!"the replica's copy shrank ({items0}→{items1}): something was discarded"
           if left != 0 then return .fail s!"{left} staging/retained director(ies) left on the replica"
           if (← masterPodOf c) != some mPod then return .fail "the master moved"
+          -- docs/spec.md "redundant copy": only the master is left, so its
+          -- copy may be the last data — the operator keeps it (a plain
+          -- resume, KEPT logged) and never grants a discard
+          let kept ← waitForCondition s!"the operator logs REDUNDANT COPY KEPT for {sPod}" 240 do
+            return ((← c.opLog 200000).splitOn "\n").any fun l => containsSubstr l "REDUNDANT COPY KEPT" && containsSubstr l sPod
+          let opLines := (← c.opLog 200000).splitOn "\n"
+          let granted := opLines.filter (containsSubstr · "REDUNDANT COPY DISCARD GRANTED")
+          let discarded := match ← kubectl ["logs", "-n", rebuildTmpfsCfg.«namespace», sPod, "--tail=20000"] with
+            | .ok o => (o.splitOn "\n").filter (containsSubstr · "REDUNDANT COPY DISCARDED")
+            | .error _ => []
+          IO.eprintln s!"# master only: KEPT logged={kept}; GRANTED lines {granted.length}; flared DISCARDED lines {discarded.length}"
+          if !kept then return .fail s!"the operator did not log REDUNDANT COPY KEPT for {sPod} (master-only partition)"
+          if !granted.isEmpty then return .fail s!"the operator granted a discard with only the master left: {(granted.head?.getD "").trim.take 240}"
+          if !discarded.isEmpty then return .fail "flared discarded its copy with only the master left"
+          if (← c.currItems sIp) < items0 then return .fail "the replica's copy shrank after the operator's decision"
           return .pass }
   ]
 }
@@ -1370,11 +1411,17 @@ def rebuildTmpfsSuite : TestSuite := {
 -- fits) stayed REBUILD HELD as a Proxy until the parked one was deleted.
 -- Same sizing as rebuildTmpfsCfg (~125 MB copy + 128 MiB reserve do not fit
 -- next to an old copy in 384Mi), 3 copies.
+--
+-- The operator's redundant-copy discard is OFF here: s2 is an Active copy of
+-- the master's history, so by default the operator would tell the parked s1
+-- to discard its copy (docs/spec.md; redundantDiscardSuite covers that). This
+-- suite is about the SLOT, and needs s1 to stay parked with its copy.
 private def parkedSlotCfg : ClusterConfig := { rebuildTmpfsCfg with
   name := "cont-repl-parked-slot"
   «namespace» := "flare-cont-repl-parked-slot"
   replicas := 3
-  debugPod := "debug-cont-repl-parked-slot" }
+  debugPod := "debug-cont-repl-parked-slot"
+  operatorEnv := [("FLARE_OPERATOR_REDUNDANT_COPY_DISCARD", "off")] }
 
 def parkedSlotSuite : TestSuite := {
   name := "continuous-replication-parked-slot"
@@ -1455,6 +1502,124 @@ def parkedSlotSuite : TestSuite := {
         if !(← parkedAtActive.get) then
           return .fail s!"{s1} was not parked (no_space) at the moment {s2} became Active: the two were not observed together"
         if items1Now < items1 then return .fail s!"the parked replica's copy shrank ({items1}→{items1Now}): something was discarded"
+        if (← masterPodOf c) != some mPod then return .fail "the master moved"
+        return .pass }
+  ]
+}
+
+-- ─── a redundant copy is discarded on the operator's word ─────────────────
+
+-- pf-dev 2026-11-05 / 2026-11-10 in miniature (docs/spec.md "A redundant copy
+-- is discarded on the operator's word"): three copies, the tmpfs holds one
+-- copy plus the reserve but not two. A replica restarts with its old copy and
+-- its staged rebuild parks on no_space; the partition has a master and another
+-- Active slave of the master's history on another pod, so the operator tells
+-- the parked replica it may discard its copy; flared discards it, rebuilds
+-- into the room that freed, and the replica becomes Active with the master's
+-- items — no park until a person deletes the Pod.
+private def redundantDiscardCfg : ClusterConfig := { rebuildTmpfsCfg with
+  name := "cont-repl-redundant-discard"
+  «namespace» := "flare-cont-repl-redundant-discard"
+  replicas := 3
+  debugPod := "debug-cont-repl-redundant-discard" }
+
+def redundantDiscardSuite : TestSuite := {
+  name := "continuous-replication-redundant-discard"
+  setup := do
+    deployCluster redundantDiscardCfg
+    IO.sleep 50000
+  teardown := cleanupCluster redundantDiscardCfg
+  onFailure := dumpClusterDiagnostics redundantDiscardCfg.«namespace» s!"app={redundantDiscardCfg.operatorName}"
+  tests :=
+    let c : Ctx := { cfg := redundantDiscardCfg }
+    [
+    { name := "redundant copy (spec): a replica parked on no_space (tmpfs holds one copy) while the partition has a master and another Active slave of its history is told by the operator it may discard its copy; flared logs DISCARDED, rebuilds into the freed room and the replica becomes Active with the master's items; the other slave and the master are untouched; no copy.discarded marker is left"
+      run := do
+        let ns := redundantDiscardCfg.«namespace»
+        let entries ← c.nodeView
+        let some mFqdn := findMasterFqdn entries 0 | return .fail "no Active P0 master in the operator's map"
+        let slaves := (entries.filter fun e => e.role == 1 && e.state == 0 && e.partition == 0).map (podOf ·.fqdn)
+        let [s1, s2] := slaves | return .fail s!"precondition: want 2 Active slaves, have {slaves}"
+        let mPod := podOf mFqdn
+        let some mIp ← getPodIp mPod ns | return .fail "no master IP"
+        let some s1Ip ← getPodIp s1 ns | return .fail "no IP for the first slave"
+        let some s2Ip ← getPodIp s2 ns | return .fail "no IP for the second slave"
+        let big ← c.bulkWriteRandom mIp "rnd" 2400 50000
+        if big < 2400 then return .fail s!"stored {big}/2400 random values"
+        for (pod, ip) in [(s1, s1Ip), (s2, s2Ip)] do
+          if !(← convergedItems c mIp ip s!"{pod} matches the master") then
+            return .fail s!"{pod}: items master={← c.currItems mIp} replica={← c.currItems ip}"
+        let s2Items0 ← c.currItems s2Ip
+        let t0 := (← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%SZ"] }).stdout.trim
+        -- s1's flared restarts with its tmpfs copy kept: its staged rebuild
+        -- cannot fit next to the old copy and parks — unless the operator
+        -- grants the discard first (it can: s2 is a real copy)
+        if let .error e ← c.killFlaredIn s1 then return .fail s!"precondition: could not restart flared in {s1}: {e}"
+        -- flare-parked-slave-forward-noise: write while {s1} is rebuilding. Its
+        -- copy refuses these forwards (another history); they must not count
+        -- as failed (the operator's grant needs failed = 0 for the replica) and
+        -- must come back through the rebuild: every key ends up on {s1}.
+        let _ ← waitForCondition s!"{s1} has restarted and refuses or rebuilds (parked, or already granted)" 300 do
+          let some ip ← getPodIp s1 ns | return false
+          return (← c.statStr ip "rebuild_blocked") == some "no_space" || (← c.statNat ip "rebuild_redundant_discards") == some 1
+        let wParked ← writeKeys redundantDiscardCfg.debugPod ns mIp redundantDiscardCfg.flarePort "parked" 50
+        if wParked != 50 then return .fail s!"writes while {s1} was rebuilding: stored {wParked}/50"
+        let granted ← waitForCondition s!"the operator grants {s1} the discard of its redundant copy" 600 do
+          return ((← c.opLogSince t0).splitOn "\n").any fun l =>
+            containsSubstr l "REDUNDANT COPY DISCARD GRANTED" && containsSubstr l s1
+        let discardedLog : IO Bool := do
+          match ← kubectl ["logs", "-n", ns, s1, "--tail=20000"] with
+          | .ok o => return (o.splitOn "\n").any (containsSubstr · "REDUNDANT COPY DISCARDED on the operator's word")
+          | .error _ => return false
+        let discarded ← waitForCondition s!"{s1} logs REDUNDANT COPY DISCARDED" 300 discardedLog
+        -- flare-parked-slave-forward-noise: the discarded copy restarts with a
+        -- history of its own, so while it rebuilds it refuses the master's
+        -- forwards ("rebuild pending"). They are expected: counted in
+        -- proxy_write_refused_rebuilding, never in proxy_write_failed nor
+        -- dropped, and they come back through the rebuild (checked below).
+        let failedD0 := (← c.statNat mIp "proxy_write_failed").getD 0
+        let droppedD0 := (← c.statNat mIp "proxy_write_dropped").getD 0
+        let refusedD0 := (← c.statNat mIp "proxy_write_refused_rebuilding").getD 0
+        let wDisc ← writeKeys redundantDiscardCfg.debugPod ns mIp redundantDiscardCfg.flarePort "discarded" 50
+        let _ ← waitForCondition "the master has no forward in flight after the writes during the rebuild" 30 do
+          return (← c.statNat mIp "proxy_write_in_flight").getD 1 == 0
+        let failedD1 := (← c.statNat mIp "proxy_write_failed").getD 0
+        let droppedD1 := (← c.statNat mIp "proxy_write_dropped").getD 0
+        let refusedD1 := (← c.statNat mIp "proxy_write_refused_rebuilding").getD 0
+        IO.eprintln s!"# writes after the discard: stored {wDisc}/50; master proxy_write_failed {failedD0}→{failedD1}, dropped {droppedD0}→{droppedD1}, refused_rebuilding {refusedD0}→{refusedD1}"
+        if wDisc != 50 then return .fail s!"writes while {s1} rebuilt after the discard: stored {wDisc}/50"
+        if failedD1 != failedD0 then return .fail s!"the master's proxy_write_failed rose while {s1} rebuilt after the discard ({failedD0}→{failedD1}): a rebuilding replica's refusal is counted as a failure"
+        if droppedD1 != droppedD0 then return .fail s!"the master dropped forwards while {s1} rebuilt after the discard ({droppedD0}→{droppedD1})"
+        -- no long park: the replica is Ready, Slave/Active, with the master's items
+        let active ← waitForCondition s!"{s1} rebuilds into the freed room: Ready, Slave/Active, the master's items" 900 do
+          if !(← c.ready s1) then return false
+          let view ← c.nodeView
+          if !(view.any fun e => podOf e.fqdn == s1 && e.role == 1 && e.state == 0) then return false
+          let some ip ← getPodIp s1 ns | return false
+          return (← c.currItems ip) ≥ big
+        let some s1IpNow ← getPodIp s1 ns | return .fail "no IP for the first slave after the test"
+        let items1 ← c.currItems s1IpNow
+        let blocked ← c.statStr s1IpNow "rebuild_blocked"
+        let discards ← c.statNat s1IpNow "rebuild_redundant_discards"
+        let marker ← c.statNat s1IpNow "rocksdb_copy_discarded"
+        let leftover ← match ← kubectl ["exec", "-n", ns, s1, "--", "sh", "-c", "ls /data/copy.discarded 2>/dev/null | wc -l"] with
+          | .ok o => pure (o.trim.toNat?.getD 99)
+          | .error _ => pure 99
+        let opLines := ((← c.opLogSince t0).splitOn "\n").filter (containsSubstr · "REDUNDANT COPY DISCARD GRANTED")
+        IO.eprintln s!"# granted={granted} discarded={discarded} active={active}; {s1} items {items1} (master {← c.currItems mIp}), rebuild_blocked={blocked}, redundant discards {discards}, rocksdb_copy_discarded {marker}, copy.discarded files {leftover}\n# {(opLines.head?.getD "(no GRANTED line)").trim.take 300}"
+        if !granted then return .fail s!"the operator did not grant {s1} the discard while {s2} held the master's history"
+        if !discarded then return .fail s!"{s1} did not log REDUNDANT COPY DISCARDED"
+        if !active then return .fail s!"{s1} did not become Slave/Active with the master's items after the discard (items {items1})"
+        if discards != some 1 then return .fail s!"rebuild_redundant_discards is {discards}, not 1"
+        if marker != some 0 || leftover != 0 then return .fail s!"the discarded-copy marker is still there after the switch (stat {marker}, files {leftover})"
+        if (← c.currItems s2Ip) < s2Items0 then return .fail s!"the other slave {s2} lost items"
+        for i in [0:50] do
+          let sv ← memcachedGet c.cfg.debugPod ns s1IpNow c.cfg.flarePort s!"parked_{i}"
+          if sv != some s!"val_{i}" then
+            return .fail s!"parked_{i} (written while {s1} was rebuilding) is {sv} on {s1} afterwards: the refused forward did not come back through the rebuild"
+          let dv ← memcachedGet c.cfg.debugPod ns s1IpNow c.cfg.flarePort s!"discarded_{i}"
+          if dv != some s!"val_{i}" then
+            return .fail s!"discarded_{i} (written while {s1} rebuilt after the discard) is {dv} on {s1} afterwards: the refused forward did not come back through the rebuild"
         if (← masterPodOf c) != some mPod then return .fail "the master moved"
         return .pass }
   ]
@@ -5765,17 +5930,30 @@ def historyTrackingSuite : TestSuite := {
           -- curr_items 0, so the dead process — still named master by the map
           -- before the operator saw it die — could read as "empty"): the NEW
           -- process (another boot id) answering curr_items 0 while the map
-          -- names it master
+          -- names it master, AND the process itself reporting own_role master.
+          -- The map and the process are read at different instants: E2E
+          -- 43156408531 read the map (the dead process still named master,
+          -- before the operator saw it die) about 0.3 s before the new process
+          -- started, then read the new process (items 0) — which the operator
+          -- had registered as Slave (Prepare) in between, never master. Its
+          -- own_role, curr_items and boot id come from ONE stats reply (one
+          -- sample of one process), so no transition falls between them, and
+          -- the map is read again after it: it counts only when the map
+          -- names the pod master both before and after that sample.
           let mut emptyMaster := false
           let mut seated := false
           for i in [0:60] do
             if let some m := ← masterPodOf c then
               if m == mPod then
                 let ip := (← getPodIp mPod ns).getD ""
-                let items ← c.statNat ip "curr_items"
-                let boot ← c.statStr ip "reconstruction_boot_id"
-                IO.eprintln s!"# sample {i}: map master {m}; its process boot {boot} (before the kill {boot0}), curr_items {items}"
-                if items == some 0 && boot.isSome && boot != some boot0 then emptyMaster := true
+                let sample ← c.statsOf ip
+                let items := sample.bind (statVal · "curr_items") |>.bind (·.toNat?)
+                let boot := sample.bind (statVal · "reconstruction_boot_id")
+                let role := sample.bind (statVal · "own_role")
+                let after ← masterPodOf c
+                IO.eprintln s!"# sample {i}: map master {m} (after the sample: {after}); its process boot {boot} (before the kill {boot0}), curr_items {items}, own_role {role}"
+                if after == some mPod && items == some 0 && boot.isSome && boot != some boot0 && role == some "master" then
+                  emptyMaster := true
               if m == sPod then seated := true
             if seated then break
             IO.sleep 5000

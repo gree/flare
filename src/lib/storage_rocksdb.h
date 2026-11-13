@@ -50,6 +50,7 @@
 #include "storage.h"
 #include "util.h"
 #include "wal_pin.h"
+#include "copy_discard_grant.h"
 
 using namespace std;
 
@@ -120,6 +121,11 @@ public:
 	static const char* const kCopyIdKey;
 	// design §6: in data_dir, written BEFORE a corrupt copy is moved aside
 	static const char* const kQuarantineMarkerFile;
+	// data_dir/copy.discarded ("old=<copy id>"): written durably BEFORE the live
+	// copy is wiped on the operator's word (or an approval); removed only after
+	// a verified staged copy is switched in. While it exists the copy is empty
+	// or about to be: never promotable. A crash finishes the wipe at open.
+	static const char* const kDiscardedMarkerFile;
 
 	// Return true if key is a reserved replication metadata key.
 	static bool is_reserved_key(const string& key);
@@ -255,6 +261,8 @@ protected:
 	// resumes it (rebuild_resume) when a slot is free; in_flight = a staged
 	// copy, catch-up or switch is running right now
 	bool _rebuild_parked = false;
+	discard_grant _discard_grant;
+	uint64_t _redundant_discards = 0;
 	bool _rebuild_in_flight = false;
 	// design §9 / decision 2026-10-07 item 4: measured peaks, so the reserve
 	// is set from measurements (receiver = staged rebuild, source = serve)
@@ -418,6 +426,8 @@ protected:
 	// marker present and the live copy is the post-quarantine empty copy (or
 	// the crash came before it was recorded)
 	bool _quarantined_now();
+	// finishes a wipe a crash interrupted (copy.discarded names the live copy)
+	int _finish_interrupted_discard();
 	int _clear_quarantine_marker(const char* why);
 	// exact count of live (non-reserved) keys -> curr_items; logs `why`
 	void _seed_curr_items_by_scan(const char* why);
@@ -828,6 +838,14 @@ public:
 	bool is_rebuild_parked();
 	// true if it was parked (the next attempt re-checks everything)
 	bool resume_rebuild();
+	// the operator's grant to discard this redundant copy (see copy_discard_grant.h);
+	// held in memory only (a restart loses it), cleared by a plain resume
+	void set_discard_grant(const discard_grant& g);
+	bool take_discard_grant(discard_grant& g);
+	void clear_discard_grant();
+	bool is_copy_discarded();
+	uint64_t get_redundant_discards();
+	void note_redundant_discard();
 	void set_rebuild_in_flight(bool b);
 	bool is_rebuild_in_flight();
 	// peaks: start a measurement window, sample (at most once a second unless

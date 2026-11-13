@@ -162,6 +162,11 @@ structure OperatorMetrics where
   cordonMoveHeld : Gauge
   cordonMovesActive : Gauge
   cordonMovesStuck : Gauge
+  -- seconds the running move has waited in `unserved` (0 when none waits),
+  -- and how long the most recently released move waited there: the client
+  -- Service leaving the pod and its client connections closing
+  cordonMoveUnservedSeconds : Gauge
+  cordonMoveLastUnservedSeconds : Gauge
 
   -- Gauge: 1 while the blast-radius circuit breaker is tripped (the FSM's
   -- last pass ended in EmergencyPaused), else 0. Page on this: it means a
@@ -250,6 +255,8 @@ def initMetrics : IO OperatorMetrics := do
   let cordonMoveHeld ← IO.mkRef 0.0
   let cordonMovesActive ← IO.mkRef 0.0
   let cordonMovesStuck ← IO.mkRef 0.0
+  let cordonMoveUnservedSeconds ← IO.mkRef 0.0
+  let cordonMoveLastUnservedSeconds ← IO.mkRef 0.0
   let circuitBreakerTripped ← IO.mkRef 0.0
   let partitionsDesired ← IO.mkRef 0.0
   let migrationPhase ← IO.mkRef 0.0
@@ -289,6 +296,8 @@ def initMetrics : IO OperatorMetrics := do
     cordonMoveHeld := { value := cordonMoveHeld }
     cordonMovesActive := { value := cordonMovesActive }
     cordonMovesStuck := { value := cordonMovesStuck }
+    cordonMoveUnservedSeconds := { value := cordonMoveUnservedSeconds }
+    cordonMoveLastUnservedSeconds := { value := cordonMoveLastUnservedSeconds }
     circuitBreakerTripped := { value := circuitBreakerTripped }
     partitionsDesired := { value := partitionsDesired }
     migrationPhase := { value := migrationPhase }
@@ -572,6 +581,12 @@ def exportMetrics (metrics : OperatorMetrics) (clusterName : String) : IO String
   output := output ++ "# HELP flare_operator_cordon_moves_stuck Cordon moves past their phase deadline (unserved: nodeReplacement.unservedTimeoutSeconds; deleted/resyncing: resyncTimeoutSeconds); no longer the running move, never released\n"
   output := output ++ "# TYPE flare_operator_cordon_moves_stuck gauge\n"
   output := output ++ formatGauge "flare_operator_cordon_moves_stuck" labels (← metrics.cordonMovesStuck.value.get)
+  output := output ++ "# HELP flare_operator_cordon_move_unserved_seconds Seconds the running cordon move has waited in unserved (the client Service leaving the pod and its client connections closing; an idle persistent client keeps one open up to flared's client idle timeout); 0 when no move waits\n"
+  output := output ++ "# TYPE flare_operator_cordon_move_unserved_seconds gauge\n"
+  output := output ++ formatGauge "flare_operator_cordon_move_unserved_seconds" labels (← metrics.cordonMoveUnservedSeconds.value.get)
+  output := output ++ "# HELP flare_operator_cordon_move_last_unserved_seconds Seconds the most recently released cordon move waited in unserved\n"
+  output := output ++ "# TYPE flare_operator_cordon_move_last_unserved_seconds gauge\n"
+  output := output ++ formatGauge "flare_operator_cordon_move_last_unserved_seconds" labels (← metrics.cordonMoveLastUnservedSeconds.value.get)
 
   -- Circuit breaker state (gauge)
   output := output ++ "# HELP flare_operator_circuit_breaker_tripped 1 while failover is paused by the blast-radius breaker\n"

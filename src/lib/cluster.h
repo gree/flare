@@ -375,6 +375,11 @@ public:
 	bool apply_source_decision(unsigned long long generation, const string& current, source_decision d, const string& reason);
 	// own (role, state, partition) from the current map
 	bool get_own_assignment(role& r, state& st, int& partition);
+	// true when this node's copy is being rebuilt, so a forward carrying
+	// another history is expected to be refused: own assignment is a slave in
+	// state_prepare, or (backstop) the storage reports a parked / in-flight
+	// rebuild. An Active replica is never "rebuild pending".
+	bool is_rebuild_pending_here(storage* st);
 	// validator pacing: sleep until woken or `timeout_ms`
 	void wait_source_check(int timeout_ms);
 	void wake_source_validator();

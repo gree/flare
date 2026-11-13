@@ -3438,6 +3438,93 @@ void test_copy_discard_approval_is_named_and_one_shot() {
 	drop_rocksdb(s, wal_slave_dir);
 }
 
+// docs/spec.md "redundant copy": a discard writes copy.discarded BEFORE the
+// wipe; the emptied copy is never promotable until a verified staged copy is
+// switched in, and only that switch clears the marker (a new identity does not).
+void test_copy_discard_marker_until_a_verified_copy_is_switched_in() {
+	const string d = wal_slave_dir;
+	storage_rocksdb* s = make_rocksdb(wal_slave_dir);
+	storage_set_string(s, "k", "old");
+	const string old_id = s->get_copy_id();
+	string why, res;
+	cut_assert_false(s->is_copy_discarded());
+	cut_assert_false(s->promotion_forbidden(why));
+	s->discard_copy("redundant:" + old_id + ":7", "discard-before-copy", old_id, true, res);
+	cut_assert_equal_string("applied", res.c_str());
+	struct stat st;
+	cut_assert_equal_int(0, stat((d + "/copy.discarded").c_str(), &st));
+	cut_assert_true(s->is_copy_discarded());
+	cut_assert_true(s->promotion_forbidden(why));
+	cut_assert_true(s->get_copy_id() != old_id);
+	cut_assert_equal_int(0, static_cast<int>(s->count()));
+	// still forbidden after a restart
+	drop_rocksdb_noremove(s);
+	s = make_rocksdb(wal_slave_dir);
+	cut_assert_true(s->promotion_forbidden(why));
+	// a verified staged copy switched in clears it
+	storage_rocksdb* stg = s->open_staging("r1", false);
+	storage_set_string(stg, "k", "new");
+	cut_assert_equal_int(0, stg->adopt_history("M", "E", 1));
+	const string new_id = stg->get_copy_id();
+	cut_assert_equal_int(0, stg->seal());
+	delete stg;
+	cut_assert_equal_int(0, s->switch_to_staging("r1", new_id));
+	cut_assert_equal_int(-1, stat((d + "/copy.discarded").c_str(), &st));
+	cut_assert_false(s->is_copy_discarded());
+	cut_assert_false(s->promotion_forbidden(why));
+	cut_assert_equal_string("new", get_value(s, "k").c_str());
+	drop_rocksdb(s, wal_slave_dir);
+}
+
+// A crash after the marker and before the wipe finished: the wipe is finished
+// at open (the old data never serves again) and the marker stays.
+void test_copy_discard_crash_finishes_the_wipe_at_open() {
+	const string d = wal_slave_dir;
+	storage_rocksdb* s = make_rocksdb(wal_slave_dir);
+	storage_set_string(s, "k", "old");
+	const string old_id = s->get_copy_id();
+	drop_rocksdb_noremove(s);
+	FILE* f = fopen((d + "/copy.discarded").c_str(), "w");
+	fprintf(f, "old=%s\n", old_id.c_str());
+	fclose(f);
+	s = make_rocksdb(wal_slave_dir);
+	cut_assert_equal_int(0, static_cast<int>(s->count()));
+	cut_assert_true(s->get_copy_id() != old_id);
+	string why;
+	cut_assert_true(s->promotion_forbidden(why));
+	// a marker whose wipe already finished (the live copy is another one) does not wipe again
+	storage_set_string(s, "k2", "v");
+	const string cur = s->get_copy_id();
+	drop_rocksdb_noremove(s);
+	s = make_rocksdb(wal_slave_dir);
+	cut_assert_equal_string(cur.c_str(), s->get_copy_id().c_str());
+	cut_assert_equal_string("v", get_value(s, "k2").c_str());
+	drop_rocksdb(s, wal_slave_dir);
+}
+
+// A grant is consumed once; a plain resume clears it.
+void test_discard_grant_is_held_in_memory_and_cleared_by_resume() {
+	storage_rocksdb* s = make_rocksdb(wal_slave_dir);
+	discard_grant g, got;
+	g.pod_uid = "u";
+	g.copy_id = s->get_copy_id();
+	g.map_version = 3;
+	cut_assert_false(s->take_discard_grant(got));
+	s->set_rebuild_parked(true);
+	s->set_discard_grant(g);
+	cut_assert_false(s->is_rebuild_parked());
+	cut_assert_true(s->take_discard_grant(got));
+	cut_assert_equal_string("u", got.pod_uid.c_str());
+	cut_assert_equal_int(3, static_cast<int>(got.map_version));
+	cut_assert_false(s->take_discard_grant(got));
+	s->set_rebuild_parked(true);
+	s->set_discard_grant(g);
+	s->set_rebuild_parked(true);
+	s->resume_rebuild();
+	cut_assert_false(s->take_discard_grant(got));
+	drop_rocksdb(s, wal_slave_dir);
+}
+
 // The quarantine generation is freed only by an approval naming it.
 void test_copy_discard_frees_the_quarantine_generation() {
 	const string d = wal_slave_dir;
@@ -5261,8 +5348,16 @@ void test_identified_change_maps_outcomes_for_the_source() {
 	// Another history: the source must hear about it.
 	storage::entry e4;
 	fill_entry(e4, "k", "foreign");
-	cut_assert_equal_int(storage::identified_refused,
+	// (an ordinary key of another history = a copy being rebuilt)
+	cut_assert_equal_int(storage::identified_refused_history,
 		s->apply_identified_change("9:another-history/11", e4, false));
+	cut_assert_equal_int(storage::identified_refused_history,
+		s->apply_identified_change("9:another-history/11", e4, true));
+	// ... but a reserved key of another history stays a plain refusal
+	storage::entry e4r;
+	fill_entry(e4r, storage_rocksdb::kReplLastLsnKey, "foreign");
+	cut_assert_equal_int(storage::identified_refused,
+		s->apply_identified_change("9:another-history/11", e4r, false));
 
 	// Malformed tags are refused, never guessed.
 	storage::entry e5;

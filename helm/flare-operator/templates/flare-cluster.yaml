@@ -399,6 +399,13 @@ spec:
             # thread counts.
             - name: MALLOC_ARENA_MAX
               value: {{ ($c.mallocArenaMax | default 2) | quote }}
+            # The Pod's own UID: the operator's permission to discard a redundant
+            # copy (docs/spec.md) names it, and flared refuses the permission
+            # without it (refused:pod_uid_unknown).
+            - name: FLARE_POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
           command:
             - sh
             - -c

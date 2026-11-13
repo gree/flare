@@ -90,6 +90,7 @@ const stat_mapping flared_gauges[] = {
 	{ "proxy_write_in_flight",   "flare_node_proxy_write_in_flight",   "gauge"   },
 	{ "proxy_write_failed",      "flare_node_proxy_write_failed",      "counter" },
 	{ "proxy_write_skipped",     "flare_node_proxy_write_skipped",     "counter" },
+	{ "proxy_write_refused_rebuilding", "flare_node_proxy_write_refused_rebuilding", "counter" },
 	// forwards that waited out an unanswering replica (L12 hold) and the
 	// longest such wait (msec)
 	{ "proxy_write_held",        "flare_node_proxy_write_held",        "counter" },

@@ -236,6 +236,7 @@ int flarei::startup(int argc, char **argv) {
 
 	// application objects
 	connection_tcp::read_timeout = ini_option_object().get_net_read_timeout() * 1000;		// -> msec
+	connection_tcp::accepted_read_timeout = connection_tcp::read_timeout;
 	this->_server = new server();
 	if (this->_server->listen(ini_option_object().get_server_port()) < 0) {
 		return -1;
@@ -358,6 +359,7 @@ int flarei::reload() {
 
 	// net_read_timeout
 	connection_tcp::read_timeout = ini_option_object().get_net_read_timeout() * 1000;		// -> msec
+	connection_tcp::accepted_read_timeout = connection_tcp::read_timeout;
 
 	// thread_pool_size
 	this->_req_thread_pool->set_max_pool_size(ini_option_object().get_thread_pool_size());

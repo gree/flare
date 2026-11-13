@@ -34,7 +34,7 @@ libflare_la_SOURCES = \
 	handler_source_validator.h handler_source_validator.cc \
 	source_eligibility.h \
 	copy_protection.h \
-	copy_switch.h copy_switch_fs.h copy_switch.cc copy_capacity.h \
+	copy_switch.h copy_switch_fs.h copy_switch.cc copy_capacity.h copy_discard_grant.h \
 	wal_pin.h wal_pin.cc \
 	signal_interrupt.h signal_interrupt.cc \
 	htonll.h \

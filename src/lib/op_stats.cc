@@ -245,6 +245,14 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 			_send_stat(key, it->second);
 		}
 		_send_stat("proxy_write_skipped", skipped);
+		uint64_t refused_rebuilding = 0;
+		map<string, uint64_t> rr = stats_object->get_proxy_write_refused_rebuilding(refused_rebuilding);
+		for (map<string, uint64_t>::const_iterator it = rr.begin(); it != rr.end(); it++) {
+			char key[BUFSIZ];
+			snprintf(key, sizeof(key), "proxy_write_refused_rebuilding[%s]", it->first.c_str());
+			_send_stat(key, it->second);
+		}
+		_send_stat("proxy_write_refused_rebuilding", refused_rebuilding);
 		uint64_t held = 0;
 		map<string, uint64_t> hd = stats_object->get_proxy_write_held(held);
 		for (map<string, uint64_t>::const_iterator it = hd.begin(); it != hd.end(); it++) {
@@ -362,6 +370,10 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 			_send_stat("rocksdb_quarantined"                , rdb->is_quarantined() ? 1 : 0);
 			// decision 2026-10-08: changed part-way by a merging dump (durable)
 			_send_stat("rocksdb_copy_partial"               , rdb->is_copy_partial() ? 1 : 0);
+			// docs/spec.md "redundant copy": copy.discarded exists (wiped on the
+			// operator's word / an approval, no verified copy switched in yet)
+			_send_stat("rocksdb_copy_discarded"             , rdb->is_copy_discarded() ? 1 : 0);
+			_send_stat("rebuild_redundant_discards"         , static_cast<long long>(rdb->get_redundant_discards()));
 			// restore provenance: the partition / routing layout this copy's
 			// data belongs to ("-" = not bound yet) and whether it is a
 			// restored copy not yet accepted as that partition's master

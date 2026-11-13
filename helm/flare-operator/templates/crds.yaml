@@ -192,6 +192,19 @@ spec:
                       type: integer
                       minimum: 1000
                       description: Follower poll interval in microseconds (flared repl-follow-poll-interval-usec)
+                    clientIdleTimeoutSeconds:
+                      type: integer
+                      minimum: 1
+                      description: >-
+                        Idle timeout of the client connections flared accepts,
+                        in seconds (flared client-idle-timeout; unset =
+                        net_read_timeout, 600; hot-toggleable, removing it goes
+                        back to 600). A cordon move waits for the moved pod's
+                        connections to close, so an idle persistent client
+                        delays it by up to this long. Shorter closes idle
+                        clients sooner; a client behind a load balancer that
+                        forgets a half-closed connection may then wait in
+                        close().
                     readUnavailableError:
                       type: boolean
                       description: >-
@@ -315,7 +328,8 @@ spec:
                     Nodes the operator moves off, one at a time. `moves[]` holds
                     {id, generation, node, pod, podUid, key, role, partition, phase,
                     successor, reason, held, attempts, admittedUid, restored, stuck,
-                    stuckMs, startedMs, phaseMs, releasedMs}; phase is pending, handingOver,
+                    stuckMs, startedMs, phaseMs, releasedMs, unservedMs}; unservedMs is
+                    how long the move waited in unserved before its release; phase is pending, handingOver,
                     proxied, unserved, released, deleted, resyncing, done or cancelled.
                     `stuck` = past the phase deadline (nodeReplacement.unservedTimeoutSeconds
                     / resyncTimeoutSeconds): no longer the running move, never released.

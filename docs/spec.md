@@ -87,7 +87,39 @@ SAFETY-TODO.md.
 - **Promotion.** The successor is the reachable slave with the newest data
   (requirement 4). An empty copy or one being rebuilt is never promoted.
 - **Copies are kept until replaced.** A copy is not removed before a copy
-  that replaces it exists (copy retention / copy protection).
+  that replaces it exists (copy retention / copy protection). flared sees only
+  its own copy, so on its own it never discards one: a rebuild receives the
+  new copy beside the old one and switches when it is complete. That needs
+  room for two copies; without it the rebuild parks
+  (`rebuild_blocked=no_space`) and keeps the old copy.
+- **A redundant copy is discarded on the operator's word** (user decision,
+  2026-11-10). A copy that serves nothing — a proxy's, or that of a slave
+  waiting for or parked in a rebuild — is useless while its partition has a
+  master and at least one Active slave of the master's current history on
+  another Pod. Then the operator tells that node it may discard its copy, and
+  the node discards it before it rebuilds, so the rebuild needs room for one
+  copy.
+  - **Kept otherwise.** When only the master is left, or the partition has
+    no master, a proxy's copy can be the last data: a masterless partition
+    gets its new master from a node that holds data, a proxy included,
+    before an empty one.
+  - **Never discarded by this rule.** The master's copy, a promotion
+    candidate, and quarantined or retained copies (those need a
+    `FlareCopyDiscardApproval`).
+  - **Bound to what was checked.** The permission names the Pod (UID), its
+    copy and the node_map version it was judged under. The node refuses it
+    if any of them changed, and the operator checks the condition again
+    before each grant.
+  - Background: on pf-dev (2026-11-05 and 2026-11-10, rc70 and rc71 rolls)
+    a replica rebuilt from the master that was about to hand over kept a
+    5 GB copy of the old history in an 8 GiB tmpfs. Its rebuild needed
+    7.4 GB, parked on `no_space`, and stayed parked until the Pod was
+    deleted by hand, while the master and another slave held all the data.
+  - Status: implemented (flare-redundant-copy-discard). The operator decides
+    it for a rebuild parked on `no_space` (`FLARE_OPERATOR_REDUNDANT_COPY_DISCARD=off`
+    turns it off); flared writes `copy.discarded` before it wipes, so a crash
+    finishes the wipe and the emptied copy is never promotable until a
+    verified copy is switched in.
 - **Planned master switches are ordered handovers.** Any switch the operator
   starts on a reachable master (Pod delete, rolling update, drain, cordon)
   loses no acknowledged write and returns no error; a write that arrives
@@ -125,6 +157,24 @@ SAFETY-TODO.md.
   being moved. With 3 copies, the master and one more copy remain during
   the move. See
   [RUNBOOK.md#cordon-move](RUNBOOK.md#cordon-move).
+- **Connections are of three kinds, with different time limits** (user
+  decision, 2026-11-13). A Pod's connection count (`curr_connections`)
+  includes all accepted connections, so the cordon move above waits for
+  each kind.
+
+  | Connection | Opened by → to | Closed when idle | Why |
+  |---|---|---|---|
+  | Client | a client (directly or through the load balancer) → flared | by flared after the client idle timeout: `net_read_timeout`, 600 s, or `spec.rocksdb.clientIdleTimeoutSeconds` | A batch client can be silent for more than 30 s between requests. Closing an idle client sooner, behind a load balancer that forgets the half-closed flow, made the client's `close()` hang up to 1000 s (flare-idle-close-linger-hang). |
+  | Forwarding | flared → another flared (proxy forwards and replica forwards) | by the **sender** after 30 s without a forward; the next forward opens it again | The receiver cannot tell it from a client and would keep it for 600 s. A Pod that became a proxy then kept its peers' idle forwarding connections, and every cordon move waited about 10 minutes (E2E 43200043205). |
+  | Liveness | the operator → flared (stats, node_map) | per request | Whether a node is up is decided by the operator (requirement 12), not by idle connections. A flared waiting for a reply from a peer gives up after 30 s in the Kubernetes build. |
+
+  - **Effect on the cordon move.** The move is released when the Pod has no
+    connection. Forwarding connections close about 30 s after the Pod
+    became a proxy. A client that keeps an idle connection open delays the
+    release up to the client idle timeout; the move is reported held after
+    120 s (`FlareCordonMoveHeld`) and stuck after 1800 s. Set
+    `clientIdleTimeoutSeconds` to shorten the wait for such clients, at the
+    cost of closing idle clients sooner.
 - **History continuation after a handover** (PR #151). The remaining
   replicas take over the new master's history instead of rebuilding. Off
   unless the operator runs with `FLARE_OPERATOR_HISTORY_CONTINUATION=on`, and

@@ -32,6 +32,7 @@ import FlareOperator.E2E.Helpers
 import FlareOperator.E2E.PromotionTimeline
 import FlareOperator.StateMachine.SourceEligibility
 import FlareOperator.StateMachine.RebuildConcurrency
+import FlareOperator.StateMachine.RedundantCopy
 import FlareOperator.StateMachine.HistoryContinuation
 import FlareOperator.StateMachine.AuthoritativeHistory
 import FlareOperator.StateMachine.CopyDiscardApproval
@@ -1086,6 +1087,10 @@ private def checkBreakerUnavailable (ctx : Ctx) : IO Unit := do
   let big := cs ((List.range 8).map fun i =>
     node s!"n{i}" (if i == 0 then .Master else .Slave) (if i == 7 then .Down else .Active))
   let pair := cs [node "a" .Master .Active, node "b" .Slave .Active]
+  check ctx "client-idle-timeout renders into extra.conf only when set"
+    (({ clientIdleTimeoutSeconds := some 120 } : RocksdbConfigSpec).toExtraConf == "client-idle-timeout = 120"
+      && ({ clientIdleTimeoutSeconds := some 120 } : RocksdbConfigSpec).hasAny
+      && ({ maxTotalThreadQueue := some 1 } : RocksdbConfigSpec).toExtraConf == "max-total-thread-queue = 1")
   check ctx "read-unavailable-error renders into extra.conf only when set"
     (({ readUnavailableError := some true } : RocksdbConfigSpec).toExtraConf == "read-unavailable-error = true"
       && ({ readUnavailableError := some false } : RocksdbConfigSpec).toExtraConf == "read-unavailable-error = false"
@@ -2547,6 +2552,72 @@ private def checkHistoryContinuation (ctx : Ctx) : IO Unit := do
 
 -- ─── copy retention §7: discard approvals ───────────────────────────────
 
+open FlareOperator.RedundantCopy in
+private def checkRedundantCopy (ctx : Ctx) : IO Unit := do
+  let nd := fun (name : String) (role : FlareRole) (st : FlareState) (part : Int) =>
+    ({ serverName := name, serverPort := 12121, role := role, state := st, partition := part } : FlareNode)
+  -- partition 0: master m, Active slave s2 (another pod), and s1 whose rebuild is parked
+  let st : FlareClusterState :=
+    { nodeMap := [("m:1", nd "m" .Master .Active 0), ("s1:1", nd "s1" .Slave .Prepare 0), ("s2:1", nd "s2" .Slave .Active 0)],
+      partitionMap := [(0, { master := some "m:1", slaves := ["s1:1", "s2:1"] })], nodeMapVersion := 9 }
+  let other : Other :=
+    { key := "s2:1", podUid := "U2", active := true, sameHistory := true, repairOpen := false,
+      consistent := some 1, quarantined := some 0, dropped := some 0, failed := some 0, followOk := true }
+  let f : Facts :=
+    { key := "s1:1", podUid := "U1", copyId := "c-1:1", flaredMapVersion := some 9, consistent := some 1, quarantined := some 0,
+      others := [other], candidates := [] }
+  let kept := fun (v : Verdict) => match v with | .keep _ => true | _ => false
+  check ctx "redundant copy: the master and an Active same-history slave on another pod → grant, bound to the pod, copy and map version"
+    (decide st f == .grant "U1" "c-1:1" 9)
+  check ctx "redundant copy: only the master is left (no other Active copy) → keep"
+    (kept (decide st { f with others := [] }) && kept (decide st { f with others := [{ other with key := "m:1" }] }))
+  check ctx "redundant copy: a masterless partition keeps the copy (it may be the last data)"
+    (kept (decide { st with nodeMap := st.nodeMap.map fun (k, n) => if k == "m:1" then (k, { n with role := .Slave }) else (k, n) } f)
+      && kept (decide { st with nodeMap := st.nodeMap.map fun (k, n) => if k == "m:1" then (k, { n with state := .Down }) else (k, n) } f))
+  check ctx "redundant copy: the other copy has another history, an open repair, a new drop, the same pod UID, an unproven follow, or is not Active → keep"
+    (kept (decide st { f with others := [{ other with sameHistory := false }] })
+      && kept (decide st { f with others := [{ other with repairOpen := true }] })
+      && kept (decide st { f with others := [{ other with dropped := some 1 }] })
+      && kept (decide st { f with others := [{ other with failed := some 3 }] })
+      && kept (decide st { f with others := [{ other with podUid := "U1" }] })
+      && kept (decide st { f with others := [{ other with podUid := "" }] })
+      && kept (decide st { f with others := [{ other with followOk := false }] })
+      && kept (decide st { f with others := [{ other with active := false }] })
+      && kept (decide { st with nodeMap := st.nodeMap.map fun (k, n) => if k == "s2:1" then (k, { n with state := .Prepare }) else (k, n) } f))
+  check ctx "redundant copy: a promotion candidate, the master itself, an Active slave and a node outside the map are kept"
+    (kept (decide st { f with candidates := ["s1:1"] })
+      && kept (decide st { f with key := "m:1" })
+      && kept (decide st { f with key := "s2:1", others := [{ other with key := "s1:1" }] })
+      && kept (decide st { f with key := "zz:1" }))
+  check ctx "redundant copy: quarantined, inconsistent or unreported copies, an unknown pod UID or copy id, a malformed token → keep"
+    (kept (decide st { f with quarantined := some 1 }) && kept (decide st { f with quarantined := none })
+      && kept (decide st { f with consistent := some 0 }) && kept (decide st { f with consistent := none })
+      && kept (decide st { f with podUid := "" }) && kept (decide st { f with copyId := "" })
+      && kept (decide st { f with copyId := "c-1:1; rm -rf /" }) && kept (decide st { f with copyId := "a b" }))
+  check ctx "redundant copy: flared's map version must equal the operator's (stale, missing → keep)"
+    (kept (decide st { f with flaredMapVersion := some 8 }) && kept (decide st { f with flaredMapVersion := none })
+      && decide { st with nodeMapVersion := 10 } { f with flaredMapVersion := some 10 } == .grant "U1" "c-1:1" 10)
+  check ctx "redundant copy: missing telemetry of the other copy fails closed (its identity / quarantine not reported, the master's dropped / failed counters for it not reported) → keep"
+    (kept (decide st { f with others := [{ other with consistent := none }] })
+      && kept (decide st { f with others := [{ other with consistent := some 0 }] })
+      && kept (decide st { f with others := [{ other with quarantined := none }] })
+      && kept (decide st { f with others := [{ other with quarantined := some 1 }] })
+      && kept (decide st { f with others := [{ other with dropped := none }] })
+      && kept (decide st { f with others := [{ other with failed := none }] })
+      && kept (decide st { f with others := [{ other with dropped := none, failed := none, consistent := none, quarantined := none }] }))
+  check ctx "redundant copy: no baseline — drops counted before the operator looked (or before it restarted) still keep the copy; only zero since the master's flared started grants"
+    (kept (decide st { f with others := [{ other with dropped := some 27, failed := some 0 }] })
+      && kept (decide st { f with others := [{ other with dropped := some 0, failed := some 454 }] })
+      && decide st { f with others := [{ other with dropped := some 0, failed := some 0 }] } == .grant "U1" "c-1:1" 9)
+  check ctx "redundant copy: one clean copy among others grants; a clean copy that is not Active does not"
+    (decide st { f with others := [{ other with failed := some 1 }, { other with key := "s2:1" }] } == .grant "U1" "c-1:1" 9
+      && kept (decide st { f with others := [{ other with active := false }] }))
+  check ctx "redundant copy: the keep reason names the missing or non-zero evidence"
+    (match decide st { f with others := [{ other with failed := none }] } with
+     | .keep w => (w.splitOn "not reported").length > 1 | _ => false)
+  check ctx "redundant copy: a keep names why (logged only when it changes)"
+    (match decide st { f with others := [] } with | .keep w => w.length > 0 | _ => false)
+
 open FlareOperator.CopyDiscardApproval in
 private def checkCopyDiscardApproval (ctx : Ctx) : IO Unit := do
   let a : Approval := {
@@ -3347,6 +3418,7 @@ def run : IO UInt32 := do
   checkAuthority29Transitions ctx
   checkRestoreProvenance ctx
   checkCopyDiscardApproval ctx
+  checkRedundantCopy ctx
   checkPromotionEvidence ctx
   checkStaleR3Refill ctx
   checkStaleR3RefillUntracked ctx

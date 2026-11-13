@@ -7,6 +7,7 @@
 #include <cppcutter.h>
 #include <copy_switch.h>
 #include <copy_capacity.h>
+#include <copy_discard_grant.h>
 #include <copy_switch_fs.h>
 
 #include <cerrno>
@@ -158,6 +159,65 @@ namespace test_copy_switch {
 		cut_assert_equal_int(capacity_insufficient, decide_rebuild_capacity(50, true, 100, 149, need, why));
 		// reserve 0 is a SET value (allowed), not unset
 		cut_assert_equal_int(capacity_ok, decide_rebuild_capacity(0, true, 100, 100, need, why));
+	}
+
+	// --- docs/spec.md "redundant copy": the operator's grant ----------------------
+	static discard_grant_facts grant_facts() {
+		discard_grant_facts f;
+		f.own_pod_uid = "uid-1";
+		f.own_copy_id = "C:1";
+		f.identity_consistent = true;
+		f.own_map_version = 9;
+		f.role_known = true;
+		f.serving_or_master = false;
+		f.parked_no_space = true;
+		return f;
+	}
+	static discard_grant make_grant() {
+		discard_grant g;
+		g.pod_uid = "uid-1";
+		g.copy_id = "C:1";
+		g.map_version = 9;
+		return g;
+	}
+
+	void test_discard_grant_holds_when_every_binding_holds() {
+		cut_assert_equal_string("", check_discard_grant(make_grant(), grant_facts(), true).c_str());
+	}
+
+	void test_discard_grant_is_refused_for_each_mismatch() {
+		discard_grant g = make_grant();
+		discard_grant_facts f = grant_facts();
+		f.own_pod_uid = "";
+		cut_assert_equal_string("pod_uid_unknown", check_discard_grant(g, f, true).c_str());
+		f = grant_facts(); g.pod_uid = "uid-2";
+		cut_assert_equal_string("pod_changed", check_discard_grant(g, f, true).c_str());
+		g = make_grant(); g.copy_id = "C:2";
+		cut_assert_equal_string("copy_changed", check_discard_grant(g, f, true).c_str());
+		g = make_grant(); g.copy_id = "a b";
+		cut_assert_equal_string("malformed", check_discard_grant(g, f, true).c_str());
+		g = make_grant(); g.map_version = 10;
+		cut_assert_equal_string("map_changed", check_discard_grant(g, f, true).c_str());
+		g = make_grant(); f.identity_consistent = false;
+		cut_assert_equal_string("identity_inconsistent", check_discard_grant(g, f, true).c_str());
+		f = grant_facts(); f.role_known = false;
+		cut_assert_equal_string("role_unknown", check_discard_grant(g, f, true).c_str());
+		f = grant_facts(); f.serving_or_master = true;
+		cut_assert_equal_string("master_or_serving", check_discard_grant(g, f, true).c_str());
+		f = grant_facts(); f.quarantined = true;
+		cut_assert_equal_string("quarantined", check_discard_grant(g, f, true).c_str());
+		f = grant_facts(); f.switch_unresolved = true;
+		cut_assert_equal_string("switch_unresolved", check_discard_grant(g, f, true).c_str());
+		// parked-for-room is checked when the grant arrives, not when it is used
+		f = grant_facts(); f.parked_no_space = false;
+		cut_assert_equal_string("not_parked_no_space", check_discard_grant(g, f, true).c_str());
+		cut_assert_equal_string("", check_discard_grant(g, f, false).c_str());
+	}
+
+	void test_discard_makes_room_counts_the_live_copy() {
+		cut_assert_true(discard_makes_room(150, 50, 100));
+		cut_assert_false(discard_makes_room(151, 50, 100));
+		cut_assert_false(discard_makes_room(10, -1, 1000));
 	}
 
 	// verification capture (2026-10-12): worst-case pin = copy + reserve;

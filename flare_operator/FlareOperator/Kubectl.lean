@@ -132,6 +132,7 @@ private def getFlareClusterFromJson (json : Lean.Json) (name ns : String)
     maxTotalThreadQueue := rocksdbObj.getObjValD "maxTotalThreadQueue" |>.getNat?.toOption
     noreplyWindowLimit := rocksdbObj.getObjValD "noreplyWindowLimit" |>.getNat?.toOption
     rebuildReserveBytes := rocksdbObj.getObjValD "rebuildReserveBytes" |>.getNat?.toOption
+    clientIdleTimeoutSeconds := rocksdbObj.getObjValD "clientIdleTimeoutSeconds" |>.getNat?.toOption
   }
   -- The circuit breaker knobs were published in the CRD examples and the
   -- Runbook but never parsed — the safety valve silently ran on defaults

@@ -2585,9 +2585,9 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
           return
         | some out =>
           let st := PromotionEvidence.parseStats out
-          match (if st.complete then PromotionEvidence.bindingConflict st.partitionBinding st.restoredUnverified expected else some "stats incomplete") with
+          match PromotionEvidence.firstMasterAllows st expected with
           | some why =>
-            IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: the first master of partition {part} — restore provenance: {why} — nothing from this pass is committed"
+            IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: the first master of partition {part} — {why} — nothing from this pass is committed"
             promotionAbortedRef.set true
             return
           | none =>
@@ -2623,14 +2623,13 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
         -- A3b: a committed replica replacing a stopped successor holds the
         -- handover's continued history (master_id, E'), not the recorded E
         let contHist ← handoverContinuedHistoryRef.get
-        let continued := proven && match replyNow with
-          | some out => contHist.any fun (kk, m, ep) =>
-              kk == k && statStr out "rocksdb_master_id" == some m && statStr out "rocksdb_source_epoch" == some ep
-          | none => false
-        let allows := if proven then PromotionEvidence.handoverCommitAllows cls || continued else PromotionEvidence.commitTimeAllows cls
-        if continued && !PromotionEvidence.handoverCommitAllows cls then
+        let stNow := (replyNow.map PromotionEvidence.parseStats).getD {}
+        let continued := proven && PromotionEvidence.continuedAllows cls stNow obs.partitionHasMaster
+          (PromotionEvidence.continuedHistoryMatches k contHist stNow)
+        let allows := PromotionEvidence.commitDecision replyNow obs proven k contHist
+        if allows && continued && !PromotionEvidence.handoverCommitAllows cls then
           IO.eprintln s!"[flare-operator] promotion of {k}: {cls.label} at commit, accepted: it holds the continued history of its handover (committed replica replacing a stopped successor)"
-        else if proven && allows && !PromotionEvidence.commitTimeAllows cls then
+        else if allows && proven && !PromotionEvidence.commitTimeAllows cls then
           IO.eprintln s!"[flare-operator] promotion of {k}: {cls.label} at commit, accepted for an ordered handover whose drain was proven clean"
         if podNow.isNone || !allows then
           IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: an existing copy promoted on a pass that did not read it, read at commit as {cls.label}{if podNow.isNone then " (pod unreadable)" else ""} — nothing from this pass is committed, the next pass reads again"
@@ -2814,19 +2813,15 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
             mapPrepare := (n?.map (·.state)) == some FlareState.Prepare, mapActive := (n?.map (·.state)) == some FlareState.Active,
             podReady := true, partitionHasMaster := false, lastMasterHistory := some (rec.hist.masterId, rec.hist.epoch) }
           let freshCls := PromotionEvidence.classify (fresh.map (·.2)) obsNow
+          let contHistI ← handoverContinuedHistoryRef.get
           let consistent := match passEv with
             | some (_, passCls, b0) =>
               (PromotionEvidence.reclassifyAllows passCls freshCls).1
                 && b0 == PromotionEvidence.bindingOf (fresh.map (·.1)) (fresh.map (·.2))
-            | none => if proven then PromotionEvidence.handoverCommitAllows freshCls else PromotionEvidence.commitTimeAllows freshCls
-          -- A3b: the replacement of a stopped successor holds the handover's
-          -- continued history (master_id, E'), exactly — as at the commit read
-          let contHistI ← handoverContinuedHistoryRef.get
-          let continuedI := proven && match fresh with
-            | some (_, out) => contHistI.any fun (kk, m, ep) =>
-                kk == k && statStr out "rocksdb_master_id" == some m && statStr out "rocksdb_source_epoch" == some ep
-            | none => false
-          let consistent := consistent || continuedI
+            -- A3b: the replacement of a stopped successor holds the handover's
+            -- continued history (master_id, E'), exactly — the same decision
+            -- as at the commit read (continuedAllows inside commitDecision)
+            | none => PromotionEvidence.commitDecision (fresh.map (·.2)) obsNow proven k contHistI
           let seenK := match fresh with
             | some (u, r) => seenOf u (some r)
             | none => .unreadable

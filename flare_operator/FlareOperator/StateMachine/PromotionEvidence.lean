@@ -531,6 +531,64 @@ def handoverCommitAllows : Class → Bool
   | .lagging => true
   | c => commitTimeAllows c
 
+/-- The ONLY forbidden reasons a handover's continued history may override
+    (allowlist, by the prefix `classify` gives them): the copy holds ANOTHER
+    history than the recorded one (`rejoining`, or R3 needs_rebuild's
+    "confirmed different history (the copy is ...)"). That is exactly what a
+    committed replica replacing a stopped successor reports after the switch:
+    (master_id, E'), not the recorded (master_id, E). Every other forbidden
+    reason (a rebuild, partial, quarantine, identity, switch, corruption, a
+    follow-side fault, a restore-provenance conflict, a divergence against the
+    recorded last master) is not in the list. -/
+def continuedForbiddenPrefixes : List String :=
+  ["rejoining: the copy holds ", "R3: confirmed different history (the copy is "]
+
+def Class.continuedForbiddenOk : Class → Bool
+  | .forbidden why => continuedForbiddenPrefixes.any (why.startsWith ·)
+  | _ => true
+
+/-- A3b: the stats are of the copy holding the handover's continued history
+    (master_id, E') recorded for `k`. -/
+def continuedHistoryMatches (k : String) (contHist : List (String × String × String)) (st : Stats) : Bool :=
+  contHist.any fun (kk, m, ep) => kk == k && st.masterId == some m && st.sourceEpoch == some ep
+
+/-- The handover-continued exception (a committed replica replacing a stopped
+    successor holds (master_id, E'), not the recorded E), as one pure
+    function. Fail closed: a complete, valid reply with NO forbidden marker,
+    a class that is not forbidden for any reason outside the allowlist, and
+    the continued history matched exactly. -/
+def continuedAllows (cls : Class) (st : Stats) (partitionHasMaster : Bool) (histMatches : Bool) : Bool :=
+  histMatches && st.complete && st.invalid.isEmpty
+    && (st.forbiddenMarker partitionHasMaster).isNone && cls.continuedForbiddenOk
+
+/-- The commit decision for a promotion of an EXISTING copy on a pass that
+    did not read it (and the history intent's fresh read when no pass
+    evidence exists): the reply is classified and the stats checked again here.
+    Premises Main supplies (IO): the reply (`readFresh` / stats), the
+    pod's Ready, the map and recorded-history `Observed`, `proven` (the
+    handover drain proof bound to the pod), the recorded continued history.
+    A forbidden marker in the stats, or a forbidden class outside the
+    continued allowlist, never allows. -/
+def commitDecision (reply : Option String) (o : Observed) (proven : Bool) (k : String)
+    (contHist : List (String × String × String)) : Bool :=
+  let st := (reply.map parseStats).getD {}
+  let cls := classify reply o
+  (st.forbiddenMarker o.partitionHasMaster).isNone &&
+    (if proven then handoverCommitAllows cls
+        || continuedAllows cls st o.partitionHasMaster (continuedHistoryMatches k contHist st)
+     else commitTimeAllows cls)
+
+/-- The first master of a partition no copy has held: why it is REFUSED
+    (`none` = allowed). Its own copy is read: an incomplete reply, a restore
+    provenance conflict, or any forbidden marker (fail closed) refuses it.
+    There is no master in the partition, so R3's "against the present master"
+    markers do not apply (`partitionHasMaster := false`). -/
+def firstMasterAllows (st : Stats) (expected : String) : Option String :=
+  if !st.complete then some "restore provenance: stats incomplete"
+  else match st.forbiddenMarker false with
+  | some why => some s!"its copy is FORBIDDEN ({why})"
+  | none => (bindingConflict st.partitionBinding st.restoredUnverified expected).map (s!"restore provenance: {·}")
+
 /-- Evidence bound to what it was read from; the commit re-reads these. -/
 structure Binding where
   podUid : Option String

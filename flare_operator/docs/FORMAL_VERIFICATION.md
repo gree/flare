@@ -424,15 +424,28 @@ theorem scenario2_verified :
    (`commitTimeAllows_forbidden`, `commitAllows_forbidden`,
    `reclassifyAllows_forbidden_pass`, `handoverCommitAllows_forbidden`) and the
    handover (`handoverAccepts_eligible`, `handover_demote_requires_r3`).
-   Premises outside the proofs: Main classifies every live non-master copy of
-   a risk pass (`evidence`) and passes `blockedKeys` / `unfitKeys`;
+   The commit-time decision Main calls is ONE pure function:
+   `PromotionEvidence.commitDecision` (classify, then `commitTimeAllows` /
+   `handoverCommitAllows` / `continuedAllows`; also used at the history
+   intent's fresh read) and `PromotionEvidence.firstMasterAllows` (the first
+   master of a partition no copy has held). Proven: `commitDecision_marker`
+   (a forbidden marker in the stats never allows), `commitDecision_forbidden`
+   / `commitDecision_forbidden_not_allowlisted` (a forbidden class passes only
+   in a proven handover, and only for the continued allowlist
+   `continuedForbiddenPrefixes`: "the copy holds another history than the
+   recorded one"), `continuedAllows_marker` / `_incomplete` /
+   `_forbidden_allowlist`, `firstMasterAllows_marker` (a marker refuses the
+   first master).
+   The claim is therefore narrowed to: the pure reconcile steps (via the
+   gates) and the pure commit decisions above. NOT proven: the IO wiring.
+   Premises: Main classifies every live non-master copy of a risk pass
+   (`evidence`) and passes `blockedKeys` / `unfitKeys`; on a non-risk pass
+   Main reads the stats, the pod's Ready and builds the `Observed`, `proven`
+   and the recorded continued history, and calls `commitDecision` with them;
    `PodListResponse` reaches the FSM unchanged; `KeysNodup` of the node map;
-   flared reports the markers it is supposed to. Not covered by the
-   theorem (the commit layer is the only guard there): the first master of a
-   partition no copy has held (`firstMasterOfNewPartition` checks only the
-   restore binding), a handover successor that holds the handover's
-   continued history (`continued` in `commitChecked`), and passes where
-   `promotionRisk` is false (no evidence, so empty gates).
+   flared reports the markers it is supposed to. Passes where
+   `promotionRisk` is false have no evidence (empty gates): the commit
+   decision is their only guard.
 
 ### What Is NOT Yet Verified
 

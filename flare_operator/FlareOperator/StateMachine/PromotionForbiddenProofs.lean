@@ -894,7 +894,11 @@ theorem notPromotable_gated {s : FlareReconcileState} {ev : List (String × Clas
 
 /-! ## The one theorem -/
 
-/-- THE THEOREM. Take a pass whose gates are built from its evidence
+/-- THE THEOREM — about the PURE reconcile FSM only. The commit-time decisions
+    Main makes with IO (`commitDecision`, `firstMasterAllows`) are proven
+    separately below; Main's IO wiring (the stats read, the pod's Ready, the
+    `Observed` it builds, the evidence list) is a premise, not proven.
+    Take a pass whose gates are built from its evidence
     (`PassGates`) and a key whose evidence class is `forbidden` (more
     generally, not promotable). In every step of the reconcile FSM that can
     seat a master — failover and the one-map drain (`AfterHandleFailover`),
@@ -925,6 +929,77 @@ theorem forbidden_never_promoted {s : FlareReconcileState} {ev : List (String ×
   · intro resp cs ns hstep hnone hns
     exact recoveryRefill_noNew resp s cs ns hstep hnone hns k hk
 
+
+/-! ## The commit-time decision Main calls
+
+`commitDecision` (one pure function of the commit read) and
+`firstMasterAllows` are what Main calls for a promotion on a pass that did
+not read the candidate, for the history intent's fresh read, and for the first
+master of a new partition. Premises (IO): the stats reply, the pod's Ready,
+the `Observed` Main builds, `proven`, the recorded continued history. -/
+
+theorem continuedAllows_marker {cls : Class} {st : Stats} {p h : Bool} {why : String}
+    (hm : st.forbiddenMarker p = some why) : continuedAllows cls st p h = false := by
+  simp [continuedAllows, hm]
+
+theorem continuedAllows_incomplete {cls : Class} {st : Stats} {p h : Bool}
+    (hc : st.complete = false) : continuedAllows cls st p h = false := by
+  simp [continuedAllows, hc]
+
+/-- A forbidden class passes `continuedAllows` only for a reason in the allowlist. -/
+theorem continuedAllows_forbidden_allowlist {why : String} {st : Stats} {p h : Bool}
+    (ha : continuedAllows (.forbidden why) st p h = true) :
+    ∃ pre ∈ continuedForbiddenPrefixes, why.startsWith pre = true := by
+  simp only [continuedAllows, Class.continuedForbiddenOk, Bool.and_eq_true, List.any_eq_true] at ha
+  exact ha.2
+
+/-- A stats reply carrying a forbidden marker is never allowed at commit. -/
+theorem commitDecision_marker {reply : Option String} {o : Observed} {pr : Bool} {k : String}
+    {ch : List (String × String × String)} {why : String}
+    (hm : ((reply.map parseStats).getD {}).forbiddenMarker o.partitionHasMaster = some why) :
+    commitDecision reply o pr k ch = false := by
+  unfold commitDecision
+  simp only []
+  rw [hm]
+  rfl
+
+/-- A forbidden class is allowed at commit only in a proven handover, and only
+    for a reason in the continued allowlist. -/
+theorem commitDecision_forbidden {reply : Option String} {o : Observed} {pr : Bool} {k : String}
+    {ch : List (String × String × String)} {why : String}
+    (hc : classify reply o = .forbidden why) (ha : commitDecision reply o pr k ch = true) :
+    pr = true ∧ ∃ pre ∈ continuedForbiddenPrefixes, why.startsWith pre = true := by
+  unfold commitDecision at ha
+  simp only [hc, Bool.and_eq_true] at ha
+  cases pr
+  · simp [commitTimeAllows] at ha
+  · refine ⟨rfl, ?_⟩
+    have h2 := ha.2
+    simp only [if_true, Bool.or_eq_true] at h2
+    rcases h2 with h | h
+    · simp [handoverCommitAllows, commitTimeAllows] at h
+    · exact continuedAllows_forbidden_allowlist h
+
+/-- Outside the allowlist, a forbidden class is never allowed. -/
+theorem commitDecision_forbidden_not_allowlisted {reply : Option String} {o : Observed} {pr : Bool}
+    {k : String} {ch : List (String × String × String)} {why : String}
+    (hc : classify reply o = .forbidden why)
+    (hn : ∀ pre ∈ continuedForbiddenPrefixes, why.startsWith pre = false) :
+    commitDecision reply o pr k ch = false := by
+  cases h : commitDecision reply o pr k ch
+  · rfl
+  · obtain ⟨_, pre, hpre, hs⟩ := commitDecision_forbidden hc h
+    rw [hn pre hpre] at hs
+    exact nomatch hs
+
+/-- The first master of a new partition is refused when its copy carries a
+    forbidden marker. -/
+theorem firstMasterAllows_marker {st : Stats} {expected : String} {why : String}
+    (hm : st.forbiddenMarker false = some why) : (firstMasterAllows st expected).isSome = true := by
+  unfold firstMasterAllows
+  split
+  · rfl
+  · simp [hm]
 
 /-! ## The ordered handover's successor -/
 

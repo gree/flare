@@ -2382,6 +2382,36 @@ private def checkAuthoritativeHistory (ctx : Ctx) : IO Unit := do
     ((match PromotionEvidence.classify (some (b ++ "STAT curr_items 0\r\nSTAT repl_read_source_eligible 0\r\nEND\r\n")) o with | .forbidden _ => true | _ => false)
       && (match PromotionEvidence.classify (some (b ++ "STAT curr_items 9\r\nSTAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nEND\r\n")) o with | .forbidden _ => true | _ => false)
       && (match PromotionEvidence.classify (some (b ++ "STAT curr_items 0\r\nSTAT repl_read_source_eligible 0\r\nEND\r\n")) { o with lastMasterHistory := none } with | .empty => true | _ => false))
+  -- forbidden-promotion review (7376469a): the handover-continued exception and the first master
+  let contBody := b ++ "STAT curr_items 9\r\nSTAT repl_read_source_eligible 0\r\n"
+  let contOk := contBody ++ "END\r\n"
+  let contHist := [("k", "M2", "5:fresh")]
+  let rebuilding := (b.replace "STAT rebuild_in_flight 0" "STAT rebuild_in_flight 1") ++ "STAT curr_items 9\r\nSTAT repl_read_source_eligible 0\r\nEND\r\n"
+  let partialCopy := (b.replace "STAT rocksdb_copy_partial 0" "STAT rocksdb_copy_partial 1") ++ "STAT curr_items 9\r\nSTAT repl_read_source_eligible 0\r\nEND\r\n"
+  check ctx "continued: a committed replica holding the continued history classifies FORBIDDEN (rejoining: another history than the recorded)"
+    (match PromotionEvidence.classify (some contOk) o with
+      | .forbidden w => w.startsWith "rejoining: the copy holds " | _ => false)
+  check ctx "continued: the legitimate continued history (no marker, R3 history differs) is allowed at commit"
+    (PromotionEvidence.commitDecision (some contOk) o true "k" contHist
+      && !PromotionEvidence.commitDecision (some contOk) o false "k" contHist
+      && !PromotionEvidence.commitDecision (some contOk) o true "k" []
+      && !PromotionEvidence.commitDecision (some contOk) o true "other" contHist)
+  check ctx "continued: a candidate with a rebuild in flight / a partialCopy copy is REFUSED even with the continued history"
+    (!PromotionEvidence.commitDecision (some rebuilding) o true "k" contHist
+      && !PromotionEvidence.commitDecision (some partialCopy) o true "k" contHist
+      && !PromotionEvidence.commitDecision (some (rebuilding.replace "END\r\n" "")) o true "k" contHist)
+  check ctx "continued: a forbidden reason outside the allowlist (restore provenance, divergence from the recorded history) is REFUSED"
+    (let restored := (contBody ++ "STAT rocksdb_restored_unverified 1\r\nSTAT rocksdb_partition_binding v1 partition=7 partitions=1 size=1024 hash=jenkins resolver=modular hint=1 virtual=4096\r\nEND\r\n")
+     let oB := { o with expectedBinding := some (PromotionEvidence.bindingFor 0 1 1024) }
+     (match PromotionEvidence.classify (some restored) oB with | .forbidden w => w.startsWith "restore provenance" | _ => false)
+       && !PromotionEvidence.commitDecision (some restored) oB true "k" contHist)
+  -- first master of a new partition
+  let fm := fun (r : String) => PromotionEvidence.firstMasterAllows (PromotionEvidence.parseStats r) (PromotionEvidence.bindingFor 0 1 1024)
+  check ctx "first master: a candidate whose copy carries a forbidden marker is REFUSED (rebuild in flight, partialCopy, quarantine)"
+    ((fm rebuilding).isSome && (fm partialCopy).isSome
+      && (fm ((b.replace "STAT rocksdb_quarantined 0" "STAT rocksdb_quarantined 1") ++ "STAT curr_items 0\r\nEND\r\n")).isSome)
+  check ctx "first master: a clean copy is allowed as before; an incomplete reply is not"
+    ((fm (b ++ "STAT curr_items 0\r\nEND\r\n")).isNone && (fm (b ++ "STAT curr_items 0\r\n")).isSome)
 
 -- ─── copy retention §10: rebuild concurrency ──────────────────────────────
 

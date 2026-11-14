@@ -211,82 +211,48 @@ def RocksdbConfigSpec.hasAny (r : RocksdbConfigSpec) : Bool :=
   r.maxTotalThreadQueue.isSome || r.noreplyWindowLimit.isSome || r.rebuildReserveBytes.isSome ||
   r.clientIdleTimeoutSeconds.isSome
 
+/-- Every `RocksdbConfigSpec` field as its flared key and its rendered value
+    (`none` = unset). The ONE place the key names live: `toExtraConf` and the
+    proofs in `K8s/ExtraConfProofs.lean` both read it. The order is the order
+    of the lines in `extra.conf` (not quite the declaration order:
+    `rebuildReserveBytes` is emitted after `backupKeep`). -/
+def RocksdbConfigSpec.entries (r : RocksdbConfigSpec) : List (String × Option String) :=
+  let bool := fun (b : Bool) => if b then "true" else "false"
+  [ ("rocksdb-block-cache-size-mb", r.blockCacheSizeMb.map toString),
+    ("rocksdb-write-buffer-size-mb", r.writeBufferSizeMb.map toString),
+    ("rocksdb-max-write-buffer-number", r.maxWriteBufferNumber.map toString),
+    ("rocksdb-wal-ttl-seconds", r.walTtlSeconds.map toString),
+    ("rocksdb-wal-size-limit-mb", r.walSizeLimitMb.map toString),
+    ("rocksdb-sync-writes", r.syncWrites.map bool),
+    ("rocksdb-resync-failure-threshold", r.resyncFailureThreshold.map toString),
+    ("rocksdb-wal-max-batch-bytes", r.walMaxBatchBytes.map toString),
+    ("rocksdb-wal-sync-bwlimit", r.walSyncBwlimit.map toString),
+    ("rocksdb-wal-sync-interval", r.walSyncInterval.map toString),
+    ("rocksdb-snapshot-bwlimit", r.snapshotBwlimit.map toString),
+    ("flush-all-enabled", r.flushAllEnabled.map bool),
+    ("rocksdb-backup-keep", r.backupKeep.map toString),
+    ("rocksdb-rebuild-reserve-bytes", r.rebuildReserveBytes.map toString),
+    ("read-unavailable-error", r.readUnavailableError.map bool),
+    ("repl-identity-forward", r.replIdentityForward.map bool),
+    ("repl-follow-enabled", r.replFollowEnabled.map bool),
+    ("repl-follow-poll-interval-usec", r.replFollowPollIntervalUsec.map toString),
+    ("max-total-thread-queue", r.maxTotalThreadQueue.map toString),
+    ("noreply-window-limit", r.noreplyWindowLimit.map toString),
+    ("client-idle-timeout", r.clientIdleTimeoutSeconds.map toString) ]
+
+/-- The flared keys, in line order. -/
+def RocksdbConfigSpec.keys : List String :=
+  (RocksdbConfigSpec.entries {}).map Prod.fst
+
+/-- The `extra.conf` lines, one `key = value` per set field. -/
+def RocksdbConfigSpec.lines (r : RocksdbConfigSpec) : List String :=
+  r.entries.filterMap fun (k, v) => v.map fun s => k ++ " = " ++ s
+
 /-- Render the rocksdb spec as `extra.conf` lines (one per set field).
     Returns an empty string when no fields are set. Lines are joined with "\n";
     the caller is responsible for joining with other sections. -/
 def RocksdbConfigSpec.toExtraConf (r : RocksdbConfigSpec) : String :=
-  let lines : List String := []
-  let lines := match r.blockCacheSizeMb with
-    | some n => lines ++ [s!"rocksdb-block-cache-size-mb = {n}"]
-    | none => lines
-  let lines := match r.writeBufferSizeMb with
-    | some n => lines ++ [s!"rocksdb-write-buffer-size-mb = {n}"]
-    | none => lines
-  let lines := match r.maxWriteBufferNumber with
-    | some n => lines ++ [s!"rocksdb-max-write-buffer-number = {n}"]
-    | none => lines
-  let lines := match r.walTtlSeconds with
-    | some n => lines ++ [s!"rocksdb-wal-ttl-seconds = {n}"]
-    | none => lines
-  let lines := match r.walSizeLimitMb with
-    | some n => lines ++ [s!"rocksdb-wal-size-limit-mb = {n}"]
-    | none => lines
-  let lines := match r.syncWrites with
-    | some b =>
-      let v := if b then "true" else "false"
-      lines ++ [s!"rocksdb-sync-writes = {v}"]
-    | none => lines
-  let lines := match r.resyncFailureThreshold with
-    | some n => lines ++ [s!"rocksdb-resync-failure-threshold = {n}"]
-    | none => lines
-  let lines := match r.walMaxBatchBytes with
-    | some n => lines ++ [s!"rocksdb-wal-max-batch-bytes = {n}"]
-    | none => lines
-  let lines := match r.walSyncBwlimit with
-    | some n => lines ++ [s!"rocksdb-wal-sync-bwlimit = {n}"]
-    | none => lines
-  let lines := match r.walSyncInterval with
-    | some n => lines ++ [s!"rocksdb-wal-sync-interval = {n}"]
-    | none => lines
-  let lines := match r.snapshotBwlimit with
-    | some n => lines ++ [s!"rocksdb-snapshot-bwlimit = {n}"]
-    | none => lines
-  let lines := match r.flushAllEnabled with
-    | some b =>
-      let v := if b then "true" else "false"
-      lines ++ [s!"flush-all-enabled = {v}"]
-    | none => lines
-  let lines := match r.backupKeep with
-    | some n => lines ++ [s!"rocksdb-backup-keep = {n}"]
-    | none => lines
-  let lines := match r.rebuildReserveBytes with
-    | some n => lines ++ [s!"rocksdb-rebuild-reserve-bytes = {n}"]
-    | none => lines
-  let lines := match r.readUnavailableError with
-    | some b =>
-      let v := if b then "true" else "false"
-      lines ++ [s!"read-unavailable-error = {v}"]
-    | none => lines
-  let boolLine := fun (key : String) (b : Bool) => s!"{key} = {if b then "true" else "false"}"
-  let lines := match r.replIdentityForward with
-    | some b => lines ++ [boolLine "repl-identity-forward" b]
-    | none => lines
-  let lines := match r.replFollowEnabled with
-    | some b => lines ++ [boolLine "repl-follow-enabled" b]
-    | none => lines
-  let lines := match r.replFollowPollIntervalUsec with
-    | some n => lines ++ [s!"repl-follow-poll-interval-usec = {n}"]
-    | none => lines
-  let lines := match r.maxTotalThreadQueue with
-    | some n => lines ++ [s!"max-total-thread-queue = {n}"]
-    | none => lines
-  let lines := match r.noreplyWindowLimit with
-    | some n => lines ++ [s!"noreply-window-limit = {n}"]
-    | none => lines
-  let lines := match r.clientIdleTimeoutSeconds with
-    | some n => lines ++ [s!"client-idle-timeout = {n}"]
-    | none => lines
-  String.intercalate "\n" lines
+  String.intercalate "\n" r.lines
 
 inductive MigrationPhase where
   | None | Dumping | Forwarding

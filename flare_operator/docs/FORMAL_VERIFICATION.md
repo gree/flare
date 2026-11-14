@@ -406,6 +406,34 @@ theorem scenario2_verified :
    — proven by induction over ARBITRARY node maps, not scenarios: whatever
    the FSM snapshot and the TCP server wrote, the committed node map never
    contains two Masters for one partition
+✅ **Replica-repair ledger** (`StateMachine/ReplicaRepairProofs.lean`, SC-03; the
+   E2E repair-ledger / SC-03 6 check of a restart that must not request twice):
+   - persistence round trip, exact equality for every `Phase`, `Entry` and
+     `Ledger`: `phase_roundtrip`, `entry_roundtrip`, `ledger_roundtrip`
+     (`fromJson? (toJson x) = some x`; every entry field, every counter
+     baseline `counterKey ↦ value`, and `initialized` come back). Lean's core
+     has no lemma for `Json.mkObj`/`getObjVal?`, so `getObjVal?_mkObj` proves
+     it (a red-black-tree lookup equals the association-list lookup);
+   - idempotence of the counter accounting, for ALL ledgers and observations
+     with distinct destinations: `observe_idempotent` (the same cumulative
+     counters a second time: no drops, no first sighting, ledger unchanged),
+     `observe_drops_mem` / `observe_drops_of_rise` (drops are attributed
+     only for a rise — by exactly the rise —, a restart at a non-zero value
+     (all of it), or a non-zero first sighting; a restart at 0 and an
+     unchanged counter attribute nothing), `request_twice_dests` (a second
+     request for a destination opens no second entry),
+     `requestRebuild_idem`;
+   - the pass Main runs and a restart in the middle: `observePass_idempotent`
+     (observe → request is a fixed point) and `restart_no_double_request`
+     (the ledger read back after serialize → parse is the pass's ledger, and
+     the same observation on it asks for nothing and changes nothing).
+   Assumed, not proved: `KeysSplit` (a counter key `master|dest|boot` splits
+   back into its three parts, i.e. no `|` in the master key or destination),
+   the text round trip of `Json.compress`/`Json.parse`, the kubectl read and
+   write of `status.replicaRepairs`, and the order in which Main calls the
+   functions. Two runs in the file (`#guard`, and an `example` for a boot id
+   that is read once and missing the next time) show what the first and the
+   last assumptions exclude.
 
 ### What Is NOT Yet Verified
 

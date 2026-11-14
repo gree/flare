@@ -407,6 +407,20 @@ theorem scenario2_verified :
    the FSM snapshot and the TCP server wrote, the committed node map never
    contains two Masters for one partition
 
+✅ **`extra.conf` rendering of `spec.rocksdb`** (`K8s/ExtraConfProofs.lean`):
+   for each of the 21 `RocksdbConfigSpec` fields, `<field>_some` says that a
+   `some v` gives exactly one line `key = render v` in `RocksdbConfigSpec.lines`
+   (`v = 0` and both Bool values included, `<field>_true` / `<field>_false`),
+   and `<field>_none` that `none` gives no line for that key. The keys live in
+   `RocksdbConfigSpec.entries` / `keys`; `keys_prefixFree` says no key is a
+   prefix of another (so flared cannot read one key as another),
+   `keys_not_cluster_replication` that none looks like a cluster-replication
+   key, and `hasAny_false_iff` that `hasAny r = false ↔ toExtraConf r = ""`.
+   `render_eq` / `render_contains_rocksdb_lines` show `renderFlaredExtraConf`
+   is the rocksdb block, a blank line, then `renderReplicationBlock`, with every
+   rocksdb line kept whole (`IsLineOf`). The ConfigMap write itself (IO) is not
+   proved; it takes its content only from `renderFlaredExtraConf`.
+
 ### What Is NOT Yet Verified
 
 ✅ ~~**General case**: Arbitrary execution traces of unbounded length~~ —

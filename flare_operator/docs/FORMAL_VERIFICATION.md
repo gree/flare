@@ -407,6 +407,60 @@ theorem scenario2_verified :
    the FSM snapshot and the TCP server wrote, the committed node map never
    contains two Masters for one partition
 
+✅ **A FORBIDDEN copy is never promoted** (`PromotionForbiddenProofs.lean`,
+   sorry- and axiom-free, no `native_decide`; FORMAL_VERIFICATION §4 #3 of the
+   E2E-replacement plan). `forbidden_never_promoted`: for a pass whose gates
+   are built from its evidence (`PassGates`: `PromotionEvidence.blockedKeys` /
+   `unfitKeys` / `withheldKeys`, the functions Main calls) and a key whose
+   evidence class is `forbidden` (more generally not promotable), the key is a
+   Master after `AfterHandleFailover` (failover and the one-map drain),
+   `AfterAssignRoles` (proxy assignment, masterless refill, zone swap) or
+   `RecoveryRefill` only if it already was one. Per path:
+   `failoverOfPass_noNew` / `afterHandleFailover_noNew` (failover, drain),
+   `refill_noNew` / `refills_noNew` (the refill, every tier, wait expired or
+   not), `assignProxies_noNew`, `recoveryRefill_noNew`;
+   `classify_marker_forbidden` / `classify_promotable_marker_free` (a forbidden
+   marker always wins in `classify`); the commit layer
+   (`commitTimeAllows_forbidden`, `commitAllows_forbidden`,
+   `reclassifyAllows_forbidden_pass`, `handoverCommitAllows_forbidden`) and the
+   handover (`handoverAccepts_eligible`, `handover_demote_requires_r3`).
+   The commit-time decision Main calls is ONE pure function of `classify`:
+   `PromotionEvidence.commitDecision` (`commitTimeAllows` /
+   `handoverCommitAllows` of the class; also used at the history intent's
+   fresh read) and `PromotionEvidence.firstMasterDecision` (the first master of
+   a partition no copy has held: `firstMasterAllows` AND the full class, with
+   the recorded history of its partition). There is NO exception for a
+   forbidden class. A proven handover's continued history (a committed replica
+   replacing a stopped successor holds (master_id, E'), not the recorded E) is
+   its own class `continued`, returned by `classify` only after the forbidden
+   markers, the restore-provenance check and EVERY history check (attributed
+   rejoin proof, R3 needs_rebuild, follow reasons, rejoining, divergence) pass
+   against the continued history `h` (the recorded history replaced by `h`):
+   forbidden / unknown against `h` stays so, and a copy not holding `h` is
+   judged against the recorded history as without a continued history; it is
+   not promotable or normal, `commitTimeAllows` refuses it and only
+   `handoverCommitAllows` (a proven handover) accepts it. Proven:
+   `classify_forbidden_never_commits` (a forbidden class never commits, proven
+   handover or not), `commitDecision_marker`, `classify_continued_marker_free`
+   (a marker beats a continued history), `classify_continued_sound` (a
+   `continued` copy holds exactly `h`, has no marker, is neither forbidden nor
+   unknown against `h`, and an attributed rejoin has its proof against `h`),
+   `commitDecision_continued_needs_proof`
+   / `_proven`, `continued_not_promotable`, `firstMasterDecision_forbidden`
+   (a forbidden class refuses the first master), `firstMasterAllows_marker`.
+   The claim is therefore narrowed to: the pure reconcile steps (via the
+   gates) and the pure commit decisions above. NOT proven: the IO wiring.
+   Premises: Main classifies every live non-master copy of a risk pass
+   (`evidence`) and passes `blockedKeys` / `unfitKeys`; on a non-risk pass
+   Main reads the stats, the pod's Ready and builds the `Observed` (the recorded
+   history, `continuedHistory` only for a proven handover) and `proven`, and
+   calls `commitDecision` with them; the first master's `Observed` likewise
+   (recorded history, `partitionHasMaster := false`);
+   `PodListResponse` reaches the FSM unchanged; `KeysNodup` of the node map;
+   flared reports the markers it is supposed to. Passes where
+   `promotionRisk` is false have no evidence (empty gates): the commit
+   decision is their only guard.
+
 ### What Is NOT Yet Verified
 
 ✅ ~~**General case**: Arbitrary execution traces of unbounded length~~ —

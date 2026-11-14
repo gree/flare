@@ -307,8 +307,7 @@ def visibilityBenchSuite : TestSuite := {
   setup := do
     if ← benchOn then
       deployCluster benchCfg
-      IO.eprintln "# Waiting 50s grace period for operator reconciliation..."
-      IO.sleep 50000
+      discard <| waitClusterSettled benchCfg
       discard <| kubectl ["delete", "configmap", "vis-bench-script", "-n", ns, "--ignore-not-found"]
       discard <| kubectl ["create", "configmap", "vis-bench-script", "-n", ns, "--from-file=visibility_bench.py=../bench/visibility/visibility_bench.py"]
       discard <| kubectlApplyStdin harnessYaml

@@ -59,6 +59,11 @@ def Class.promotable : Class → Bool
   | .eligible | .lagging | .legacy | .empty => true
   | _ => false
 
+/-- `forbidden` and `unknown`: the classes that hold a copy back. -/
+def Class.refuses : Class → Bool
+  | .forbidden _ | .unknown _ => true
+  | _ => false
+
 /-- A NORMAL promotion candidate (eligible / legacy / empty). Every other
     class is out of the normal paths: Main puts it with the unfit followers
     (excluded from failover, drain, proxy assignment and the refill's first
@@ -420,6 +425,109 @@ def Stats.attributedRejoinProof (s : Stats) (o : Observed) : Option String :=
     | some want, some got => if got == want then none else some s!"its partition binding [{got}] is not the partition's [{want}]"
     | _, _ => some "its partition binding is not proven (not reported or not checked)"
 
+/-- `continued` comes only from `classifyContinued`'s checked branch: the
+    history judgement never yields it (it does not), and if it ever did it
+    would be held (fail closed) rather than accepted by a proven handover. -/
+def Class.notContinued : Class → Class
+  | .continued => .unknown "continued without the continued history"
+  | c => c
+
+/-- The class of a copy once the stats are complete and valid, no forbidden
+    marker was reported and its restore provenance holds: the history
+    judgement (attributed rejoin, REJOINING, R3 needs_rebuild, follow reasons,
+    the recorded last master's history `o.lastMasterHistory`). It does not
+    look at `o.continuedHistory`. -/
+def classifyBody (s : Stats) (o : Observed) : Class :=
+  -- an ATTRIBUTED REJOIN (a dead ex-slave back by its persisted record):
+  -- proof first, then only `lagging` (the refill's held, logged last
+  -- resort) or held / forbidden — never eligible, legacy or empty
+  if o.attributedRejoin then
+    match s.attributedRejoinProof o with
+    | some why => .unknown s!"attributed rejoin: {why}"
+    | none =>
+      if s.sourceState == some "needs_rebuild" then needsRebuildClass s o
+      else match o.lastMasterHistory, s.masterId, s.copyEpoch with
+        | some (mid, ep), some cm, some ce =>
+          if cm == mid && ce == ep then .lagging
+          else .forbidden s!"attributed rejoin: the copy holds {cm}/{ce}, not the recorded history {mid}/{ep}"
+        | none, _, _ => .unknown "attributed rejoin: the partition's history is not recorded"
+        | _, _, _ => .unknown "attributed rejoin: the copy does not report its history"
+  else
+  -- REJOINING (docs/design-authoritative-history.md): with an authoritative
+  -- record, a copy that reports ANOTHER history (e.g. the ex-master back
+  -- with an empty DB and a new epoch) is never a master candidate, empty
+  -- or not, eligible to its current source or not. R3 needs_rebuild has its
+  -- own rule (it compares the copy with the record itself).
+  let rejoining := match o.lastMasterHistory, s.masterId, s.copyEpoch with
+    | some (mid, ep), some cm, some ce => cm != mid || ce != ep
+    | _, _, _ => false
+  if rejoining && s.sourceState != some "needs_rebuild" then
+    .forbidden s!"rejoining: the copy holds {s.masterId}/{s.copyEpoch}, not the authoritative history"
+  else if s.sourceState == some "needs_rebuild" then needsRebuildClass s o
+  else if s.isLegacy then
+    -- no markers to trust: only the map, the pod and the reconstruction say
+    if s.items == some 0 then .empty
+    else if o.mapActive && !o.mapPrepare && o.podReady then .legacy
+    else .unknown "a pre-R3 flared that is not Active, Ready and idle"
+  else if s.noCopyEvidence then
+    if s.sourceState == some "revalidating" then .unknown "re-validating with no master, and no copy evidence to tell its history"
+    else if s.eligible == some 1 && o.partitionHasMaster && o.mapActive && !o.mapPrepare then .eligible
+    else if s.items == some 0 then .empty
+    else if o.mapActive && !o.mapPrepare && o.podReady then .legacy
+    else .unknown "a backend without copy evidence that is not Active, Ready and idle"
+  else if s.legacyCopyOfUntrackedLastMaster o then .lagging
+  else if s.sourceState == some "revalidating" then
+    -- the master went while it was re-validating: its going is NOT
+    -- evidence. Only a copy proven to be the RECORDED last master's
+    -- history (not the unrecorded ex-master fallback) is merely lagging.
+    match o.lastMasterHistory, s.masterId, s.copyEpoch with
+    | some (mid, ep), some cm, some ce =>
+      if cm == mid && ce == ep then .lagging
+      else .unknown s!"re-validating, and its history ({cm}/{ce}) is not the recorded last master's ({mid}/{ep})"
+    | _, _, _ => .unknown "re-validating when the master went, and the last master's history was not recorded"
+  -- R3 `eligible` says the copy was validated against the master the
+  -- partition HAS. With no master in the map it is a stale binding: R3
+  -- keeps it while the master it validated against cannot be probed
+  -- (source_eligibility.h decide_source), so a follower cut off long before
+  -- still reads eligible (history-tracking 10, 38687661051: 20 acknowledged
+  -- writes lost to a cut-off follower crowned ahead of the ex-master that
+  -- held them). It is not evidence of currency then: the copy is decided
+  -- by its history below — the recorded last master's = `lagging` (only
+  -- the refill's held, logged last resort), no record / not reported =
+  -- `unknown` (held). Being disconnected is not by itself "same history".
+  else if s.eligible == some 1 && o.partitionHasMaster && o.mapActive && !o.mapPrepare then .eligible
+  else if (s.items == some 0) && s.copyPartial == some 0 && s.inFlight != some 1 then .empty
+  else
+    match o.lastMasterHistory, s.masterId, s.copyEpoch with
+    | some (mid, ep), some cm, some ce =>
+      if cm == mid && ce == ep then .lagging
+      else .unknown s!"its history ({cm}/{ce}) is not the last master's ({mid}/{ep})"
+    | none, _, _ =>
+      -- no authoritative record (unknown / not yet adopted): held. The
+      -- ex-master holder is NOT presumed to be that history — it may be
+      -- the one that came back empty (docs/design-authoritative-history.md)
+      .unknown "the last master's history was not recorded"
+    | _, _, _ => .unknown "the copy does not report its history"
+
+/-- A3b: the copy holds exactly the continued history (master_id, E') of the
+    key's PROVEN handover. It is judged by EVERY check of `classifyBody`
+    (attributed-rejoin proof, R3 needs_rebuild, follow reasons, rejoining,
+    divergence), with the recorded history replaced by the continued one `h`
+    it is compared with: forbidden / unknown against `h` stays so. Only a copy
+    that is not forbidden against `h` and holds exactly `h` is `continued`;
+    any other copy is judged against the recorded history as without a
+    continued history. -/
+def classifyContinued (s : Stats) (o : Observed) : Class :=
+  match o.continuedHistory with
+  | none => Class.notContinued (classifyBody s o)
+  | some h =>
+    if s.masterId == some h.1 && s.sourceEpoch == some h.2 then
+      match Class.notContinued (classifyBody s { o with lastMasterHistory := some h }) with
+      | .forbidden w => .forbidden w
+      | .unknown w => .unknown w
+      | _ => .continued
+    else Class.notContinued (classifyBody s o)
+
 def classify (reply : Option String) (o : Observed) : Class :=
   match reply with
   | none => .unknown "stats unreadable"
@@ -433,83 +541,7 @@ def classify (reply : Option String) (o : Observed) : Class :=
     match o.expectedBinding.bind (bindingConflict s.partitionBinding s.restoredUnverified) with
     | some why => .forbidden s!"restore provenance: {why}"
     | none =>
-    -- A3b: the copy holds exactly the continued history (master_id, E') of
-    -- the key's PROVEN handover. Only after the markers and the provenance
-    -- check above (a forbidden marker always wins) and before any history
-    -- judgement, which would call E' "another history" (rejoining / R3
-    -- needs_rebuild). Not forbidden, and not promotable on its own.
-    if o.continuedHistory.any (fun (m, e) => s.masterId == some m && s.sourceEpoch == some e) then .continued
-    else
-    -- an ATTRIBUTED REJOIN (a dead ex-slave back by its persisted record):
-    -- proof first, then only `lagging` (the refill's held, logged last
-    -- resort) or held / forbidden — never eligible, legacy or empty
-    if o.attributedRejoin then
-      match s.attributedRejoinProof o with
-      | some why => .unknown s!"attributed rejoin: {why}"
-      | none =>
-        if s.sourceState == some "needs_rebuild" then needsRebuildClass s o
-        else match o.lastMasterHistory, s.masterId, s.copyEpoch with
-          | some (mid, ep), some cm, some ce =>
-            if cm == mid && ce == ep then .lagging
-            else .forbidden s!"attributed rejoin: the copy holds {cm}/{ce}, not the recorded history {mid}/{ep}"
-          | none, _, _ => .unknown "attributed rejoin: the partition's history is not recorded"
-          | _, _, _ => .unknown "attributed rejoin: the copy does not report its history"
-    else
-    -- REJOINING (docs/design-authoritative-history.md): with an authoritative
-    -- record, a copy that reports ANOTHER history (e.g. the ex-master back
-    -- with an empty DB and a new epoch) is never a master candidate, empty
-    -- or not, eligible to its current source or not. R3 needs_rebuild has its
-    -- own rule (it compares the copy with the record itself).
-    let rejoining := match o.lastMasterHistory, s.masterId, s.copyEpoch with
-      | some (mid, ep), some cm, some ce => cm != mid || ce != ep
-      | _, _, _ => false
-    if rejoining && s.sourceState != some "needs_rebuild" then
-      .forbidden s!"rejoining: the copy holds {s.masterId}/{s.copyEpoch}, not the authoritative history"
-    else if s.sourceState == some "needs_rebuild" then needsRebuildClass s o
-    else if s.isLegacy then
-      -- no markers to trust: only the map, the pod and the reconstruction say
-      if s.items == some 0 then .empty
-      else if o.mapActive && !o.mapPrepare && o.podReady then .legacy
-      else .unknown "a pre-R3 flared that is not Active, Ready and idle"
-    else if s.noCopyEvidence then
-      if s.sourceState == some "revalidating" then .unknown "re-validating with no master, and no copy evidence to tell its history"
-      else if s.eligible == some 1 && o.partitionHasMaster && o.mapActive && !o.mapPrepare then .eligible
-      else if s.items == some 0 then .empty
-      else if o.mapActive && !o.mapPrepare && o.podReady then .legacy
-      else .unknown "a backend without copy evidence that is not Active, Ready and idle"
-    else if s.legacyCopyOfUntrackedLastMaster o then .lagging
-    else if s.sourceState == some "revalidating" then
-      -- the master went while it was re-validating: its going is NOT
-      -- evidence. Only a copy proven to be the RECORDED last master's
-      -- history (not the unrecorded ex-master fallback) is merely lagging.
-      match o.lastMasterHistory, s.masterId, s.copyEpoch with
-      | some (mid, ep), some cm, some ce =>
-        if cm == mid && ce == ep then .lagging
-        else .unknown s!"re-validating, and its history ({cm}/{ce}) is not the recorded last master's ({mid}/{ep})"
-      | _, _, _ => .unknown "re-validating when the master went, and the last master's history was not recorded"
-    -- R3 `eligible` says the copy was validated against the master the
-    -- partition HAS. With no master in the map it is a stale binding: R3
-    -- keeps it while the master it validated against cannot be probed
-    -- (source_eligibility.h decide_source), so a follower cut off long before
-    -- still reads eligible (history-tracking 10, 38687661051: 20 acknowledged
-    -- writes lost to a cut-off follower crowned ahead of the ex-master that
-    -- held them). It is not evidence of currency then: the copy is decided
-    -- by its history below — the recorded last master's = `lagging` (only
-    -- the refill's held, logged last resort), no record / not reported =
-    -- `unknown` (held). Being disconnected is not by itself "same history".
-    else if s.eligible == some 1 && o.partitionHasMaster && o.mapActive && !o.mapPrepare then .eligible
-    else if (s.items == some 0) && s.copyPartial == some 0 && s.inFlight != some 1 then .empty
-    else
-      match o.lastMasterHistory, s.masterId, s.copyEpoch with
-      | some (mid, ep), some cm, some ce =>
-        if cm == mid && ce == ep then .lagging
-        else .unknown s!"its history ({cm}/{ce}) is not the last master's ({mid}/{ep})"
-      | none, _, _ =>
-        -- no authoritative record (unknown / not yet adopted): held. The
-        -- ex-master holder is NOT presumed to be that history — it may be
-        -- the one that came back empty (docs/design-authoritative-history.md)
-        .unknown "the last master's history was not recorded"
-      | _, _, _ => .unknown "the copy does not report its history"
+    classifyContinued s o
 
 /-- At commit the candidate is CLASSIFIED AGAIN from a fresh read: the same
     process and copy can still start a rebuild or a re-validation after the

@@ -432,13 +432,20 @@ theorem scenario2_verified :
    the recorded history of its partition). There is NO exception for a
    forbidden class. A proven handover's continued history (a committed replica
    replacing a stopped successor holds (master_id, E'), not the recorded E) is
-   its own class `continued`, returned by `classify` after the forbidden
-   markers and the restore-provenance check and before any history judgement;
-   it is not promotable or normal, `commitTimeAllows` refuses it and only
+   its own class `continued`, returned by `classify` only after the forbidden
+   markers, the restore-provenance check and EVERY history check (attributed
+   rejoin proof, R3 needs_rebuild, follow reasons, rejoining, divergence) pass
+   against the continued history `h` (the recorded history replaced by `h`):
+   forbidden / unknown against `h` stays so, and a copy not holding `h` is
+   judged against the recorded history as without a continued history; it is
+   not promotable or normal, `commitTimeAllows` refuses it and only
    `handoverCommitAllows` (a proven handover) accepts it. Proven:
    `classify_forbidden_never_commits` (a forbidden class never commits, proven
    handover or not), `commitDecision_marker`, `classify_continued_marker_free`
-   (a marker beats a continued history), `commitDecision_continued_needs_proof`
+   (a marker beats a continued history), `classify_continued_sound` (a
+   `continued` copy holds exactly `h`, has no marker, is neither forbidden nor
+   unknown against `h`, and an attributed rejoin has its proof against `h`),
+   `commitDecision_continued_needs_proof`
    / `_proven`, `continued_not_promotable`, `firstMasterDecision_forbidden`
    (a forbidden class refuses the first master), `firstMasterAllows_marker`.
    The claim is therefore narrowed to: the pure reconcile steps (via the

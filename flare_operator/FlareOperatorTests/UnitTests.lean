@@ -2412,6 +2412,29 @@ private def checkAuthoritativeHistory (ctx : Ctx) : IO Unit := do
      let diverged := (b.replace "STAT rocksdb_master_id M2" "STAT rocksdb_master_id M9") ++ "STAT curr_items 9\r\nSTAT repl_read_source_eligible 0\r\nEND\r\n"
      isForb (some restored) oB && !PromotionEvidence.commitDecision (some restored) oB true
        && isForb (some diverged) oC && !PromotionEvidence.commitDecision (some diverged) oC true)
+  -- review of 9afdf49d: `continued` is judged by every check against the continued history, not decided before them
+  let nrHist := contBody ++ "STAT repl_read_source_state needs_rebuild\r\nSTAT repl_read_source_reason history differs: copy 5:fresh, master k 5:fresh\r\nEND\r\n"
+  let nrOther := contBody ++ "STAT repl_read_source_state needs_rebuild\r\nSTAT repl_read_source_reason history differs: copy 5:fresh, master k 9:other\r\nEND\r\n"
+  let nrNoReason := contBody ++ "STAT repl_read_source_state needs_rebuild\r\nEND\r\n"
+  let nrApply := contBody ++ "STAT repl_read_source_state needs_rebuild\r\nSTAT repl_follow_last_reason apply_error\r\nSTAT repl_read_source_reason history differs: copy 5:fresh, master k 9:other\r\nEND\r\n"
+  let refused := fun (r : String) (ob : PromotionEvidence.Observed) =>
+    !isCont (some r) ob && !PromotionEvidence.commitDecision (some r) ob true && !PromotionEvidence.commitDecision (some r) ob false
+  check ctx "continued: a matching continued history does NOT bypass R3 needs_rebuild — forbidden against the continued history itself (R3 compared it with h), held with no reason; a needs_rebuild that compared the copy with another history stays CONTINUED"
+    (isForb (some nrHist) oC && refused nrHist oC
+      && !isForb (some nrNoReason) oC && refused nrNoReason oC
+      && isCont (some nrOther) oC && PromotionEvidence.commitDecision (some nrOther) oC true)
+  check ctx "continued: a matching continued history does NOT bypass an unsound follow reason (needs_rebuild + apply_error is FORBIDDEN, refused in a proven handover)"
+    (isForb (some nrApply) oC && refused nrApply oC)
+  let attrBody := contBody ++ "STAT rebuild_parked 0\r\nSTAT rocksdb_switch_unresolved 0\r\nSTAT rocksdb_partition_binding "
+  let attrOk := attrBody ++ PromotionEvidence.bindingFor 0 1 1024 ++ "\r\nEND\r\n"
+  let oA := { oC with attributedRejoin := true, expectedBinding := some (PromotionEvidence.bindingFor 0 1 1024) }
+  check ctx "continued: an UNPROVEN attributed rejoin holding the continued history is held, not continued (no binding / another binding / unreported integrity / follow apply_error); a PROVEN one is continued"
+    (refused contOk oA
+      && refused (attrBody ++ PromotionEvidence.bindingFor 3 1 1024 ++ "\r\nEND\r\n") oA
+      && refused (attrOk.replace "STAT rebuild_parked 0\r\n" "") oA
+      && refused (attrOk.replace "END\r\n" "STAT repl_follow_last_reason apply_error\r\nEND\r\n") oA
+      && isCont (some attrOk) oA && PromotionEvidence.commitDecision (some attrOk) oA true
+      && !PromotionEvidence.commitDecision (some attrOk) oA false)
   -- first master of a new partition
   let fm := fun (r : String) => PromotionEvidence.firstMasterAllows (PromotionEvidence.parseStats r) (PromotionEvidence.bindingFor 0 1 1024)
   let fd := fun (r : String) (ob : PromotionEvidence.Observed) => PromotionEvidence.firstMasterDecision (some r) ob (PromotionEvidence.bindingFor 0 1 1024)

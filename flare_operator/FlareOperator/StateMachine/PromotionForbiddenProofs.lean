@@ -939,8 +939,9 @@ theorem forbidden_never_promoted {s : FlareReconcileState} {ev : List (String ×
 are what Main calls for a promotion on a pass that did not read the candidate,
 for the history intent's fresh read, and for the first master of a new
 partition. There is NO exception for a forbidden class: a handover's
-continued history is its own class (`continued`), decided before any
-history judgement and after every forbidden marker. Premises (IO): the stats
+continued history is its own class (`continued`), returned only after
+every forbidden marker and every history check (R3, follow reasons,
+attributed-rejoin proof, rejoining) passed against that continued history. Premises (IO): the stats
 reply, the pod's Ready, the `Observed` Main builds (the recorded history, and
 `continuedHistory` only for a proven handover), `proven`. -/
 
@@ -994,6 +995,94 @@ theorem classify_continued_marker_free {out : String} {o : Observed}
     · have : classify (some out) o = .unknown "stats incomplete" := by
         unfold classify; simp [hc]
       rw [this] at h; exact nomatch h
+
+theorem classifyBody_ignores_continued (s : Stats) (o : Observed) :
+    classifyBody s { o with continuedHistory := none } = classifyBody s o := rfl
+
+theorem notContinued_ne (c : Class) : Class.notContinued c ≠ .continued := by
+  cases c <;> simp [Class.notContinued]
+
+/-- The wrapper's contract: `continued` only for the continued history `h`
+    the copy holds exactly, judged by `classifyBody` against `h`. -/
+theorem classifyContinued_continued {s : Stats} {o : Observed}
+    (hc : classifyContinued s o = .continued) :
+    ∃ h, o.continuedHistory = some h ∧ s.masterId = some h.1 ∧ s.sourceEpoch = some h.2
+      ∧ (Class.notContinued (classifyBody s { o with lastMasterHistory := some h })).refuses = false := by
+  unfold classifyContinued at hc
+  split at hc
+  · exact absurd hc (notContinued_ne _)
+  · rename_i h hh
+    split at hc
+    · rename_i hmatch
+      refine ⟨h, hh, ?_, ?_, ?_⟩
+      · simp at hmatch; exact hmatch.1
+      · simp at hmatch; exact hmatch.2
+      · revert hc
+        cases Class.notContinued (classifyBody s { o with lastMasterHistory := some h }) <;> simp [Class.refuses]
+    · exact absurd hc (notContinued_ne _)
+
+/-- `continued` is SOUND: when `classify` returns it, the continued history
+    `h` the proven handover recorded is exactly what the copy holds, the reply
+    has no forbidden marker, and the copy passes EVERY check against `h` —
+    `classify` of the same copy with the recorded history replaced by `h` is
+    neither forbidden nor unknown (R3 needs_rebuild, follow reasons,
+    rejoining and divergence against `h`), and an attributed rejoin has its
+    proof (`attributedRejoinProof`) against `h`. -/
+theorem classify_continued_sound {reply : Option String} {o : Observed}
+    (hc : classify reply o = .continued) :
+    ∃ h out, o.continuedHistory = some h ∧ reply = some out
+      ∧ (parseStats out).forbiddenMarker o.partitionHasMaster = none
+      ∧ (parseStats out).masterId = some h.1 ∧ (parseStats out).sourceEpoch = some h.2
+      ∧ (classify reply { o with lastMasterHistory := some h, continuedHistory := none }).refuses = false
+      ∧ (o.attributedRejoin = true →
+          (parseStats out).attributedRejoinProof { o with lastMasterHistory := some h } = none) := by
+  cases reply with
+  | none => simp [classify] at hc
+  | some out =>
+    have hm : (parseStats out).forbiddenMarker o.partitionHasMaster = none :=
+      classify_continued_marker_free hc
+    have hcomp : (parseStats out).complete = true := by
+      refine Classical.byContradiction fun hn => ?_
+      have : classify (some out) o = .unknown "stats incomplete" := by
+        unfold classify; simp [hn]
+      rw [this] at hc; exact nomatch hc
+    have hinv : (parseStats out).invalid = [] := by
+      refine Classical.byContradiction fun hn => ?_
+      have : classify (some out) o = .unknown s!"invalid value(s) reported for {(parseStats out).invalid}" := by
+        unfold classify; simp [hcomp]
+        intro hemp; exact absurd hemp hn
+      rw [this] at hc; exact nomatch hc
+    have hb : o.expectedBinding.bind (bindingConflict (parseStats out).partitionBinding (parseStats out).restoredUnverified) = none := by
+      cases hb : o.expectedBinding.bind (bindingConflict (parseStats out).partitionBinding (parseStats out).restoredUnverified) with
+      | none => rfl
+      | some why =>
+        have : classify (some out) o = .forbidden s!"restore provenance: {why}" := by
+          unfold classify; simp [hcomp, hinv, hm, hb]
+        rw [this] at hc; exact nomatch hc
+    have hshape : ∀ o', classify (some out) o' = classifyContinued (parseStats out) o' → True := fun _ _ => trivial
+    have hcc : classifyContinued (parseStats out) o = .continued := by
+      unfold classify at hc; simp only [hcomp, hinv, hm, hb] at hc; simpa using hc
+    obtain ⟨h, hh, hid, hep, hrefuse⟩ := classifyContinued_continued hcc
+    obtain ⟨o2, ho2⟩ : ∃ o2, o2 = { o with lastMasterHistory := some h } := ⟨_, rfl⟩
+    rw [← ho2] at hrefuse
+    refine ⟨h, out, hh, rfl, hm, hid, hep, ?_, ?_⟩
+    · have e : classifyBody (parseStats out) { o with lastMasterHistory := some h, continuedHistory := none }
+          = classifyBody (parseStats out) o2 := by rw [ho2]; rfl
+      have : classify (some out) { o with lastMasterHistory := some h, continuedHistory := none }
+          = Class.notContinued (classifyBody (parseStats out) o2) := by
+        unfold classify classifyContinued
+        simp [hcomp, hinv, hm, hb]
+        exact congrArg Class.notContinued e
+      rw [this]; exact hrefuse
+    · intro hrej
+      rw [← ho2]
+      have hrej2 : o2.attributedRejoin = true := by rw [ho2]; exact hrej
+      cases hp : (parseStats out).attributedRejoinProof o2 with
+      | none => rfl
+      | some why =>
+        have : classifyBody (parseStats out) o2 = .unknown s!"attributed rejoin: {why}" := by
+          unfold classifyBody; simp [hrej2, hp]
+        rw [this] at hrefuse; simp [Class.refuses, Class.notContinued] at hrefuse
 
 /-- The first master of a new partition is refused when its copy carries a
     forbidden marker. -/

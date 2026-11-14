@@ -566,4 +566,28 @@ def commitAllows (cls : Option Class) (read now : Binding) : Bool × String :=
       (false, s!"the evidence was read from {repr read} but the candidate is now {repr now}")
     else (true, c.label)
 
+
+/-- The keys of a pass's evidence whose class is not promotable (forbidden,
+    unknown): Main hands them to the reconciler as `promotionBlocked`
+    (failover, drain, refill and the commit read them). -/
+def blockedKeys (evidence : List (String × Class × Binding)) : List String :=
+  evidence.filterMap fun (k, c, _) => if c.promotable then none else some k
+
+/-- The keys of a pass's evidence that are not a normal promotion
+    candidate (everything but eligible / legacy / empty). -/
+def notNormalKeys (evidence : List (String × Class × Binding)) : List String :=
+  evidence.filterMap fun (k, c, _) => if c.normal then none else some k
+
+/-- R3-ineligible keys plus the evidence's not-normal ones: the pass's
+    `sourceIneligible`. -/
+def withheldKeys (r3Withheld : List String) (evidence : List (String × Class × Binding)) : List String :=
+  r3Withheld ++ (notNormalKeys evidence).filter (!r3Withheld.contains ·)
+
+/-- The `followUnfit` list of a pass: the follow evidence's unfit keys, then
+    the Active slaves whose pod is not Ready and the source-ineligible keys
+    (once each). Failover, drain, proxy assignment and the refill's first
+    tiers exclude these. -/
+def unfitKeys (clsUnfit notReadyActive sourceIneligible : List String) : List String :=
+  clsUnfit ++ (notReadyActive ++ sourceIneligible).filter (!clsUnfit.contains ·)
+
 end FlareOperator.PromotionEvidence

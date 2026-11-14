@@ -407,6 +407,33 @@ theorem scenario2_verified :
    the FSM snapshot and the TCP server wrote, the committed node map never
    contains two Masters for one partition
 
+✅ **A FORBIDDEN copy is never promoted** (`PromotionForbiddenProofs.lean`,
+   sorry- and axiom-free, no `native_decide`; FORMAL_VERIFICATION §4 #3 of the
+   E2E-replacement plan). `forbidden_never_promoted`: for a pass whose gates
+   are built from its evidence (`PassGates`: `PromotionEvidence.blockedKeys` /
+   `unfitKeys` / `withheldKeys`, the functions Main calls) and a key whose
+   evidence class is `forbidden` (more generally not promotable), the key is a
+   Master after `AfterHandleFailover` (failover and the one-map drain),
+   `AfterAssignRoles` (proxy assignment, masterless refill, zone swap) or
+   `RecoveryRefill` only if it already was one. Per path:
+   `failoverOfPass_noNew` / `afterHandleFailover_noNew` (failover, drain),
+   `refill_noNew` / `refills_noNew` (the refill, every tier, wait expired or
+   not), `assignProxies_noNew`, `recoveryRefill_noNew`;
+   `classify_marker_forbidden` / `classify_promotable_marker_free` (a forbidden
+   marker always wins in `classify`); the commit layer
+   (`commitTimeAllows_forbidden`, `commitAllows_forbidden`,
+   `reclassifyAllows_forbidden_pass`, `handoverCommitAllows_forbidden`) and the
+   handover (`handoverAccepts_eligible`, `handover_demote_requires_r3`).
+   Premises outside the proofs: Main classifies every live non-master copy of
+   a risk pass (`evidence`) and passes `blockedKeys` / `unfitKeys`;
+   `PodListResponse` reaches the FSM unchanged; `KeysNodup` of the node map;
+   flared reports the markers it is supposed to. Not covered by the
+   theorem (the commit layer is the only guard there): the first master of a
+   partition no copy has held (`firstMasterOfNewPartition` checks only the
+   restore binding), a handover successor that holds the handover's
+   continued history (`continued` in `commitChecked`), and passes where
+   `promotionRisk` is false (no evidence, so empty gates).
+
 ### What Is NOT Yet Verified
 
 ✅ ~~**General case**: Arbitrary execution traces of unbounded length~~ —

@@ -2211,8 +2211,7 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
         -- not a normal promotion: anything other than eligible / legacy /
         -- empty is out of the normal paths (the refill's last resort may still
         -- choose a lagging copy; the commit decides by reason)
-        let notNormal := evidence.filterMap fun (k, c, _) => if c.normal then none else some k
-        sourceIneligible := sourceIneligible ++ notNormal.filter (!sourceIneligible.contains ·)
+        sourceIneligible := PromotionEvidence.withheldKeys sourceIneligible evidence
         -- every reading this pass, unreadable ones included: which evidence
         -- a promotion on this pass could stand on (copy-identity 11)
         let shown := readings.map fun (k, e) => s!"{k}={SourceEligibility.readingLabel e}"
@@ -2237,8 +2236,8 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       let ranked := pinnedFirst ++ (cls.ranked ++ failoverRanked).filter (!pinnedFirst.contains ·)
       let nPartsHolders ← desiredPartitionsRef.get
       pure (.PodListResponse podKeys (Bridge.podZones pods nodeZones) termKeys dataKeys unhealthyKeys heldKeys
-              (cls.unfit ++ (notReadyActive ++ sourceIneligible).filter (!cls.unfit.contains ·)) cls.unproven ranked knownEmpty
-              ((← promotionEvidenceRef.get).filterMap fun (k, c, _) => if c.promotable then none else some k)
+              (PromotionEvidence.unfitKeys cls.unfit notReadyActive sourceIneligible) cls.unproven ranked knownEmpty
+              (PromotionEvidence.blockedKeys (← promotionEvidenceRef.get))
               (match ← historyStoreRef.get with
                 | some st => (List.range nPartsHolders).filterMap fun p =>
                     match st.part p with

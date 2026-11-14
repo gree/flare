@@ -1711,6 +1711,31 @@ def checkLedgerObserve (ctx : Ctx) : IO Unit := do
   let (_, dz, fz) := ReplicaRepair.observe l0 "m" [("r1", 0)] (some 1)
   check ctx "ledger: a zero first sighting requests nothing"
     (dz.isEmpty && fz.isEmpty)
+  -- the boot id readable on one pass and not on the next (review of 7b414caf)
+  let (s1, sd1, _) := ReplicaRepair.observe l0 "m" [("r1", 3)] (some 7)
+  let (s2, sd2, _) := ReplicaRepair.observe s1 "m" [("r1", 3)] none
+  let (s3, sd3, _) := ReplicaRepair.observe s2 "m" [("r1", 3)] (some 7)
+  check ctx "ledger: boot id some -> none -> some with the same value requests once (the pass without it is not accounted)"
+    (sd1 == [("r1", 3)] && sd2.isEmpty && s2 == s1 && sd3.isEmpty && s3.counters == s1.counters)
+  let (_, sd4, _) := ReplicaRepair.observe s2 "m" [("r1", 5)] (some 7)
+  check ctx "ledger: after an unreadable boot id the same process continues from its baseline (only the difference)"
+    (sd4 == [("r1", 2)])
+  let (n1, nd1, _) := ReplicaRepair.observe l0 "m" [("r1", 3)] none
+  let (n2, nd2, _) := ReplicaRepair.observe n1 "m" [("r1", 3)] (some 7)
+  let (n3, nd3, _) := ReplicaRepair.observe n2 "m" [("r1", 3)] none
+  let (n4, nd4, _) := ReplicaRepair.observe n3 "m" [("r1", 3)] (some 7)
+  check ctx "ledger: boot id none -> some -> none -> some with the same value requests once (boot-less key migrates to the boot key)"
+    (nd1 == [("r1", 3)] && nd2.isEmpty && nd3.isEmpty && nd4.isEmpty
+      && n2.counters == [(counterKey "m" "r1" (some 7), 3)] && n4.counters == n2.counters)
+  let (_, nd5, _) := ReplicaRepair.observe n1 "m" [("r1", 5)] (some 7)
+  check ctx "ledger: none -> some with an increased value requests only the difference"
+    (nd5 == [("r1", 2)])
+  let (_, bd1, bf1) := ReplicaRepair.observe l0 "m" [("a|b", 3), ("r1", 4)] (some 7)
+  check ctx "ledger: a destination containing '|' is not accounted (no request, no counter); the others are"
+    (bd1 == [("r1", 4)] && bf1 == ["r1"])
+  let (bl, bd2, _) := ReplicaRepair.observe l0 "m|x" [("r1", 4)] (some 7)
+  check ctx "ledger: a master key containing '|' accounts nothing"
+    (bd2.isEmpty && bl == l0)
 
 def checkMasterMoved (ctx : Ctx) : IO Unit := do
   let m := fun (k : String) (e : Nat) (u : String) => ((k, e, u) : FollowEvidence.MasterIdentity)

@@ -4084,6 +4084,13 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
       let led0 ← ledgerRef.get
       -- counters are bound to the master's flared PROCESS (boot id)
       let mBoot := statNat mo "reconstruction_boot_id"
+      if mBoot.isNone && ReplicaRepair.hasBootKey led0 mKey then
+        IO.eprintln s!"[flare-operator] REPLICA REPAIR accounting skipped: master {mKey}'s reconstruction_boot_id is unreadable in this stats reply while the ledger holds its counters under a boot id — a baseline taken without it could be the wrong process's; the next pass that reads it continues from the recorded one"
+      if !ReplicaRepair.barFree mKey then
+        IO.eprintln s!"[flare-operator] REPLICA REPAIR accounting skipped: master key {mKey} contains '|', which its counter keys cannot carry"
+      for (dest, _) in drops do
+        if !ReplicaRepair.barFree dest then
+          IO.eprintln s!"[flare-operator] REPLICA REPAIR accounting skipped: master {mKey} reports drops for destination {dest}, which contains '|' and cannot be told apart in the ledger's counter keys"
       let (led1, newDrops, firstSeen) := ReplicaRepair.observe led0 mKey drops mBoot
       for dest in firstSeen do
         IO.eprintln s!"[flare-operator] REPLICA REPAIR (first observation): master {mKey} (boot {mBoot}) already reports dropped writes to {dest} at the ledger's first observation — when they happened, and whether anything repaired them since, is unknown; recorded as a POSSIBLY UNREPAIRED request (same ownership and gates as any request, no immediate demotion)"

@@ -154,8 +154,43 @@ structure Ledger where
 
 def counterKey (masterKey dest : String) (boot : Option Nat := none) : String :=
   match boot with
-  | some b => s!"{masterKey}|{dest}|{b}"
-  | none => s!"{masterKey}|{dest}"
+  | some b => masterKey ++ "|" ++ dest ++ "|" ++ toString b
+  | none => masterKey ++ "|" ++ dest
+
+/-- Split on `|`, by structural recursion on the characters. -/
+def splitBar : List Char → List (List Char)
+  | [] => [[]]
+  | c :: cs =>
+    let r := splitBar cs
+    if c = '|' then [] :: r
+    else match r with
+      | [] => [[c]]
+      | h :: t => (c :: h) :: t
+
+/-- The `|`-separated parts of a counter key. -/
+def keyParts (k : String) : List String := (splitBar k.data).map String.mk
+
+/-- A master key or destination the counter keys can carry: no `|`, so that
+    `masterKey|dest[|boot]` splits back into its parts. -/
+def barFree (s : String) : Bool := s.data.all (· != '|')
+
+/-- Another process's counter of this master, as seen from `boot`: a key of the
+    master that is not `master|dest|boot` (another boot id, or the boot-less
+    `master|dest` written before boot ids were recorded). -/
+def otherProcess (masterKey : String) (boot : Option Nat) (k : String) : Bool :=
+  match boot with
+  | some b =>
+    let parts := keyParts k
+    parts.head? == some masterKey && (parts.length != 3 || parts.getLast? != some (toString b))
+  | none => false
+
+/-- A counter this master keeps under a boot id (`master|dest|boot`). -/
+def isBootKey (masterKey : String) (k : String) : Bool :=
+  let parts := keyParts k
+  parts.head? == some masterKey && parts.length == 3
+
+def hasBootKey (l : Ledger) (masterKey : String) : Bool :=
+  l.counters.any fun (k, _) => isBootKey masterKey k
 
 /-- Outcome of comparing one observed counter to the ledger. -/
 inductive DropDelta where
@@ -169,6 +204,13 @@ def classify (prev : Option Nat) (initialized : Bool) (n : Nat) : DropDelta :=
   match prev with
   | none => if initialized then (if n > 0 then .increased n else .unchanged) else .firstSighting n
   | some p => if n > p then .increased (n - p) else if n < p then .reset n else .unchanged
+
+/-- The boot-less counter of `master|dest`, which a pass that reads the boot id
+    takes as the previous value when `master|dest|boot` is not there yet. -/
+def legacyPrev (l : Ledger) (masterKey : String) (boot : Option Nat) (dest : String) : Option Nat :=
+  match boot with
+  | some _ => l.counters.lookup (counterKey masterKey dest none)
+  | none => none
 
 /-- Fold one master's `proxy_write_dropped[dest]` readings into the ledger.
     Returns the ledger with counters updated, the (dest, newDrops) pairs that
@@ -190,22 +232,19 @@ def classify (prev : Option Nat) (initialized : Bool) (n : Nat) : DropDelta :=
     above the old value was attributed only the difference). Keys of the same
     master under another boot are dropped; the same cumulative value is never
     requested twice. -/
-def observe (l : Ledger) (masterKey : String) (observed : List (String × Nat))
+def observeCore (l : Ledger) (masterKey : String) (observed : List (String × Nat))
     (boot : Option Nat := none) : Ledger × List (String × Nat) × List String :=
   -- Forget this master's counters from OTHER processes (another boot id,
   -- or the boot-less form written before boot ids were recorded). Only when
   -- the boot is known: without it the old keys are the only reference.
-  let otherProcess := fun (k : String) =>
-    match boot with
-    | some b =>
-      let parts := k.splitOn "|"
-      parts.head? == some masterKey && (parts.length != 3 || parts.getLast? != some (toString b))
-    | none => false
-  let l0 := { l with counters := l.counters.filter (fun (k, _) => !otherProcess k) }
+  let l0 := { l with counters := l.counters.filter (fun (k, _) => !otherProcess masterKey boot k) }
   let step := fun (acc : Ledger × List (String × Nat) × List String) ((dest, n) : String × Nat) =>
     let (led, drops, first) := acc
     let key := counterKey masterKey dest boot
-    let delta := classify (led.counters.lookup key) l.initialized n
+    -- a counter written without a boot id (before it was readable) is the
+    -- previous value of the same process, not a new one
+    let prev := (led.counters.lookup key).or (legacyPrev l masterKey boot dest)
+    let delta := classify prev l.initialized n
     let led' := { led with counters := (led.counters.filter (·.1 != key)) ++ [(key, n)] }
     match delta with
     | .increased d => (led', drops ++ [(dest, d)], first)
@@ -214,6 +253,28 @@ def observe (l : Ledger) (masterKey : String) (observed : List (String × Nat))
     | .unchanged => (led', drops, first)
   let (led, drops, first) := observed.foldl step (l0, [], [])
   ({ led with initialized := true }, drops, first)
+
+/-- `observeCore`, with the two cases it cannot account for left out:
+
+    * the master key, or a destination, contains `|`: the key
+      `master|dest[|boot]` would not split back into its parts, so the
+      counter would be taken for another process's and forgotten, and the same
+      cumulative value asked for again. Such a destination is not accounted
+      (a master key like that, nothing is). `barFree` is the check.
+    * the master's boot id is unreadable (`boot = none`) while the ledger
+      holds a boot-keyed counter of this master: the stats reply that lost the
+      boot id says nothing about which process it came from, so any baseline
+      taken from it would be the wrong one. The pass is not observed at all
+      (ledger unchanged, nothing requested) and the next pass that reads the
+      boot id continues from the baseline it left. A master with no boot-keyed
+      counter (an operator upgraded over a ledger of boot-less keys) is
+      accounted under the boot-less key as before; when its boot id then
+      becomes readable, the boot-less value is the previous value
+      (`legacyPrev`) and the key moves to the boot-keyed form. -/
+def observe (l : Ledger) (masterKey : String) (observed : List (String × Nat))
+    (boot : Option Nat := none) : Ledger × List (String × Nat) × List String :=
+  if !barFree masterKey || (boot.isNone && hasBootKey l masterKey) then (l, [], [])
+  else observeCore l masterKey (observed.filter fun p => barFree p.1) boot
 
 /-- What the caller saw of a drop's destination right AFTER reading the
     master's counter: the ADOPTION evidence (see `reconstructingKeys`). The

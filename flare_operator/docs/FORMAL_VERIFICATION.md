@@ -406,6 +406,42 @@ theorem scenario2_verified :
    — proven by induction over ARBITRARY node maps, not scenarios: whatever
    the FSM snapshot and the TCP server wrote, the committed node map never
    contains two Masters for one partition
+✅ **Replica-repair ledger** (`StateMachine/ReplicaRepairProofs.lean`, SC-03; the
+   E2E repair-ledger / SC-03 6 check of a restart that must not request twice):
+   - persistence round trip of the Json TREE, exact equality for every `Phase`,
+     `Entry` and `Ledger`: `phase_roundtrip`, `entry_roundtrip`,
+     `ledger_roundtrip` (`fromJson? (toJson x) = some x`; every entry field,
+     every counter baseline `counterKey ↦ value`, and `initialized` come back
+     from the tree). Lean's core has no lemma for `Json.mkObj`/`getObjVal?`, so
+     `getObjVal?_mkObj` proves it (a red-black-tree lookup equals the
+     association-list lookup);
+   - accounting, for ALL ledgers and observations with distinct destinations:
+     `observeCore_idempotent` (the same cumulative counters a second time: no
+     drops, no first sighting, ledger unchanged), `observe_drops_mem` /
+     `observe_drops_of_rise` (drops are attributed only for a rise — by exactly
+     the rise —, a restart at a non-zero value (all of it), or a non-zero first
+     sighting; a restart at 0 and an unchanged counter attribute nothing),
+     `request_twice_dests` (a second request for a destination opens no second
+     entry), `requestRebuild_idem`;
+   - the boot id coming and going, for `observe` (what Main calls): counters are
+     keyed by the boot id when it reads. A pass that cannot read it while the
+     ledger holds the master's boot-keyed counters is not observed
+     (`observe_skip`); a boot-less counter is the previous value once the boot id
+     reads. `step_hold`, `first_hold` and `no_repeat_request`: after one
+     accounted pass, any sequence of passes reading no boot id or the same one
+     (some → none → some, none → some → none, …), with an operator restart (the
+     Json tree round trip) before each, makes no request and leaves the entries
+     as they were;
+   - a master key or destination containing `|` is not accounted
+     (`observe_bar_master`, `observe_ignores_bar_dest`, `observe_drops_barFree`),
+     and every counter `observe` writes splits back into its parts
+     (`observe_new_keys`, `keyParts_some`, `keyParts_none`) — `KeysSplit` is no
+     longer an assumption.
+   Not proved: the text round trip of `Json.compress`/`Json.parse`, the kubectl
+   read and write of `status.replicaRepairs`, and Main's order of calls and IO
+   (stats read, `observe`, then `request` per drop); destinations within one
+   pass are assumed distinct. Concrete runs in the file (`#guard`) show the
+   boot id read / not read / read again and the `|` cases.
 
 ### What Is NOT Yet Verified
 

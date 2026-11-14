@@ -206,6 +206,62 @@ jobs:
   # the same images (rc72 matrix 43347648381: 7-11 min per leg, 171 runner
   # minutes). The legs restore the cache this job saved; their own build
   # steps stay as the fallback (a cache eviction, or this job failing).
+  # Builds the Lean operator and E2E driver ONCE per run and saves the .lake
+  # under this commit's key, before any leg starts. Without it every leg
+  # restored an older commit's .lake and rebuilt the changed modules itself
+  # (measurement run 43586345999: 10-22 min per leg, 282 runner minutes).
+  # The legs' own cache step then hits this exact key; their build stays as
+  # the fallback (and the unit leg still builds flare_unit on top).
+  lean-build:
+    needs: plan
+    if: needs.plan.outputs.run_e2e == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Restore the Lean toolchain and build
+        id: lean
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.elan
+            flare_operator/.lake
+          key: e2e-lean-${{ runner.os }}-${{ hashFiles('flare_operator/lean-toolchain', 'flare_operator/lake-manifest.json') }}-${{ github.sha }}
+          restore-keys: |
+            e2e-lean-${{ runner.os }}-${{ hashFiles('flare_operator/lean-toolchain', 'flare_operator/lake-manifest.json') }}-
+
+      - name: Install elan (Lean version manager)
+        if: steps.lean.outputs.cache-hit != 'true'
+        run: |
+          curl --retry 5 --retry-delay 3 --retry-all-errors https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y
+          echo "$HOME/.elan/bin" >> $GITHUB_PATH
+
+      # Same separate invocations and one clean retry as the legs' build
+      # (see "Build Lean operator and tests" there for why)
+      - name: Build Lean operator and E2E driver
+        if: steps.lean.outputs.cache-hit != 'true'
+        run: |
+          cd flare_operator
+          build_all() { lake build flare_operator && lake build flare_e2e; }
+          build_all || {
+            echo "::warning::lake build failed — cleaning and retrying once"
+            lake clean
+            build_all
+          }
+
+      - name: Save the Lean toolchain and build
+        if: steps.lean.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.elan
+            flare_operator/.lake
+          key: e2e-lean-${{ runner.os }}-${{ hashFiles('flare_operator/lean-toolchain', 'flare_operator/lake-manifest.json') }}-${{ github.sha }}
+
   flared-images:
     needs: plan
     if: needs.plan.outputs.run_e2e == 'true'
@@ -302,9 +358,9 @@ jobs:
           key: flared-images-${{ hashFiles('Dockerfile.flare-node', 'Dockerfile.flare-node-rocksdb', 'autogen.sh', 'configure.ac', 'Makefile.am', 'config.guess', 'config.sub', 'depcomp', 'install-sh', 'missing', 'mkinstalldirs', 'AUTHORS', 'ChangeLog', 'COPYING', 'INSTALL', 'NEWS', 'src/**', 'test/**', 'scripts/flare-restore-hook') }}
 
   e2e-test:
-    # flared-images only fills the cache: a leg runs whether it succeeded or
-    # not (the leg builds the images itself on a cache miss)
-    needs: [plan, flared-images]
+    # flared-images and lean-build only fill the caches: a leg runs whether
+    # they succeeded or not (the leg builds itself on a cache miss)
+    needs: [plan, flared-images, lean-build]
     if: ${{ !cancelled() && needs.plan.outputs.run_e2e == 'true' }}
     runs-on: ubuntu-latest
     # PR legs: a newer push cancels the older run of the same leg. MANUAL

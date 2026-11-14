@@ -236,7 +236,7 @@ def suite : TestSuite := {
   name := "failover-order"
   setup := do
     deployCluster cfg
-    IO.sleep 50000
+    discard <| waitClusterSettled cfg
   teardown := do
     for node in ← kindNodes do
       discard <| kubectl ["uncordon", node]

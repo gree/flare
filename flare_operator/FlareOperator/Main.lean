@@ -2577,7 +2577,8 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
         let replyNow ← match ← Bridge.queryPodStats (extractPodName k) ns "stats" with
           | .ok out => pure (some out)
           | .error _ => pure none
-        let expected := PromotionEvidence.bindingFor part.toNat (← desiredPartitionsRef.get) cur.partitionSize
+        let nPartsF ← desiredPartitionsRef.get
+        let expected := PromotionEvidence.bindingFor part.toNat nPartsF cur.partitionSize
         match replyNow with
         | none =>
           IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: the first master of partition {part}, but its copy could not be read (restore provenance unknown) — nothing from this pass is committed, the next pass reads again"
@@ -2585,7 +2586,23 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
           return
         | some out =>
           let st := PromotionEvidence.parseStats out
-          match PromotionEvidence.firstMasterAllows st expected with
+          -- a history may be RECORDED for a partition the map holds no copy of
+          -- (the store outlives the map): the full class decides too
+          let n1? := cur.lookupNode k
+          let readyF := match ← kubectl ["get", "pod", extractPodName k, "-n", ns, "-o",
+              "jsonpath={.status.conditions[?(@.type==\"Ready\")].status}"] with
+            | .ok o => o.trim == "True"
+            | .error _ => false
+          let obsF : PromotionEvidence.Observed := {
+            mapPrepare := (n1?.map (·.state)) == some FlareState.Prepare
+            mapActive := (n1?.map (·.state)) == some FlareState.Active
+            podReady := readyF
+            partitionHasMaster := false
+            lastMasterHistory := ← recordedHistory part
+            expectedBinding := some expected
+            untrackedLastMaster := ← untrackedLastMaster cur part
+            attributedRejoin := (n1?.map fun n => PromotionEvidence.isAttributedRejoin (n.role == FlareRole.Slave) (n.state == FlareState.Prepare) n.partition n.lastMasterOf n.formerSlaveOf).getD false }
+          match PromotionEvidence.firstMasterDecision replyNow obsF expected with
           | some why =>
             IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: the first master of partition {part} — {why} — nothing from this pass is committed"
             promotionAbortedRef.set true
@@ -2606,6 +2623,7 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
         let nPartsB ← desiredPartitionsRef.get
         let proven := (← handoverProvenRef.get).contains k
           && (← handoverBindingHolds k (PromotionEvidence.bindingOf (podNow.map (·.1)) replyNow))
+        let contHistC ← handoverContinuedHistoryRef.get
         let obs : PromotionEvidence.Observed := {
           mapPrepare := (n?.map (·.state)) == some FlareState.Prepare
           mapActive := (n?.map (·.state)) == some FlareState.Active
@@ -2614,6 +2632,8 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
           partitionHasMaster := cur.nodeMap.any fun kv => kv.2.role == FlareRole.Master && kv.2.partition == part
             && (!proven || kv.2.state == FlareState.Active)
           lastMasterHistory := hist
+          -- A3b: only a proven handover's commit may name a continued history
+          continuedHistory := if proven then PromotionEvidence.continuedFor k contHistC else none
           isLastMasterHolder := (n?.map (·.lastMasterOf)) == some part
           expectedBinding := if part ≥ 0 then some (PromotionEvidence.bindingFor part.toNat nPartsB cur.partitionSize) else none
           untrackedLastMaster := ← untrackedLastMaster cur part
@@ -2621,13 +2641,11 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
         let cls := PromotionEvidence.classify replyNow obs
         IO.eprintln s!"[flare-operator] PROMOTION EVIDENCE (read at commit, a pass that did not read the candidates): {k}={cls.label} [boot {(PromotionEvidence.bindingOf none replyNow).bootId.getD "?"}]"
         -- A3b: a committed replica replacing a stopped successor holds the
-        -- handover's continued history (master_id, E'), not the recorded E
-        let contHist ← handoverContinuedHistoryRef.get
-        let stNow := (replyNow.map PromotionEvidence.parseStats).getD {}
-        let continued := proven && PromotionEvidence.continuedAllows cls stNow obs.partitionHasMaster
-          (PromotionEvidence.continuedHistoryMatches k contHist stNow)
-        let allows := PromotionEvidence.commitDecision replyNow obs proven k contHist
-        if allows && continued && !PromotionEvidence.handoverCommitAllows cls then
+        -- handover's continued history (master_id, E'), not the recorded E:
+        -- `classify` says `continued` (never forbidden), only a proven
+        -- handover's commit accepts it
+        let allows := PromotionEvidence.commitDecision replyNow obs proven
+        if allows && cls == .continued then
           IO.eprintln s!"[flare-operator] promotion of {k}: {cls.label} at commit, accepted: it holds the continued history of its handover (committed replica replacing a stopped successor)"
         else if allows && proven && !PromotionEvidence.commitTimeAllows cls then
           IO.eprintln s!"[flare-operator] promotion of {k}: {cls.label} at commit, accepted for an ordered handover whose drain was proven clean"
@@ -2809,19 +2827,20 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
           let obsK0 := (← promotionObservedRef.get).lookup k
           let obsK := if proven then none else obsK0
           let n? := cur.lookupNode k
-          let obsNow : PromotionEvidence.Observed := obsK.getD {
-            mapPrepare := (n?.map (·.state)) == some FlareState.Prepare, mapActive := (n?.map (·.state)) == some FlareState.Active,
-            podReady := true, partitionHasMaster := false, lastMasterHistory := some (rec.hist.masterId, rec.hist.epoch) }
-          let freshCls := PromotionEvidence.classify (fresh.map (·.2)) obsNow
           let contHistI ← handoverContinuedHistoryRef.get
+          let obsNow : PromotionEvidence.Observed := { obsK.getD {
+            mapPrepare := (n?.map (·.state)) == some FlareState.Prepare, mapActive := (n?.map (·.state)) == some FlareState.Active,
+            podReady := true, partitionHasMaster := false, lastMasterHistory := some (rec.hist.masterId, rec.hist.epoch) } with
+            continuedHistory := if proven then PromotionEvidence.continuedFor k contHistI else none }
+          let freshCls := PromotionEvidence.classify (fresh.map (·.2)) obsNow
           let consistent := match passEv with
             | some (_, passCls, b0) =>
               (PromotionEvidence.reclassifyAllows passCls freshCls).1
                 && b0 == PromotionEvidence.bindingOf (fresh.map (·.1)) (fresh.map (·.2))
             -- A3b: the replacement of a stopped successor holds the handover's
             -- continued history (master_id, E'), exactly — the same decision
-            -- as at the commit read (continuedAllows inside commitDecision)
-            | none => PromotionEvidence.commitDecision (fresh.map (·.2)) obsNow proven k contHistI
+            -- as at the commit read (`continued` class, commitDecision)
+            | none => PromotionEvidence.commitDecision (fresh.map (·.2)) obsNow proven
           let seenK := match fresh with
             | some (u, r) => seenOf u (some r)
             | none => .unreadable

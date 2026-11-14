@@ -424,24 +424,31 @@ theorem scenario2_verified :
    (`commitTimeAllows_forbidden`, `commitAllows_forbidden`,
    `reclassifyAllows_forbidden_pass`, `handoverCommitAllows_forbidden`) and the
    handover (`handoverAccepts_eligible`, `handover_demote_requires_r3`).
-   The commit-time decision Main calls is ONE pure function:
-   `PromotionEvidence.commitDecision` (classify, then `commitTimeAllows` /
-   `handoverCommitAllows` / `continuedAllows`; also used at the history
-   intent's fresh read) and `PromotionEvidence.firstMasterAllows` (the first
-   master of a partition no copy has held). Proven: `commitDecision_marker`
-   (a forbidden marker in the stats never allows), `commitDecision_forbidden`
-   / `commitDecision_forbidden_not_allowlisted` (a forbidden class passes only
-   in a proven handover, and only for the continued allowlist
-   `continuedForbiddenPrefixes`: "the copy holds another history than the
-   recorded one"), `continuedAllows_marker` / `_incomplete` /
-   `_forbidden_allowlist`, `firstMasterAllows_marker` (a marker refuses the
-   first master).
+   The commit-time decision Main calls is ONE pure function of `classify`:
+   `PromotionEvidence.commitDecision` (`commitTimeAllows` /
+   `handoverCommitAllows` of the class; also used at the history intent's
+   fresh read) and `PromotionEvidence.firstMasterDecision` (the first master of
+   a partition no copy has held: `firstMasterAllows` AND the full class, with
+   the recorded history of its partition). There is NO exception for a
+   forbidden class. A proven handover's continued history (a committed replica
+   replacing a stopped successor holds (master_id, E'), not the recorded E) is
+   its own class `continued`, returned by `classify` after the forbidden
+   markers and the restore-provenance check and before any history judgement;
+   it is not promotable or normal, `commitTimeAllows` refuses it and only
+   `handoverCommitAllows` (a proven handover) accepts it. Proven:
+   `classify_forbidden_never_commits` (a forbidden class never commits, proven
+   handover or not), `commitDecision_marker`, `classify_continued_marker_free`
+   (a marker beats a continued history), `commitDecision_continued_needs_proof`
+   / `_proven`, `continued_not_promotable`, `firstMasterDecision_forbidden`
+   (a forbidden class refuses the first master), `firstMasterAllows_marker`.
    The claim is therefore narrowed to: the pure reconcile steps (via the
    gates) and the pure commit decisions above. NOT proven: the IO wiring.
    Premises: Main classifies every live non-master copy of a risk pass
    (`evidence`) and passes `blockedKeys` / `unfitKeys`; on a non-risk pass
-   Main reads the stats, the pod's Ready and builds the `Observed`, `proven`
-   and the recorded continued history, and calls `commitDecision` with them;
+   Main reads the stats, the pod's Ready and builds the `Observed` (the recorded
+   history, `continuedHistory` only for a proven handover) and `proven`, and
+   calls `commitDecision` with them; the first master's `Observed` likewise
+   (recorded history, `partitionHasMaster := false`);
    `PodListResponse` reaches the FSM unchanged; `KeysNodup` of the node map;
    flared reports the markers it is supposed to. Passes where
    `promotionRisk` is false have no evidence (empty gates): the commit

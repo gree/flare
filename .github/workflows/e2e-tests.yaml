@@ -200,9 +200,112 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           echo "::notice::E2E NOT RUN on this commit; see run $PREV"
 
-  e2e-test:
+  # Builds the two flared images ONCE per run when their C++ inputs changed
+  # (the cache key below misses), before any leg starts. Without it the
+  # first ~18 legs, started together, all missed the cache and each built
+  # the same images (rc72 matrix 43347648381: 7-11 min per leg, 171 runner
+  # minutes). The legs restore the cache this job saved; their own build
+  # steps stay as the fallback (a cache eviction, or this job failing).
+  flared-images:
     needs: plan
     if: needs.plan.outputs.run_e2e == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Look up the flared images
+        id: lookup
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/flared-images
+          key: flared-images-${{ hashFiles('Dockerfile.flare-node', 'Dockerfile.flare-node-rocksdb', 'autogen.sh', 'configure.ac', 'Makefile.am', 'config.guess', 'config.sub', 'depcomp', 'install-sh', 'missing', 'mkinstalldirs', 'AUTHORS', 'ChangeLog', 'COPYING', 'INSTALL', 'NEWS', 'src/**', 'test/**', 'scripts/flare-restore-hook') }}
+          lookup-only: true
+
+      - name: Set up Docker Buildx
+        if: steps.lookup.outputs.cache-hit != 'true'
+        uses: docker/setup-buildx-action@v3
+
+      # One retry each, as in the legs: resolving the base image's manifest
+      # from Docker Hub returned HTTP 503 once (PR run 36866790112).
+      - name: Build flare-node image
+        id: build_node
+        if: steps.lookup.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.flare-node
+          tags: flare-node:test
+          load: true
+          cache-from: type=gha,scope=flare-node
+          cache-to: type=gha,mode=max,scope=flare-node
+
+      - name: Wait before retrying flare-node
+        if: steps.lookup.outputs.cache-hit != 'true' && steps.build_node.outcome == 'failure'
+        run: sleep 30
+
+      - name: Build flare-node image (retry)
+        if: steps.lookup.outputs.cache-hit != 'true' && steps.build_node.outcome == 'failure'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.flare-node
+          tags: flare-node:test
+          load: true
+          cache-from: type=gha,scope=flare-node
+          cache-to: type=gha,mode=max,scope=flare-node
+
+      - name: Build flare-node-rocksdb image
+        id: build_rocksdb
+        if: steps.lookup.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.flare-node-rocksdb
+          tags: flare-node-rocksdb:test
+          load: true
+          cache-from: type=gha,scope=flare-node-rocksdb
+          cache-to: type=gha,mode=max,scope=flare-node-rocksdb
+
+      - name: Wait before retrying flare-node-rocksdb
+        if: steps.lookup.outputs.cache-hit != 'true' && steps.build_rocksdb.outcome == 'failure'
+        run: sleep 30
+
+      - name: Build flare-node-rocksdb image (retry)
+        if: steps.lookup.outputs.cache-hit != 'true' && steps.build_rocksdb.outcome == 'failure'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.flare-node-rocksdb
+          tags: flare-node-rocksdb:test
+          load: true
+          cache-from: type=gha,scope=flare-node-rocksdb
+          cache-to: type=gha,mode=max,scope=flare-node-rocksdb
+
+      - name: Save the flared images
+        if: steps.lookup.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p /tmp/flared-images
+          docker save flare-node:test -o /tmp/flared-images/flare-node.tar
+          docker save flare-node-rocksdb:test -o /tmp/flared-images/flare-node-rocksdb.tar
+
+      - name: Cache the flared images
+        if: steps.lookup.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/flared-images
+          key: flared-images-${{ hashFiles('Dockerfile.flare-node', 'Dockerfile.flare-node-rocksdb', 'autogen.sh', 'configure.ac', 'Makefile.am', 'config.guess', 'config.sub', 'depcomp', 'install-sh', 'missing', 'mkinstalldirs', 'AUTHORS', 'ChangeLog', 'COPYING', 'INSTALL', 'NEWS', 'src/**', 'test/**', 'scripts/flare-restore-hook') }}
+
+  e2e-test:
+    # flared-images only fills the cache: a leg runs whether it succeeded or
+    # not (the leg builds the images itself on a cache miss)
+    needs: [plan, flared-images]
+    if: ${{ !cancelled() && needs.plan.outputs.run_e2e == 'true' }}
     runs-on: ubuntu-latest
     # PR legs: a newer push cancels the older run of the same leg. MANUAL
     # runs (investigation of one finding) get a group of their own run id:

@@ -1919,7 +1919,7 @@ private def scenarioSuite (sc : Scenario) (st : SwitchStorage) : TestSuite :=
     setup := do
       if sc == .op .helmUpgrade then deployHelmCluster cfg (← helmChartRollingUpdate cfg)
       else deployCluster cfg
-      IO.sleep 50000
+      discard <| waitClusterSettled cfg
     teardown := do
       if sc == .op .helmUpgrade then cleanupHelmCluster cfg
       for w in ← dataWorkers do uncordon w
@@ -1966,7 +1966,7 @@ def continuationSwitchSuite : TestSuite :=
   { name := "node-ops-switch-tmpfs-continuation-delete"
     setup := do
       deployCluster cfg
-      IO.sleep 50000
+      discard <| waitClusterSettled cfg
     teardown := do
       for w in ← dataWorkers do uncordon w
       cleanupCluster cfg
@@ -1989,7 +1989,7 @@ def continuationCordonSuite : TestSuite :=
   { name := "node-ops-switch-tmpfs-continuation-cordon-master"
     setup := do
       deployCluster cfg
-      IO.sleep 50000
+      discard <| waitClusterSettled cfg
     teardown := do
       for w in ← dataWorkers do uncordon w
       cleanupCluster cfg

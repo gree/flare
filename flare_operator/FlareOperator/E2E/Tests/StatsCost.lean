@@ -213,7 +213,7 @@ def suite : TestSuite := {
   name := "stats-cost"
   setup := do
     deployCluster cfg
-    IO.sleep 50000
+    discard <| waitClusterSettled cfg
   teardown := cleanupCluster cfg
   onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
   tests := [

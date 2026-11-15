@@ -255,8 +255,7 @@ def purgeSuite : TestSuite := {
   name := "continuous-replication-purge"
   setup := do
     deployCluster purgeCfg
-    IO.eprintln "# Waiting 50s grace period for operator reconciliation..."
-    IO.sleep 50000
+    discard <| waitClusterSettled purgeCfg
   teardown := cleanupCluster purgeCfg
   tests :=
     let c : Ctx := { cfg := purgeCfg }
@@ -388,8 +387,7 @@ def limitsSuite : TestSuite := {
   name := "continuous-replication-limits"
   setup := do
     deployCluster limitsCfg
-    IO.eprintln "# Waiting 50s grace period for operator reconciliation..."
-    IO.sleep 50000
+    discard <| waitClusterSettled limitsCfg
   teardown := cleanupCluster limitsCfg
   onFailure := dumpClusterDiagnostics limitsCfg.«namespace» s!"app={limitsCfg.operatorName}"
   tests :=
@@ -571,8 +569,7 @@ def lagHoldSuite : TestSuite := {
   name := "continuous-replication-lag-hold"
   setup := do
     deployCluster holdCfg
-    IO.eprintln "# Waiting 50s grace period for operator reconciliation..."
-    IO.sleep 50000
+    discard <| waitClusterSettled holdCfg
   teardown := do
     discard <| kubectl ["uncordon", kindNode]
     cleanupCluster holdCfg
@@ -741,8 +738,7 @@ def enableSuite : TestSuite := {
   name := "continuous-replication-enable"
   setup := do
     deployCluster enableCfg
-    IO.eprintln "# Waiting 50s grace period for operator reconciliation..."
-    IO.sleep 50000
+    discard <| waitClusterSettled enableCfg
   teardown := cleanupCluster enableCfg
   onFailure := dumpClusterDiagnostics enableCfg.«namespace» s!"app={enableCfg.operatorName}"
   tests :=
@@ -910,7 +906,7 @@ def lagHoldTmpfsSuite : TestSuite := {
   name := "continuous-replication-lag-hold-tmpfs"
   setup := do
     deployCluster holdTmpfsCfg
-    IO.sleep 50000
+    discard <| waitClusterSettled holdTmpfsCfg
   teardown := cleanupCluster holdTmpfsCfg
   onFailure := dumpClusterDiagnostics holdTmpfsCfg.«namespace» s!"app={holdTmpfsCfg.operatorName}"
   tests :=
@@ -962,7 +958,7 @@ def lagHoldExpirySuite : TestSuite := {
   name := "continuous-replication-lag-hold-expiry"
   setup := do
     deployCluster holdExpiryCfg
-    IO.sleep 50000
+    discard <| waitClusterSettled holdExpiryCfg
   teardown := do
     discard <| kubectl ["uncordon", kindNode]
     cleanupCluster holdExpiryCfg
@@ -1031,7 +1027,7 @@ def lagHoldUnreadableSuite : TestSuite := {
   name := "continuous-replication-lag-hold-unreadable"
   setup := do
     deployCluster holdUnreadableCfg
-    IO.sleep 50000
+    discard <| waitClusterSettled holdUnreadableCfg
   teardown := do
     discard <| kubectl ["uncordon", kindNode]
     cleanupCluster holdUnreadableCfg
@@ -1155,7 +1151,7 @@ def enablePurgedSuite : TestSuite := {
   name := "continuous-replication-enable-purged"
   setup := do
     deployCluster enablePurgedCfg
-    IO.sleep 50000
+    discard <| waitClusterSettled enablePurgedCfg
   teardown := cleanupCluster enablePurgedCfg
   onFailure := dumpClusterDiagnostics enablePurgedCfg.«namespace» s!"app={enablePurgedCfg.operatorName}"
   tests :=
@@ -1316,7 +1312,7 @@ def rebuildTmpfsSuite : TestSuite := {
   name := "continuous-replication-rebuild-tmpfs"
   setup := do
     deployCluster rebuildTmpfsCfg
-    IO.sleep 50000
+    discard <| waitClusterSettled rebuildTmpfsCfg
   teardown := cleanupCluster rebuildTmpfsCfg
   onFailure := dumpClusterDiagnostics rebuildTmpfsCfg.«namespace» s!"app={rebuildTmpfsCfg.operatorName}"
   tests :=
@@ -1427,7 +1423,7 @@ def parkedSlotSuite : TestSuite := {
   name := "continuous-replication-parked-slot"
   setup := do
     deployCluster parkedSlotCfg
-    IO.sleep 50000
+    discard <| waitClusterSettled parkedSlotCfg
   teardown := cleanupCluster parkedSlotCfg
   onFailure := dumpClusterDiagnostics parkedSlotCfg.«namespace» s!"app={parkedSlotCfg.operatorName}"
   tests :=
@@ -1527,7 +1523,7 @@ def redundantDiscardSuite : TestSuite := {
   name := "continuous-replication-redundant-discard"
   setup := do
     deployCluster redundantDiscardCfg
-    IO.sleep 50000
+    discard <| waitClusterSettled redundantDiscardCfg
   teardown := cleanupCluster redundantDiscardCfg
   onFailure := dumpClusterDiagnostics redundantDiscardCfg.«namespace» s!"app={redundantDiscardCfg.operatorName}"
   tests :=
@@ -1658,7 +1654,7 @@ def upgradeSuite : TestSuite := {
   name := "continuous-replication-upgrade"
   setup := do
     deployCluster upgradeCfg
-    IO.sleep 60000
+    discard <| waitClusterSettled upgradeCfg
   teardown := cleanupCluster upgradeCfg
   onFailure := dumpClusterDiagnostics upgradeCfg.«namespace» s!"app={upgradeCfg.operatorName}"
   tests :=
@@ -1948,7 +1944,7 @@ def identitySuite : TestSuite := {
     -- until a human acts — CI 37278389267 stalled there. The breaker is not
     -- what these tests examine, so raise its floor for this suite only.
     discard <| kubectlPatch "flarecluster" identityCfg.name identityCfg.«namespace» "{\"spec\":{\"circuitBreaker\":{\"minUnavailableToTrip\":3}}}"
-    IO.sleep 60000
+    discard <| waitClusterSettled identityCfg
   teardown := do
     discard <| kubectl ["uncordon", kindNode]
     cleanupCluster identityCfg
@@ -4194,7 +4190,7 @@ def multiEnableSuite : TestSuite := {
   name := "continuous-replication-multipart-enable"
   setup := do
     deployCluster multiEnableCfg
-    IO.sleep 60000
+    discard <| waitClusterSettled multiEnableCfg
   teardown := cleanupCluster multiEnableCfg
   onFailure := dumpClusterDiagnostics multiEnableCfg.«namespace» s!"app={multiEnableCfg.operatorName}"
   tests :=
@@ -4266,7 +4262,7 @@ def multiHoldSuite : TestSuite := {
   name := "continuous-replication-multipart-lag-hold"
   setup := do
     deployCluster multiHoldCfg
-    IO.sleep 60000
+    discard <| waitClusterSettled multiHoldCfg
   teardown := do
     discard <| kubectl ["uncordon", kindNode]
     cleanupCluster multiHoldCfg
@@ -4388,8 +4384,7 @@ def scaleSuite : TestSuite := {
     | none => IO.eprintln "# FLARE_E2E_SCALE_KEYS unset: the scale evaluation deploys nothing and its tests are skipped"
     | some _ =>
       deployCluster scaleCfg
-      IO.eprintln "# Waiting 50s grace period for operator reconciliation..."
-      IO.sleep 50000
+      discard <| waitClusterSettled scaleCfg
   teardown := do
     match ← scaleKeys with
     | none => pure ()
@@ -4687,9 +4682,9 @@ def sustainedSuite : TestSuite := {
         | some n => sustainedCfg.extraFlaredConf ++ s!"\nnoreply-window-limit = {n}"
         | none => sustainedCfg.extraFlaredConf
       IO.eprintln s!"# sustained variant: flared cpu limit {cpu}, noreply-window-limit {nrw.map toString |>.getD "off"}"
-      deployCluster { sustainedCfg with flaredCpuLimit := cpu, extraFlaredConf := extra }
-      IO.eprintln "# Waiting 50s grace period for operator reconciliation..."
-      IO.sleep 50000
+      let sCfg := { sustainedCfg with flaredCpuLimit := cpu, extraFlaredConf := extra }
+      deployCluster sCfg
+      discard <| waitClusterSettled sCfg
     else IO.eprintln "# FLARE_E2E_SUSTAINED unset: the sustained-load evaluation deploys nothing and its tests are skipped"
   teardown := do
     if ← sustainedOn then cleanupCluster sustainedCfg
@@ -4842,8 +4837,7 @@ def mkOutageSuite (suiteName : String) (cfg : ClusterConfig) (gate : IO Bool) (g
   setup := do
     if ← gate then
       deployCluster cfg
-      IO.eprintln "# Waiting 50s grace period for operator reconciliation..."
-      IO.sleep 50000
+      discard <| waitClusterSettled cfg
     else IO.eprintln s!"# {gateName} unset: the long-outage evaluation deploys nothing and its tests are skipped"
   teardown := do
     if ← gate then cleanupCluster cfg
@@ -5330,8 +5324,9 @@ def reserveMeasureSuite : TestSuite := {
   name := "copy-retention-measure"
   setup := do
     if (← IO.getEnv "FLARE_E2E_RESERVE_MEASURE").isSome then
-      deployCluster (← measureCfg)
-      IO.sleep 50000
+      let mCfg ← measureCfg
+      deployCluster mCfg
+      discard <| waitClusterSettled mCfg
     else IO.eprintln "# FLARE_E2E_RESERVE_MEASURE unset: the reserve measurement deploys nothing and its test is skipped"
   teardown := do
     if (← IO.getEnv "FLARE_E2E_RESERVE_MEASURE").isSome then cleanupCluster (← measureCfg)
@@ -5779,7 +5774,7 @@ def historyTrackingSuite : TestSuite := {
   name := "history-tracking"
   setup := do
     deployCluster historyCfg
-    IO.sleep 50000
+    discard <| waitClusterSettled historyCfg
   teardown := cleanupCluster historyCfg
   onFailure := dumpClusterDiagnostics historyCfg.«namespace» s!"app={historyCfg.operatorName}"
   afterEach := fun i => saveFullLogs historyCfg.«namespace» s!"after-test-{i}"
@@ -6099,7 +6094,7 @@ def historyHeldSuite : TestSuite := {
   name := "history-held"
   setup := do
     deployCluster historyHeldCfg
-    IO.sleep 50000
+    discard <| waitClusterSettled historyHeldCfg
   teardown := cleanupCluster historyHeldCfg
   onFailure := dumpClusterDiagnostics historyHeldCfg.«namespace» s!"app={historyHeldCfg.operatorName}"
   tests :=
@@ -6147,7 +6142,7 @@ def historyIntentSuite : TestSuite := {
   name := "history-intent-restart"
   setup := do
     deployCluster historyIntentCfg
-    IO.sleep 50000
+    discard <| waitClusterSettled historyIntentCfg
   teardown := cleanupCluster historyIntentCfg
   onFailure := dumpClusterDiagnostics historyIntentCfg.«namespace» s!"app={historyIntentCfg.operatorName}"
   tests :=
@@ -6774,7 +6769,7 @@ def forwardStepSuite : TestSuite := {
     -- S3 composes two faults (2 of 3 unavailable trips the breaker by design,
     -- as in copy-identity): the breaker is not under test here
     discard <| kubectlPatch "flarecluster" fwdStepCfg.name fwdStepCfg.«namespace» "{\"spec\":{\"circuitBreaker\":{\"minUnavailableToTrip\":3}}}"
-    IO.sleep 60000
+    discard <| waitClusterSettled fwdStepCfg
   teardown := do
     discard <| kubectl ["uncordon", kindNode]
     cleanupCluster fwdStepCfg
@@ -7193,7 +7188,7 @@ def promotionDisconnectedSuite : TestSuite := {
   name := "promotion-disconnected-follower"
   setup := do
     deployCluster discCfg
-    IO.sleep 50000
+    discard <| waitClusterSettled discCfg
   teardown := cleanupCluster discCfg
   onFailure := dumpClusterDiagnostics discCfg.«namespace» s!"app={discCfg.operatorName}"
   afterEach := fun i => saveFullLogs discCfg.«namespace» s!"after-test-{i}"
@@ -7226,7 +7221,7 @@ def promotionDisconnectedEmptySuite : TestSuite := {
   name := "promotion-disconnected-follower-empty"
   setup := do
     deployCluster discEmptyCfg
-    IO.sleep 50000
+    discard <| waitClusterSettled discEmptyCfg
   teardown := cleanupCluster discEmptyCfg
   onFailure := dumpClusterDiagnostics discEmptyCfg.«namespace» s!"app={discEmptyCfg.operatorName}"
   afterEach := fun i => saveFullLogs discEmptyCfg.«namespace» s!"after-test-{i}"
@@ -7462,7 +7457,7 @@ def promotionProxyOnlySuite : TestSuite := {
   name := "promotion-proxy-only-copy"
   setup := do
     deployCluster proxyOnlyCfg
-    IO.sleep 50000
+    discard <| waitClusterSettled proxyOnlyCfg
   teardown := cleanupCluster proxyOnlyCfg
   onFailure := dumpClusterDiagnostics proxyOnlyCfg.«namespace» s!"app={proxyOnlyCfg.operatorName}"
   afterEach := fun i => saveFullLogs proxyOnlyCfg.«namespace» s!"after-test-{i}"

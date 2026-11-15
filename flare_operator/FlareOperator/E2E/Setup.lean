@@ -1325,4 +1325,30 @@ def waitForStable (cfg : ClusterConfig) (graceSec : Nat := 50) : IO Bool := do
 
   return true
 
+/-- What the fixed `IO.sleep 50000` after `deployCluster` waited for
+    ("the cluster settles"): every pod Ready, every node registered with the
+    operator and Active (a slave synced, not Prepare), and the operator's map
+    holding a master for each partition.
+    Polls that state for at most `maxSec` (the old sleep was 50 s), then keeps
+    `marginSec` for the operator's next reconcile pass. On the limit it returns
+    false and the caller goes on exactly as the fixed sleep did: the tests'
+    own checks decide, this is never a failure. -/
+def waitClusterSettled (cfg : ClusterConfig) (maxSec : Nat := 120) (marginSec : Nat := 10) : IO Bool := do
+  let numPods := cfg.partitions * cfg.replicas
+  let settled ← waitForCondition s!"{cfg.name} settled ({numPods} pods ready, registered and Active, a master per partition)" maxSec do
+    match ← kubectlGetJsonpath "statefulset" s!"{cfg.name}-nodes" cfg.«namespace» "{.status.readyReplicas}" with
+    | .ok val =>
+      if val.toNat?.getD 0 < numPods then return false
+    | .error _ => return false
+    let sync ← operatorTcpCmd cfg.debugPod cfg.«namespace» cfg.operatorName cfg.operatorPort "node sync"
+    let entries := parseNodeSync sync
+    -- every node Active (state 0), not only registered: suites start from
+    -- synced slaves (parked-slot / redundant-discard "want 2 Active slaves",
+    -- measurement run 43593886831 went on after 20 s with one still syncing)
+    return entries.length ≥ numPods && countMasters entries ≥ cfg.partitions
+      && entries.all (·.state == 0)
+  if settled then IO.sleep (marginSec * 1000).toUInt32
+  else IO.eprintln s!"# {cfg.name} not settled within {maxSec}s; continuing as the fixed wait did"
+  return settled
+
 end FlareOperator.E2E.Setup

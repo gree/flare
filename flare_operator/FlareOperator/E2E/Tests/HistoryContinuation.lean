@@ -135,7 +135,7 @@ def walPinRestartSuite : TestSuite := {
   name := "history-continuation-wal-pin-restart"
   setup := do
     deployCluster walPinCfg
-    IO.sleep 50000
+    discard <| waitClusterSettled walPinCfg
   teardown := cleanupCluster walPinCfg
   onFailure := dumpClusterDiagnostics walPinCfg.«namespace» s!"app={walPinCfg.operatorName}"
   tests := [
@@ -279,7 +279,7 @@ def handoverSuite : TestSuite := {
   name := "history-continuation-handover"
   setup := do
     deployCluster hcCfg
-    IO.sleep 50000
+    discard <| waitClusterSettled hcCfg
   teardown := cleanupCluster hcCfg
   onFailure := dumpClusterDiagnostics hcCfg.«namespace» s!"app={hcCfg.operatorName}"
   tests := [
@@ -375,7 +375,7 @@ def handoverFollowOffSuite : TestSuite := {
   name := "history-continuation-handover-follow-off"
   setup := do
     deployCluster foCfg
-    IO.sleep 50000
+    discard <| waitClusterSettled foCfg
   teardown := cleanupCluster foCfg
   onFailure := dumpClusterDiagnostics foCfg.«namespace» s!"app={foCfg.operatorName}"
   tests := [
@@ -476,7 +476,7 @@ def handoverRollingSuite : TestSuite := {
   name := "history-continuation-handover-rolling"
   setup := do
     deployCluster rlCfg
-    IO.sleep 50000
+    discard <| waitClusterSettled rlCfg
   teardown := cleanupCluster rlCfg
   onFailure := dumpClusterDiagnostics rlCfg.«namespace» s!"app={rlCfg.operatorName}"
   tests := [
@@ -633,7 +633,7 @@ def recoveryReplaceSuite : TestSuite :=
   { name := "history-continuation-recovery-replace"
     setup := do
       deployCluster cfg
-      IO.sleep 50000
+      discard <| waitClusterSettled cfg
     teardown := cleanupCluster cfg
     onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
     tests := [
@@ -695,7 +695,7 @@ def recoveryUnfencedSuite : TestSuite :=
   { name := "history-continuation-recovery-unfenced"
     setup := do
       deployCluster cfg
-      IO.sleep 50000
+      discard <| waitClusterSettled cfg
     teardown := cleanupCluster cfg
     onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
     tests := [
@@ -758,7 +758,7 @@ def recoveryBreakGlassSuite : TestSuite :=
   { name := "history-continuation-recovery-breakglass"
     setup := do
       deployCluster cfg
-      IO.sleep 50000
+      discard <| waitClusterSettled cfg
     teardown := cleanupCluster cfg
     onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
     tests := [
@@ -923,7 +923,7 @@ def recoveryOperatorRestartSuite : TestSuite :=
   { name := "history-continuation-recovery-operator-restart"
     setup := do
       deployCluster cfg
-      IO.sleep 50000
+      discard <| waitClusterSettled cfg
     teardown := cleanupCluster cfg
     onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
     tests := [

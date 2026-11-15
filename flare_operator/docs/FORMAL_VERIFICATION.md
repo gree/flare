@@ -19,9 +19,9 @@
 
 | 本番経路 | 本数 | 意味 |
 |---|---|---|
-| 本番経路 | 331 | 定理の対象の関数を、動いている operator が呼ぶ |
-| モデルのみ | 109 | 証明やテストだけが使う関数、またはモデル |
-| 一部 | 28 | 本番も同じ関数を使うが、証明していない引数や上書きがある、または証明用に作った定義（`ReplicaRepairProofs` の `obsStep` / `corePass` / `pass` / `runPasses` など）についての定理（2.3 参照） |
+| 本番経路 | 312 | 定理の対象の関数を、動いている operator が呼ぶ |
+| モデルのみ | 123 | 証明やテストだけが使う関数（証明用の補助定義を含む）、またはモデル |
+| 一部 | 33 | 本番も同じ関数を使うが、証明していない引数や上書きがある、または本番の関数を証明用に作った定義（`ReplicaRepairProofs` の `pass` / `runPasses`、`HandoverRetryProofs` の `Reach` など）を通して扱う定理（2.3 参照） |
 
 数は `private` / `protected` の定理を含む（`grep '^theorem'` だけでは 461 で、`private theorem` 7 本が漏れる）。
 
@@ -41,7 +41,7 @@
 | トポロジの世代フェンス | `startupVersion_gt_resumed`、`startupGeneration_ge_lease`、`generation_fences` | 新しい leader の version は、永続化済みの値より大きい。「永続化してから送る」は IO 側の約束で、証明していない。カウンタが 2^32 未満であることは仮定 |
 | balance の正規化と状態のマージ | `normalizeBalance*`、`mergeClusterState_preserves_keys`、`mergeClusterState_down_survives` など | 正規化で role、partition、キーは変わらない。マージでキーは消えない。Down は Down のまま残る |
 | 冗長コピーの破棄 | `RedundantCopy` の 3 本 | 破棄を認める対象は Slave だけで、別ノードに master があり、同じ履歴の Active な Slave がもう 1 つあるときに限る。Facts（stats の値）が正しいことは信頼している |
-| ハンドオーバーの再試行（`HandoverRetryProofs.lean`、19 本） | `retryable_lt`、`reach_retries_le`、`reach_exhausted`、`reach_drain_free`、`drainHeldKeys_mem`、`step_attempt`、`retryDecision_attempt` | abort された handover の再試行は高々 `maxAttempts − attempt` 回で、使い切ると旧 master を drain に保留しない（1 マップの drain が master を取れる）。`Reach`（step と再試行の任意の列）の上の定理で、`retryDecision` / `drainHeldKeys` / `step` は本番が呼ぶ。「drain が実際にいつか走る」ことと、他の entry による保留は証明していない |
+| ハンドオーバーの再試行（`HandoverRetryProofs.lean`、19 本） | `retryable_lt`、`reach_retries_le`、`reach_exhausted`、`reach_drain_free`、`drainHeldKeys_mem`、`step_attempt`、`retryDecision_attempt` | abort された handover の再試行は高々 `maxAttempts − attempt` 回で、使い切ると旧 master を drain に保留しない（1 マップの drain が master を取れる）。`Reach`（step と再試行の任意の列）の上の定理で、`retryDecision` / `drainHeldKeys` / `step` は本番が呼ぶが、実際の実行が `Reach` に従うことは証明していない（2.3 の「一部」）。「drain が実際にいつか走る」ことと、他の entry による保留は証明していない |
 | `spec.rocksdb` から `extra.conf` への描画（`ExtraConfProofs.lean`、77 本） | 21 フィールドごとの `<field>_some` / `_none`、`keys_prefixFree`、`keys_not_cluster_replication`、`hasAny_false_iff`、`render_eq`、`render_contains_rocksdb_lines` | `some v` はちょうど 1 行 `key = v`（0 と Bool を含む）、`none` は行なし。キーは互いの接頭辞にならず、cluster-replication のキーに見えない。`renderFlaredExtraConf` は rocksdb ブロック、空行、replication ブロックの順。ConfigMap への書き込み（IO）と、flared が値をどう解釈するかは範囲外 |
 | 昇格先に FORBIDDEN の copy を選ばない（`PromotionForbiddenProofs.lean`、76 本） | `forbidden_never_promoted`、`failoverOfPass_noNew`、`refill_noNew`、`assignProxies_noNew`、`recoveryRefill_noNew`、`classify_forbidden_never_commits`、`commitDecision_*`、`firstMasterDecision_forbidden`、`classify_continued_sound` | gate を証拠から作った pass で、evidence class が forbidden の key は、failover・1 マップ drain・proxy 割り当て・masterless の refill・zone swap・recovery refill のどれでも、元から master でない限り master にならない。commit 時の判断（`commitDecision`、`firstMasterDecision`）も forbidden を通さず、証明済み handover の継続履歴（`continued`）は handover の commit だけが受け入れる。**Main が全 copy を classify して gate と `Observed` を渡すこと、stats、Pod の Ready は前提**。`promotionRisk` が false の pass には証拠がなく、commit 時の判断だけが守る |
 | ReplicaRepair の台帳（`ReplicaRepairProofs.lean`、113 本） | `ledger_roundtrip`、`observeCore_idempotent`、`observe_drops_of_rise`、`request_twice_dests`、`no_repeat_request`、`observe_skip`、`observe_new_boot_full`、`keyParts_some` / `keyParts_none`、`counterKey_inj` | 台帳の Json 木の往復は、`Phase`・`Entry`・`Ledger` のすべてで等しい。同じ累積カウンタを 2 回観測しても drop は増えず、drop の帰属は増加分・0 でない再起動・0 でない初回だけ。同じ宛先への 2 回目の request は entry を増やさない。boot id が読める・読めないを繰り返し、operator が再起動しても、1 回計上した後は request しない。カウンタのキー（master、宛先、boot id）は任意の文字列で一意に復元できる。**boot id なし → あり は同じ累積値をもう一度計上しうる**（見逃しより重複を選んだ。余分な rebuild が 1 回起きうる）。1 pass 内の宛先は互いに異なると仮定 |
@@ -57,7 +57,13 @@
 
 ### 2.3 「一部」の定理（本番の呼び方とずれているもの）
 
-`ReplicaRepairProofs` の 23 本は、証明用に作った `obsStep` / `corePass` / `pass` / `runPasses` / `restart` などの上の定理で、本番の `observe` に対応する形で書いたものである（本番の関数そのものについての定理ではない）。次の 5 本は本番の呼び方とのずれが明確なもの。
+「一部」の 33 本の内訳は次のとおり。
+
+- `ReplicaRepairProofs` の 23 本: 証明用に作った `obsStep` / `corePass` / `pass` / `runPasses` / `restart` などの上の定理で、本番の `observe` に対応する形で書いたもの（本番の関数そのものについての定理ではない）。
+- `HandoverRetryProofs` の 5 本（`reach_attempt`、`reach_le`、`reach_retries_le`、`reach_exhausted`、`reach_drain_free`）: 証明用に定義した遷移列 `Reach`（`step` と再試行の任意の列）の上の定理。本番は `step`・`retryDecision`・`drainHeldKeys` を呼ぶが、実際の実行が `Reach` に従うことは証明していない。
+- 次の表の 5 本: 本番の呼び方とのずれが明確なもの。
+
+証明のためだけに作った補助定義についての補題（`ExtraConfProofs` の `PrefixFree` / `lineOf`、`ReplicaRepairProofs` の `fStr` / `fNat` / `fFlag` / `entryFields` など。`Entry.toJson` はこれらを呼ばない）は、「一部」ではなく「モデルのみ」に数えている。
 
 | 定理 | ずれ |
 |---|---|

@@ -1711,6 +1711,65 @@ def checkLedgerObserve (ctx : Ctx) : IO Unit := do
   let (_, dz, fz) := ReplicaRepair.observe l0 "m" [("r1", 0)] (some 1)
   check ctx "ledger: a zero first sighting requests nothing"
     (dz.isEmpty && fz.isEmpty)
+  -- the boot id readable on one pass and not on the next (review of 7b414caf)
+  let (s1, sd1, _) := ReplicaRepair.observe l0 "m" [("r1", 3)] (some 7)
+  let (s2, sd2, _) := ReplicaRepair.observe s1 "m" [("r1", 3)] none
+  let (s3, sd3, _) := ReplicaRepair.observe s2 "m" [("r1", 3)] (some 7)
+  check ctx "ledger: boot id some -> none -> some with the same value requests once (the pass without it is not accounted)"
+    (sd1 == [("r1", 3)] && sd2.isEmpty && s2 == s1 && sd3.isEmpty && s3.counters == s1.counters)
+  let (_, sd4, _) := ReplicaRepair.observe s2 "m" [("r1", 5)] (some 7)
+  check ctx "ledger: after an unreadable boot id the same process continues from its baseline (only the difference)"
+    (sd4 == [("r1", 2)])
+
+/-- Json round trip of a ledger (an operator restart reads `status.replicaRepairs` back). -/
+@[noinline] def ledgerRoundTrip (l : ReplicaRepair.Ledger) : ReplicaRepair.Ledger :=
+  (ReplicaRepair.Ledger.fromJson? l.toJson).getD l
+
+/-- Boot-id transitions with a restart in between. -/
+def checkLedgerObserveBoot (ctx : Ctx) : IO Unit := do
+  let l0 : ReplicaRepair.Ledger := {}
+  let rt := ledgerRoundTrip
+  -- (a) boot-less 10, the master restarts while the boot id is unreadable, then reads 15
+  let (a1, ad1, _) := ReplicaRepair.observe l0 "m" [("r1", 10)] none
+  let (a2, ad2, _) := ReplicaRepair.observe a1 "m" [("r1", 15)] (some 7)
+  let (_, ad3, _) := ReplicaRepair.observe (rt a2) "m" [("r1", 15)] (some 7)
+  check ctx "ledger: boot-less 10, then a boot id reads with 15: the WHOLE 15 is requested (not 15 - 10); after an operator restart (Json round trip) the same boot and 15 request nothing"
+    (ad1 == [("r1", 10)] && ad2 == [("r1", 15)] && ad3.isEmpty
+      && a2.counters == [(counterKey "m" "r1" (some 7), 15)])
+  -- (b) boot-less 10, then a boot id reads with the same 10: accepted as a possible duplicate
+  let (_, bd1, _) := ReplicaRepair.observe a1 "m" [("r1", 10)] (some 7)
+  check ctx "ledger: boot-less 10, then a boot id reads with the same 10: requested once more in full (a possible duplicate repair is accepted over a missed one)"
+    (bd1 == [("r1", 10)])
+  -- (c) some b 10 -> none 10 -> some b 10
+  let (c1, cd1, _) := ReplicaRepair.observe l0 "m" [("r1", 10)] (some 7)
+  let (c2, cd2, _) := ReplicaRepair.observe (rt c1) "m" [("r1", 10)] none
+  let (c3, cd3, _) := ReplicaRepair.observe (rt c2) "m" [("r1", 10)] (some 7)
+  check ctx "ledger: boot id some -> none -> some with the same 10 requests once (the pass without the boot id is not accounted)"
+    (cd1 == [("r1", 10)] && cd2.isEmpty && c2 == c1 && cd3.isEmpty && c3 == c1)
+
+/-- Names containing the key separators `|` and `%`. -/
+def checkLedgerObserveNames (ctx : Ctx) : IO Unit := do
+  let l0 : ReplicaRepair.Ledger := {}
+  let rt := ledgerRoundTrip
+  -- (d) destinations `a|b`, `a`, `b` are accounted apart
+  let dests := [("a|b", 3), ("a", 4), ("b", 5)]
+  let (e1, ed1, _) := ReplicaRepair.observe l0 "m" dests (some 7)
+  let (_, ed2, _) := ReplicaRepair.observe (rt e1) "m" dests (some 7)
+  check ctx "ledger: destinations `a|b`, `a` and `b` are each accounted (separate counters), and the second pass requests nothing"
+    (ed1 == dests && ed2.isEmpty && e1.counters.length == 3)
+  let (_, ed3, _) := ReplicaRepair.observe e1 "m" [("a|b", 9), ("a", 4), ("b", 5)] (some 7)
+  check ctx "ledger: a rise on `a|b` is attributed to `a|b` alone"
+    (ed3 == [("a|b", 6)])
+  -- (e) a master key with `|` (and `%`), same as (d)
+  let (f1, fd1, _) := ReplicaRepair.observe l0 "m|x%y" dests (some 7)
+  let (_, fd2, _) := ReplicaRepair.observe (rt f1) "m|x%y" dests (some 7)
+  let (g1, _, _) := ReplicaRepair.observe f1 "m" [("x%y|a", 1)] (some 7)
+  let (_, gd2, _) := ReplicaRepair.observe g1 "m|x%y" dests (some 7)
+  check ctx "ledger: a master key containing '|' or '%' accounts its destinations apart; another master's counters are neither taken for it nor forgotten by it"
+    (fd1 == dests && fd2.isEmpty && gd2.isEmpty && g1.counters.length == 4)
+  check ctx "ledger: a name with neither '%' nor '|' keeps its old counter key (host:port)"
+    (counterKey "h:1" "r:2" none == "h:1|r:2" && counterKey "h:1" "r:2" (some 7) == "h:1|r:2|7"
+      && counterKey "m|x" "a%b" none == "m%7Cx|a%25b")
 
 def checkMasterMoved (ctx : Ctx) : IO Unit := do
   let m := fun (k : String) (e : Nat) (u : String) => ((k, e, u) : FollowEvidence.MasterIdentity)
@@ -3471,6 +3530,8 @@ def run : IO UInt32 := do
   checkFollowConfirm ctx
   checkMasterMoved ctx
   checkLedgerObserve ctx
+  checkLedgerObserveBoot ctx
+  checkLedgerObserveNames ctx
   checkTraceParse ctx
   checkTraceMatch ctx
   checkTraceAmbiguity ctx

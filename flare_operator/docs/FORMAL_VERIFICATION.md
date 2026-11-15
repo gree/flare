@@ -410,6 +410,54 @@ theorem scenario2_verified :
    — proven by induction over ARBITRARY node maps, not scenarios: whatever
    the FSM snapshot and the TCP server wrote, the committed node map never
    contains two Masters for one partition
+✅ **Replica-repair ledger** (`StateMachine/ReplicaRepairProofs.lean`, SC-03; the
+   E2E repair-ledger / SC-03 6 check of a restart that must not request twice):
+   - persistence round trip of the Json TREE, exact equality for every `Phase`,
+     `Entry` and `Ledger`: `phase_roundtrip`, `entry_roundtrip`,
+     `ledger_roundtrip` (`fromJson? (toJson x) = some x`; every entry field,
+     every counter baseline `counterKey ↦ value`, and `initialized` come back
+     from the tree). Lean's core has no lemma for `Json.mkObj`/`getObjVal?`, so
+     `getObjVal?_mkObj` proves it (a red-black-tree lookup equals the
+     association-list lookup);
+   - accounting, for ALL ledgers and observations with distinct destinations:
+     `observeCore_idempotent` (the same cumulative counters a second time: no
+     drops, no first sighting, ledger unchanged), `observe_drops_mem` /
+     `observe_drops_of_rise` (drops are attributed only for a rise — by exactly
+     the rise —, a restart at a non-zero value (all of it), or a non-zero first
+     sighting; a restart at 0 and an unchanged counter attribute nothing),
+     `request_twice_dests` (a second request for a destination opens no second
+     entry), `requestRebuild_idem`;
+   - the boot id coming and going, for `observe` (what Main calls): counters are
+     keyed by the boot id when it reads. A pass that cannot read it while the
+     ledger holds the master's boot-keyed counters is not observed
+     (`observe_skip`). `step_hold`, `first_hold` and `no_repeat_request`: after
+     one accounted pass that READ a boot id `b`, any sequence of passes reading
+     no boot id or the same `b` (some → none → some, …), with an operator
+     restart (the Json tree round trip) before each, makes no request and
+     leaves the entries as they were;
+   - the other direction is NOT idempotent, by decision: a boot-less counter is
+     not a previous value for a boot-keyed pass (the master may have restarted
+     while the boot id was unreadable, and a counter of 15 over a baseline of
+     10 would request only 5). `observe_new_boot_full`: a boot id with no
+     counter of its own is accounted in FULL, whatever the boot-less key holds.
+     So none → some can request the same cumulative value once more — a
+     possible duplicate repair (one extra rebuild), chosen over a missed one
+     (replicas left inconsistent);
+   - counter keys encode the master key and destination (`%` → `%25`, `|` →
+     `%7C`) before joining them with `|`: `keyParts_some` / `keyParts_none`
+     (every key splits into exactly 3 / 2 parts and decodes back to the master
+     key, destination and boot id, for ANY strings), `decode_encode`,
+     `counterKey_inj`, `observe_new_keys`. A name with neither character
+     encodes to itself (`encodePart_id`, `counterKey_compat`), so keys of an
+     existing ledger (`host:port`) are unchanged. A destination containing `|`
+     is accounted like any other and `no_repeat_request` covers it;
+   Not proved: the text round trip of `Json.compress`/`Json.parse`, the kubectl
+   read and write of `status.replicaRepairs`, and Main's order of calls and IO
+   (stats read, `observe`, then `request` per drop); destinations within one
+   pass are assumed distinct. The claim is the Json tree round trip: Main's and
+   Kubernetes' IO are outside it (a targeted E2E is separate, run-time
+   evidence). Concrete runs in the file (`#guard`) show the boot id read / not
+   read / read again, boot-less 10 → 15, and the `|` cases.
 
 ✅ **A FORBIDDEN copy is never promoted** (`PromotionForbiddenProofs.lean`,
    sorry- and axiom-free, no `native_decide`; FORMAL_VERIFICATION §4 #3 of the

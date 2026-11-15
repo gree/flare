@@ -307,7 +307,7 @@ private def outageTest (c : Ctx) (k : Kind) : IO TestResult := do
     apiStart cp
 
 def suite : TestSuite :=
-  { name := "apiserver-outage"
+  { name := "node-ops-apiserver-outage"
     setup := do
       deployCluster cfg
       IO.sleep 50000

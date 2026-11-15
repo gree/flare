@@ -119,7 +119,7 @@ jobs:
             {"group":"node-ops-cordon-b","suites":"node-ops-switch-tmpfs-cordon-no-successor,node-ops-switch-tmpfs-cordon-operator-restart,node-ops-switch-tmpfs-cordon-two-nodes,node-ops-switch-tmpfs-cordon-no-operator,node-ops-switch-tmpfs-cordon-restart-quiet"},
             {"group":"node-ops-cordon-c","suites":"node-ops-switch-tmpfs-cordon-stuck,node-ops-switch-tmpfs-cordon-master-noreply"},
             {"group":"node-ops-cordon-pvc","suites":"node-ops-switch-nfs-cordon-master,node-ops-switch-nfs-cordon-replica,node-ops-switch-cordon-pinned"},
-            {"group":"node-ops-apiserver-outage","suites":"apiserver-outage"},
+            {"group":"node-ops-apiserver-outage","suites":"node-ops-apiserver-outage"},
             {"group":"stats-cost","suites":"stats-cost"},
             {"group":"continuous-replication","suites":"copy-retention-measure,continuous-replication,continuous-replication-scale,continuous-replication-sustained,continuous-replication-outage,continuous-replication-outage-tmpfs,visibility-bench"}
           ]'

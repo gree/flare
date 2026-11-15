@@ -16,10 +16,13 @@
       returns and the cluster settles (one master, map version not lower).
   T2  short blip (10 s, the API port dropped with iptables on the control-plane
       node so the window is exact; restoring the static pod took 25 s in
-      43692989177): 0 errors, 0 missing. Whether the operator leader restarts is
-      RECORDED, not asserted: it exits on the first failed lease renewal (one
-      reconcile pass, Main.lean), and in 43692989177 it logged LOST LEASE 1-5 s
-      after the API stopped.
+      43692989177): 0 errors, 0 missing, and NOTHING happens: the operator
+      container does not restart, logs no LOST LEASE, the operator pod is the
+      same, the master and the node map version are unchanged. With the port
+      dropped the renewal's kubectl call waits (30 s wall, Kubectl.lean) and
+      succeeds when the port opens. An API that REFUSES connections (T1, the
+      static pod stopped) fails the renewal at once and the operator exits on
+      that first failure (Main.lean; flare-operator-lease-renew-tolerance).
   T3  API down + the master's flared killed (-9, from the node; the kubelet
       restarts the container, the emptyDir is kept): errors are CHARACTERISED
       (per type, window, whether the restarted flared serves before the API
@@ -242,6 +245,7 @@ private def outageTest (c : Ctx) (k : Kind) : IO TestResult := do
       c.event s!"operator container restarts during the window: {restarts2} (lease lines: {leaseLines.length}, LOST LEASE seen: {lostLease leaseLines})"
       let settledAfter ← waitForCondition "the cluster is settled after the API returned" 420 (settled c)
       let v1 ← masterMapVersion c
+      let masterAfter := (← c.roles).bind (·.1)
       -- the load
       let svc? ← c.stopLoad "svc" 4
       let peer? ← c.stopLoad "peer" 2
@@ -316,8 +320,16 @@ private def outageTest (c : Ctx) (k : Kind) : IO TestResult := do
         | _, _ => return .fail s!"the node map version could not be read ({v0} -> {v1}). {summary}"
       | .blip =>
         if errs != 0 then return .fail s!"WRITE ERRORS during the blip. {summary}"
-        -- characterised: the operator exits on the first failed renewal
-        c.art "report.txt" s!"blip: operator restarts {restarts2}, LOST LEASE logged {lostLease leaseLines}"
+        c.art "report.txt" s!"blip: operator restarts {restarts2}, LOST LEASE logged {lostLease leaseLines}, master {p.master.name} -> {masterAfter}"
+        if restarts2 != 0 || lostLease leaseLines then
+          return .fail s!"the operator leader restarted or lost its lease in a 10 s blip (restarts {restarts2}, LOST LEASE {lostLease leaseLines}; operator-lease-lines.txt). {summary}"
+        if (opAfter.map (·.1)) != some opPod then
+          return .fail s!"the operator pod was replaced in a 10 s blip ({opPod} -> {opAfter.map (·.1)}). {summary}"
+        if masterAfter != some p.master.name then
+          return .fail s!"the master changed in a 10 s blip ({p.master.name} -> {masterAfter}). {summary}"
+        match v0, v1 with
+        | some a, some b => if a != b then return .fail s!"the node map version changed in a 10 s blip ({a} -> {b}). {summary}"
+        | _, _ => return .fail s!"the node map version could not be read ({v0} -> {v1}). {summary}"
       | .killMaster =>
         if killOut != "killed=1" then return .fail (notSetUp s!"the master's flared was not killed ({killOut})")
       return .pass
@@ -339,7 +351,7 @@ def suite : TestSuite :=
     afterEach := fun i => saveFullLogs cfg.«namespace» s!"after-test-{i}"
     tests := [
       { name := "(A1) kube-apiserver down ~120 s under load: 0 write errors, 0 missing; the operator leader exits on the lost lease, resumes after the API returns, the cluster settles", run := outageTest ctx .long },
-      { name := "(A2) kube-apiserver unreachable 10 s (port dropped) under load: 0 write errors, 0 missing; whether the operator leader restarts is recorded", run := outageTest ctx .blip },
+      { name := "(A2) kube-apiserver unreachable 10 s (port dropped) under load: 0 write errors, 0 missing; nothing happens (operator not restarted, no LOST LEASE, same master, same node map version)", run := outageTest ctx .blip },
       { name := "(A3) kube-apiserver down ~90 s and the master's flared killed: errors characterised; after the API returns 0 acknowledged writes missing, one master, settled", run := outageTest ctx .killMaster } ] }
 
 end FlareOperator.E2E.Tests.ApiserverOutage

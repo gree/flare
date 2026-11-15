@@ -49,6 +49,7 @@ import FlareOperator.E2E.Tests.SnapshotPushSeed
 import FlareOperator.E2E.Tests.ReadBalance
 import FlareOperator.E2E.Tests.RestoreIsolated
 import FlareOperator.E2E.Tests.NodeOpsSwitch
+import FlareOperator.E2E.Tests.ApiserverOutage
 import FlareOperator.E2E.Tests.FailoverOrder
 import FlareOperator.E2E.Tests.FirstBuildBusyPool
 import FlareOperator.E2E.Tests.WebhookTls
@@ -153,4 +154,4 @@ def main (args : List String) : IO UInt32 :=
     Tests.BlueGreenMigration.suite,
     Tests.SnapshotPushSeed.suite,
     Tests.WebhookTls.suite
-  ] ++ Tests.NodeOpsSwitch.switchSuites) args
+  ] ++ Tests.NodeOpsSwitch.switchSuites ++ [Tests.ApiserverOutage.suite]) args

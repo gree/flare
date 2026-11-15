@@ -482,6 +482,16 @@ private def runNodeMoves (crName ns : String) (stateRef : IO.Ref FlareClusterSta
   metrics.cordonMovesActive.set (final.moves.filter (!·.finished)).length.toFloat
   metrics.cordonMoveHeld.set (if final.moves.any (fun m => !m.finished && m.held) then 1.0 else 0.0)
   metrics.cordonMovesStuck.set final.stuckMoves.length.toFloat
+  metrics.cordonMoveUnservedSeconds.set
+    (match final.moves.find? (fun m => !m.finished && !m.stuck && m.phase == .unserved) with
+     | some m => ((wallNow - m.phaseMs).toFloat / 1000.0)
+     | none => 0.0)
+  match (final.moves.filter (·.releasedMs > 0)).foldl
+      (fun (acc : Option NodeMove.Move) m => match acc with
+        | some a => if m.releasedMs > a.releasedMs then some m else some a
+        | none => some m) none with
+  | some m => metrics.cordonMoveLastUnservedSeconds.set (m.unservedMs.toFloat / 1000.0)
+  | none => pure ()
   metrics.cordonMoveBlocked.set (if final.active.isNone then final.blocked.length.toFloat else 0.0)
   return heldNow
 
@@ -2201,8 +2211,7 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
         -- not a normal promotion: anything other than eligible / legacy /
         -- empty is out of the normal paths (the refill's last resort may still
         -- choose a lagging copy; the commit decides by reason)
-        let notNormal := evidence.filterMap fun (k, c, _) => if c.normal then none else some k
-        sourceIneligible := sourceIneligible ++ notNormal.filter (!sourceIneligible.contains ·)
+        sourceIneligible := PromotionEvidence.withheldKeys sourceIneligible evidence
         -- every reading this pass, unreadable ones included: which evidence
         -- a promotion on this pass could stand on (copy-identity 11)
         let shown := readings.map fun (k, e) => s!"{k}={SourceEligibility.readingLabel e}"
@@ -2227,8 +2236,8 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       let ranked := pinnedFirst ++ (cls.ranked ++ failoverRanked).filter (!pinnedFirst.contains ·)
       let nPartsHolders ← desiredPartitionsRef.get
       pure (.PodListResponse podKeys (Bridge.podZones pods nodeZones) termKeys dataKeys unhealthyKeys heldKeys
-              (cls.unfit ++ (notReadyActive ++ sourceIneligible).filter (!cls.unfit.contains ·)) cls.unproven ranked knownEmpty
-              ((← promotionEvidenceRef.get).filterMap fun (k, c, _) => if c.promotable then none else some k)
+              (PromotionEvidence.unfitKeys cls.unfit notReadyActive sourceIneligible) cls.unproven ranked knownEmpty
+              (PromotionEvidence.blockedKeys (← promotionEvidenceRef.get))
               (match ← historyStoreRef.get with
                 | some st => (List.range nPartsHolders).filterMap fun p =>
                     match st.part p with
@@ -2568,7 +2577,8 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
         let replyNow ← match ← Bridge.queryPodStats (extractPodName k) ns "stats" with
           | .ok out => pure (some out)
           | .error _ => pure none
-        let expected := PromotionEvidence.bindingFor part.toNat (← desiredPartitionsRef.get) cur.partitionSize
+        let nPartsF ← desiredPartitionsRef.get
+        let expected := PromotionEvidence.bindingFor part.toNat nPartsF cur.partitionSize
         match replyNow with
         | none =>
           IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: the first master of partition {part}, but its copy could not be read (restore provenance unknown) — nothing from this pass is committed, the next pass reads again"
@@ -2576,9 +2586,25 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
           return
         | some out =>
           let st := PromotionEvidence.parseStats out
-          match (if st.complete then PromotionEvidence.bindingConflict st.partitionBinding st.restoredUnverified expected else some "stats incomplete") with
+          -- a history may be RECORDED for a partition the map holds no copy of
+          -- (the store outlives the map): the full class decides too
+          let n1? := cur.lookupNode k
+          let readyF := match ← kubectl ["get", "pod", extractPodName k, "-n", ns, "-o",
+              "jsonpath={.status.conditions[?(@.type==\"Ready\")].status}"] with
+            | .ok o => o.trim == "True"
+            | .error _ => false
+          let obsF : PromotionEvidence.Observed := {
+            mapPrepare := (n1?.map (·.state)) == some FlareState.Prepare
+            mapActive := (n1?.map (·.state)) == some FlareState.Active
+            podReady := readyF
+            partitionHasMaster := false
+            lastMasterHistory := ← recordedHistory part
+            expectedBinding := some expected
+            untrackedLastMaster := ← untrackedLastMaster cur part
+            attributedRejoin := (n1?.map fun n => PromotionEvidence.isAttributedRejoin (n.role == FlareRole.Slave) (n.state == FlareState.Prepare) n.partition n.lastMasterOf n.formerSlaveOf).getD false }
+          match PromotionEvidence.firstMasterDecision replyNow obsF expected with
           | some why =>
-            IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: the first master of partition {part} — restore provenance: {why} — nothing from this pass is committed"
+            IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: the first master of partition {part} — {why} — nothing from this pass is committed"
             promotionAbortedRef.set true
             return
           | none =>
@@ -2597,6 +2623,7 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
         let nPartsB ← desiredPartitionsRef.get
         let proven := (← handoverProvenRef.get).contains k
           && (← handoverBindingHolds k (PromotionEvidence.bindingOf (podNow.map (·.1)) replyNow))
+        let contHistC ← handoverContinuedHistoryRef.get
         let obs : PromotionEvidence.Observed := {
           mapPrepare := (n?.map (·.state)) == some FlareState.Prepare
           mapActive := (n?.map (·.state)) == some FlareState.Active
@@ -2605,6 +2632,8 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
           partitionHasMaster := cur.nodeMap.any fun kv => kv.2.role == FlareRole.Master && kv.2.partition == part
             && (!proven || kv.2.state == FlareState.Active)
           lastMasterHistory := hist
+          -- A3b: only a proven handover's commit may name a continued history
+          continuedHistory := if proven then PromotionEvidence.continuedFor k contHistC else none
           isLastMasterHolder := (n?.map (·.lastMasterOf)) == some part
           expectedBinding := if part ≥ 0 then some (PromotionEvidence.bindingFor part.toNat nPartsB cur.partitionSize) else none
           untrackedLastMaster := ← untrackedLastMaster cur part
@@ -2612,16 +2641,13 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
         let cls := PromotionEvidence.classify replyNow obs
         IO.eprintln s!"[flare-operator] PROMOTION EVIDENCE (read at commit, a pass that did not read the candidates): {k}={cls.label} [boot {(PromotionEvidence.bindingOf none replyNow).bootId.getD "?"}]"
         -- A3b: a committed replica replacing a stopped successor holds the
-        -- handover's continued history (master_id, E'), not the recorded E
-        let contHist ← handoverContinuedHistoryRef.get
-        let continued := proven && match replyNow with
-          | some out => contHist.any fun (kk, m, ep) =>
-              kk == k && statStr out "rocksdb_master_id" == some m && statStr out "rocksdb_source_epoch" == some ep
-          | none => false
-        let allows := if proven then PromotionEvidence.handoverCommitAllows cls || continued else PromotionEvidence.commitTimeAllows cls
-        if continued && !PromotionEvidence.handoverCommitAllows cls then
+        -- handover's continued history (master_id, E'), not the recorded E:
+        -- `classify` says `continued` (never forbidden), only a proven
+        -- handover's commit accepts it
+        let allows := PromotionEvidence.commitDecision replyNow obs proven
+        if allows && cls == .continued then
           IO.eprintln s!"[flare-operator] promotion of {k}: {cls.label} at commit, accepted: it holds the continued history of its handover (committed replica replacing a stopped successor)"
-        else if proven && allows && !PromotionEvidence.commitTimeAllows cls then
+        else if allows && proven && !PromotionEvidence.commitTimeAllows cls then
           IO.eprintln s!"[flare-operator] promotion of {k}: {cls.label} at commit, accepted for an ordered handover whose drain was proven clean"
         if podNow.isNone || !allows then
           IO.eprintln s!"[flare-operator] CRITICAL: PROMOTION ABORTED for {k}: an existing copy promoted on a pass that did not read it, read at commit as {cls.label}{if podNow.isNone then " (pod unreadable)" else ""} — nothing from this pass is committed, the next pass reads again"
@@ -2801,23 +2827,20 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
           let obsK0 := (← promotionObservedRef.get).lookup k
           let obsK := if proven then none else obsK0
           let n? := cur.lookupNode k
-          let obsNow : PromotionEvidence.Observed := obsK.getD {
+          let contHistI ← handoverContinuedHistoryRef.get
+          let obsNow : PromotionEvidence.Observed := { obsK.getD {
             mapPrepare := (n?.map (·.state)) == some FlareState.Prepare, mapActive := (n?.map (·.state)) == some FlareState.Active,
-            podReady := true, partitionHasMaster := false, lastMasterHistory := some (rec.hist.masterId, rec.hist.epoch) }
+            podReady := true, partitionHasMaster := false, lastMasterHistory := some (rec.hist.masterId, rec.hist.epoch) } with
+            continuedHistory := if proven then PromotionEvidence.continuedFor k contHistI else none }
           let freshCls := PromotionEvidence.classify (fresh.map (·.2)) obsNow
           let consistent := match passEv with
             | some (_, passCls, b0) =>
               (PromotionEvidence.reclassifyAllows passCls freshCls).1
                 && b0 == PromotionEvidence.bindingOf (fresh.map (·.1)) (fresh.map (·.2))
-            | none => if proven then PromotionEvidence.handoverCommitAllows freshCls else PromotionEvidence.commitTimeAllows freshCls
-          -- A3b: the replacement of a stopped successor holds the handover's
-          -- continued history (master_id, E'), exactly — as at the commit read
-          let contHistI ← handoverContinuedHistoryRef.get
-          let continuedI := proven && match fresh with
-            | some (_, out) => contHistI.any fun (kk, m, ep) =>
-                kk == k && statStr out "rocksdb_master_id" == some m && statStr out "rocksdb_source_epoch" == some ep
-            | none => false
-          let consistent := consistent || continuedI
+            -- A3b: the replacement of a stopped successor holds the handover's
+            -- continued history (master_id, E'), exactly — the same decision
+            -- as at the commit read (`continued` class, commitDecision)
+            | none => PromotionEvidence.commitDecision (fresh.map (·.2)) obsNow proven
           let seenK := match fresh with
             | some (u, r) => seenOf u (some r)
             | none => .unreadable
@@ -4074,6 +4097,8 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
       let led0 ← ledgerRef.get
       -- counters are bound to the master's flared PROCESS (boot id)
       let mBoot := statNat mo "reconstruction_boot_id"
+      if mBoot.isNone && ReplicaRepair.hasBootKey led0 mKey then
+        IO.eprintln s!"[flare-operator] REPLICA REPAIR accounting skipped: master {mKey}'s reconstruction_boot_id is unreadable in this stats reply while the ledger holds its counters under a boot id — a baseline taken without it could be the wrong process's; the next pass that reads it continues from the recorded one"
       let (led1, newDrops, firstSeen) := ReplicaRepair.observe led0 mKey drops mBoot
       for dest in firstSeen do
         IO.eprintln s!"[flare-operator] REPLICA REPAIR (first observation): master {mKey} (boot {mBoot}) already reports dropped writes to {dest} at the ledger's first observation — when they happened, and whether anything repaired them since, is unknown; recorded as a POSSIBLY UNREPAIRED request (same ownership and gates as any request, no immediate demotion)"

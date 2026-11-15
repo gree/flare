@@ -5930,17 +5930,30 @@ def historyTrackingSuite : TestSuite := {
           -- curr_items 0, so the dead process — still named master by the map
           -- before the operator saw it die — could read as "empty"): the NEW
           -- process (another boot id) answering curr_items 0 while the map
-          -- names it master
+          -- names it master, AND the process itself reporting own_role master.
+          -- The map and the process are read at different instants: E2E
+          -- 43156408531 read the map (the dead process still named master,
+          -- before the operator saw it die) about 0.3 s before the new process
+          -- started, then read the new process (items 0) — which the operator
+          -- had registered as Slave (Prepare) in between, never master. Its
+          -- own_role, curr_items and boot id come from ONE stats reply (one
+          -- sample of one process), so no transition falls between them, and
+          -- the map is read again after it: it counts only when the map
+          -- names the pod master both before and after that sample.
           let mut emptyMaster := false
           let mut seated := false
           for i in [0:60] do
             if let some m := ← masterPodOf c then
               if m == mPod then
                 let ip := (← getPodIp mPod ns).getD ""
-                let items ← c.statNat ip "curr_items"
-                let boot ← c.statStr ip "reconstruction_boot_id"
-                IO.eprintln s!"# sample {i}: map master {m}; its process boot {boot} (before the kill {boot0}), curr_items {items}"
-                if items == some 0 && boot.isSome && boot != some boot0 then emptyMaster := true
+                let sample ← c.statsOf ip
+                let items := sample.bind (statVal · "curr_items") |>.bind (·.toNat?)
+                let boot := sample.bind (statVal · "reconstruction_boot_id")
+                let role := sample.bind (statVal · "own_role")
+                let after ← masterPodOf c
+                IO.eprintln s!"# sample {i}: map master {m} (after the sample: {after}); its process boot {boot} (before the kill {boot0}), curr_items {items}, own_role {role}"
+                if after == some mPod && items == some 0 && boot.isSome && boot != some boot0 && role == some "master" then
+                  emptyMaster := true
               if m == sPod then seated := true
             if seated then break
             IO.sleep 5000

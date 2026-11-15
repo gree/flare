@@ -224,7 +224,9 @@ int flared::startup(int argc, char **argv) {
 	// same rule on reload.
 	connection_tcp::read_timeout = connection_tcp::effective_read_timeout_ms(flared_k8s_build(),
 		ini_option_object().is_net_read_timeout_set(), ini_option_object().get_net_read_timeout());
-	connection_tcp::accepted_read_timeout = connection_tcp::effective_accepted_read_timeout_ms(ini_option_object().get_net_read_timeout());
+	connection_tcp::accepted_read_timeout = connection_tcp::effective_accepted_read_timeout_ms(ini_option_object().get_net_read_timeout(),
+		ini_option_object().get_client_idle_timeout());
+	log_notice("  client idle timeout:    %d ms", connection_tcp::accepted_read_timeout);
 	this->_server = new server();
 	this->_server->set_back_log(ini_option_object().get_back_log());
 #ifndef ENABLE_K8S_OPERATOR
@@ -555,7 +557,8 @@ int flared::reload() {
 	// 30 s read timeout into 600 s)
 	connection_tcp::read_timeout = connection_tcp::effective_read_timeout_ms(flared_k8s_build(),
 		ini_option_object().is_net_read_timeout_set(), ini_option_object().get_net_read_timeout());
-	connection_tcp::accepted_read_timeout = connection_tcp::effective_accepted_read_timeout_ms(ini_option_object().get_net_read_timeout());
+	connection_tcp::accepted_read_timeout = connection_tcp::effective_accepted_read_timeout_ms(ini_option_object().get_net_read_timeout(),
+		ini_option_object().get_client_idle_timeout());
 	log_notice("  read timeout:           %d ms", connection_tcp::read_timeout);
 	log_notice("  client idle timeout:    %d ms", connection_tcp::accepted_read_timeout);
 

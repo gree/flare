@@ -257,6 +257,13 @@ cluster:
   # are withheld meanwhile). The WAL must cover the backlog of dropped
   # forwards: on tmpfs keep walSizeLimitMb / walTtlSeconds as above.
   # Set both false to keep the earlier behaviour (repairs rebuild a replica).
+  # clientIdleTimeoutSeconds: idle timeout of client connections (flared
+  # client-idle-timeout; unset = 600 s, applied by SIGHUP). A cordon move waits
+  # for the moved pod's client connections to close, so an idle persistent
+  # client delays the move by up to this long (see the operator metric
+  # flare_operator_cordon_move_unserved_seconds). Shorter closes idle clients
+  # sooner; a client behind a load balancer that forgets a half-closed
+  # connection may then wait in close() (libmemcached SO_LINGER, 1000 s).
   rocksdb:
     maxTotalThreadQueue: 200000
     replIdentityForward: true

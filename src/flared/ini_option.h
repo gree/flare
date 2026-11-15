@@ -71,6 +71,7 @@ private:
 	int					_master_wait_msec;
 	int					_net_read_timeout;
 	bool				_net_read_timeout_set;
+	int					_client_idle_timeout;
 	int					_proxy_concurrency;
 	int					_reconstruction_interval;
 	int					_reconstruction_bwlimit;
@@ -265,6 +266,8 @@ public:
 	int get_net_read_timeout() { return this->_net_read_timeout; };
 	// net-read-timeout was given explicitly (config file or command line)
 	bool is_net_read_timeout_set() { return this->_net_read_timeout_set; };
+	// idle timeout of accepted (client) connections, sec; 0 = net_read_timeout
+	int get_client_idle_timeout() { return this->_client_idle_timeout; };
 	int get_proxy_concurrency() { return this->_proxy_concurrency; };
 	int get_reconstruction_interval() { return this->_reconstruction_interval; };
 	int get_reconstruction_bwlimit() { return this->_reconstruction_bwlimit; };

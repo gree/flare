@@ -157,6 +157,24 @@ SAFETY-TODO.md.
   being moved. With 3 copies, the master and one more copy remain during
   the move. See
   [RUNBOOK.md#cordon-move](RUNBOOK.md#cordon-move).
+- **Connections are of three kinds, with different time limits** (user
+  decision, 2026-11-13). A Pod's connection count (`curr_connections`)
+  includes all accepted connections, so the cordon move above waits for
+  each kind.
+
+  | Connection | Opened by → to | Closed when idle | Why |
+  |---|---|---|---|
+  | Client | a client (directly or through the load balancer) → flared | by flared after the client idle timeout: `net_read_timeout`, 600 s, or `spec.rocksdb.clientIdleTimeoutSeconds` | A batch client can be silent for more than 30 s between requests. Closing an idle client sooner, behind a load balancer that forgets the half-closed flow, made the client's `close()` hang up to 1000 s (flare-idle-close-linger-hang). |
+  | Forwarding | flared → another flared (proxy forwards and replica forwards) | by the **sender** after 30 s without a forward; the next forward opens it again | The receiver cannot tell it from a client and would keep it for 600 s. A Pod that became a proxy then kept its peers' idle forwarding connections, and every cordon move waited about 10 minutes (E2E 43200043205). |
+  | Liveness | the operator → flared (stats, node_map) | per request | Whether a node is up is decided by the operator (requirement 12), not by idle connections. A flared waiting for a reply from a peer gives up after 30 s in the Kubernetes build. |
+
+  - **Effect on the cordon move.** The move is released when the Pod has no
+    connection. Forwarding connections close about 30 s after the Pod
+    became a proxy. A client that keeps an idle connection open delays the
+    release up to the client idle timeout; the move is reported held after
+    120 s (`FlareCordonMoveHeld`) and stuck after 1800 s. Set
+    `clientIdleTimeoutSeconds` to shorten the wait for such clients, at the
+    cost of closing idle clients sooner.
 - **History continuation after a handover** (PR #151). The remaining
   replicas take over the new master's history instead of rebuilding. Off
   unless the operator runs with `FLARE_OPERATOR_HISTORY_CONTINUATION=on`, and

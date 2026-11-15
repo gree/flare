@@ -43,6 +43,8 @@ private def cfg : ClusterConfig := {
 
 private def pod : String := s!"{cfg.name}-nodes-0"
 private def explicitSec : Nat := 8
+/-- spec.rocksdb.clientIdleTimeoutSeconds set through the FlareCluster -/
+private def clientIdleSec : Nat := 12
 /-- Measurement cap: well above 30 s, far below the 600 s default. -/
 private def capSec : Nat := 75
 
@@ -153,6 +155,54 @@ def suite : TestSuite := {
               return .pass
             | _, _ => return .fail s!"could not measure from the debug pod: {t0} / {t1}" },
 
+    { name := s!"spec.rocksdb.clientIdleTimeoutSeconds = {clientIdleSec}: the operator writes client-idle-timeout, a reload closes an idle client after it while the opened connections keep 30 s; removing it goes back to 600 s"
+      run := do
+        match ← getPodIp pod cfg.«namespace» with
+        | none => return .fail s!"no IP for {pod}"
+        | some ip =>
+          -- flushAllEnabled (its default, true) stays set while the knob is
+          -- removed: the operator leaves extra.conf alone once spec.rocksdb
+          -- is empty (hand-edited keys), as the chart never leaves it (E2E
+          -- 43172827217: the removal never reached the file)
+          let patch := fun (rocksdb : String) =>
+            kubectl ["patch", "flarecluster", cfg.name, "-n", cfg.«namespace», "--type", "merge",
+              "-p", s!"\{\"spec\":\{\"rocksdb\":{rocksdb}}}"]
+          match ← patch s!"\{\"clientIdleTimeoutSeconds\":{clientIdleSec},\"flushAllEnabled\":true}" with
+          | .error e => return .fail s!"could not set clientIdleTimeoutSeconds: {e}"
+          | .ok _ => pure ()
+          let mounted ← waitForCondition "the mounted extra.conf carries client-idle-timeout" 180 do
+            return containsSubstr (← mountedConf) s!"client-idle-timeout = {clientIdleSec}"
+          if !mounted then return .fail "the operator never wrote client-idle-timeout into the pod's extra.conf"
+          match ← reloadAndRead with
+          | .error e => return .fail e
+          | .ok ms =>
+            let client := (clientIdleLines (← kubectlLogs pod cfg.«namespace» 5000)).getLast?
+            let t ← closeAfterPartialCommand ip
+            IO.eprintln s!"# set: read timeout {ms} ms, client idle {client} ms; half-sent command dropped after {t} s"
+            if ms != 30000 then return .fail s!"client-idle-timeout changed the opened connections' read timeout to {ms} ms, expected 30000"
+            if client != some (clientIdleSec * 1000) then return .fail s!"the reload printed client idle timeout {client} ms, expected {clientIdleSec * 1000}"
+            match t with
+            | some a =>
+              if !(a + 3 ≥ clientIdleSec && a ≤ clientIdleSec + 7) then
+                return .fail s!"the half-sent client command was dropped after {a} s, expected about {clientIdleSec}"
+            | none => return .fail "could not measure from the debug pod"
+            match ← patch "{\"clientIdleTimeoutSeconds\":null}" with
+            | .error e => return .fail s!"could not remove clientIdleTimeoutSeconds: {e}"
+            | .ok _ => pure ()
+            let gone ← waitForCondition "the mounted extra.conf no longer carries client-idle-timeout" 180 do
+              return !containsSubstr (← mountedConf) "client-idle-timeout"
+            if !gone then return .fail "client-idle-timeout stayed in the pod's extra.conf after it was removed from the spec"
+            match ← reloadAndRead with
+            | .error e => return .fail e
+            | .ok ms2 =>
+              let client2 := (clientIdleLines (← kubectlLogs pod cfg.«namespace» 5000)).getLast?
+              IO.eprintln s!"# removed: read timeout {ms2} ms, client idle {client2} ms"
+              if client2 != some 600000 then return .fail s!"after removing it the reload printed client idle timeout {client2} ms, expected 600000"
+              -- spec.rocksdb empty again: the next test hand-edits extra.conf,
+              -- which the operator then leaves alone
+              discard <| patch "{\"flushAllEnabled\":null}"
+              return .pass },
+
     { name := s!"net-read-timeout = {explicitSec} set explicitly: a SIGHUP reload applies it, and a second reload with the file unchanged keeps it (measured)"
       run := do
         match ← getPodIp pod cfg.«namespace» with
@@ -163,7 +213,15 @@ def suite : TestSuite := {
           match ← sh edit with
           | .error e => return .fail s!"could not add net-read-timeout to {cm}: {e}"
           | .ok _ => pure ()
+          -- the previous test's last spec change (spec.rocksdb emptied) may
+          -- reach the operator after this edit: while spec.rocksdb was still
+          -- set it rewrites the file and drops the hand-added line (E2E
+          -- 43180140120). Once spec.rocksdb is empty it leaves the file, so
+          -- the line is added again while it is missing.
           let mounted ← waitForCondition "the mounted extra.conf carries net-read-timeout" 180 do
+            let inMap ← sh s!"kubectl get configmap {cm} -n {cfg.«namespace»} -o jsonpath='\{.data.extra\\.conf}'"
+            if !(match inMap with | .ok t => containsSubstr t s!"net-read-timeout = {explicitSec}" | .error _ => true) then
+              discard <| sh edit
             return containsSubstr (← mountedConf) s!"net-read-timeout = {explicitSec}"
           if !mounted then return .fail "the ConfigMap change never reached the pod's extra.conf"
           match ← reloadAndRead with

@@ -16,7 +16,9 @@
       returns and the cluster settles (one master, map version not lower).
   T2  short blip (10 s, the API port dropped with iptables on the control-plane
       node so the window is exact; restoring the static pod took 25 s in
-      43692989177): 0 errors, 0 missing, and NOTHING happens: the operator
+      43692989177; the 10 s run from the iptables insert to its removal, with
+      1 s resolution, and SUMMARY prints the measured value): 0 errors, 0
+      missing, and NOTHING happens: the operator
       container does not restart, logs no LOST LEASE, the operator pod is the
       same, the master and the node map version are unchanged. With the port
       dropped the renewal's kubectl call waits (30 s wall, Kubectl.lean) and
@@ -205,7 +207,10 @@ private def outageTest (c : Ctx) (k : Kind) : IO TestResult := do
       | some s => c.event s!"/readyz fails after {s} s"
       let mut killUs : Option Nat := none
       let mut killOut := ""
-      let deadline := (← nowSec) + k.outageSecs
+      -- the window is measured from the stop itself (downUs), not from when
+      -- /readyz first failed: a dropped port makes that check wait out its 4 s
+      -- request timeout first
+      let deadline := downUs / 1000000 + k.outageSecs
       if k == .killMaster then
         IO.sleep 15000
         killUs ← some <$> nowUs
@@ -219,16 +224,18 @@ private def outageTest (c : Ctx) (k : Kind) : IO TestResult := do
           match ← hostCmd "docker" ["exec", p.master.node, "sh", "-c", "crictl ps -a --name flared 2>&1 | tail -n 4"] with
           | .ok o => for l in o.splitOn "\n" do if !l.trim.isEmpty then c.art "node-containers.txt" s!"{← epochNow} {l}"
           | .error _ => pure ()
-        if (← nowSec) ≥ deadline then break
-        IO.sleep 5000
+        let now ← epochNow
+        if now ≥ deadline then break
+        IO.sleep ((min 5 (deadline - now)) * 1000).toUInt32
+      -- API back (first, so nothing else lengthens the window)
+      if k == .blip then apiUndrop cp else apiStart cp
+      let restoreUs ← nowUs
       let leaseLines ← operatorLeaseLines c opNode opPod (downUs / 1000000)
       for l in leaseLines do c.art "operator-lease-lines.txt" l
-      -- API back
-      if k == .blip then apiUndrop cp else apiStart cp
       let some secs := ← pollFor 300 apiReady
         | return .fail "the kube-apiserver did not answer /readyz within 300 s after its manifest was restored"
       let upUs ← nowUs
-      c.event s!"/readyz ok again after {secs} s; outage window {(upUs - downUs) / 1000000} s"
+      c.event s!"/readyz ok again after {secs} s; stopped for {(restoreUs - downUs) / 1000000} s (stop to restore), {(upUs - downUs) / 1000000} s until /readyz answered"
       let kubectlOk ← waitForCondition "kubectl works again" 120 do
         return (← kubectl ["get", "nodes"]) matches .ok _
       if !kubectlOk then return .fail "kubectl did not work within 120 s after the kube-apiserver returned"
@@ -298,7 +305,7 @@ private def outageTest (c : Ctx) (k : Kind) : IO TestResult := do
       let servedBeforeUp := match killUs with
         | some ku => (recs.filter fun (r : LoadRec) => r.ack && r.t0 ≥ ku && r.t1 ≤ upUs).length
         | none => 0
-      let summary := s!"SUMMARY [{k.label}]: errors {errs} by type {kinds} (window {errWindow}), missing on master {mm} / replica {mr}, max no-ACK gap {ms gap}, operator restarts {restarts2}, acks after the kill and before the API returned {servedBeforeUp}, map v{v0} -> v{v1}, settled {settledAfter}"
+      let summary := s!"SUMMARY [{k.label}]: stopped {(restoreUs - downUs) / 1000000} s (stop to restore, 1 s resolution), errors {errs} by type {kinds} (window {errWindow}), missing on master {mm} / replica {mr}, max no-ACK gap {ms gap}, operator restarts {restarts2}, acks after the kill and before the API returned {servedBeforeUp}, map v{v0} -> v{v1}, settled {settledAfter}"
       IO.eprintln s!"# [apiserver-outage] {summary}"
       c.art "report.txt" summary
       c.art "report.txt" (svcS.summary "svc")

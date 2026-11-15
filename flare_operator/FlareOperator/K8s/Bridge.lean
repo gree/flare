@@ -326,14 +326,10 @@ def confLandedOnAllPods (crName ns needle : String) : IO Bool := do
     | .error _ => return false
   return true
 
-/-- Render `extra.conf` content from rocksdb + optional cluster-replication
-    sections. Sections are separated by a blank line when both are present so
-    the file stays readable. Returns the empty string when neither section has
-    anything to emit. -/
-def renderFlaredExtraConf (rocksdb : RocksdbConfigSpec)
-    (repl : Option ClusterReplicationSpec) (offSnapshotPush : Bool := true) : String :=
-  let rocksdbBlock := rocksdb.toExtraConf
-  let replBlock := match repl with
+/-- The cluster-replication section of `extra.conf` (never empty: with
+    replication off it is still an explicit `cluster-replication = false`). -/
+def renderReplicationBlock (repl : Option ClusterReplicationSpec) (offSnapshotPush : Bool := true) : String :=
+  match repl with
     | some r =>
       let enabled := if r.enabled then "true" else "false"
       String.intercalate "\n" [
@@ -357,6 +353,15 @@ def renderFlaredExtraConf (rocksdb : RocksdbConfigSpec)
       -- (destination side, user decision 2026-10-13 item 1). Default true
       -- renders nothing (file unchanged).
       "cluster-replication = false" ++ (if offSnapshotPush then "" else "\ncluster-replication-snapshot-push = false")
+
+/-- Render `extra.conf` content from rocksdb + optional cluster-replication
+    sections. Sections are separated by a blank line when both are present so
+    the file stays readable. Returns the empty string when neither section has
+    anything to emit. -/
+def renderFlaredExtraConf (rocksdb : RocksdbConfigSpec)
+    (repl : Option ClusterReplicationSpec) (offSnapshotPush : Bool := true) : String :=
+  let rocksdbBlock := rocksdb.toExtraConf
+  let replBlock := renderReplicationBlock repl offSnapshotPush
   match rocksdbBlock, replBlock with
   | "", r  => r
   | a,  b  => a ++ "\n\n" ++ b

@@ -1711,6 +1711,65 @@ def checkLedgerObserve (ctx : Ctx) : IO Unit := do
   let (_, dz, fz) := ReplicaRepair.observe l0 "m" [("r1", 0)] (some 1)
   check ctx "ledger: a zero first sighting requests nothing"
     (dz.isEmpty && fz.isEmpty)
+  -- the boot id readable on one pass and not on the next (review of 7b414caf)
+  let (s1, sd1, _) := ReplicaRepair.observe l0 "m" [("r1", 3)] (some 7)
+  let (s2, sd2, _) := ReplicaRepair.observe s1 "m" [("r1", 3)] none
+  let (s3, sd3, _) := ReplicaRepair.observe s2 "m" [("r1", 3)] (some 7)
+  check ctx "ledger: boot id some -> none -> some with the same value requests once (the pass without it is not accounted)"
+    (sd1 == [("r1", 3)] && sd2.isEmpty && s2 == s1 && sd3.isEmpty && s3.counters == s1.counters)
+  let (_, sd4, _) := ReplicaRepair.observe s2 "m" [("r1", 5)] (some 7)
+  check ctx "ledger: after an unreadable boot id the same process continues from its baseline (only the difference)"
+    (sd4 == [("r1", 2)])
+
+/-- Json round trip of a ledger (an operator restart reads `status.replicaRepairs` back). -/
+@[noinline] def ledgerRoundTrip (l : ReplicaRepair.Ledger) : ReplicaRepair.Ledger :=
+  (ReplicaRepair.Ledger.fromJson? l.toJson).getD l
+
+/-- Boot-id transitions with a restart in between. -/
+def checkLedgerObserveBoot (ctx : Ctx) : IO Unit := do
+  let l0 : ReplicaRepair.Ledger := {}
+  let rt := ledgerRoundTrip
+  -- (a) boot-less 10, the master restarts while the boot id is unreadable, then reads 15
+  let (a1, ad1, _) := ReplicaRepair.observe l0 "m" [("r1", 10)] none
+  let (a2, ad2, _) := ReplicaRepair.observe a1 "m" [("r1", 15)] (some 7)
+  let (_, ad3, _) := ReplicaRepair.observe (rt a2) "m" [("r1", 15)] (some 7)
+  check ctx "ledger: boot-less 10, then a boot id reads with 15: the WHOLE 15 is requested (not 15 - 10); after an operator restart (Json round trip) the same boot and 15 request nothing"
+    (ad1 == [("r1", 10)] && ad2 == [("r1", 15)] && ad3.isEmpty
+      && a2.counters == [(counterKey "m" "r1" (some 7), 15)])
+  -- (b) boot-less 10, then a boot id reads with the same 10: accepted as a possible duplicate
+  let (_, bd1, _) := ReplicaRepair.observe a1 "m" [("r1", 10)] (some 7)
+  check ctx "ledger: boot-less 10, then a boot id reads with the same 10: requested once more in full (a possible duplicate repair is accepted over a missed one)"
+    (bd1 == [("r1", 10)])
+  -- (c) some b 10 -> none 10 -> some b 10
+  let (c1, cd1, _) := ReplicaRepair.observe l0 "m" [("r1", 10)] (some 7)
+  let (c2, cd2, _) := ReplicaRepair.observe (rt c1) "m" [("r1", 10)] none
+  let (c3, cd3, _) := ReplicaRepair.observe (rt c2) "m" [("r1", 10)] (some 7)
+  check ctx "ledger: boot id some -> none -> some with the same 10 requests once (the pass without the boot id is not accounted)"
+    (cd1 == [("r1", 10)] && cd2.isEmpty && c2 == c1 && cd3.isEmpty && c3 == c1)
+
+/-- Names containing the key separators `|` and `%`. -/
+def checkLedgerObserveNames (ctx : Ctx) : IO Unit := do
+  let l0 : ReplicaRepair.Ledger := {}
+  let rt := ledgerRoundTrip
+  -- (d) destinations `a|b`, `a`, `b` are accounted apart
+  let dests := [("a|b", 3), ("a", 4), ("b", 5)]
+  let (e1, ed1, _) := ReplicaRepair.observe l0 "m" dests (some 7)
+  let (_, ed2, _) := ReplicaRepair.observe (rt e1) "m" dests (some 7)
+  check ctx "ledger: destinations `a|b`, `a` and `b` are each accounted (separate counters), and the second pass requests nothing"
+    (ed1 == dests && ed2.isEmpty && e1.counters.length == 3)
+  let (_, ed3, _) := ReplicaRepair.observe e1 "m" [("a|b", 9), ("a", 4), ("b", 5)] (some 7)
+  check ctx "ledger: a rise on `a|b` is attributed to `a|b` alone"
+    (ed3 == [("a|b", 6)])
+  -- (e) a master key with `|` (and `%`), same as (d)
+  let (f1, fd1, _) := ReplicaRepair.observe l0 "m|x%y" dests (some 7)
+  let (_, fd2, _) := ReplicaRepair.observe (rt f1) "m|x%y" dests (some 7)
+  let (g1, _, _) := ReplicaRepair.observe f1 "m" [("x%y|a", 1)] (some 7)
+  let (_, gd2, _) := ReplicaRepair.observe g1 "m|x%y" dests (some 7)
+  check ctx "ledger: a master key containing '|' or '%' accounts its destinations apart; another master's counters are neither taken for it nor forgotten by it"
+    (fd1 == dests && fd2.isEmpty && gd2.isEmpty && g1.counters.length == 4)
+  check ctx "ledger: a name with neither '%' nor '|' keeps its old counter key (host:port)"
+    (counterKey "h:1" "r:2" none == "h:1|r:2" && counterKey "h:1" "r:2" (some 7) == "h:1|r:2|7"
+      && counterKey "m|x" "a%b" none == "m%7Cx|a%25b")
 
 def checkMasterMoved (ctx : Ctx) : IO Unit := do
   let m := fun (k : String) (e : Nat) (u : String) => ((k, e, u) : FollowEvidence.MasterIdentity)
@@ -2382,6 +2441,70 @@ private def checkAuthoritativeHistory (ctx : Ctx) : IO Unit := do
     ((match PromotionEvidence.classify (some (b ++ "STAT curr_items 0\r\nSTAT repl_read_source_eligible 0\r\nEND\r\n")) o with | .forbidden _ => true | _ => false)
       && (match PromotionEvidence.classify (some (b ++ "STAT curr_items 9\r\nSTAT repl_read_source_eligible 1\r\nSTAT repl_read_source_state eligible\r\nEND\r\n")) o with | .forbidden _ => true | _ => false)
       && (match PromotionEvidence.classify (some (b ++ "STAT curr_items 0\r\nSTAT repl_read_source_eligible 0\r\nEND\r\n")) { o with lastMasterHistory := none } with | .empty => true | _ => false))
+  -- forbidden-promotion review (7376469a): the handover-continued exception and the first master
+  let contBody := b ++ "STAT curr_items 9\r\nSTAT repl_read_source_eligible 0\r\n"
+  let contOk := contBody ++ "END\r\n"
+  let contHist := [("k", "M2", "5:fresh")]
+  let rebuilding := (b.replace "STAT rebuild_in_flight 0" "STAT rebuild_in_flight 1") ++ "STAT curr_items 9\r\nSTAT repl_read_source_eligible 0\r\nEND\r\n"
+  let partialCopy := (b.replace "STAT rocksdb_copy_partial 0" "STAT rocksdb_copy_partial 1") ++ "STAT curr_items 9\r\nSTAT repl_read_source_eligible 0\r\nEND\r\n"
+  let oC := { o with continuedHistory := some ("M2", "5:fresh") }
+  let isCont := fun (r : Option String) (ob : PromotionEvidence.Observed) => PromotionEvidence.classify r ob == .continued
+  let isForb := fun (r : Option String) (ob : PromotionEvidence.Observed) => match PromotionEvidence.classify r ob with | .forbidden _ => true | _ => false
+  check ctx "continued: a committed replica holding the recorded-elsewhere history is FORBIDDEN (rejoining) without the proven handover's continued history, and CONTINUED (not forbidden) with it"
+    (isForb (some contOk) o && isCont (some contOk) oC && !isForb (some contOk) oC)
+  check ctx "continued: only a PROVEN handover's commit accepts `continued`; without the proof, or with another key's / another history's, it is refused"
+    (PromotionEvidence.commitDecision (some contOk) oC true
+      && !PromotionEvidence.commitDecision (some contOk) oC false
+      && !PromotionEvidence.commitDecision (some contOk) o true
+      && !PromotionEvidence.commitDecision (some contOk) { o with continuedHistory := some ("M2", "6:other") } true
+      && PromotionEvidence.continuedFor "k" contHist == some ("M2", "5:fresh")
+      && (PromotionEvidence.continuedFor "other" contHist).isNone
+      && !PromotionEvidence.Class.promotable .continued && !PromotionEvidence.Class.normal .continued)
+  check ctx "continued: a forbidden marker wins over the continued history (rebuild in flight, partialCopy, incomplete reply) — FORBIDDEN, refused even in a proven handover"
+    (isForb (some rebuilding) oC && isForb (some partialCopy) oC
+      && !PromotionEvidence.commitDecision (some rebuilding) oC true
+      && !PromotionEvidence.commitDecision (some partialCopy) oC true
+      && !PromotionEvidence.commitDecision (some (rebuilding.replace "END\r\n" "")) oC true)
+  check ctx "continued: a forbidden class (restore provenance, divergence from the recorded history) is refused in a proven handover too — no exception"
+    (let restored := (contBody ++ "STAT rocksdb_restored_unverified 1\r\nSTAT rocksdb_partition_binding v1 partition=7 partitions=1 size=1024 hash=jenkins resolver=modular hint=1 virtual=4096\r\nEND\r\n")
+     let oB := { oC with expectedBinding := some (PromotionEvidence.bindingFor 0 1 1024) }
+     let diverged := (b.replace "STAT rocksdb_master_id M2" "STAT rocksdb_master_id M9") ++ "STAT curr_items 9\r\nSTAT repl_read_source_eligible 0\r\nEND\r\n"
+     isForb (some restored) oB && !PromotionEvidence.commitDecision (some restored) oB true
+       && isForb (some diverged) oC && !PromotionEvidence.commitDecision (some diverged) oC true)
+  -- review of 9afdf49d: `continued` is judged by every check against the continued history, not decided before them
+  let nrHist := contBody ++ "STAT repl_read_source_state needs_rebuild\r\nSTAT repl_read_source_reason history differs: copy 5:fresh, master k 5:fresh\r\nEND\r\n"
+  let nrOther := contBody ++ "STAT repl_read_source_state needs_rebuild\r\nSTAT repl_read_source_reason history differs: copy 5:fresh, master k 9:other\r\nEND\r\n"
+  let nrNoReason := contBody ++ "STAT repl_read_source_state needs_rebuild\r\nEND\r\n"
+  let nrApply := contBody ++ "STAT repl_read_source_state needs_rebuild\r\nSTAT repl_follow_last_reason apply_error\r\nSTAT repl_read_source_reason history differs: copy 5:fresh, master k 9:other\r\nEND\r\n"
+  let refused := fun (r : String) (ob : PromotionEvidence.Observed) =>
+    !isCont (some r) ob && !PromotionEvidence.commitDecision (some r) ob true && !PromotionEvidence.commitDecision (some r) ob false
+  check ctx "continued: a matching continued history does NOT bypass R3 needs_rebuild — forbidden against the continued history itself (R3 compared it with h), held with no reason; a needs_rebuild that compared the copy with another history stays CONTINUED"
+    (isForb (some nrHist) oC && refused nrHist oC
+      && !isForb (some nrNoReason) oC && refused nrNoReason oC
+      && isCont (some nrOther) oC && PromotionEvidence.commitDecision (some nrOther) oC true)
+  check ctx "continued: a matching continued history does NOT bypass an unsound follow reason (needs_rebuild + apply_error is FORBIDDEN, refused in a proven handover)"
+    (isForb (some nrApply) oC && refused nrApply oC)
+  let attrBody := contBody ++ "STAT rebuild_parked 0\r\nSTAT rocksdb_switch_unresolved 0\r\nSTAT rocksdb_partition_binding "
+  let attrOk := attrBody ++ PromotionEvidence.bindingFor 0 1 1024 ++ "\r\nEND\r\n"
+  let oA := { oC with attributedRejoin := true, expectedBinding := some (PromotionEvidence.bindingFor 0 1 1024) }
+  check ctx "continued: an UNPROVEN attributed rejoin holding the continued history is held, not continued (no binding / another binding / unreported integrity / follow apply_error); a PROVEN one is continued"
+    (refused contOk oA
+      && refused (attrBody ++ PromotionEvidence.bindingFor 3 1 1024 ++ "\r\nEND\r\n") oA
+      && refused (attrOk.replace "STAT rebuild_parked 0\r\n" "") oA
+      && refused (attrOk.replace "END\r\n" "STAT repl_follow_last_reason apply_error\r\nEND\r\n") oA
+      && isCont (some attrOk) oA && PromotionEvidence.commitDecision (some attrOk) oA true
+      && !PromotionEvidence.commitDecision (some attrOk) oA false)
+  -- first master of a new partition
+  let fm := fun (r : String) => PromotionEvidence.firstMasterAllows (PromotionEvidence.parseStats r) (PromotionEvidence.bindingFor 0 1 1024)
+  let fd := fun (r : String) (ob : PromotionEvidence.Observed) => PromotionEvidence.firstMasterDecision (some r) ob (PromotionEvidence.bindingFor 0 1 1024)
+  check ctx "first master: a candidate whose copy carries a forbidden marker is REFUSED (rebuild in flight, partialCopy, quarantine)"
+    ((fm rebuilding).isSome && (fm partialCopy).isSome
+      && (fm ((b.replace "STAT rocksdb_quarantined 0" "STAT rocksdb_quarantined 1") ++ "STAT curr_items 0\r\nEND\r\n")).isSome)
+  check ctx "first master: a copy that is FORBIDDEN by the recorded history of its partition (rejoining another history) is REFUSED though no marker is set; with no record it is allowed"
+    ((fm contOk).isNone && (fd contOk o).isSome && (fd contOk { o with lastMasterHistory := none }).isNone
+      && (fd rebuilding { o with lastMasterHistory := none }).isSome)
+  check ctx "first master: a clean copy is allowed as before; an incomplete reply is not"
+    ((fm (b ++ "STAT curr_items 0\r\nEND\r\n")).isNone && (fm (b ++ "STAT curr_items 0\r\n")).isSome)
 
 -- ─── copy retention §10: rebuild concurrency ──────────────────────────────
 
@@ -3407,6 +3530,8 @@ def run : IO UInt32 := do
   checkFollowConfirm ctx
   checkMasterMoved ctx
   checkLedgerObserve ctx
+  checkLedgerObserveBoot ctx
+  checkLedgerObserveNames ctx
   checkTraceParse ctx
   checkTraceMatch ctx
   checkTraceAmbiguity ctx

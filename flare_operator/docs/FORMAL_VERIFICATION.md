@@ -154,6 +154,10 @@ example : checkInvariantFinite s5 2 = true := by decide
 
 **Significance**: Critical checkpoints along the execution path are individually verified.
 
+#### 8. Handover Retry Terminates (`HandoverRetryProofs.lean`)
+
+`step_attempt`, `retryDecision_attempt`, `retryable_lt`, `drainHeldKeys_mem`, `reach_retries_le`, `reach_exhausted`, `reach_drain_free`: an aborted handover is retried at most `maxAttempts − attempt` times, then the one-map drain takes the master (3dcfc5c S9).
+
 ## Verification Architecture
 
 ### Phase 2: FlaredNode Model (`FlaredNode.lean`)
@@ -406,6 +410,122 @@ theorem scenario2_verified :
    — proven by induction over ARBITRARY node maps, not scenarios: whatever
    the FSM snapshot and the TCP server wrote, the committed node map never
    contains two Masters for one partition
+✅ **Replica-repair ledger** (`StateMachine/ReplicaRepairProofs.lean`, SC-03; the
+   E2E repair-ledger / SC-03 6 check of a restart that must not request twice):
+   - persistence round trip of the Json TREE, exact equality for every `Phase`,
+     `Entry` and `Ledger`: `phase_roundtrip`, `entry_roundtrip`,
+     `ledger_roundtrip` (`fromJson? (toJson x) = some x`; every entry field,
+     every counter baseline `counterKey ↦ value`, and `initialized` come back
+     from the tree). Lean's core has no lemma for `Json.mkObj`/`getObjVal?`, so
+     `getObjVal?_mkObj` proves it (a red-black-tree lookup equals the
+     association-list lookup);
+   - accounting, for ALL ledgers and observations with distinct destinations:
+     `observeCore_idempotent` (the same cumulative counters a second time: no
+     drops, no first sighting, ledger unchanged), `observe_drops_mem` /
+     `observe_drops_of_rise` (drops are attributed only for a rise — by exactly
+     the rise —, a restart at a non-zero value (all of it), or a non-zero first
+     sighting; a restart at 0 and an unchanged counter attribute nothing),
+     `request_twice_dests` (a second request for a destination opens no second
+     entry), `requestRebuild_idem`;
+   - the boot id coming and going, for `observe` (what Main calls): counters are
+     keyed by the boot id when it reads. A pass that cannot read it while the
+     ledger holds the master's boot-keyed counters is not observed
+     (`observe_skip`). `step_hold`, `first_hold` and `no_repeat_request`: after
+     one accounted pass that READ a boot id `b`, any sequence of passes reading
+     no boot id or the same `b` (some → none → some, …), with an operator
+     restart (the Json tree round trip) before each, makes no request and
+     leaves the entries as they were;
+   - the other direction is NOT idempotent, by decision: a boot-less counter is
+     not a previous value for a boot-keyed pass (the master may have restarted
+     while the boot id was unreadable, and a counter of 15 over a baseline of
+     10 would request only 5). `observe_new_boot_full`: a boot id with no
+     counter of its own is accounted in FULL, whatever the boot-less key holds.
+     So none → some can request the same cumulative value once more — a
+     possible duplicate repair (one extra rebuild), chosen over a missed one
+     (replicas left inconsistent);
+   - counter keys encode the master key and destination (`%` → `%25`, `|` →
+     `%7C`) before joining them with `|`: `keyParts_some` / `keyParts_none`
+     (every key splits into exactly 3 / 2 parts and decodes back to the master
+     key, destination and boot id, for ANY strings), `decode_encode`,
+     `counterKey_inj`, `observe_new_keys`. A name with neither character
+     encodes to itself (`encodePart_id`, `counterKey_compat`), so keys of an
+     existing ledger (`host:port`) are unchanged. A destination containing `|`
+     is accounted like any other and `no_repeat_request` covers it;
+   Not proved: the text round trip of `Json.compress`/`Json.parse`, the kubectl
+   read and write of `status.replicaRepairs`, and Main's order of calls and IO
+   (stats read, `observe`, then `request` per drop); destinations within one
+   pass are assumed distinct. The claim is the Json tree round trip: Main's and
+   Kubernetes' IO are outside it (a targeted E2E is separate, run-time
+   evidence). Concrete runs in the file (`#guard`) show the boot id read / not
+   read / read again, boot-less 10 → 15, and the `|` cases.
+
+✅ **A FORBIDDEN copy is never promoted** (`PromotionForbiddenProofs.lean`,
+   sorry- and axiom-free, no `native_decide`; FORMAL_VERIFICATION §4 #3 of the
+   E2E-replacement plan). `forbidden_never_promoted`: for a pass whose gates
+   are built from its evidence (`PassGates`: `PromotionEvidence.blockedKeys` /
+   `unfitKeys` / `withheldKeys`, the functions Main calls) and a key whose
+   evidence class is `forbidden` (more generally not promotable), the key is a
+   Master after `AfterHandleFailover` (failover and the one-map drain),
+   `AfterAssignRoles` (proxy assignment, masterless refill, zone swap) or
+   `RecoveryRefill` only if it already was one. Per path:
+   `failoverOfPass_noNew` / `afterHandleFailover_noNew` (failover, drain),
+   `refill_noNew` / `refills_noNew` (the refill, every tier, wait expired or
+   not), `assignProxies_noNew`, `recoveryRefill_noNew`;
+   `classify_marker_forbidden` / `classify_promotable_marker_free` (a forbidden
+   marker always wins in `classify`); the commit layer
+   (`commitTimeAllows_forbidden`, `commitAllows_forbidden`,
+   `reclassifyAllows_forbidden_pass`, `handoverCommitAllows_forbidden`) and the
+   handover (`handoverAccepts_eligible`, `handover_demote_requires_r3`).
+   The commit-time decision Main calls is ONE pure function of `classify`:
+   `PromotionEvidence.commitDecision` (`commitTimeAllows` /
+   `handoverCommitAllows` of the class; also used at the history intent's
+   fresh read) and `PromotionEvidence.firstMasterDecision` (the first master of
+   a partition no copy has held: `firstMasterAllows` AND the full class, with
+   the recorded history of its partition). There is NO exception for a
+   forbidden class. A proven handover's continued history (a committed replica
+   replacing a stopped successor holds (master_id, E'), not the recorded E) is
+   its own class `continued`, returned by `classify` only after the forbidden
+   markers, the restore-provenance check and EVERY history check (attributed
+   rejoin proof, R3 needs_rebuild, follow reasons, rejoining, divergence) pass
+   against the continued history `h` (the recorded history replaced by `h`):
+   forbidden / unknown against `h` stays so, and a copy not holding `h` is
+   judged against the recorded history as without a continued history; it is
+   not promotable or normal, `commitTimeAllows` refuses it and only
+   `handoverCommitAllows` (a proven handover) accepts it. Proven:
+   `classify_forbidden_never_commits` (a forbidden class never commits, proven
+   handover or not), `commitDecision_marker`, `classify_continued_marker_free`
+   (a marker beats a continued history), `classify_continued_sound` (a
+   `continued` copy holds exactly `h`, has no marker, is neither forbidden nor
+   unknown against `h`, and an attributed rejoin has its proof against `h`),
+   `commitDecision_continued_needs_proof`
+   / `_proven`, `continued_not_promotable`, `firstMasterDecision_forbidden`
+   (a forbidden class refuses the first master), `firstMasterAllows_marker`.
+   The claim is therefore narrowed to: the pure reconcile steps (via the
+   gates) and the pure commit decisions above. NOT proven: the IO wiring.
+   Premises: Main classifies every live non-master copy of a risk pass
+   (`evidence`) and passes `blockedKeys` / `unfitKeys`; on a non-risk pass
+   Main reads the stats, the pod's Ready and builds the `Observed` (the recorded
+   history, `continuedHistory` only for a proven handover) and `proven`, and
+   calls `commitDecision` with them; the first master's `Observed` likewise
+   (recorded history, `partitionHasMaster := false`);
+   `PodListResponse` reaches the FSM unchanged; `KeysNodup` of the node map;
+   flared reports the markers it is supposed to. Passes where
+   `promotionRisk` is false have no evidence (empty gates): the commit
+   decision is their only guard.
+
+✅ **`extra.conf` rendering of `spec.rocksdb`** (`K8s/ExtraConfProofs.lean`):
+   for each of the 21 `RocksdbConfigSpec` fields, `<field>_some` says that a
+   `some v` gives exactly one line `key = render v` in `RocksdbConfigSpec.lines`
+   (`v = 0` and both Bool values included, `<field>_true` / `<field>_false`),
+   and `<field>_none` that `none` gives no line for that key. The keys live in
+   `RocksdbConfigSpec.entries` / `keys`; `keys_prefixFree` says no key is a
+   prefix of another (so flared cannot read one key as another),
+   `keys_not_cluster_replication` that none looks like a cluster-replication
+   key, and `hasAny_false_iff` that `hasAny r = false ↔ toExtraConf r = ""`.
+   `render_eq` / `render_contains_rocksdb_lines` show `renderFlaredExtraConf`
+   is the rocksdb block, a blank line, then `renderReplicationBlock`, with every
+   rocksdb line kept whole (`IsLineOf`). The ConfigMap write itself (IO) is not
+   proved; it takes its content only from `renderFlaredExtraConf`.
 
 ### What Is NOT Yet Verified
 

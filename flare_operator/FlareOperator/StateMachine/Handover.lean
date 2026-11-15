@@ -309,7 +309,7 @@ def successorChanged (e : Entry) (o : Obs) : Bool :=
   | some b => !e.successorBinding.isEmpty && b != e.successorBinding
   | none => false
 
-private def toPhase (e : Entry) (p : Phase) (now : Nat) (why : String := "") : Entry :=
+def toPhase (e : Entry) (p : Phase) (now : Nat) (why : String := "") : Entry :=
   { e with phase := p, phaseMs := now, reason := if why.isEmpty then e.reason else why }
 
 /-- The pod UID of a recorded binding (`uid|boot|copy`). -/
@@ -354,7 +354,7 @@ def replaceSuccessor (e : Entry) (now : Nat) : Option Entry :=
 /-- Stay in the phase and say why (addendum 4 §1 / 5 §2): nothing is
     promoted and nothing rolled back; writes wait (W). Main logs a reason
     that starts with "HALTED" as CRITICAL once and emits an Event. -/
-private def halt (e : Entry) (why : String) : Entry :=
+def halt (e : Entry) (why : String) : Entry :=
   { e with reason := s!"HALTED: {why}" }
 
 /-- One step of one entry. Pure: the caller sends a map for `.send` and then
@@ -589,6 +589,32 @@ def noSuccessorAttempt (e : Entry) (now : Nat) : Entry :=
   { e with attempt := e.attempt + 1, phase := .aborted, v1 := none, v2 := none, vBack := none,
            drainProven := false, successorBinding := "", startedMs := now, phaseMs := now,
            reason := s!"attempt {e.attempt + 1}: no replica the handover accepts (eligible, complete binding) when the retry was due" }
+
+/-- The retry of the aborted entry `prev` of partition's old master pod
+    (`k`, `uid`) is due: it is retryable, is for this same pod, and the retry
+    delay has passed. -/
+def retryDue (cfg : Config) (prev : Option Entry) (k uid : String) (now : Nat) : Bool :=
+  match prev with
+  | some e => retryable cfg e && e.oldMaster == k && e.oldUid == uid
+                && now >= e.phaseMs + cfg.retryDelayMs
+  | none => false
+
+/-- What the start step does for the Active master `k` (pod `uid`) of
+    partition `pIdx`, given the partition's previous entry `prev` and the
+    successor `succ?` the IO picked (only asked for when `prev` is none or
+    the retry is due): a new entry (attempt 1, or the previous attempt + 1
+    in `.requested`), the used-up attempt of a retry that found no successor
+    (`noSuccessorAttempt`), or `none` (nothing to do). -/
+def retryDecision (cfg : Config) (prev : Option Entry) (k uid : String) (now pIdx : Nat)
+    (succ? : Option String) : Option Entry :=
+  let retry := retryDue cfg prev k uid now
+  if prev.isNone || retry then
+    match succ? with
+    | some succ =>
+      some { partition := pIdx, oldMaster := k, successor := succ, oldUid := uid,
+             attempt := (prev.map (·.attempt + 1)).getD 1, startedMs := now, phaseMs := now }
+    | none => if retry then prev.map (noSuccessorAttempt · now) else none
+  else none
 
 /-- Old masters the one-map drain must leave alone: their handover is in
     progress (requested … promoting), or aborted and still to be retried.

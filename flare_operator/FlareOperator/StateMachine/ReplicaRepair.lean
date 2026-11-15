@@ -152,10 +152,65 @@ structure Ledger where
   entries : List Entry := []
   deriving Repr, BEq
 
+/-- Escape the two characters a counter key reserves: `%` → `%25`, `|` → `%7C`.
+    A string with neither is unchanged, so the keys of an existing ledger
+    (`host:port` names) are the same strings as before. -/
+def encodeChars : List Char → List Char
+  | [] => []
+  | c :: cs =>
+    if c = '%' then '%' :: '2' :: '5' :: encodeChars cs
+    else if c = '|' then '%' :: '7' :: 'C' :: encodeChars cs
+    else c :: encodeChars cs
+
+/-- Undo `encodeChars`. -/
+def decodeChars : List Char → List Char
+  | [] => []
+  | '%' :: '2' :: '5' :: cs => '%' :: decodeChars cs
+  | '%' :: '7' :: 'C' :: cs => '|' :: decodeChars cs
+  | c :: cs => c :: decodeChars cs
+
+def encodePart (s : String) : String := String.mk (encodeChars s.data)
+def decodePart (s : String) : String := String.mk (decodeChars s.data)
+
+/-- The key of one counter: the encoded master key and destination (and the
+    master's boot id, when read) joined by `|`. The encoded parts hold no `|`,
+    so the key splits back (`keyParts`) into exactly its parts for ANY master
+    key and destination. -/
 def counterKey (masterKey dest : String) (boot : Option Nat := none) : String :=
   match boot with
-  | some b => s!"{masterKey}|{dest}|{b}"
-  | none => s!"{masterKey}|{dest}"
+  | some b => encodePart masterKey ++ "|" ++ encodePart dest ++ "|" ++ toString b
+  | none => encodePart masterKey ++ "|" ++ encodePart dest
+
+/-- Split on `|`, by structural recursion on the characters. -/
+def splitBar : List Char → List (List Char)
+  | [] => [[]]
+  | c :: cs =>
+    let r := splitBar cs
+    if c = '|' then [] :: r
+    else match r with
+      | [] => [[c]]
+      | h :: t => (c :: h) :: t
+
+/-- The parts of a counter key: split on `|`, each part decoded. -/
+def keyParts (k : String) : List String := (splitBar k.data).map fun cs => decodePart (String.mk cs)
+
+/-- Another process's counter of this master, as seen from `boot`: a key of the
+    master that is not `master|dest|boot` (another boot id, or the boot-less
+    `master|dest` written before boot ids were recorded). -/
+def otherProcess (masterKey : String) (boot : Option Nat) (k : String) : Bool :=
+  match boot with
+  | some b =>
+    let parts := keyParts k
+    parts.head? == some masterKey && (parts.length != 3 || parts.getLast? != some (toString b))
+  | none => false
+
+/-- A counter this master keeps under a boot id (`master|dest|boot`). -/
+def isBootKey (masterKey : String) (k : String) : Bool :=
+  let parts := keyParts k
+  parts.head? == some masterKey && parts.length == 3
+
+def hasBootKey (l : Ledger) (masterKey : String) : Bool :=
+  l.counters.any fun (k, _) => isBootKey masterKey k
 
 /-- Outcome of comparing one observed counter to the ledger. -/
 inductive DropDelta where
@@ -189,19 +244,23 @@ def classify (prev : Option Nat) (initialized : Bool) (n : Nat) : DropDelta :=
     never compared with the old process's (a restart whose count climbed back
     above the old value was attributed only the difference). Keys of the same
     master under another boot are dropped; the same cumulative value is never
-    requested twice. -/
-def observe (l : Ledger) (masterKey : String) (observed : List (String × Nat))
+    requested twice by the same process.
+
+    A boot-less key (`master|dest`, written before the boot id was readable)
+    is NOT a previous value for a boot-keyed pass: the process may have
+    restarted while the boot id was unreadable, and its counter (say 15) can
+    exceed the old baseline (say 10), so taking the difference would drop
+    drops. The boot-keyed pass forgets it as another process's and asks for
+    the whole value. The price: going from unreadable to readable can request
+    the same cumulative value once more (a possible duplicate repair — one
+    extra rebuild — chosen over a missed one, which leaves replicas
+    inconsistent). -/
+def observeCore (l : Ledger) (masterKey : String) (observed : List (String × Nat))
     (boot : Option Nat := none) : Ledger × List (String × Nat) × List String :=
   -- Forget this master's counters from OTHER processes (another boot id,
   -- or the boot-less form written before boot ids were recorded). Only when
   -- the boot is known: without it the old keys are the only reference.
-  let otherProcess := fun (k : String) =>
-    match boot with
-    | some b =>
-      let parts := k.splitOn "|"
-      parts.head? == some masterKey && (parts.length != 3 || parts.getLast? != some (toString b))
-    | none => false
-  let l0 := { l with counters := l.counters.filter (fun (k, _) => !otherProcess k) }
+  let l0 := { l with counters := l.counters.filter (fun (k, _) => !otherProcess masterKey boot k) }
   let step := fun (acc : Ledger × List (String × Nat) × List String) ((dest, n) : String × Nat) =>
     let (led, drops, first) := acc
     let key := counterKey masterKey dest boot
@@ -214,6 +273,20 @@ def observe (l : Ledger) (masterKey : String) (observed : List (String × Nat))
     | .unchanged => (led', drops, first)
   let (led, drops, first) := observed.foldl step (l0, [], [])
   ({ led with initialized := true }, drops, first)
+
+/-- `observeCore`, except when the master's boot id is unreadable
+    (`boot = none`) while the ledger holds a boot-keyed counter of this
+    master: the stats reply that lost the boot id says nothing about which
+    process it came from, so any baseline taken from it would be the wrong
+    one. The pass is not observed at all (ledger unchanged, nothing requested)
+    and the next pass that reads the boot id continues from the baseline it
+    left (boot id readable → unreadable → readable asks for nothing). A master
+    with no boot-keyed counter is accounted under the boot-less key. Master
+    keys and destinations are any strings: the counter keys encode them. -/
+def observe (l : Ledger) (masterKey : String) (observed : List (String × Nat))
+    (boot : Option Nat := none) : Ledger × List (String × Nat) × List String :=
+  if boot.isNone && hasBootKey l masterKey then (l, [], [])
+  else observeCore l masterKey observed boot
 
 /-- What the caller saw of a drop's destination right AFTER reading the
     master's counter: the ADOPTION evidence (see `reconstructingKeys`). The

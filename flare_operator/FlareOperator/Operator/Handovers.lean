@@ -368,6 +368,7 @@ def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterState)
     | .ok _ => handoverDirtyRef.set false
     | .error e => IO.eprintln s!"[flare-operator] WARNING: handover ledger still unsaved ({e})"
   let led0 ← handoverRef.get
+  let cfg : Handover.Config := { continuation := contOn }
   -- TEST SEAM (FLARE_TEST_HANDOVER_PODS_FAIL_FILE, unset in production):
   -- while the named file exists, this read fails as an API error would
   let podsSeam ← match ← IO.getEnv "FLARE_TEST_HANDOVER_PODS_FAIL_FILE" with
@@ -379,8 +380,7 @@ def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterState)
     | .ok ps => pure ps
     | .error e =>
       IO.eprintln s!"[flare-operator] handover: pods unreadable ({e}); handovers held this pass"
-      return Handover.blockedKeys led0 ++ Handover.drainHeldKeys led0 ++ (← frozen led0)
-  let cfg : Handover.Config := { continuation := contOn }
+      return Handover.blockedKeys led0 ++ Handover.drainHeldKeys led0 cfg ++ (← frozen led0)
   let now ← IO.monoMsNow
   let state0 ← stateRef.get
   let mut led := led0
@@ -416,27 +416,21 @@ def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterState)
         -- (same old master pod, after the retry delay, attempts left): L7 —
         -- the lossless handover is tried again before the one-map drain
         let prev := Handover.find? led pIdx
-        let retry := match prev with
-          | some e => Handover.retryable cfg e && e.oldMaster == k && e.oldUid == p.uid
-                        && now >= e.phaseMs + cfg.retryDelayMs
-          | none => false
+        let retry := Handover.retryDue cfg prev k p.uid now
         if prev.isNone || retry then
           match state0.partitionMap.find? (fun (i, _) => i == pIdx) with
           | some (_, part) =>
-            match ← pickHandoverSuccessor state0 part n.partition k pods repairDests0 ns with
-            | some succ =>
-              let attempt := (prev.map (·.attempt + 1)).getD 1
-              led := Handover.upsert led { partition := pIdx, oldMaster := k, successor := succ,
-                                           oldUid := p.uid, attempt, startedMs := now, phaseMs := now }
-              IO.eprintln s!"[flare-operator] HANDOVER requested: partition {pIdx} master {k} is Terminating; successor {succ}{if retry then s!" (attempt {attempt} of {cfg.maxAttempts}, after: {(prev.map (·.reason)).getD ""})" else ""}"
-            | none =>
-              -- a due retry with no acceptable successor uses up its attempt
-              -- (else the retryable entry holds the drain indefinitely)
-              if retry then
-                if let some e := prev then
-                  let e' := Handover.noSuccessorAttempt e now
-                  led := Handover.upsert led e'
-                  IO.eprintln s!"[flare-operator] HANDOVER p{pIdx} {k}: retry due, no replica the handover accepts -> aborted after 0 ms without a map (attempt {e'.attempt} of {cfg.maxAttempts}){if Handover.retryable cfg e' then "" else "; attempts used up, the one-map drain applies"}"
+            let succ? ← pickHandoverSuccessor state0 part n.partition k pods repairDests0 ns
+            match Handover.retryDecision cfg prev k p.uid now pIdx succ? with
+            | some e' =>
+              led := Handover.upsert led e'
+              if e'.phase == .requested then
+                IO.eprintln s!"[flare-operator] HANDOVER requested: partition {pIdx} master {k} is Terminating; successor {e'.successor}{if retry then s!" (attempt {e'.attempt} of {cfg.maxAttempts}, after: {(prev.map (·.reason)).getD ""})" else ""}"
+              else
+                -- a due retry with no acceptable successor uses up its attempt
+                -- (else the retryable entry holds the drain indefinitely)
+                IO.eprintln s!"[flare-operator] HANDOVER p{pIdx} {k}: retry due, no replica the handover accepts -> aborted after 0 ms without a map (attempt {e'.attempt} of {cfg.maxAttempts}){if Handover.retryable cfg e' then "" else "; attempts used up, the one-map drain applies"}"
+            | none => pure ()
           | none => pure ()
     | none => pure ()
   -- step. A handover in transit (V1 sent, not yet promoted or rolled back)
@@ -950,7 +944,7 @@ def runHandovers (crName ns : String) (stateRef : IO.Ref FlareClusterState)
     if !transit || now >= bound then break
   handoverRef.set out
   handoverActiveRef.set (out.entries.any fun e => e.phase != .aborted)
-  return Handover.blockedKeys out ++ Handover.drainHeldKeys out ++ (← frozen out)
+  return Handover.blockedKeys out ++ Handover.drainHeldKeys out cfg ++ (← frozen out)
 
 initialize rollingStablePassesRef : IO.Ref Nat ← IO.mkRef 0
 initialize rollingLastRef : IO.Ref String ← IO.mkRef ""

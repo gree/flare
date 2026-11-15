@@ -154,6 +154,10 @@ example : checkInvariantFinite s5 2 = true := by decide
 
 **Significance**: Critical checkpoints along the execution path are individually verified.
 
+#### 8. Handover Retry Terminates (`HandoverRetryProofs.lean`)
+
+`step_attempt`, `retryDecision_attempt`, `retryable_lt`, `drainHeldKeys_mem`, `reach_retries_le`, `reach_exhausted`, `reach_drain_free`: an aborted handover is retried at most `maxAttempts − attempt` times, then the one-map drain takes the master (3dcfc5c S9).
+
 ## Verification Architecture
 
 ### Phase 2: FlaredNode Model (`FlaredNode.lean`)

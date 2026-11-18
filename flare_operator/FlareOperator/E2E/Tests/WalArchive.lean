@@ -1,8 +1,8 @@
 /-
-  E2E/Tests/WalArchive.lean — the continuous WAL archive on kind with MinIO
+  E2E/Tests/WalArchive.lean — the continuous WAL archive on kind with an S3-compatible store
   (issue flare-wal-archive-e2e; docs/BACKUP_RESTORE.md, "WAL archive").
 
-  What is real here: MinIO (a single pod and Service, the bucket made with
+  What is real here: `rclone serve s3` (a single pod and Service `minio`, the bucket made with
   aws-cli) is the object storage; the cluster is a REAL `helm install` of the
   chart (deployHelmCluster), so the StatefulSet's `backup-bootstrap` and
   `backup-wal-replay` init containers, the backup CronJob and its RBAC, the
@@ -37,7 +37,7 @@
       after the last uploaded segment (the first new segment starts at the
       last archived sequence + 1: not from the base again, no hole).
   T4  offline replay in a pod with the flared image: base + chain downloaded
-      from MinIO; `flared --wal-replay` with an until time between two known
+      from the store; `flared --wal-replay` with an until time between two known
       writes (keys after it absent, before it present); a replay stopped part
       way (on half the segments, and killed with SIGKILL while running) and
       run again continues (exit 0, the same end state as one full run); a
@@ -73,7 +73,10 @@ private def toolPod : String := "wa-tool"
 private def replayPod : String := "wa-replay"
 private def extHost : String := s!"{cluster}-nodes-external.{nsName}.svc.cluster.local"
 private def backupImage : String := "flare-backup:test"
-private def minioImage : String := "minio/minio:RELEASE.2024-06-13T22-53-53Z"
+-- The S3-compatible store: `rclone serve s3` (the MinIO images are no longer
+-- pullable without credentials: docker.io and quay.io both answered 401 in
+-- CI 44286248212). Its Service keeps the name `minio`.
+private def s3Image : String := "rclone/rclone:1.68.2"
 
 private def ctx (test : String) : Ctx := { cfg := cfg, suite := "wal-archive", test := test }
 
@@ -104,27 +107,20 @@ spec:
         app: minio
     spec:
       containers:
-        - name: minio
-          image: {minioImage}
+        - name: s3
+          image: {s3Image}
           args:
-            - server
+            - serve
+            - s3
+            - --addr
+            - :9000
+            - --auth-key
+            - {accessKey},{secretKey}
             - /data
-          env:
-            - name: MINIO_ROOT_USER
-              valueFrom:
-                secretKeyRef:
-                  name: {secretName}
-                  key: AWS_ACCESS_KEY_ID
-            - name: MINIO_ROOT_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {secretName}
-                  key: AWS_SECRET_ACCESS_KEY
           ports:
             - containerPort: 9000
           readinessProbe:
-            httpGet:
-              path: /minio/health/ready
+            tcpSocket:
               port: 9000
             periodSeconds: 3
           volumeMounts:
@@ -804,9 +800,9 @@ private def setupInfra : IO Unit := do
   let _ ← kubectl ["create", "namespace", nsName]
   match ← applyText "infra" infraYaml with
   | .ok _ => pure ()
-  | .error e => throw (IO.userError s!"MinIO / Secret / tool pod: {e}")
+  | .error e => throw (IO.userError s!"S3 store / Secret / tool pod: {e}")
   if !(← kubectlRolloutStatus "deployment/minio" nsName 300) then
-    throw (IO.userError "MinIO did not become ready")
+    throw (IO.userError "the S3 store (rclone serve s3) did not become ready")
   if !(← kubectlWaitReady s!"pod/{toolPod}" nsName 180) then
     throw (IO.userError s!"the tool pod ({backupImage}) did not become Ready: is the flare-backup image loaded into kind?")
   let made ← waitForCondition s!"bucket {bucket} created" 120 do

@@ -651,6 +651,7 @@ private def replayScript (untilT markersA markersB : String) : String :=
   r##"W=/work/d1
 chk() { echo "CHK $1 $2 $3"; }
 fresh() { rm -rf "$W/$1"; cp -a "$W/base" "$W/$1"; }
+# rows are `"<key>",expire,ttl,size` (the key quoted)
 csv() { flared --analyze-checkpoint "$1" 2>/dev/null | cut -d, -f1,4 | sort; }
 field() { echo "$1" | tr ' ' '\n' | sed -n "s/^$2=//p" | head -1; }
 NSEG=$(ls "$W/seg" | wc -l)
@@ -661,7 +662,7 @@ fresh r_until
 OUT=$(flared --wal-replay "$W/r_until" "$W/seg" @UNTIL@ 2>"$W/err_until"); RC=$?
 echo "REPLAY until rc=$RC $OUT"
 csv "$W/r_until" > "$W/k_until"
-A=$(grep -c '^walt_a_' "$W/k_until"); B=$(grep -c '^walt_b_' "$W/k_until")
+A=$(grep -c '^"walt_a_' "$W/k_until"); B=$(grep -c '^"walt_b_' "$W/k_until")
 if [ "$RC" = 0 ] && [ "$A" = @NA@ ] && [ "$B" = 0 ] && [ "$(field "$OUT" until)" = 1 ]; then
   chk until PASS "a=$A b=$B $OUT"
 else chk until FAIL "rc=$RC a=$A (want @NA@) b=$B (want 0) $OUT"; fi
@@ -672,7 +673,7 @@ OUT=$(flared --wal-replay "$W/r_full" "$W/seg" 2>"$W/err_full"); RC=$?
 echo "REPLAY full rc=$RC $OUT"
 APP_FULL=$(field "$OUT" applied); LAST_FULL=$(field "$OUT" last_lsn)
 csv "$W/r_full" > "$W/c_full"
-A=$(grep -c '^walt_a_' "$W/c_full"); B=$(grep -c '^walt_b_' "$W/c_full")
+A=$(grep -c '^"walt_a_' "$W/c_full"); B=$(grep -c '^"walt_b_' "$W/c_full")
 if [ "$RC" = 0 ] && [ "$(field "$OUT" gap)" = 0 ] && [ "$(field "$OUT" conflict)" = 0 ] && [ "$(field "$OUT" until)" = 0 ] \
    && [ "$A" = @NA@ ] && [ "$B" = @NB@ ] && [ "${APP_FULL:-0}" -gt 0 ]; then
   chk full PASS "a=$A b=$B $OUT"

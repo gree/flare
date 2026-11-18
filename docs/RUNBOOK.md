@@ -1117,6 +1117,36 @@ The chart's alert `FlareBackupStale` fires when
 flared exports the metric itself on its `/metrics`. Tune the threshold to
 twice your backup interval.
 
+### WAL archive alerts {#wal-archive}
+
+`kubectl logs deploy/<cluster>-wal-archive -c upload` (decisions: which base,
+which master, why a new base) and `-c follow` (the follower's reason, e.g.
+`lsn_purged`, `incarnation_changed`).
+
+- **FlareWalArchiveBehind.** A chain is followed but archived data is older
+  than `rpoAlertSeconds`. The follower cannot reach the master or reads too
+  slowly (follow log), or uploads fail (upload log, credentials). Nothing is
+  lost while the master lives; the risk is the size of an all-copy loss.
+- **FlareWalArchiveNeedsBase.** The chain ended (master switch, copy replaced,
+  history change, retention exceeded) and no new base has arrived for 30 min.
+  Check the backup Jobs (`<cluster>-backup-wal-*`): a failed backup is the
+  usual cause. Until a base arrives a restore reaches only the old chain's
+  end. Run the backup by hand if needed:
+  `kubectl create job --from=cronjob/<cluster>-backup <cluster>-backup-manual`.
+- **FlareWalArchiveUploadFailing.** Segments stay on the archiver's emptyDir
+  and are retried; they are lost if the archiver pod is deleted meanwhile.
+
+- **A restore stuck with `backup-wal-replay: REFUSED`.** The archive holds
+  history the replay cannot reach (its summary line: `gap=1`, `conflict=1` or
+  `corrupt_beyond>0`). Look at the segments named in the init log before
+  deciding. To restore up to `last_lsn` and lose the rest, set
+  `backup-bootstrap-wal-accept-incomplete: "true"` in `<cluster>-flags`; the
+  next init attempt publishes it with an `INCOMPLETE archive accepted`
+  warning. Set it back to `"false"` afterwards.
+
+Turning the archive off (`walArchive.enabled: false`) deletes the Deployment;
+segments already uploaded stay and remain usable for restore.
+
 ### An in-place restore keeps the copy it replaces {#restore-in-place}
 
 A restore into a pod that has a live copy does NOT remove it:

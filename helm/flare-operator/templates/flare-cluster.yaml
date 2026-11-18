@@ -129,6 +129,14 @@ metadata:
     {{- include "flare-operator.wellKnown" (dict "root" $ "name" "flared" "component" "node") | nindent 4 }}
 data:
   backup-bootstrap-enabled: {{ $bb.enabled | default false | quote }}
+  # WAL archive: replay the archived WAL onto the restored base only up to
+  # this unix time (batches the archiver had received whole by then). Empty
+  # = as far as the archive continues. For a restore to a point in time.
+  backup-bootstrap-wal-until: {{ $bb.walUntil | default "" | quote }}
+  # WAL archive: when the archive holds history the replay cannot reach (a
+  # gap, a conflict, a corrupt later segment), the restore is REFUSED unless
+  # this is "true" — then it is published up to where the archive continues.
+  backup-bootstrap-wal-accept-incomplete: {{ $bb.walAcceptIncomplete | default false | quote }}
 {{- end }}
 ---
 apiVersion: flare.gree.net/v1alpha1
@@ -354,11 +362,29 @@ spec:
                 echo "backup-bootstrap: CURRENT names missing $M -> backup mirror is torn, refusing"
                 exit 1
               fi
-              # a restored copy is a DIFFERENT copy: flared gives it a new
-              # identity at open (copy retention §2)
-              touch "$DATA/flare.rocksdb.restore/RESTORED"
-              mv "$DATA/flare.rocksdb.restore" "$DATA/flare.rocksdb"
-              echo "backup-bootstrap: seeded from $SRC (age ${AGE}s)"
+              # WAL archive: the segments of this base's chain after its
+              # sequence number (bucket wal/p0/<incarnation>/<epoch>/<master_id>/,
+              # names "<first>-<last>-<ms>.wal"). The next init container
+              # (the flared image) replays them and publishes the restore.
+              WALD="$DATA/flare.rocksdb.restore.wal"
+              rm -rf "$WALD"; mkdir -p "$WALD"
+              B="$DATA/flare.rocksdb.restore/FLARE_BASE"
+              if [ -f "$B" ]; then
+                B_SEQ=$(sed -n 's/.* seq=\([0-9]*\).*/\1/p' "$B")
+                CHAIN="${S3_URL}/wal/p0/$(sed -n 's/.* incarnation=\([^ ]*\).*/\1/p' "$B")/$(sed -n 's/.* epoch=\([^ ]*\).*/\1/p' "$B")/$(sed -n 's/.* master_id=\([^ ]*\).*/\1/p' "$B")"
+                N=0
+                for n in $(aws s3 ls $EP "$CHAIN/" 2>/dev/null | awk '{print $4}'); do
+                  last=$(echo "$n" | sed -n 's/^[0-9]*-0*\([0-9][0-9]*\)-.*\.wal$/\1/p')
+                  [ -n "$last" ] && [ "$last" -gt "$B_SEQ" ] || continue
+                  aws s3 cp $EP --no-progress "$CHAIN/$n" "$WALD/$n" >/dev/null
+                  N=$((N + 1))
+                done
+                echo "backup-bootstrap: base seq ${B_SEQ}, ${N} WAL segment(s) after it"
+              else
+                echo "backup-bootstrap: the backup has no FLARE_BASE -> no WAL replay"
+              fi
+              touch "$DATA/flare.rocksdb.restore.pending"
+              echo "backup-bootstrap: downloaded $SRC (age ${AGE}s); the replay step publishes it"
           env:
             # location/auth come from cluster.objectStorage — the SAME block
             # the backup CronJob publishes to, so they cannot drift apart.
@@ -384,6 +410,64 @@ spec:
               mountPath: /var/run/secrets/sts
               readOnly: true
             {{- end }}
+        # Publishes what backup-bootstrap downloaded: replays the archived
+        # WAL onto the base (offline, `flared --wal-replay`: physical replay
+        # of the contiguous chain, fail closed on any mismatch), then marks
+        # it RESTORED and moves it into place. No-op without a pending
+        # restore. A failure publishes nothing and keeps the pending restore,
+        # so every retry refuses again (never an empty start).
+        - name: backup-wal-replay
+          image: "{{ $c.image.repository }}:{{ $c.image.tag }}"
+          imagePullPolicy: {{ $c.image.pullPolicy }}
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              DATA={{ $dataDir }}
+              [ -f "$DATA/flare.rocksdb.restore.pending" ] || exit 0
+              WALD="$DATA/flare.rocksdb.restore.wal"
+              UNTIL=$(tr -d '\r\n ' < /etc/flare-flags/backup-bootstrap-wal-until 2>/dev/null || true)
+              ACCEPT=$(tr -d '\r\n ' < /etc/flare-flags/backup-bootstrap-wal-accept-incomplete 2>/dev/null || true)
+              if [ -f "$DATA/flare.rocksdb.restore/FLARE_BASE" ] && ls "$WALD"/*.wal >/dev/null 2>&1; then
+                set +e
+                OUT=$(flared --wal-replay "$DATA/flare.rocksdb.restore" "$WALD" $UNTIL)
+                RC=$?
+                set -e
+                echo "backup-wal-replay: $OUT"
+                if [ "$RC" = 4 ] && [ "$ACCEPT" = "true" ]; then
+                  # explicitly accepted: published up to where the archive continues
+                  echo "backup-wal-replay: WARNING: INCOMPLETE archive accepted by backup-bootstrap-wal-accept-incomplete; restored only up to last_lsn" >&2
+                elif [ "$RC" != 0 ]; then
+                  # FAIL CLOSED: an incomplete archive (4: gap, conflict, corrupt
+                  # later segment) or a replay error is not published. The
+                  # pending restore is KEPT: kubelet re-runs only this failed
+                  # container, so removing it would let the retry see "nothing
+                  # pending" and start flared EMPTY (E2E 44330726018 T5). Each
+                  # retry decides again (the replay journal continues the same
+                  # chain); deleting the pod downloads again.
+                  if [ "$RC" = 4 ]; then
+                    echo "backup-wal-replay: REFUSED: the archive holds history this replay cannot reach (exit 4). Set backup-bootstrap-wal-accept-incomplete=true in the {{ $c.name }}-flags ConfigMap to restore up to last_lsn (RUNBOOK#wal-archive)" >&2
+                  else
+                    echo "backup-wal-replay: replay FAILED (exit $RC); delete the pod to download the backup again" >&2
+                  fi
+                  exit 1
+                fi
+              else
+                echo "backup-wal-replay: no WAL to replay -> the base as it is"
+              fi
+              # a restored copy is a DIFFERENT copy: flared gives it a new
+              # identity at open (copy retention §2)
+              touch "$DATA/flare.rocksdb.restore/RESTORED"
+              mv "$DATA/flare.rocksdb.restore" "$DATA/flare.rocksdb"
+              rm -rf "$WALD" "$DATA/flare.rocksdb.restore.pending"
+              echo "backup-wal-replay: restore published"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: flare-flags
+              mountPath: /etc/flare-flags
+              readOnly: true
       {{- end }}
       containers:
         - name: flared

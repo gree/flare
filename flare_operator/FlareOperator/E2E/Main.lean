@@ -53,6 +53,7 @@ import FlareOperator.E2E.Tests.ApiserverOutage
 import FlareOperator.E2E.Tests.FailoverOrder
 import FlareOperator.E2E.Tests.FirstBuildBusyPool
 import FlareOperator.E2E.Tests.WebhookTls
+import FlareOperator.E2E.Tests.WalArchive
 
 open FlareOperator.E2E
 
@@ -154,4 +155,4 @@ def main (args : List String) : IO UInt32 :=
     Tests.BlueGreenMigration.suite,
     Tests.SnapshotPushSeed.suite,
     Tests.WebhookTls.suite
-  ] ++ Tests.NodeOpsSwitch.switchSuites ++ [Tests.ApiserverOutage.suite]) args
+  ] ++ Tests.NodeOpsSwitch.switchSuites ++ [Tests.ApiserverOutage.suite, Tests.WalArchive.suite]) args

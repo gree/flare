@@ -52,6 +52,9 @@
 #include <copy_switch_fs.h>
 #include <rocksdb/db.h>
 #include <rocksdb/options.h>
+#include <wal_archive.h>
+#include <fstream>
+#include <iterator>
 
 using namespace std;
 
@@ -5836,6 +5839,784 @@ void test_reseed_serve_to_a_slow_reader_completes_past_several_windows() {
 	cut_assert_equal_int(0, count_serve_dirs(wal_master_dir));
 	drop_rocksdb(m, wal_master_dir);
 }
+
+	// {{{ WAL archive (wal_archive.h)
+	const char wa_restore_dir[] = "tmp_rocksdb_wa_restore";
+	const char wa_seg_dir[] = "tmp_rocksdb_wa_segments";
+
+	// The batches a copy wrote after `from`, as the archiver records them.
+	vector<wal_archive::record> wa_records_since(storage_rocksdb* s, uint64_t from, int64_t time_us = 1) {
+		vector<pair<uint64_t, rocksdb::WriteBatch>> u;
+		cut_assert_equal_int(0, s->get_updates_since(from, u, 0, 0, NULL, from));
+		vector<wal_archive::record> out;
+		for (size_t i = 0; i < u.size(); i++) {
+			wal_archive::record r;
+			r.lsn = u[i].first;
+			r.count = u[i].second.Count();
+			r.time_us = time_us + static_cast<int64_t>(i);
+			r.data = u[i].second.Data();
+			out.push_back(r);
+		}
+		return out;
+	}
+
+	wal_archive::identity wa_identity_of(storage_rocksdb* s) {
+		wal_archive::identity id;
+		id.incarnation = s->get_incarnation();
+		id.epoch = s->get_source_epoch();
+		id.master_id = s->get_master_id();
+		return id;
+	}
+
+	void wa_reset_dirs() {
+		cut_remove_path(wa_restore_dir, NULL);
+		cut_remove_path(wa_seg_dir, NULL);
+		mkdir(wa_seg_dir, 0700);
+	}
+
+	// Copies a checkpoint to the restore directory (a restore downloads one).
+	void wa_restore_from(const string& checkpoint) {
+		cut_remove_path(wa_restore_dir, NULL);
+		const string cmd = "cp -a '" + checkpoint + "' '" + string(wa_restore_dir) + "'";
+		cut_assert_equal_int(0, system(cmd.c_str()));
+	}
+
+	string wa_dump(const string& dir) {
+		storage_rocksdb reader(dir, 1, 0);
+		char* buf = NULL;
+		size_t len = 0;
+		FILE* f = open_memstream(&buf, &len);
+		int r = reader.dump_checkpoint(dir, f);
+		fclose(f);
+		string out = r == 0 ? string(buf, len) : string("dump failed");
+		free(buf);
+		return out;
+	}
+
+	uint64_t wa_seq_of(const string& dir) {
+		rocksdb::DB* db = NULL;
+		rocksdb::Options opt;
+		vector<string> names;
+		rocksdb::DB::ListColumnFamilies(rocksdb::DBOptions(opt), dir, &names);
+		vector<rocksdb::ColumnFamilyDescriptor> d;
+		for (size_t i = 0; i < names.size(); i++) {
+			d.push_back(rocksdb::ColumnFamilyDescriptor(names[i], rocksdb::ColumnFamilyOptions(opt)));
+		}
+		vector<rocksdb::ColumnFamilyHandle*> h;
+		if (!rocksdb::DB::OpenForReadOnly(rocksdb::DBOptions(opt), dir, d, &h, &db).ok()) {
+			return 0;
+		}
+		uint64_t seq = db->GetLatestSequenceNumber();
+		for (size_t i = 0; i < h.size(); i++) db->DestroyColumnFamilyHandle(h[i]);
+		delete db;
+		return seq;
+	}
+
+	int wa_replay(int64_t until_us, string& summary) {
+		char* buf = NULL;
+		size_t len = 0;
+		FILE* f = open_memstream(&buf, &len);
+		int r = wal_archive::replay(wa_restore_dir, wa_seg_dir, until_us, f);
+		fclose(f);
+		summary.assign(buf, len);
+		free(buf);
+		return r;
+	}
+
+	// The backup's base marker carries the checkpoint's own sequence number and
+	// the identity read from the checkpoint.
+	void test_wal_archive_backup_writes_base_marker() {
+		storage_rocksdb* s = make_rocksdb(wal_master_dir);
+		cut_assert_equal_int(0, storage_set_string(s, "a", "1"));
+		string cp;
+		cut_assert_equal_int(0, s->create_named_backup("20261118-000000", cp));
+		wal_archive::base b;
+		const int r = wal_archive::read_base_file(cp, b);
+		const uint64_t cp_seq = wa_seq_of(cp);
+		const wal_archive::identity id = wa_identity_of(s);
+		drop_rocksdb(s, wal_master_dir);
+		cut_assert_equal_int(0, r);
+		cppcut_assert_equal(cp_seq, b.seq);
+		cut_assert_true(b.id == id);
+		cut_assert_true(b.id.complete());
+		cut_notify("wal archive: checked");
+	}
+
+	void test_wal_archive_base_marker_round_trip_and_refusals() {
+		wal_archive::base b;
+		b.seq = 42;
+		b.time = 1794990000;
+		b.id.incarnation = "3:aaaa";
+		b.id.epoch = "7:bbbb";
+		b.id.master_id = "cccc";
+		wal_archive::base got;
+		cut_assert_equal_int(0, wal_archive::parse_base(wal_archive::format_base(b), got));
+		cppcut_assert_equal(static_cast<uint64_t>(42), got.seq);
+		cut_assert_true(got.id == b.id);
+		cut_assert_equal_int(-1, wal_archive::parse_base("FLAREBASE 1 seq=42 epoch=e master_id=m time=1\n", got));	// no incarnation
+		cut_assert_equal_int(-1, wal_archive::parse_base("FLAREBASE 2 seq=42\n", got));
+		cut_assert_equal_int(-1, wal_archive::parse_base("FLAREBASE 1 seq=-1 incarnation=i epoch=e master_id=m time=1\n", got));
+		cut_notify("wal archive: checked");
+	}
+
+	// A segment is whole or refused: a flipped byte, a missing trailer or a
+	// record that does not continue are errors, never a partial result.
+	void test_wal_archive_segment_round_trip_and_corruption() {
+		wa_reset_dirs();
+		storage_rocksdb* s = make_rocksdb(wal_master_dir);
+		const uint64_t from = s->get_latest_sequence_number();
+		for (int i = 0; i < 5; i++) {
+			cut_assert_equal_int(0, storage_set_string(s, "k" + boost::lexical_cast<string>(i), "v"));
+		}
+		vector<wal_archive::record> rs = wa_records_since(s, from);
+		const wal_archive::identity id = wa_identity_of(s);
+		drop_rocksdb(s, wal_master_dir);
+		cut_assert_operator(rs.size(), >=, static_cast<size_t>(5));
+
+		string path, err;
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, rs, 1000, path, err));
+		wal_archive::identity got_id;
+		vector<wal_archive::record> got;
+		cut_assert_equal_int(0, wal_archive::read_segment(path, got_id, got, err));
+		cut_assert_true(got_id == id);
+		cppcut_assert_equal(rs.size(), got.size());
+		cppcut_assert_equal(rs.back().last_lsn(), got.back().last_lsn());
+
+		string content;
+		{
+			std::ifstream in(path.c_str(), std::ios::binary);
+			content.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+		}
+		// a flipped byte inside the first record's data
+		string bad = content;
+		const size_t data_at = bad.find('\n', bad.find("\nR ") + 1) + 1;
+		bad[data_at + 5] ^= 0x55;
+		{ std::ofstream o(path.c_str(), std::ios::binary | std::ios::trunc); o << bad; }
+		cut_assert_equal_int(-1, wal_archive::read_segment(path, got_id, got, err));
+		// no trailer
+		bad = content.substr(0, content.rfind("END "));
+		{ std::ofstream o(path.c_str(), std::ios::binary | std::ios::trunc); o << bad; }
+		cut_assert_equal_int(-1, wal_archive::read_segment(path, got_id, got, err));
+		// records that do not continue
+		vector<wal_archive::record> holed;
+		holed.push_back(rs[0]);
+		holed.push_back(rs[2]);
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, holed, 2000, path, err));
+		cut_assert_equal_int(-1, wal_archive::read_segment(path, got_id, got, err));
+		wa_reset_dirs();
+		cut_notify("wal archive: checked");
+	}
+
+	wal_archive::record wa_fake(uint64_t lsn, uint32_t count, int64_t t, const string& data = "x") {
+		wal_archive::record r;
+		r.lsn = lsn;
+		r.count = count;
+		r.time_us = t;
+		r.data = data + boost::lexical_cast<string>(lsn);
+		return r;
+	}
+
+	void test_wal_archive_plan_contiguity_duplicates_conflicts_and_time() {
+		vector<wal_archive::record> rs;
+		rs.push_back(wa_fake(11, 2, 100));		// 11..12
+		rs.push_back(wa_fake(13, 1, 200));
+		rs.push_back(wa_fake(11, 2, 100));		// the same batch archived twice
+		rs.push_back(wa_fake(5, 3, 50));		// before the base: skipped
+		rs.push_back(wa_fake(14, 3, 300));		// 14..16
+		rs.push_back(wa_fake(20, 1, 400));		// after a hole at 17
+		wal_archive::replay_plan p = wal_archive::plan_replay(10, rs, 0);
+		cppcut_assert_equal(static_cast<size_t>(3), p.apply.size());
+		cppcut_assert_equal(static_cast<uint64_t>(16), p.last_lsn);
+		cut_assert_true(p.gap);
+		cppcut_assert_equal(static_cast<uint64_t>(17), p.gap_expected);
+		cppcut_assert_equal(static_cast<uint64_t>(20), p.gap_found);
+
+		// time bound: a batch received at the bound is kept, the next is not
+		p = wal_archive::plan_replay(10, rs, 200);
+		cppcut_assert_equal(static_cast<size_t>(2), p.apply.size());
+		cut_assert_true(p.stopped_by_until);
+		cut_assert_false(p.gap);
+
+		// a different batch at a planned position: two histories mixed
+		vector<wal_archive::record> mixed = rs;
+		mixed.push_back(wa_fake(13, 1, 200, "other"));
+		p = wal_archive::plan_replay(10, mixed, 0);
+		cut_assert_true(p.conflict);
+
+		// a batch straddling the base is not this copy's history
+		vector<wal_archive::record> straddle;
+		straddle.push_back(wa_fake(9, 3, 1));		// 9..11 over base 10
+		p = wal_archive::plan_replay(10, straddle, 0);
+		cut_assert_true(p.conflict);
+		cppcut_assert_equal(static_cast<size_t>(0), p.apply.size());
+		cut_notify("wal archive: checked");
+	}
+
+	// The whole path: backup -> later writes archived -> restore the
+	// checkpoint and replay: the restored copy equals the source at the last
+	// archived batch, in the SAME sequence space.
+	void test_wal_archive_replay_reaches_the_last_archived_batch() {
+		wa_reset_dirs();
+		storage_rocksdb* s = make_rocksdb(wal_master_dir);
+		cut_assert_equal_int(0, storage_set_string(s, "gone", "1"));
+		string cp;
+		cut_assert_equal_int(0, s->create_named_backup("20261118-000001", cp));
+		wal_archive::base b;
+		cut_assert_equal_int(0, wal_archive::read_base_file(cp, b));
+		for (int i = 0; i < 40; i++) {
+			cut_assert_equal_int(0, storage_set_string(s, "k" + boost::lexical_cast<string>(i), string(100, 'a' + i % 26)));
+		}
+		storage::result res;
+		storage::entry e;
+		e.key = "gone";
+		e.version = 0;
+		cut_assert_equal_int(0, s->remove(e, res, 0));
+		vector<wal_archive::record> rs = wa_records_since(s, b.seq);
+		const wal_archive::identity id = wa_identity_of(s);
+		string head_cp;
+		cut_assert_equal_int(0, s->create_named_backup("20261118-000002", head_cp));
+		const uint64_t head = s->get_latest_sequence_number();
+		drop_rocksdb_noremove(s);
+
+		const size_t half = rs.size() / 2;
+		vector<wal_archive::record> a(rs.begin(), rs.begin() + half), c(rs.begin() + half, rs.end());
+		string path, err;
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, a, 1, path, err));
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, c, 2, path, err));
+
+		wa_restore_from(cp);
+		string summary;
+		const int r = wa_replay(0, summary);
+		const uint64_t restored_seq = wa_seq_of(wa_restore_dir);
+		const string restored = wa_dump(wa_restore_dir);
+		const string expected = wa_dump(head_cp);
+		cut_remove_path(wal_master_dir, NULL);
+		cut_assert_equal_int(0, r, cut_message("%s", summary.c_str()));
+		cppcut_assert_equal(rs.back().last_lsn(), restored_seq);
+		cut_assert_operator(head, >=, restored_seq);
+		cut_assert_true(restored == expected);
+		cut_assert_true(summary.find("gap=0") != string::npos, cut_message("%s", summary.c_str()));
+		wa_reset_dirs();
+		cut_notify("wal archive replay: %s", summary.c_str());
+	}
+
+	// RESUME RULE: a replay interrupted part way continues the same chain; a
+	// database written past the base by anything else is refused, and so is a
+	// chain whose batch at a replayed position differs.
+	void test_wal_archive_replay_resume_only_the_same_chain() {
+		wa_reset_dirs();
+		storage_rocksdb* s = make_rocksdb(wal_master_dir);
+		string cp;
+		cut_assert_equal_int(0, s->create_named_backup("20261118-000003", cp));
+		wal_archive::base b;
+		cut_assert_equal_int(0, wal_archive::read_base_file(cp, b));
+		for (int i = 0; i < 10; i++) {
+			cut_assert_equal_int(0, storage_set_string(s, "r" + boost::lexical_cast<string>(i), "v"));
+		}
+		vector<wal_archive::record> rs = wa_records_since(s, b.seq);
+		const wal_archive::identity id = wa_identity_of(s);
+		drop_rocksdb_noremove(s);
+		const size_t half = rs.size() / 2;
+		vector<wal_archive::record> a(rs.begin(), rs.begin() + half), c(rs.begin() + half, rs.end());
+		string path, err, summary;
+
+		// 1) first segment only, then the second arrives: continues
+		wa_restore_from(cp);
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, a, 1, path, err));
+		cut_assert_equal_int(0, wa_replay(0, summary), cut_message("%s", summary.c_str()));
+		cppcut_assert_equal(a.back().last_lsn(), wa_seq_of(wa_restore_dir));
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, c, 2, path, err));
+		cut_assert_equal_int(0, wa_replay(0, summary), cut_message("%s", summary.c_str()));
+		cppcut_assert_equal(rs.back().last_lsn(), wa_seq_of(wa_restore_dir));
+		// a re-run at the end applies nothing and succeeds
+		cut_assert_equal_int(0, wa_replay(0, summary), cut_message("%s", summary.c_str()));
+		cut_assert_true(summary.find("applied=0") != string::npos, cut_message("%s", summary.c_str()));
+
+		// 2) a database written past the base by something else: refused
+		wa_restore_from(cp);
+		{
+			rocksdb::DB* db = NULL;
+			rocksdb::Options opt;
+			vector<string> names;
+			rocksdb::DB::ListColumnFamilies(rocksdb::DBOptions(opt), wa_restore_dir, &names);
+			vector<rocksdb::ColumnFamilyDescriptor> d;
+			for (size_t i = 0; i < names.size(); i++) {
+				d.push_back(rocksdb::ColumnFamilyDescriptor(names[i], rocksdb::ColumnFamilyOptions(opt)));
+			}
+			vector<rocksdb::ColumnFamilyHandle*> h;
+			cut_assert_true(rocksdb::DB::Open(rocksdb::DBOptions(opt), wa_restore_dir, d, &h, &db).ok());
+			// exactly as many sequence numbers as the first archived batch
+			rocksdb::WriteBatch wb;
+			for (uint32_t k = 0; k < rs[0].count; k++) {
+				wb.Put("foreign" + boost::lexical_cast<string>(k), "x");
+			}
+			cut_assert_true(db->Write(rocksdb::WriteOptions(), &wb).ok());
+			for (size_t i = 0; i < h.size(); i++) db->DestroyColumnFamilyHandle(h[i]);
+			delete db;
+		}
+		cut_assert_equal_int(3, wa_replay(0, summary), cut_message("%s", summary.c_str()));
+
+		// 3) the journal names other batches than the archive now holds
+		wa_restore_from(cp);
+		cut_remove_path(wa_seg_dir, NULL);
+		mkdir(wa_seg_dir, 0700);
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, a, 1, path, err));
+		cut_assert_equal_int(0, wa_replay(0, summary), cut_message("%s", summary.c_str()));
+		cut_remove_path(wa_seg_dir, NULL);
+		mkdir(wa_seg_dir, 0700);
+		vector<wal_archive::record> other = a;
+		// same positions, but the last replayed batch differs (a value byte)
+		other.back().data[other.back().data.size() - 1] ^= 0x01;
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, other, 1, path, err));
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, c, 2, path, err));
+		cut_assert_equal_int(3, wa_replay(0, summary), cut_message("%s", summary.c_str()));
+		cut_assert_true(summary.find("journal=differs") != string::npos, cut_message("%s", summary.c_str()));
+
+		// 4) a segment of another identity is ignored, not mixed in
+		wa_restore_from(cp);
+		cut_remove_path(wa_seg_dir, NULL);
+		mkdir(wa_seg_dir, 0700);
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, a, 1, path, err));
+		wal_archive::identity foreign = id;
+		foreign.incarnation += "x";
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, foreign, c, 3, path, err));
+		cut_assert_equal_int(0, wa_replay(0, summary), cut_message("%s", summary.c_str()));
+		cut_assert_true(summary.find("foreign=1") != string::npos, cut_message("%s", summary.c_str()));
+		cppcut_assert_equal(a.back().last_lsn(), wa_seq_of(wa_restore_dir));
+
+		cut_remove_path(wal_master_dir, NULL);
+		wa_reset_dirs();
+		cut_notify("wal archive: checked");
+	}
+
+	// The archiver reads the SOURCE's real reply: identity tuple in the EPOCH
+	// line, batches kept only on END.
+	void test_wal_archive_follower_reads_a_source_reply() {
+		storage_rocksdb* m = make_rocksdb(wal_master_dir);
+		const uint64_t from = m->get_latest_sequence_number();
+		for (int i = 0; i < 3; i++) {
+			cut_assert_equal_int(0, storage_set_string(m, "f" + boost::lexical_cast<string>(i), "v"));
+		}
+		const uint64_t head = m->get_latest_sequence_number();
+		const wal_archive::identity id = wa_identity_of(m);
+		char request[BUFSIZ];
+		snprintf(request, sizeof(request), " %llu %s %s 100 1048576\r\n", (unsigned long long)from,
+			id.master_id.c_str(), id.epoch.c_str());
+		shared_connection c(new connection_sstream(request));
+		serving_sync_wal op(c, m);
+		cut_assert_equal_int(0, op._parse_text_server_parameters());
+		op._run_server();
+		const string reply = static_cast<connection_sstream*>(c.get())->get_output();
+		drop_rocksdb(m, wal_master_dir);
+
+		// the identity tuple is on the EPOCH line
+		cut_assert_true(reply.find("EPOCH " + id.epoch + " ") == 0, cut_message("%s", reply.substr(0, 200).c_str()));
+		cut_assert_true(reply.find(" " + id.incarnation + " " + id.master_id + "\r\n") != string::npos);
+
+		uint64_t cursor = from, latest = 0;
+		vector<wal_archive::record> out;
+		bool more = false;
+		string reason;
+		shared_connection r(new connection_sstream(reply));
+		cut_assert_equal_int(wal_archive::follower::response_ok,
+			wal_archive::follower::read_response(r, id, cursor, out, more, latest, reason));
+		cppcut_assert_equal(head, cursor);
+		cut_assert_false(out.empty());
+		cppcut_assert_equal(from + 1, out.front().lsn);
+
+		// the same reply ending in an error instead of END keeps nothing
+		string cut_reply = reply.substr(0, reply.rfind("END"));
+		cut_reply += "SERVER_ERROR identity_changed\r\n";
+		cursor = from;
+		out.clear();
+		shared_connection r2(new connection_sstream(cut_reply));
+		cut_assert_equal_int(wal_archive::follower::response_needs_base,
+			wal_archive::follower::read_response(r2, id, cursor, out, more, latest, reason));
+		cppcut_assert_equal(from, cursor);
+		cut_assert_true(out.empty());
+
+		// another copy (incarnation) -> needs a new base, nothing kept
+		wal_archive::identity other = id;
+		other.incarnation += "x";
+		cursor = from;
+		shared_connection r3(new connection_sstream(reply));
+		cut_assert_equal_int(wal_archive::follower::response_needs_base,
+			wal_archive::follower::read_response(r3, other, cursor, out, more, latest, reason));
+		cut_assert_equal_string("incarnation_changed", reason.c_str());
+		cut_assert_true(out.empty());
+
+		// an EPOCH line without the identity tokens (older source): fail closed
+		const string old_epoch = "EPOCH " + id.epoch + " 10\r\nEND\r\n";
+		shared_connection r4(new connection_sstream(old_epoch));
+		cut_assert_equal_int(wal_archive::follower::response_retry,
+			wal_archive::follower::read_response(r4, id, cursor, out, more, latest, reason));
+		cut_assert_equal_string("source_without_identity", reason.c_str());
+
+		// purged / other history -> new base
+		const char* needs[] = { "SERVER_ERROR lsn_purged\r\n", "SERVER_ERROR epoch_mismatch x\r\n",
+			"SERVER_ERROR master_id_mismatch y\r\n" };
+		for (size_t i = 0; i < 3; i++) {
+			shared_connection rn(new connection_sstream(needs[i]));
+			cut_assert_equal_int(wal_archive::follower::response_needs_base,
+				wal_archive::follower::read_response(rn, id, cursor, out, more, latest, reason));
+		}
+		shared_connection ru(new connection_sstream("SERVER_ERROR restored_unverified\r\n"));
+		cut_assert_equal_int(wal_archive::follower::response_retry,
+			wal_archive::follower::read_response(ru, id, cursor, out, more, latest, reason));
+		cut_notify("wal archive: checked");
+	}
+
+	// FAIL CLOSED on an incomplete archive: replay applies the contiguous part
+	// and returns 4 when the archive holds history it did not reach — a corrupt
+	// LAST segment (no gap shows for it), a missing middle segment, or a
+	// different batch at a covered position. A corrupt segment whose range is
+	// covered by another one costs nothing and stays 0.
+	void test_wal_archive_replay_refuses_an_incomplete_archive() {
+		wa_reset_dirs();
+		storage_rocksdb* s = make_rocksdb(wal_master_dir);
+		string cp;
+		cut_assert_equal_int(0, s->create_named_backup("20261118-000009", cp));
+		wal_archive::base b;
+		cut_assert_equal_int(0, wal_archive::read_base_file(cp, b));
+		for (int i = 0; i < 9; i++) {
+			cut_assert_equal_int(0, storage_set_string(s, "x" + boost::lexical_cast<string>(i), "v"));
+		}
+		vector<wal_archive::record> rs = wa_records_since(s, b.seq, 1000);
+		const wal_archive::identity id = wa_identity_of(s);
+		drop_rocksdb_noremove(s);
+		cut_assert_operator(rs.size(), >=, static_cast<size_t>(9));
+		vector<wal_archive::record> a(rs.begin(), rs.begin() + 3), m(rs.begin() + 3, rs.begin() + 6), z(rs.begin() + 6, rs.end());
+		string path, err, summary;
+		auto corrupt = [](const string& f) {
+			std::fstream io(f.c_str(), std::ios::in | std::ios::out | std::ios::binary);
+			io.seekp(-12, std::ios::end);
+			char c = 0;
+			io.read(&c, 1);
+			io.seekp(-12, std::ios::end);
+			c ^= 0x5a;
+			io.write(&c, 1);
+		};
+		auto reset_segs = [&]() { cut_remove_path(wa_seg_dir, NULL); mkdir(wa_seg_dir, 0700); };
+
+		// 1) the last segment corrupt: no gap, but history lost -> 4
+		wa_restore_from(cp);
+		reset_segs();
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, a, 1, path, err));
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, m, 2, path, err));
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, z, 3, path, err));
+		corrupt(path);
+		cut_assert_equal_int(4, wa_replay(0, summary), cut_message("%s", summary.c_str()));
+		cut_assert_true(summary.find("gap=0") != string::npos, cut_message("%s", summary.c_str()));
+		cut_assert_true(summary.find("corrupt_beyond=1 complete=0") != string::npos, cut_message("%s", summary.c_str()));
+		cppcut_assert_equal(m.back().last_lsn(), wa_seq_of(wa_restore_dir));	// the contiguous part is applied
+
+		// 2) a middle segment missing -> 4 (gap)
+		wa_restore_from(cp);
+		reset_segs();
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, a, 1, path, err));
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, z, 3, path, err));
+		cut_assert_equal_int(4, wa_replay(0, summary), cut_message("%s", summary.c_str()));
+		cut_assert_true(summary.find("gap=1") != string::npos, cut_message("%s", summary.c_str()));
+		cppcut_assert_equal(a.back().last_lsn(), wa_seq_of(wa_restore_dir));
+
+		// 3) a different batch at a covered position -> 4 (conflict)
+		wa_restore_from(cp);
+		reset_segs();
+		vector<wal_archive::record> other(m.begin(), m.begin() + 1);
+		other[0].data[other[0].data.size() - 1] ^= 0x01;	// a value byte: still a batch
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, a, 1, path, err));
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, m, 2, path, err));
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, other, 4, path, err));
+		cut_assert_equal_int(4, wa_replay(0, summary), cut_message("%s", summary.c_str()));
+		cut_assert_true(summary.find("conflict=1") != string::npos, cut_message("%s", summary.c_str()));
+
+		// 4) a corrupt duplicate of a covered range costs nothing -> 0
+		wa_restore_from(cp);
+		reset_segs();
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, a, 1, path, err));
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, a, 5, path, err));
+		corrupt(path);
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, m, 2, path, err));
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, z, 3, path, err));
+		cut_assert_equal_int(0, wa_replay(0, summary), cut_message("%s", summary.c_str()));
+		cut_assert_true(summary.find("corrupt=1 corrupt_beyond=0 complete=1") != string::npos, cut_message("%s", summary.c_str()));
+		cppcut_assert_equal(z.back().last_lsn(), wa_seq_of(wa_restore_dir));
+
+		// 5) past a time bound that stopped the replay, a corrupt segment is not wanted -> 0
+		wa_restore_from(cp);
+		reset_segs();
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, a, 1, path, err));
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, m, 2, path, err));
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, z, 3, path, err));
+		corrupt(path);
+		cut_assert_equal_int(0, wa_replay(a.back().time_us, summary), cut_message("%s", summary.c_str()));
+		cut_assert_true(summary.find("until=1") != string::npos && summary.find("complete=1") != string::npos,
+			cut_message("%s", summary.c_str()));
+
+		cut_remove_path(wal_master_dir, NULL);
+		wa_reset_dirs();
+		cut_notify("wal archive: incomplete archives refused");
+	}
+
+	// One field of /proc/self/status, in KiB (VmRSS, VmHWM).
+	long wa_status_kb(const char* field) {
+		FILE* f = fopen("/proc/self/status", "r");
+		long kb = -1;
+		if (f != NULL) {
+			char line[256];
+			const size_t n = strlen(field);
+			while (fgets(line, sizeof(line), f) != NULL) {
+				if (strncmp(line, field, n) == 0 && line[n] == ':') {
+					kb = strtol(line + n + 1, NULL, 10);
+					break;
+				}
+			}
+			fclose(f);
+		}
+		return kb;
+	}
+
+	// Resets this process's peak RSS (VmHWM) to its current RSS.
+	bool wa_reset_peak_rss() {
+		FILE* f = fopen("/proc/self/clear_refs", "w");
+		if (f == NULL) return false;
+		const bool ok = fputs("5", f) >= 0;
+		return fclose(f) == 0 && ok;
+	}
+
+	// Builds a chain of `mib` MiB of 1 MiB values after a fresh base, writing
+	// segments of 16 batches as it reads them (the test itself never holds the
+	// chain), then replays it and returns how much the process's peak RSS grew
+	// above its RSS at the start of the replay (KiB). Measured in this process:
+	// a forked child would inherit RocksDB's background thread pool without
+	// its threads, and a replay that needs a flush would wait forever.
+	long wa_replay_growth_kb(int mib, string& summary) {
+		wa_reset_dirs();
+		storage_rocksdb* s = make_rocksdb(wal_master_dir);
+		string cp;
+		cut_assert_equal_int(0, s->create_named_backup("20261119-" + boost::lexical_cast<string>(mib), cp));
+		wal_archive::base b;
+		cut_assert_equal_int(0, wal_archive::read_base_file(cp, b));
+		const wal_archive::identity id = wa_identity_of(s);
+		{
+			const string v(1 << 20, 'w');
+			for (int i = 0; i < mib; i++) {
+				cut_assert_equal_int(0, storage_set_string(s, "big" + boost::lexical_cast<string>(i), v));
+			}
+		}
+		uint64_t from = b.seq;
+		int64_t t = 1;
+		for (;;) {
+			vector<pair<uint64_t, rocksdb::WriteBatch>> u;
+			cut_assert_equal_int(0, s->get_updates_since(from, u, 16, 0, NULL, from));
+			if (u.empty()) break;
+			vector<wal_archive::record> rs;
+			for (size_t i = 0; i < u.size(); i++) {
+				wal_archive::record r;
+				r.lsn = u[i].first;
+				r.count = u[i].second.Count();
+				r.time_us = t++;
+				r.data = u[i].second.Data();
+				rs.push_back(r);
+			}
+			string path, err;
+			cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, rs, t, path, err));
+			from = rs.back().last_lsn();
+		}
+		drop_rocksdb_noremove(s);
+		wa_restore_from(cp);
+		cut_assert_true(wa_reset_peak_rss(), cut_message("cannot reset the peak RSS (/proc/self/clear_refs)"));
+		const long before = wa_status_kb("VmRSS");
+		char* buf = NULL;
+		size_t len = 0;
+		FILE* out = open_memstream(&buf, &len);
+		cut_assert_not_null(out);
+		const int rc = wal_archive::replay(wa_restore_dir, wa_seg_dir, 0, out);
+		fclose(out);
+		const long peak = wa_status_kb("VmHWM");
+		summary.assign(buf, len);
+		free(buf);
+		cut_remove_path(wal_master_dir, NULL);
+		cut_assert_equal_int(0, rc, cut_message("%s", summary.c_str()));
+		cut_assert_true(summary.find("complete=1") != string::npos, cut_message("%s", summary.c_str()));
+		cut_assert_true(before > 0 && peak >= before, cut_message("VmRSS %ld KiB, VmHWM %ld KiB", before, peak));
+		return peak - before;
+	}
+
+	// BOUNDED MEMORY: the replay reads the archive one record at a time, so
+	// the memory it uses does not grow with the chain. Measured in this
+	// process (its peak RSS above its RSS at the start) for a 64 MiB and a
+	// 256 MiB chain of 1 MiB batches: both stay far below the chain, and the
+	// larger chain does not cost proportionally more.
+	void test_wal_archive_replay_memory_does_not_grow_with_the_chain() {
+		string s64, s256;
+		const long g64 = wa_replay_growth_kb(64, s64);
+		const long g256 = wa_replay_growth_kb(256, s256);
+		wa_reset_dirs();
+		cut_notify("wal archive replay memory: 64 MiB chain +%ld KiB, 256 MiB chain +%ld KiB", g64, g256);
+		cut_assert_true(s256.find(" applied=0 ") == string::npos, cut_message("%s", s256.c_str()));
+		cut_assert_operator(g256, <, 128L * 1024, cut_message("256 MiB chain grew %ld KiB", g256));
+		// 4x the chain must not cost anything near 4x: allow the memtables' fill
+		cut_assert_operator(g256, <, g64 + 48L * 1024, cut_message("64 MiB +%ld KiB, 256 MiB +%ld KiB", g64, g256));
+	}
+
+	// A canned repl_sync_wal source on a real TCP port: the first connection
+	// gets `first`, every later one `idle`.
+	struct canned_source {
+		int lfd;
+		int port;
+		string first, idle;
+		volatile bool stop;
+		int served;
+		pthread_t th;
+		canned_source(const string& f, const string& i): lfd(-1), port(0), first(f), idle(i), stop(false), served(0) {
+			lfd = socket(AF_INET, SOCK_STREAM, 0);
+			int one = 1;
+			setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+			struct sockaddr_in a;
+			memset(&a, 0, sizeof(a));
+			a.sin_family = AF_INET;
+			a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+			bind(lfd, (struct sockaddr*)&a, sizeof(a));
+			listen(lfd, 8);
+			socklen_t l = sizeof(a);
+			getsockname(lfd, (struct sockaddr*)&a, &l);
+			port = ntohs(a.sin_port);
+			fcntl(lfd, F_SETFL, fcntl(lfd, F_GETFL, 0) | O_NONBLOCK);
+			pthread_create(&th, NULL, run, this);
+		}
+		~canned_source() {
+			stop = true;
+			pthread_join(th, NULL);
+			::close(lfd);
+		}
+		static void* run(void* p) {
+			canned_source* s = static_cast<canned_source*>(p);
+			while (!s->stop) {
+				int fd = accept(s->lfd, NULL, NULL);
+				if (fd < 0) {
+					usleep(10000);
+					continue;
+				}
+				char c;
+				while (read(fd, &c, 1) == 1 && c != '\n') {}
+				const string& r = s->served++ == 0 ? s->first : s->idle;
+				size_t off = 0;
+				while (off < r.size()) {
+					ssize_t w = write(fd, r.data() + off, r.size() - off);
+					if (w <= 0) break;
+					off += static_cast<size_t>(w);
+				}
+				::close(fd);
+			}
+			return NULL;
+		}
+	};
+
+	struct stop_after {
+		volatile sig_atomic_t flag;
+		int usec;
+		pthread_t th;
+		explicit stop_after(int u): flag(0), usec(u) { pthread_create(&th, NULL, run, this); }
+		~stop_after() { pthread_join(th, NULL); }
+		static void* run(void* p) {
+			stop_after* s = static_cast<stop_after*>(p);
+			usleep(s->usec);
+			s->flag = 1;
+			return NULL;
+		}
+	};
+
+	// The follower as `flared --wal-archive-follow` runs it: real TCP, and NO
+	// process-wide stats object (the offline mode skips the server start-up).
+	// It must not crash, must write the batches to a closed segment and record
+	// the synced time (CI 44299609676: it died on the first read).
+	void test_wal_archive_follower_over_tcp_without_server_startup() {
+		wa_reset_dirs();
+		storage_rocksdb* m = make_rocksdb(wal_master_dir);
+		const uint64_t from = m->get_latest_sequence_number();
+		for (int i = 0; i < 3; i++) {
+			cut_assert_equal_int(0, storage_set_string(m, "t" + boost::lexical_cast<string>(i), "v"));
+		}
+		const uint64_t head = m->get_latest_sequence_number();
+		const wal_archive::identity id = wa_identity_of(m);
+		char request[BUFSIZ];
+		snprintf(request, sizeof(request), " %llu %s %s 100 1048576\r\n", (unsigned long long)from,
+			id.master_id.c_str(), id.epoch.c_str());
+		shared_connection c(new connection_sstream(request));
+		serving_sync_wal op(c, m);
+		cut_assert_equal_int(0, op._parse_text_server_parameters());
+		op._run_server();
+		const string reply = static_cast<connection_sstream*>(c.get())->get_output();
+		char idle[512];
+		snprintf(idle, sizeof(idle), "EPOCH %s %llu %s %s\r\nEND\r\n", id.epoch.c_str(),
+			(unsigned long long)head, id.incarnation.c_str(), id.master_id.c_str());
+		drop_rocksdb(m, wal_master_dir);
+
+		int rc = -1;
+		{
+			canned_source src(reply, idle);
+			wal_archive::follower::options o;
+			o.host = "127.0.0.1";
+			o.port = src.port;
+			o.id = id;
+			o.from_lsn = from;
+			o.out_dir = wa_seg_dir;
+			o.segment_seconds = 1;
+			o.poll_usec = 50000;
+			stats* saved = stats_object;
+			stats_object = NULL;
+			{
+				stop_after stopper(2500000);
+				wal_archive::follower f(o);
+				rc = f.run(&stopper.flag);
+			}
+			delete stats_object;
+			stats_object = saved;
+		}
+		cut_assert_equal_int(wal_archive::follower::exit_ok, rc);
+		vector<wal_archive::record> got;
+		DIR* d = opendir(wa_seg_dir);
+		cut_assert_not_null(d);
+		struct dirent* e;
+		int segments = 0;
+		while ((e = readdir(d)) != NULL) {
+			const string n = e->d_name;
+			if (n.size() > 4 && n.compare(n.size() - 4, 4, ".wal") == 0) {
+				wal_archive::identity sid;
+				vector<wal_archive::record> rs;
+				string err;
+				cut_assert_equal_int(0, wal_archive::read_segment(string(wa_seg_dir) + "/" + n, sid, rs, err));
+				cut_assert_true(sid == id);
+				got.insert(got.end(), rs.begin(), rs.end());
+				segments++;
+			}
+		}
+		closedir(d);
+		cut_assert_operator(segments, >=, 1);
+		cut_assert_false(got.empty());
+		cppcut_assert_equal(from + 1, got.front().lsn);
+		cppcut_assert_equal(head, got.back().last_lsn());
+		struct stat st;
+		cut_assert_equal_int(0, stat((string(wa_seg_dir) + "/synced").c_str(), &st));
+		wa_reset_dirs();
+		cut_notify("wal archive: follower over tcp, %d segment(s), %zu batches", segments, got.size());
+	}
+
+	// An existing slave follower still reads the longer EPOCH line.
+	void test_follow_client_accepts_the_identity_tuple_epoch_line() {
+		storage_rocksdb* s = make_rocksdb(wal_slave_dir);
+		const uint64_t cursor0 = s->get_repl_last_lsn();
+		const string reply = "EPOCH " + s->get_source_epoch() + " 10 inc mid\r\nEND\r\n";
+		shared_connection c(new connection_sstream(reply));
+		op_repl_sync_wal op(c, s);
+		cut_assert_equal_int(0, op.run_client_follow(cursor0, s->get_master_id(), s->get_source_epoch(),
+			s->get_incarnation(), 10, 1 << 20));
+		cppcut_assert_equal(static_cast<uint64_t>(10), op.get_server_latest_lsn());
+		drop_rocksdb(s, wal_slave_dir);
+		cut_notify("wal archive: checked");
+	}
+	// }}}
 
 	void teardown()
 	{

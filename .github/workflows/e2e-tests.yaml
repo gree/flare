@@ -121,6 +121,7 @@ jobs:
             {"group":"node-ops-cordon-pvc","suites":"node-ops-switch-nfs-cordon-master,node-ops-switch-nfs-cordon-replica,node-ops-switch-cordon-pinned"},
             {"group":"node-ops-apiserver-outage","suites":"node-ops-apiserver-outage"},
             {"group":"stats-cost","suites":"stats-cost"},
+            {"group":"wal-archive","suites":"wal-archive"},
             {"group":"continuous-replication","suites":"copy-retention-measure,continuous-replication,continuous-replication-scale,continuous-replication-sustained,continuous-replication-outage,continuous-replication-outage-tmpfs,visibility-bench"}
           ]'
           all=$(echo "$default" | jq -r '[.[].suites] | join(",")')
@@ -279,7 +280,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: /tmp/flared-images
-          key: flared-images-${{ hashFiles('Dockerfile.flare-node', 'Dockerfile.flare-node-rocksdb', 'autogen.sh', 'configure.ac', 'Makefile.am', 'config.guess', 'config.sub', 'depcomp', 'install-sh', 'missing', 'mkinstalldirs', 'AUTHORS', 'ChangeLog', 'COPYING', 'INSTALL', 'NEWS', 'src/**', 'test/**', 'scripts/flare-restore-hook') }}
+          key: flared-images-${{ hashFiles('Dockerfile.flare-node', 'Dockerfile.flare-node-rocksdb', 'autogen.sh', 'configure.ac', 'Makefile.am', 'config.guess', 'config.sub', 'depcomp', 'install-sh', 'missing', 'mkinstalldirs', 'AUTHORS', 'ChangeLog', 'COPYING', 'INSTALL', 'NEWS', 'src/**', 'test/**', 'scripts/flare-restore-hook', 'scripts/flare-wal-follow') }}
           lookup-only: true
 
       - name: Set up Docker Buildx
@@ -356,7 +357,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: /tmp/flared-images
-          key: flared-images-${{ hashFiles('Dockerfile.flare-node', 'Dockerfile.flare-node-rocksdb', 'autogen.sh', 'configure.ac', 'Makefile.am', 'config.guess', 'config.sub', 'depcomp', 'install-sh', 'missing', 'mkinstalldirs', 'AUTHORS', 'ChangeLog', 'COPYING', 'INSTALL', 'NEWS', 'src/**', 'test/**', 'scripts/flare-restore-hook') }}
+          key: flared-images-${{ hashFiles('Dockerfile.flare-node', 'Dockerfile.flare-node-rocksdb', 'autogen.sh', 'configure.ac', 'Makefile.am', 'config.guess', 'config.sub', 'depcomp', 'install-sh', 'missing', 'mkinstalldirs', 'AUTHORS', 'ChangeLog', 'COPYING', 'INSTALL', 'NEWS', 'src/**', 'test/**', 'scripts/flare-restore-hook', 'scripts/flare-wal-follow') }}
 
   e2e-test:
     # flared-images and lean-build only fill the caches: a leg runs whether
@@ -606,7 +607,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: /tmp/flared-images
-          key: flared-images-${{ hashFiles('Dockerfile.flare-node', 'Dockerfile.flare-node-rocksdb', 'autogen.sh', 'configure.ac', 'Makefile.am', 'config.guess', 'config.sub', 'depcomp', 'install-sh', 'missing', 'mkinstalldirs', 'AUTHORS', 'ChangeLog', 'COPYING', 'INSTALL', 'NEWS', 'src/**', 'test/**', 'scripts/flare-restore-hook') }}
+          key: flared-images-${{ hashFiles('Dockerfile.flare-node', 'Dockerfile.flare-node-rocksdb', 'autogen.sh', 'configure.ac', 'Makefile.am', 'config.guess', 'config.sub', 'depcomp', 'install-sh', 'missing', 'mkinstalldirs', 'AUTHORS', 'ChangeLog', 'COPYING', 'INSTALL', 'NEWS', 'src/**', 'test/**', 'scripts/flare-restore-hook', 'scripts/flare-wal-follow') }}
 
       - name: Load the flared images
         if: steps.flared_images.outputs.cache-hit == 'true'
@@ -690,7 +691,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: /tmp/flared-images
-          key: flared-images-${{ hashFiles('Dockerfile.flare-node', 'Dockerfile.flare-node-rocksdb', 'autogen.sh', 'configure.ac', 'Makefile.am', 'config.guess', 'config.sub', 'depcomp', 'install-sh', 'missing', 'mkinstalldirs', 'AUTHORS', 'ChangeLog', 'COPYING', 'INSTALL', 'NEWS', 'src/**', 'test/**', 'scripts/flare-restore-hook') }}
+          key: flared-images-${{ hashFiles('Dockerfile.flare-node', 'Dockerfile.flare-node-rocksdb', 'autogen.sh', 'configure.ac', 'Makefile.am', 'config.guess', 'config.sub', 'depcomp', 'install-sh', 'missing', 'mkinstalldirs', 'AUTHORS', 'ChangeLog', 'COPYING', 'INSTALL', 'NEWS', 'src/**', 'test/**', 'scripts/flare-restore-hook', 'scripts/flare-wal-follow') }}
 
       # Retried: the builder downloads the Lean toolchain from
       # releases.lean-lang.org, which returned HTTP 504 once (manual run
@@ -709,11 +710,54 @@ jobs:
           done
           exit 1
 
+      # The flare-backup image (Dockerfile.backup: aws-cli + kubectl + nc and
+      # the backup / WAL-archive upload scripts) is only needed by the
+      # wal-archive suite (MinIO as the object storage, the chart's backup
+      # CronJob, bootstrap init container and archiver Deployment). Built and
+      # cached only in the legs that run it; the key covers everything the
+      # image copies (Dockerfile.backup and deploy/backup-scripts/**).
+      - name: Restore the flare-backup image
+        id: backup_image
+        if: ${{ contains(matrix.suites, 'wal-archive') }}
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/flare-backup-image
+          key: flare-backup-image-${{ hashFiles('Dockerfile.backup', 'deploy/backup-scripts/**') }}
+
+      - name: Build the flare-backup image
+        if: ${{ contains(matrix.suites, 'wal-archive') && steps.backup_image.outputs.cache-hit != 'true' }}
+        run: |
+          # retried: the base image comes from public.ecr.aws and kubectl from dl.k8s.io
+          for attempt in 1 2 3; do
+            docker build -t flare-backup:test -f Dockerfile.backup . && break
+            if [ "$attempt" = 3 ]; then exit 1; fi
+            echo "::warning::flare-backup image build failed (attempt $attempt/3); retrying in 30 s"
+            sleep 30
+          done
+          mkdir -p /tmp/flare-backup-image
+          docker save flare-backup:test -o /tmp/flare-backup-image/flare-backup.tar
+
+      - name: Cache the flare-backup image
+        if: ${{ contains(matrix.suites, 'wal-archive') && steps.backup_image.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/flare-backup-image
+          key: flare-backup-image-${{ hashFiles('Dockerfile.backup', 'deploy/backup-scripts/**') }}
+
+      - name: Load the cached flare-backup image
+        if: ${{ contains(matrix.suites, 'wal-archive') && steps.backup_image.outputs.cache-hit == 'true' }}
+        run: docker load -i /tmp/flare-backup-image/flare-backup.tar
+
       - name: Load images into kind
         run: |
           kind load docker-image flare-operator:test --name flare-e2e
           kind load docker-image flare-node:test --name flare-e2e
           kind load docker-image flare-node-rocksdb:test --name flare-e2e
+          if echo ",$SUITES," | grep -q ',wal-archive,'; then
+            kind load docker-image flare-backup:test --name flare-e2e
+          fi
+        env:
+          SUITES: ${{ matrix.suites }}
 
       - name: Create namespace
         run: kubectl create namespace flare-system --dry-run=client -o yaml | kubectl apply -f -

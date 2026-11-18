@@ -376,6 +376,22 @@ cluster:
     image:
       repository: ghcr.io/gree/flare-backup
       tag: ""
+    # CONTINUOUS WAL ARCHIVE (docs/BACKUP_RESTORE.md, "WAL archive"). A
+    # separate Deployment follows each partition master's WAL into short
+    # segments in objectStorage, so a restore replays the hourly base forward
+    # and loses only about the last segmentSeconds + upload time instead of up
+    # to an hour. Toggling it creates/deletes only that Deployment (flared pods
+    # are not restarted). Requires backup.enabled (a new base is taken by
+    # running the backup CronJob once) and backup.role master. After a master
+    # switch, until the new master's base is uploaded, a restore reaches only
+    # the end of the old chain (FlareWalArchiveNeedsBase).
+    walArchive:
+      enabled: false
+      segmentSeconds: 30          # close a segment this long after its first batch
+      retainSeconds: 172800       # 2 days: time-bounded restore reaches this far back
+      rebaseMinIntervalSeconds: 600
+      rpoAlertSeconds: 120        # FlareWalArchiveBehind threshold (2x the target)
+      resources: {}
 
   # Automated failover-from-backup: an init container seeds an EMPTY data dir
   # from the newest backup (objectStorage.url/<cluster.name>/latest/p0/)
@@ -395,6 +411,14 @@ cluster:
   backupBootstrap:
     enabled: false
     maxAgeSeconds: 7200
+    # WAL archive: replay the archived WAL only up to this unix time ("" =
+    # as far as it continues). A runtime flag like `enabled`.
+    walUntil: ""
+    # WAL archive: an archive the replay cannot fully reach (gap, conflict,
+    # corrupt later segment) REFUSES the restore; true publishes it up to
+    # where the archive continues. A runtime flag; set it only for a restore
+    # you decided to accept, then set it back.
+    walAcceptIncomplete: false
     image:
       repository: ghcr.io/gree/flare-backup
       tag: ""

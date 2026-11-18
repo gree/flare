@@ -213,6 +213,7 @@ int op_repl_sync_wal::_run_server() {
 	// is serving and refuse a follower that belongs to another one. A source
 	// that cannot identify its history serves nobody.
 	const string server_epoch = rocksdb->get_source_epoch();
+	const string identity_incarnation = rocksdb->get_incarnation();
 	if (server_epoch.empty()) {
 		log_warning("repl_sync_wal refused: this node cannot identify its replication history", 0);
 		return this->_send_result(result_server_error, "generations_unavailable");
@@ -227,9 +228,16 @@ int op_repl_sync_wal::_run_server() {
 		// Sent before any batch so the follower can bind what follows to a
 		// history, and carries this source's current position so the
 		// follower can report its lag with the time it was observed.
+		// The 3rd and 4th tokens name this physical copy (its incarnation
+		// advances whenever the copy is replaced) and its lineage, so the WAL
+		// archive can bind its segments to ONE copy's sequence space with the
+		// whole identity in one line. Older clients ignore them. The identity
+		// is read again after the slice (below): a slice during which any of
+		// it changed ends in an error instead of END.
 		char line[BUFSIZ];
-		snprintf(line, sizeof(line), "EPOCH %s %llu%s", server_epoch.c_str(),
-			(unsigned long long)server_latest, line_delimiter);
+		snprintf(line, sizeof(line), "EPOCH %s %llu %s %s%s", server_epoch.c_str(),
+			(unsigned long long)server_latest, identity_incarnation.empty() ? "-" : identity_incarnation.c_str(),
+			server_master_id.empty() ? "-" : server_master_id.c_str(), line_delimiter);
 		this->_connection->write(line, strlen(line));
 	}
 
@@ -364,6 +372,16 @@ int op_repl_sync_wal::_run_server() {
 		} else if (this->_interval_usec > 0) {
 			usleep(this->_interval_usec);
 		}
+	}
+
+	// Each identity value only moves forward (minted, never reused), so a
+	// slice whose before and after reads agree was served by one copy of one
+	// history in one lineage.
+	if (rocksdb->get_source_epoch() != server_epoch
+			|| rocksdb->get_incarnation() != identity_incarnation
+			|| rocksdb->get_master_id() != server_master_id) {
+		log_notice("repl_sync_wal: this copy's identity changed while the slice was read -> identity_changed", 0);
+		return this->_send_result(result_server_error, "identity_changed");
 	}
 
 	if (more) {

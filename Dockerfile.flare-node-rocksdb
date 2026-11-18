@@ -82,6 +82,9 @@ COPY --from=builder /build/install/usr/local/ /usr/local/
 # The RESTORE hook (restore provenance check before the live copy is
 # replaced); the chart and the E2E harness both call this same script.
 COPY scripts/flare-restore-hook /usr/local/bin/flare-restore-hook
+# The FOLLOW half of the WAL archiver (helm walArchive): runs
+# `flared --wal-archive-follow` per partition as the uploader directs.
+COPY scripts/flare-wal-follow /usr/local/bin/flare-wal-follow
 
 EXPOSE 12121
 

@@ -53,6 +53,7 @@
 #endif
 #ifdef HAVE_LIBROCKSDB
 #include "storage_rocksdb.h"
+#include "wal_archive.h"
 #endif
 
 #ifdef ENABLE_K8S_OPERATOR
@@ -922,6 +923,13 @@ int flared::_set_signal_handler() {
 }	// namespace gree
 
 // {{{ ::main (entry point)
+#ifdef HAVE_LIBROCKSDB
+static volatile sig_atomic_t wal_archive_stop = 0;
+static void wal_archive_stop_handler(int) {
+	wal_archive_stop = 1;
+}
+#endif
+
 int main(int argc, char **argv) {
 	// OFFLINE mode: `flared --analyze-checkpoint <dir>` opens a RocksDB
 	// checkpoint READ-ONLY and streams `key,expire,ttl,size` CSV to stdout,
@@ -959,6 +967,59 @@ int main(int argc, char **argv) {
 #else
 			fprintf(stderr, "flared built without RocksDB; --dump-checkpoint unavailable\n");
 			return 1;
+#endif
+		}
+		// WAL ARCHIVE (wal_archive.h). Both run without a server of their own.
+		//   flared --wal-archive-follow HOST PORT INCARNATION EPOCH MASTER_ID FROM_LSN OUT_DIR [SEGMENT_SECONDS]
+		//     follows HOST's WAL from FROM_LSN and writes closed segments to
+		//     OUT_DIR. Exit 0 stopped (SIGTERM/SIGINT), 10 a new base is
+		//     needed (OUT_DIR/needs-base says why), 2 usage, 3 I/O.
+		//   flared --wal-replay DB_DIR SEGMENT_DIR [UNTIL_UNIX_SECONDS]
+		//     replays the segments onto the checkpoint in DB_DIR (offline).
+		//     Exit 0 complete, 4 only part of the archive was reachable (gap,
+		//     conflict, corrupt later segment; the part is applied), 3 the base
+		//     does not describe DB_DIR, 1 open/write error.
+		if (strcmp(argv[i], "--wal-archive-follow") == 0) {
+#ifdef HAVE_LIBROCKSDB
+			if (argc - i - 1 < 7) {
+				fprintf(stderr, "usage: flared --wal-archive-follow HOST PORT INCARNATION EPOCH MASTER_ID FROM_LSN OUT_DIR [SEGMENT_SECONDS]\n");
+				return 2;
+			}
+			gree::flare::wal_archive::follower::options o;
+			o.host = argv[i + 1];
+			o.port = atoi(argv[i + 2]);
+			o.id.incarnation = argv[i + 3];
+			o.id.epoch = argv[i + 4];
+			o.id.master_id = argv[i + 5];
+			o.from_lsn = strtoull(argv[i + 6], NULL, 10);
+			o.out_dir = argv[i + 7];
+			if (argc - i - 1 >= 8) {
+				o.segment_seconds = atoi(argv[i + 8]);
+			}
+			signal(SIGTERM, wal_archive_stop_handler);
+			signal(SIGINT, wal_archive_stop_handler);
+			signal(SIGPIPE, SIG_IGN);
+			gree::flare::wal_archive::follower f(o);
+			return f.run(&wal_archive_stop);
+#else
+			fprintf(stderr, "flared built without RocksDB; --wal-archive-follow unavailable\n");
+			return 2;
+#endif
+		}
+		if (strcmp(argv[i], "--wal-replay") == 0) {
+#ifdef HAVE_LIBROCKSDB
+			if (argc - i - 1 < 2) {
+				fprintf(stderr, "usage: flared --wal-replay DB_DIR SEGMENT_DIR [UNTIL_UNIX_SECONDS]\n");
+				return 2;
+			}
+			int64_t until_us = 0;
+			if (argc - i - 1 >= 3) {
+				until_us = static_cast<int64_t>(strtoll(argv[i + 3], NULL, 10)) * 1000000;
+			}
+			return gree::flare::wal_archive::replay(argv[i + 1], argv[i + 2], until_us, stdout);
+#else
+			fprintf(stderr, "flared built without RocksDB; --wal-replay unavailable\n");
+			return 2;
 #endif
 		}
 		if (strcmp(argv[i], "--analyze-checkpoint") == 0) {

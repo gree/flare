@@ -2,7 +2,7 @@
   E2E/Tests/WalArchive.lean — the continuous WAL archive on kind with an S3-compatible store
   (issue flare-wal-archive-e2e; docs/BACKUP_RESTORE.md, "WAL archive").
 
-  What is real here: `rclone serve s3` (a single pod and Service `minio`, the bucket made with
+  What is real here: SeaweedFS's S3 server (a single pod and Service `minio`, the bucket made with
   aws-cli) is the object storage; the cluster is a REAL `helm install` of the
   chart (deployHelmCluster), so the StatefulSet's `backup-bootstrap` and
   `backup-wal-replay` init containers, the backup CronJob and its RBAC, the
@@ -76,10 +76,15 @@ private def toolPod : String := "wa-tool"
 private def replayPod : String := "wa-replay"
 private def extHost : String := s!"{cluster}-nodes-external.{nsName}.svc.cluster.local"
 private def backupImage : String := "flare-backup:test"
--- The S3-compatible store: `rclone serve s3` (the MinIO images are no longer
--- pullable without credentials: docker.io and quay.io both answered 401 in
--- CI 44286248212). Its Service keeps the name `minio`.
-private def s3Image : String := "rclone/rclone:1.68.2"
+-- The S3-compatible store: SeaweedFS (`weed server -s3`; no identities
+-- configured, so any signed request is accepted). Not MinIO: its images are
+-- not pullable without credentials any more (docker.io and quay.io 401, CI
+-- 44286248212). Not `rclone serve s3`: it lists keys out of order, and
+-- `aws s3 sync` merges the two listings in key order, so the backup's
+-- `sync --delete` deleted and re-uploaded the same keys at once and lost
+-- CURRENT (CI 44291630641; reproduced locally with aws-cli 2.15.0). Its
+-- Service keeps the name `minio`.
+private def s3Image : String := "chrislusf/seaweedfs:3.80"
 
 private def ctx (test : String) : Ctx := { cfg := cfg, suite := "wal-archive", test := test }
 
@@ -113,13 +118,10 @@ spec:
         - name: s3
           image: {s3Image}
           args:
-            - serve
-            - s3
-            - --addr
-            - :9000
-            - --auth-key
-            - {accessKey},{secretKey}
-            - /data
+            - server
+            - -dir=/data
+            - -s3
+            - -s3.port=9000
           ports:
             - containerPort: 9000
           readinessProbe:
@@ -805,7 +807,7 @@ private def setupInfra : IO Unit := do
   | .ok _ => pure ()
   | .error e => throw (IO.userError s!"S3 store / Secret / tool pod: {e}")
   if !(← kubectlRolloutStatus "deployment/minio" nsName 300) then
-    throw (IO.userError "the S3 store (rclone serve s3) did not become ready")
+    throw (IO.userError "the S3 store (SeaweedFS) did not become ready")
   if !(← kubectlWaitReady s!"pod/{toolPod}" nsName 180) then
     throw (IO.userError s!"the tool pod ({backupImage}) did not become Ready: is the flare-backup image loaded into kind?")
   let made ← waitForCondition s!"bucket {bucket} created" 120 do

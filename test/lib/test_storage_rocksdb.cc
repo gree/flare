@@ -42,6 +42,8 @@
 
 #include <limits>
 #include <sys/stat.h>
+#include <sys/resource.h>
+#include <sys/wait.h>
 #include <sys/types.h>
 #include <pthread.h>
 #include <atomic>
@@ -6356,6 +6358,99 @@ void test_reseed_serve_to_a_slow_reader_completes_past_several_windows() {
 		cut_remove_path(wal_master_dir, NULL);
 		wa_reset_dirs();
 		cut_notify("wal archive: incomplete archives refused");
+	}
+
+	long wa_rss_kb() {
+		FILE* f = fopen("/proc/self/statm", "r");
+		long pages = 0, resident = 0;
+		if (f != NULL) {
+			if (fscanf(f, "%ld %ld", &pages, &resident) != 2) resident = 0;
+			fclose(f);
+		}
+		return resident * (sysconf(_SC_PAGESIZE) / 1024);
+	}
+
+	// Builds a chain of `mib` MiB of 1 MiB values after a fresh base, writing
+	// segments of 16 batches as it reads them (the test itself never holds the
+	// chain), then replays it in a CHILD process and returns how much the
+	// child's peak RSS grew above what it inherited (KiB).
+	long wa_replay_growth_kb(int mib, string& summary) {
+		wa_reset_dirs();
+		storage_rocksdb* s = make_rocksdb(wal_master_dir);
+		string cp;
+		cut_assert_equal_int(0, s->create_named_backup("20261119-" + boost::lexical_cast<string>(mib), cp));
+		wal_archive::base b;
+		cut_assert_equal_int(0, wal_archive::read_base_file(cp, b));
+		const wal_archive::identity id = wa_identity_of(s);
+		{
+			const string v(1 << 20, 'w');
+			for (int i = 0; i < mib; i++) {
+				cut_assert_equal_int(0, storage_set_string(s, "big" + boost::lexical_cast<string>(i), v));
+			}
+		}
+		uint64_t from = b.seq;
+		int64_t t = 1;
+		for (;;) {
+			vector<pair<uint64_t, rocksdb::WriteBatch>> u;
+			cut_assert_equal_int(0, s->get_updates_since(from, u, 16, 0, NULL, from));
+			if (u.empty()) break;
+			vector<wal_archive::record> rs;
+			for (size_t i = 0; i < u.size(); i++) {
+				wal_archive::record r;
+				r.lsn = u[i].first;
+				r.count = u[i].second.Count();
+				r.time_us = t++;
+				r.data = u[i].second.Data();
+				rs.push_back(r);
+			}
+			string path, err;
+			cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, rs, t, path, err));
+			from = rs.back().last_lsn();
+		}
+		drop_rocksdb_noremove(s);
+		wa_restore_from(cp);
+		const long before = wa_rss_kb();
+		int fds[2];
+		cut_assert_equal_int(0, pipe(fds));
+		pid_t pid = fork();
+		if (pid == 0) {
+			::close(fds[0]);
+			FILE* out = fdopen(fds[1], "w");
+			int rc = wal_archive::replay(wa_restore_dir, wa_seg_dir, 0, out);
+			fflush(out);
+			_exit(rc);
+		}
+		::close(fds[1]);
+		summary.clear();
+		char buf[512];
+		ssize_t n;
+		while ((n = read(fds[0], buf, sizeof(buf))) > 0) summary.append(buf, n);
+		::close(fds[0]);
+		int status = 0;
+		struct rusage ru;
+		memset(&ru, 0, sizeof(ru));
+		cut_assert_equal_int(pid, wait4(pid, &status, 0, &ru));
+		cut_remove_path(wal_master_dir, NULL);
+		cut_assert_true(WIFEXITED(status) && WEXITSTATUS(status) == 0, cut_message("%s", summary.c_str()));
+		cut_assert_true(summary.find("complete=1") != string::npos, cut_message("%s", summary.c_str()));
+		return ru.ru_maxrss - before;
+	}
+
+	// BOUNDED MEMORY: the replay reads the archive one record at a time, so
+	// the memory it uses does not grow with the chain. Measured in a child
+	// process (its peak RSS above what it inherited) for a 64 MiB and a
+	// 256 MiB chain of 1 MiB batches: both stay far below the chain, and the
+	// larger chain does not cost proportionally more.
+	void test_wal_archive_replay_memory_does_not_grow_with_the_chain() {
+		string s64, s256;
+		const long g64 = wa_replay_growth_kb(64, s64);
+		const long g256 = wa_replay_growth_kb(256, s256);
+		wa_reset_dirs();
+		cut_notify("wal archive replay memory: 64 MiB chain +%ld KiB, 256 MiB chain +%ld KiB", g64, g256);
+		cut_assert_true(s256.find(" applied=0 ") == string::npos, cut_message("%s", s256.c_str()));
+		cut_assert_operator(g256, <, 128L * 1024, cut_message("256 MiB chain grew %ld KiB", g256));
+		// 4x the chain must not cost anything near 4x: allow the memtables' fill
+		cut_assert_operator(g256, <, g64 + 48L * 1024, cut_message("64 MiB +%ld KiB, 256 MiB +%ld KiB", g64, g256));
 	}
 
 	// A canned repl_sync_wal source on a real TCP port: the first connection

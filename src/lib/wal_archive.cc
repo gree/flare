@@ -358,25 +358,56 @@ int write_segment(const string& dir, const identity& id, const vector<record>& r
 	return 0;
 }
 
-int read_segment(const string& path, identity& id, vector<record>& records, string& err) {
-	string content;
-	if (read_whole_file(path, content) < 0) {
+/**
+ *	STREAMING segment reader: one record in memory at a time, every check of
+ *	the whole-file reader (header, CRC, decode, continuity, trailer, nothing
+ *	after it). A segment that fails any of them is an error at the record
+ *	where it fails; a caller that must not act on a bad segment validates it
+ *	to the end first.
+ */
+segment_reader::segment_reader(): _f(NULL), _n(0), _first(0), _end(0), _done(false) {
+}
+
+segment_reader::~segment_reader() {
+	this->close();
+}
+
+void segment_reader::close() {
+	if (this->_f != NULL) {
+		fclose(this->_f);
+		this->_f = NULL;
+	}
+}
+
+bool segment_reader::_line(string& line) {
+	line.clear();
+	for (;;) {
+		int c = fgetc(this->_f);
+		if (c == EOF) {
+			return false;
+		}
+		if (c == '\n') {
+			return true;
+		}
+		if (line.size() >= 512) {
+			return false;		// no line of this format is that long
+		}
+		line += static_cast<char>(c);
+	}
+}
+
+int segment_reader::open(const string& path, identity& id, string& err) {
+	this->close();
+	this->_n = 0;
+	this->_first = this->_end = 0;
+	this->_done = false;
+	this->_f = fopen(path.c_str(), "rb");
+	if (this->_f == NULL) {
 		err = string("cannot read ") + path;
 		return -1;
 	}
-	vector<record> out;
-	size_t pos = 0;
-	auto next_line = [&](string& line) -> bool {
-		size_t nl = content.find('\n', pos);
-		if (nl == string::npos) {
-			return false;
-		}
-		line = content.substr(pos, nl - pos);
-		pos = nl + 1;
-		return true;
-	};
 	string line;
-	if (!next_line(line)) {
+	if (!this->_line(line)) {
 		err = "no header";
 		return -1;
 	}
@@ -385,61 +416,93 @@ int read_segment(const string& path, identity& id, vector<record>& records, stri
 		err = "bad header";
 		return -1;
 	}
+	id.incarnation = h[2];
+	id.epoch = h[3];
+	id.master_id = h[4];
+	return 0;
+}
+
+int segment_reader::next(record& r, string& err) {
+	if (this->_f == NULL || this->_done) {
+		return 0;
+	}
+	string line;
+	if (!this->_line(line)) {
+		err = "no trailer (incomplete segment)";
+		return -1;
+	}
+	vector<string> t = tokens(line);
+	if (!t.empty() && t[0] == "END") {
+		size_t n = 0;
+		uint64_t first = 0, last = 0;
+		if (t.size() != 4 || !parse_number(t[1], n) || n != this->_n || this->_n == 0) {
+			err = "trailer does not match the records";
+			return -1;
+		}
+		if (!parse_number(t[2], first) || !parse_number(t[3], last) || first != this->_first || last != this->_end) {
+			err = "trailer range does not match the records";
+			return -1;
+		}
+		if (fgetc(this->_f) != EOF) {
+			err = "data after the trailer";
+			return -1;
+		}
+		this->_done = true;
+		return 0;
+	}
+	size_t size = 0;
+	uint32_t crc = 0;
+	if (t.size() != 6 || t[0] != "R" || !parse_number(t[1], r.lsn)
+			|| !parse_number(t[2], r.count) || !parse_signed(t[3], r.time_us)
+			|| !parse_number(t[4], size) || !parse_number(t[5], crc) || size > (static_cast<size_t>(1) << 30)) {
+		err = "bad record line";
+		return -1;
+	}
+	r.data.resize(size);
+	if (size > 0 && fread(&r.data[0], 1, size, this->_f) != size) {
+		err = "record runs past the end of the segment";
+		return -1;
+	}
+	if (fgetc(this->_f) != '\n') {
+		err = "record runs past the end of the segment";
+		return -1;
+	}
+	if (crc_of(r.data) != crc) {
+		err = "record CRC mismatch";
+		return -1;
+	}
+	uint32_t count = 0;
+	if (!decode_batch(r.data, count) || count != r.count) {
+		err = "record does not decode as the batch it claims";
+		return -1;
+	}
+	if (this->_n > 0 && r.lsn != this->_end + 1) {
+		err = "records inside the segment do not continue";
+		return -1;
+	}
+	if (this->_n == 0) {
+		this->_first = r.lsn;
+	}
+	this->_end = r.last_lsn();
+	this->_n++;
+	return 1;
+}
+
+int read_segment(const string& path, identity& id, vector<record>& records, string& err) {
+	segment_reader sr;
 	identity got;
-	got.incarnation = h[2];
-	got.epoch = h[3];
-	got.master_id = h[4];
+	if (sr.open(path, got, err) < 0) {
+		return -1;
+	}
+	vector<record> out;
 	for (;;) {
-		if (!next_line(line)) {
-			err = "no trailer (incomplete segment)";
-			return -1;
-		}
-		vector<string> t = tokens(line);
-		if (!t.empty() && t[0] == "END") {
-			size_t n = 0;
-			if (t.size() != 4 || !parse_number(t[1], n) || n != out.size() || out.empty()) {
-				err = "trailer does not match the records";
-				return -1;
-			}
-			uint64_t first = 0, last = 0;
-			if (!parse_number(t[2], first) || !parse_number(t[3], last)
-					|| first != out.front().lsn || last != out.back().last_lsn()) {
-				err = "trailer range does not match the records";
-				return -1;
-			}
-			if (pos != content.size()) {
-				err = "data after the trailer";
-				return -1;
-			}
-			break;
-		}
 		record r;
-		size_t size = 0;
-		uint32_t crc = 0;
-		if (t.size() != 6 || t[0] != "R" || !parse_number(t[1], r.lsn)
-				|| !parse_number(t[2], r.count) || !parse_signed(t[3], r.time_us)
-				|| !parse_number(t[4], size) || !parse_number(t[5], crc)) {
-			err = "bad record line";
+		int k = sr.next(r, err);
+		if (k < 0) {
 			return -1;
 		}
-		if (size > content.size() - pos || content.size() - pos - size < 1 || content[pos + size] != '\n') {
-			err = "record runs past the end of the segment";
-			return -1;
-		}
-		r.data = content.substr(pos, size);
-		pos += size + 1;
-		if (crc_of(r.data) != crc) {
-			err = "record CRC mismatch";
-			return -1;
-		}
-		uint32_t count = 0;
-		if (!decode_batch(r.data, count) || count != r.count) {
-			err = "record does not decode as the batch it claims";
-			return -1;
-		}
-		if (!out.empty() && r.lsn != out.back().last_lsn() + 1) {
-			err = "records inside the segment do not continue";
-			return -1;
+		if (k == 0) {
+			break;
 		}
 		out.push_back(r);
 	}
@@ -830,6 +893,52 @@ int follower::run(volatile sig_atomic_t* stop) {
 // }}}
 
 // {{{ replay
+namespace {
+
+struct seg_info {
+	string		name;
+	uint64_t	first;
+	uint64_t	last;
+};
+
+// The journal of a replay that may be continued: read one line at a time.
+struct journal_reader {
+	FILE*	f;
+	long	offset;		// byte offset after the last line returned
+	journal_reader(): f(NULL), offset(0) {}
+	~journal_reader() { if (f) fclose(f); }
+	bool line(string& out) {
+		out.clear();
+		int c;
+		while ((c = fgetc(f)) != EOF) {
+			if (c == '\n') {
+				offset = ftell(f);
+				return true;
+			}
+			out += static_cast<char>(c);
+		}
+		return false;
+	}
+};
+
+}	// namespace
+
+/**
+ *	STREAMING REPLAY. The memory used does not grow with the archive: segments
+ *	are validated one at a time (pass 1 keeps only their ranges), then read
+ *	again one record at a time and applied (pass 2); a re-run checks its
+ *	journal line by line. What is held at once: one record being decided, the
+ *	last applied record (to compare a duplicate of it), one chunk of intents
+ *	(<= 256 batches or 16 MiB), and a second reader on the previous segment
+ *	when a segment overlaps it.
+ *
+ *	Order and rules are those of plan_replay: valid segments of this base's
+ *	identity in sequence order; a record already covered must be the SAME
+ *	batch as the one applied there (else conflict) — checked against the last
+ *	applied record or, for an overlap, by reading the previous segment again;
+ *	an overlap reaching further back than the previous segment cannot be
+ *	checked and is a conflict (fail closed).
+ */
 int replay(const string& db_dir, const string& seg_dir, int64_t until_us, FILE* report) {
 	base b;
 	if (read_base_file(db_dir, b) < 0) {
@@ -852,18 +961,35 @@ int replay(const string& db_dir, const string& seg_dir, int64_t until_us, FILE* 
 	}
 	std::sort(names.begin(), names.end());
 
-	vector<record> all;
-	int foreign = 0, corrupt = 0, used = 0;
+	// pass 1: validate every segment to its trailer; keep only its range
+	vector<seg_info> segs;
 	vector<string> corrupt_names;
+	int foreign = 0;
 	for (size_t i = 0; i < names.size(); i++) {
+		segment_reader sr;
 		identity id;
-		vector<record> rs;
 		string err;
-		if (read_segment(seg_dir + "/" + names[i], id, rs, err) < 0) {
-			// Not applied. Whether it costs data is judged against the plan
-			// below (its name says which sequence numbers it held).
+		seg_info si;
+		si.name = names[i];
+		si.first = si.last = 0;
+		int k = sr.open(seg_dir + "/" + names[i], id, err);
+		bool any = false;
+		while (k == 0) {
+			record r;
+			k = sr.next(r, err);
+			if (k == 1) {
+				if (!any) si.first = r.lsn;
+				si.last = r.last_lsn();
+				any = true;
+				k = 0;
+			} else if (k == 0) {
+				break;
+			}
+		}
+		if (k < 0 || !any) {
+			// Not applied. Whether it costs data is judged against what was
+			// replayed (its name says which sequence numbers it held).
 			log_err("WAL segment %s refused: %s", names[i].c_str(), err.c_str());
-			corrupt++;
 			corrupt_names.push_back(names[i]);
 			continue;
 		}
@@ -871,12 +997,16 @@ int replay(const string& db_dir, const string& seg_dir, int64_t until_us, FILE* 
 			foreign++;
 			continue;
 		}
-		used++;
-		all.insert(all.end(), rs.begin(), rs.end());
+		segs.push_back(si);
 	}
+	std::stable_sort(segs.begin(), segs.end(),
+		[](const seg_info& x, const seg_info& y) { return x.first < y.first; });
 
 	rocksdb::Options opt;
 	opt.create_if_missing = false;
+	// bounded memtables: the replay writes the whole chain through them
+	opt.write_buffer_size = 16 << 20;
+	opt.max_write_buffer_number = 2;
 	vector<string> cfs;
 	rocksdb::Status ls = rocksdb::DB::ListColumnFamilies(rocksdb::DBOptions(opt), db_dir, &cfs);
 	if (!ls.ok() || cfs.empty()) {
@@ -894,7 +1024,12 @@ int replay(const string& db_dir, const string& seg_dir, int64_t until_us, FILE* 
 		fprintf(report, "replay error=open (%s)\n", s.ToString().c_str());
 		return 1;
 	}
+	int jfd = -1;
 	auto close_db = [&]() {
+		if (jfd >= 0) {
+			close(jfd);
+			jfd = -1;
+		}
 		for (size_t i = 0; i < handles.size(); i++) {
 			db->DestroyColumnFamilyHandle(handles[i]);
 		}
@@ -908,49 +1043,25 @@ int replay(const string& db_dir, const string& seg_dir, int64_t until_us, FILE* 
 	// second case from a database written by something else, so every batch
 	// is first recorded in a durable journal (the base and identity it
 	// belongs to, and each batch's range and CRC) BEFORE it is written; a
-	// re-run continues only when every batch the database already holds past
-	// the base is in that journal with the same range and CRC as the plan.
+	// re-run continues only when the batches the database already holds past
+	// the base are, in order, the journal's lines with the same range and
+	// CRC. The journal is then cut after the last of them (a chunk recorded
+	// but not written is recorded again).
 	const uint64_t latest = db->GetLatestSequenceNumber();
-	replay_plan plan = plan_replay(b.seq, all, until_us);
 	const string journal_path = db_dir + "/" + kReplayJournalFileName;
 	const string journal_header = string("FLAREREPLAY 1 ") + format_base(b);
-	size_t start = 0;
-	if (latest != b.seq) {
-		string text;
-		map<uint64_t, string> journal;	// lsn -> "<last> <crc>"
-		bool header_ok = false;
-		if (read_whole_file(journal_path, text) == 0) {
-			std::istringstream in(text);
-			string line;
-			if (std::getline(in, line) && line + "\n" == journal_header) {
-				header_ok = true;
-				while (std::getline(in, line)) {
-					vector<string> t = tokens(line);
-					uint64_t lsn = 0;
-					if (t.size() == 4 && t[0] == "B" && parse_number(t[1], lsn)) {
-						journal[lsn] = t[2] + " " + t[3];
-					}
-				}
-			}
+	const bool resuming = latest != b.seq;
+	journal_reader jr;
+	bool header_ok = false;
+	if (resuming) {
+		jr.f = fopen(journal_path.c_str(), "rb");
+		string line;
+		if (jr.f != NULL && jr.line(line) && line + "\n" == journal_header) {
+			header_ok = true;
 		}
-		bool found = false;
-		for (size_t i = 0; header_ok && i < plan.apply.size(); i++) {
-			const record* r = plan.apply[i];
-			std::ostringstream want;
-			want << r->last_lsn() << " " << crc_of(r->data);
-			map<uint64_t, string>::const_iterator j = journal.find(r->lsn);
-			if (j == journal.end() || j->second != want.str()) {
-				break;
-			}
-			if (r->last_lsn() == latest) {
-				start = i + 1;
-				found = true;
-				break;
-			}
-		}
-		if (!found) {
+		if (!header_ok) {
 			fprintf(report, "replay error=base_mismatch base_seq=%llu db_seq=%llu journal=%s\n",
-				(unsigned long long)b.seq, (unsigned long long)latest, header_ok ? "differs" : "absent");
+				(unsigned long long)b.seq, (unsigned long long)latest, jr.f != NULL ? "differs" : "absent");
 			close_db();
 			return 3;
 		}
@@ -961,56 +1072,211 @@ int replay(const string& db_dir, const string& seg_dir, int64_t until_us, FILE* 
 			close_db();
 			return 1;
 		}
-	}
-
-	int jfd = open(journal_path.c_str(), O_WRONLY | O_APPEND);
-	if (jfd < 0) {
-		fprintf(report, "replay error=journal (%s)\n", strerror(errno));
-		close_db();
-		return 1;
-	}
-	rocksdb::WriteOptions wo;
-	size_t applied = 0;
-	const size_t chunk = 256;
-	for (size_t i = start; i < plan.apply.size(); i += chunk) {
-		const size_t end = std::min(plan.apply.size(), i + chunk);
-		string intent;
-		char line[128];
-		for (size_t k = i; k < end; k++) {
-			const record* r = plan.apply[k];
-			snprintf(line, sizeof(line), "B %llu %llu %u\n", (unsigned long long)r->lsn,
-				(unsigned long long)r->last_lsn(), crc_of(r->data));
-			intent += line;
-		}
-		if (!write_all(jfd, intent.data(), intent.size()) || fsync(jfd) != 0) {
+		jfd = open(journal_path.c_str(), O_WRONLY | O_APPEND);
+		if (jfd < 0) {
 			fprintf(report, "replay error=journal (%s)\n", strerror(errno));
-			close(jfd);
 			close_db();
 			return 1;
 		}
-		for (size_t k = i; k < end; k++) {
-			const record* r = plan.apply[k];
-			rocksdb::WriteBatch wb(r->data);
+	}
+	bool verifying = resuming;			// walking batches the database already holds
+
+	replay_plan plan;					// the outcome (apply stays empty: nothing is held)
+	plan.last_lsn = b.seq;
+	uint64_t cursor = b.seq;
+	record last_applied;
+	bool have_last = false;
+	size_t applied = 0;
+	vector<record> chunk;
+	size_t chunk_bytes = 0;
+	string fail;						// a hard error (exit 1/3) found on the way
+	int fail_rc = 0;
+	rocksdb::WriteOptions wo;
+
+	auto flush_chunk = [&]() -> bool {
+		if (chunk.empty()) {
+			return true;
+		}
+		string intent;
+		char line[128];
+		for (size_t k = 0; k < chunk.size(); k++) {
+			snprintf(line, sizeof(line), "B %llu %llu %u\n", (unsigned long long)chunk[k].lsn,
+				(unsigned long long)chunk[k].last_lsn(), crc_of(chunk[k].data));
+			intent += line;
+		}
+		if (!write_all(jfd, intent.data(), intent.size()) || fsync(jfd) != 0) {
+			fail = string("journal (") + strerror(errno) + ")";
+			fail_rc = 1;
+			return false;
+		}
+		for (size_t k = 0; k < chunk.size(); k++) {
+			const record& r = chunk[k];
+			rocksdb::WriteBatch wb(r.data);
 			rocksdb::Status ws = db->Write(wo, &wb);
 			if (!ws.ok()) {
 				// An unknown column family lands here too: fail closed.
-				fprintf(report, "replay error=write lsn=%llu (%s)\n", (unsigned long long)r->lsn, ws.ToString().c_str());
-				close(jfd);
-				close_db();
-				return 1;
+				fail = "write lsn=" + boost::lexical_cast<string>(r.lsn) + " (" + ws.ToString() + ")";
+				fail_rc = 1;
+				return false;
 			}
-			if (db->GetLatestSequenceNumber() != r->last_lsn()) {
-				fprintf(report, "replay error=sequence lsn=%llu expected=%llu got=%llu\n",
-					(unsigned long long)r->lsn, (unsigned long long)r->last_lsn(),
-					(unsigned long long)db->GetLatestSequenceNumber());
-				close(jfd);
-				close_db();
-				return 1;
+			if (db->GetLatestSequenceNumber() != r.last_lsn()) {
+				fail = "sequence lsn=" + boost::lexical_cast<string>(r.lsn) + " expected="
+					+ boost::lexical_cast<string>(r.last_lsn()) + " got="
+					+ boost::lexical_cast<string>(db->GetLatestSequenceNumber());
+				fail_rc = 1;
+				return false;
 			}
 			applied++;
 		}
+		chunk.clear();
+		chunk_bytes = 0;
+		return true;
+	};
+
+	// A batch that continues the chain: checked against the journal while
+	// the database already holds it, applied after that.
+	auto take = [&](const record& r) -> bool {
+		if (verifying) {
+			string line;
+			char want[128];
+			snprintf(want, sizeof(want), "B %llu %llu %u", (unsigned long long)r.lsn,
+				(unsigned long long)r.last_lsn(), crc_of(r.data));
+			if (r.last_lsn() > latest || !jr.line(line) || line != want) {
+				fail = "base_mismatch base_seq=" + boost::lexical_cast<string>(b.seq) + " db_seq="
+					+ boost::lexical_cast<string>(latest) + " journal=differs";
+				fail_rc = 3;
+				return false;
+			}
+			if (r.last_lsn() == latest) {
+				// the database holds exactly up to here: cut the journal after
+				// this line and continue appending
+				fclose(jr.f);
+				jr.f = NULL;
+				if (truncate(journal_path.c_str(), jr.offset) != 0
+						|| (jfd = open(journal_path.c_str(), O_WRONLY | O_APPEND)) < 0) {
+					fail = string("journal (") + strerror(errno) + ")";
+					fail_rc = 1;
+					return false;
+				}
+				verifying = false;
+			}
+			return true;
+		}
+		chunk.push_back(r);
+		chunk_bytes += r.data.size();
+		if (chunk.size() >= 256 || chunk_bytes >= (16u << 20)) {
+			return flush_chunk();
+		}
+		return true;
+	};
+
+	bool stop = false;
+	for (size_t si = 0; si < segs.size() && !stop && fail_rc == 0; si++) {
+		if (segs[si].last <= cursor && segs[si].last <= b.seq) {
+			continue;						// wholly before the base
+		}
+		segment_reader sr;
+		identity id;
+		string err;
+		if (sr.open(seg_dir + "/" + segs[si].name, id, err) < 0) {
+			fail = "segment " + segs[si].name + " changed during the replay: " + err;
+			fail_rc = 1;
+			break;
+		}
+		// the previous applied segment, read again to check an overlap
+		segment_reader prev;
+		record prev_rec;
+		bool prev_open = false, prev_have = false;
+		const size_t prev_idx = si > 0 ? si - 1 : 0;
+		for (;;) {
+			record r;
+			int k = sr.next(r, err);
+			if (k < 0) {
+				fail = "segment " + segs[si].name + " changed during the replay: " + err;
+				fail_rc = 1;
+				break;
+			}
+			if (k == 0) {
+				break;
+			}
+			if (r.count == 0) {
+				continue;
+			}
+			if (r.last_lsn() <= cursor) {
+				// covered: must be the batch applied (or held) there
+				if (r.last_lsn() <= b.seq) {
+					continue;				// before the base
+				}
+				bool same;
+				if (have_last && r.lsn == last_applied.lsn) {
+					same = r.data == last_applied.data;
+				} else if (si > 0 && r.lsn >= segs[prev_idx].first && r.last_lsn() <= segs[prev_idx].last) {
+					if (!prev_open) {
+						identity pid;
+						string perr;
+						prev_open = prev.open(seg_dir + "/" + segs[prev_idx].name, pid, perr) == 0;
+					}
+					while (prev_open && (!prev_have || prev_rec.lsn < r.lsn)) {
+						string perr;
+						int pk = prev.next(prev_rec, perr);
+						if (pk != 1) {
+							prev_open = false;
+							break;
+						}
+						prev_have = true;
+					}
+					same = prev_have && prev_rec.lsn == r.lsn && prev_rec.data == r.data;
+				} else {
+					same = false;			// an overlap that cannot be checked
+				}
+				if (!same) {
+					plan.conflict = true;
+					stop = true;
+					break;
+				}
+				continue;
+			}
+			if (r.lsn <= cursor) {
+				plan.conflict = true;		// straddles: not this copy's history
+				stop = true;
+				break;
+			}
+			if (until_us > 0 && r.time_us > until_us) {
+				plan.stopped_by_until = true;
+				stop = true;
+				break;
+			}
+			if (r.lsn != cursor + 1) {
+				plan.gap = true;
+				plan.gap_expected = cursor + 1;
+				plan.gap_found = r.lsn;
+				stop = true;
+				break;
+			}
+			if (!take(r)) {
+				break;
+			}
+			cursor = r.last_lsn();
+			plan.last_lsn = cursor;
+			plan.last_time_us = r.time_us;
+			last_applied = r;
+			have_last = true;
+		}
 	}
-	close(jfd);
+	if (fail_rc == 0 && verifying) {
+		// the archive ended (or stopped) before the database's position
+		fail = "base_mismatch base_seq=" + boost::lexical_cast<string>(b.seq) + " db_seq="
+			+ boost::lexical_cast<string>(latest) + " journal=differs";
+		fail_rc = 3;
+	}
+	if (fail_rc == 0) {
+		flush_chunk();
+	}
+	if (fail_rc != 0) {
+		fprintf(report, "replay error=%s\n", fail.c_str());
+		close_db();
+		return fail_rc;
+	}
 	rocksdb::Status fs = db->FlushWAL(true);
 	close_db();
 	if (!fs.ok()) {
@@ -1019,10 +1285,10 @@ int replay(const string& db_dir, const string& seg_dir, int64_t until_us, FILE* 
 	}
 	// COMPLETENESS. A refused segment that held sequence numbers past what
 	// was replayed is archived history this restore does not reach: with the
-	// last segment corrupt the plan has no gap to show for it. (One whose
-	// range is covered — a duplicate — costs nothing; one past a time bound
-	// that already stopped the replay is not wanted.) A gap or a conflict is
-	// the same: the archive holds more than was replayed.
+	// last segment corrupt there is no gap to show for it. (One whose range
+	// is covered — a duplicate — costs nothing; one past a time bound that
+	// already stopped the replay is not wanted.) A gap or a conflict is the
+	// same: the archive holds more than was replayed.
 	int corrupt_beyond = 0;
 	for (size_t i = 0; i < corrupt_names.size(); i++) {
 		unsigned long long first = 0, last = 0;
@@ -1041,12 +1307,12 @@ int replay(const string& db_dir, const string& seg_dir, int64_t until_us, FILE* 
 	}
 	const bool complete = !plan.gap && !plan.conflict && corrupt_beyond == 0;
 	fprintf(report, "replay base_seq=%llu applied=%zu last_lsn=%llu last_time_us=%lld base_time=%lld"
-		" gap=%d gap_expected=%llu gap_found=%llu until=%d conflict=%d segments=%d foreign=%d corrupt=%d"
+		" gap=%d gap_expected=%llu gap_found=%llu until=%d conflict=%d segments=%zu foreign=%d corrupt=%zu"
 		" corrupt_beyond=%d complete=%d\n",
 		(unsigned long long)b.seq, applied, (unsigned long long)plan.last_lsn,
 		(long long)plan.last_time_us, (long long)b.time,
 		plan.gap ? 1 : 0, (unsigned long long)plan.gap_expected, (unsigned long long)plan.gap_found,
-		plan.stopped_by_until ? 1 : 0, plan.conflict ? 1 : 0, used, foreign, corrupt,
+		plan.stopped_by_until ? 1 : 0, plan.conflict ? 1 : 0, segs.size(), foreign, corrupt_names.size(),
 		corrupt_beyond, complete ? 1 : 0);
 	return complete ? 0 : 4;
 }

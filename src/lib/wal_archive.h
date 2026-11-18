@@ -117,6 +117,27 @@ int write_segment(const string& dir, const identity& id, const vector<record>& r
 // Every record's CRC and the trailer are checked; anything short of a whole
 // segment is an error (no partial result).
 int read_segment(const string& path, identity& id, vector<record>& records, string& err);
+
+// The same checks, one record at a time (the replay's memory must not grow
+// with the archive). next(): 1 a record, 0 the end (trailer verified), -1 an
+// error at that point.
+class segment_reader {
+public:
+	segment_reader();
+	~segment_reader();
+	int open(const string& path, identity& id, string& err);
+	int next(record& r, string& err);
+	void close();
+private:
+	FILE*		_f;
+	size_t		_n;
+	uint64_t	_first;
+	uint64_t	_end;
+	bool		_done;
+	bool _line(string& line);
+	segment_reader(const segment_reader&);
+	segment_reader& operator=(const segment_reader&);
+};
 // }}}
 
 // {{{ replay planning (pure)

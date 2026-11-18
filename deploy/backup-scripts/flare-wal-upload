@@ -104,6 +104,23 @@ bind() {   # bind() <reason>: follow the base's chain on the current master
   log "p${PART}: following ${HOST} from ${FROM} (base seq ${B_SEQ}, epoch ${B_EPO}; $1)"
 }
 
+# On SIGTERM (archive turned off, pod deleted) the follower closes what it
+# holds at the same moment: wait for that, upload it, then exit — otherwise the
+# last segment dies with the emptyDir. (The trap runs between commands, so the
+# loop's sleep is short.)
+final_upload() {
+  log "stopping: uploading the last closed segments"
+  i=0
+  while [ "$i" -lt 20 ] && ls "$WAL_DIR"/p*/pid >/dev/null 2>&1; do sleep 1; i=$((i + 1)); done
+  for D in "$WAL_DIR"/p*; do
+    [ -d "$D/out" ] || continue
+    PART="${D##*/p}"
+    upload_closed "$D/out" "$PART" >/dev/null
+  done
+  exit 0
+}
+trap final_upload TERM INT
+
 while :; do
   M="$WAL_DIR/metrics.tmp"
   : > "$M"

@@ -347,8 +347,9 @@ and the segments after its sequence number, `backup-wal-replay` (the flared
 image) replays them and moves the result into place.
 
 **An incomplete archive is refused.** If the replay exits 4, the restore is
-not published: the init container fails (the pod stays un-Ready, the next
-attempt downloads again) and logs `REFUSED`. To restore anyway up to where the
+not published: the init container fails and logs `REFUSED`, and every retry
+decides again on the same download (the pod never starts flared empty and
+stays un-Ready; deleting the pod downloads the backup again). To restore anyway up to where the
 archive continues — losing the history after `last_lsn` — set
 `backup-bootstrap-wal-accept-incomplete: "true"` in the `<cluster>-flags`
 ConfigMap (chart: `cluster.backupBootstrap.walAcceptIncomplete`), and set it

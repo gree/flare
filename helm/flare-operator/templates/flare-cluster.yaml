@@ -414,8 +414,8 @@ spec:
         # WAL onto the base (offline, `flared --wal-replay`: physical replay
         # of the contiguous chain, fail closed on any mismatch), then marks
         # it RESTORED and moves it into place. No-op without a pending
-        # restore. A failure leaves nothing in place; the next attempt
-        # downloads again.
+        # restore. A failure publishes nothing and keeps the pending restore,
+        # so every retry refuses again (never an empty start).
         - name: backup-wal-replay
           image: "{{ $c.image.repository }}:{{ $c.image.tag }}"
           imagePullPolicy: {{ $c.image.pullPolicy }}
@@ -440,14 +440,17 @@ spec:
                   echo "backup-wal-replay: WARNING: INCOMPLETE archive accepted by backup-bootstrap-wal-accept-incomplete; restored only up to last_lsn" >&2
                 elif [ "$RC" != 0 ]; then
                   # FAIL CLOSED: an incomplete archive (4: gap, conflict, corrupt
-                  # later segment) or a replay error is not published; nothing is
-                  # left in place and the next attempt downloads again
+                  # later segment) or a replay error is not published. The
+                  # pending restore is KEPT: kubelet re-runs only this failed
+                  # container, so removing it would let the retry see "nothing
+                  # pending" and start flared EMPTY (E2E 44330726018 T5). Each
+                  # retry decides again (the replay journal continues the same
+                  # chain); deleting the pod downloads again.
                   if [ "$RC" = 4 ]; then
                     echo "backup-wal-replay: REFUSED: the archive holds history this replay cannot reach (exit 4). Set backup-bootstrap-wal-accept-incomplete=true in the {{ $c.name }}-flags ConfigMap to restore up to last_lsn (RUNBOOK#wal-archive)" >&2
                   else
-                    echo "backup-wal-replay: replay FAILED (exit $RC)" >&2
+                    echo "backup-wal-replay: replay FAILED (exit $RC); delete the pod to download the backup again" >&2
                   fi
-                  rm -rf "$DATA/flare.rocksdb.restore" "$WALD" "$DATA/flare.rocksdb.restore.pending"
                   exit 1
                 fi
               else

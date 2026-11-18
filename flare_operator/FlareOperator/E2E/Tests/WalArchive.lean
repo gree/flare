@@ -42,6 +42,14 @@
       way (on half the segments, and killed with SIGKILL while running) and
       run again continues (exit 0, the same end state as one full run); a
       database written past the base by something else is refused (exit 3).
+  T6  the restored data is exactly what was written: keys written before a
+      base, then (only in the archive) overwritten, deleted, deleted and
+      written again, and new keys likewise; with the archive synced past the
+      last write, every pod is deleted; on EVERY restored copy the test's keys
+      are exactly the expected key/value set (none missing, none with another
+      value, none deleted that came back), and the replay applied at least
+      the writes made after the base (so the archive, not the base alone,
+      produced them).
 -/
 import FlareOperator.E2E.Framework
 import FlareOperator.E2E.Helpers
@@ -910,6 +918,140 @@ private def refuseTest : IO TestResult := do
   c.event s!"SUMMARY T5: refused {refusedSeen}, Ready while refused {readySeen}, settled after accept {settled}, replay lines {lines.length}"
   if fails.isEmpty then return .pass else return .fail (String.intercalate "; " fails)
 
+/-! ## T6: the restored data is exactly what was written -/
+
+private def t6Prefix : String := "wr6_"
+
+/-- A deterministic value of varied length (letters, digits and `-` only). -/
+private def t6Val (tag : String) (i : Nat) : String :=
+  s!"{tag}-{i}-" ++ String.mk (List.replicate ((i * 37) % 300) (Char.ofNat (97 + i % 26)))
+
+/-- (key, some value) = set, (key, none) = delete. -/
+private abbrev Op := String × Option String
+
+private def t6Before : List Op :=
+  (List.range 200).map fun i => (s!"{t6Prefix}a_{i}", some (t6Val "a1" i))
+
+/-- After the base: only the archive has these. -/
+private def t6After : List Op :=
+  ((List.range 50).map fun i => (s!"{t6Prefix}a_{i}", some (t6Val "a2" i)))
+  ++ ((List.range 50).map fun i => (s!"{t6Prefix}a_{50 + i}", none))
+  ++ ((List.range 10).map fun i => (s!"{t6Prefix}a_{90 + i}", some (t6Val "a3" (90 + i))))
+  ++ ((List.range 200).map fun i => (s!"{t6Prefix}b_{i}", some (t6Val "b1" i)))
+  ++ ((List.range 50).map fun i => (s!"{t6Prefix}b_{150 + i}", none))
+  ++ ((List.range 50).map fun i => (s!"{t6Prefix}b_{i}", some (t6Val "b2" i)))
+
+private def t6Expected (ops : List Op) : Std.HashMap String String :=
+  ops.foldl (fun m (k, v) => match v with | some x => m.insert k x | none => m.erase k) {}
+
+private def t6Chunks (ops : List Op) : List (List Op) :=
+  (List.range ((ops.length + 99) / 100)).map fun j => (ops.drop (j * 100)).take 100
+
+/-- Sends `ops` in order on one connection per chunk of 100 to `ip`; returns how many
+    were answered STORED (set) or DELETED (delete). -/
+private def t6Apply (ip : String) (ops : List Op) : IO Nat := do
+  let mut ok := 0
+  for chunk in t6Chunks ops do
+    let body := String.join (chunk.map fun (k, v) => match v with
+      | some x => s!"set {k} 0 0 {x.length}\\r\\n{x}\\r\\n"
+      | none => s!"delete {k}\\r\\n")
+    match ← execInDebugPod cfg.debugPod nsName s!"printf '{body}quit\\r\\n' | nc -w 10 {ip} {cfg.flarePort}" with
+    | .ok o =>
+      ok := ok + ((o.splitOn "\n").map (fun l => (l.replace "\r" "").trim)).countP (fun l => l == "STORED" || l == "DELETED")
+    | .error _ => pure ()
+  return ok
+
+/-- Compares the test's keys in `copy` with `want`: (missing, wrong value, extra). -/
+private def t6Diff (want : Std.HashMap String String) (copy : List (String × String)) :
+    List String × List String × List String :=
+  let mine := copy.filter (·.1.startsWith t6Prefix)
+  let have_ : Std.HashMap String String := mine.foldl (fun m (k, v) => m.insert k v) {}
+  let missing := want.toList.filterMap fun (k, _) => if have_.contains k then none else some k
+  let wrong := want.toList.filterMap fun (k, v) => match have_.get? k with
+    | some x => if x == v then none else some k
+    | none => none
+  let extra := mine.filterMap fun (k, _) => if want.contains k then none else some k
+  (missing, wrong, extra)
+
+private def exactRestoreTest : IO TestResult := do
+  let c := ctx "exact-restore"
+  c.conditions ["T6: 200 keys before a base; after it (archive only) overwrites, deletes, delete+rewrite, 200 new keys with deletes and overwrites; every pod deleted; every restored copy must hold exactly the expected keys and values"]
+  if !(← waitFollowing "a chain is followed" 900) then
+    return .fail (notSetUp s!"the archive is not following a chain: {repr (← readArch)}")
+  let some a0 ← readArch | return .fail (unobservable "the archiver's metrics cannot be read")
+  let some ip ← masterIp | return .fail (notSetUp "no master's address")
+  -- before the base
+  let nA ← t6Apply ip t6Before
+  if nA != t6Before.length then return .fail (notSetUp s!"only {nA} of {t6Before.length} writes before the base were answered")
+  match ← runBase "t6" with
+  | .error e => return .fail (notSetUp s!"the base: {e}")
+  | .ok l => c.event s!"base uploaded: {(l.trim.take 200)}"
+  if !(← waitFollowing "the archiver follows the new base's chain" 300 a0.baseTs) then
+    return .fail (notSetUp s!"the archive did not bind to the new base: {repr (← readArch)}")
+  let some base0 ← latestBase | return .fail (unobservable "the latest base cannot be read")
+  -- after the base: only in the archive
+  let some ip2 ← masterIp | return .fail (notSetUp "no master's address")
+  if ip2 != ip then return .fail (notSetUp s!"the master moved during the test ({ip} -> {ip2})")
+  let nB ← t6Apply ip t6After
+  if nB != t6After.length then return .fail (notSetUp s!"only {nB} of {t6After.length} writes after the base were answered")
+  let tLast ← epochNow
+  let want := t6Expected (t6Before ++ t6After)
+  c.event s!"writes: {t6Before.length} before the base {base0.1} seq {base0.2.1}, {t6After.length} after it (last at {tLast}); expected {want.size} keys"
+  let synced ← waitForCondition "the archive synced past the last write" 180 do
+    match ← readArch with
+    | some a => return a.synced > tLast
+    | none => return false
+  if !synced then return .fail (notSetUp s!"the archive did not sync past the writes: {repr (← readArch)}")
+  -- the restore must start from THIS base (a newer one would hold the writes itself)
+  let some base1 ← latestBase | return .fail (unobservable "the latest base cannot be read")
+  if base1 != base0 then return .fail (notSetUp s!"a newer base was taken during the test ({base0.1} seq {base0.2.1} -> {base1.1} seq {base1.2.1})")
+  -- all-copy loss
+  let some pods0 ← flaredPods | return .fail (notSetUp "the flared pods cannot be read")
+  let oldUids := pods0.map (·.uid)
+  let _ ← kubectl (["delete", "pod"] ++ pods0.map (·.name) ++ ["-n", nsName, "--force", "--grace-period=0", "--wait=false"])
+  let renewed ← waitForCondition "every flared pod is a new pod (new UID), none deleting" 300 do
+    match ← flaredPods with
+    | some ps => return ps.length == 2 && ps.all (fun p => !oldUids.contains p.uid && !p.deleting)
+    | none => return false
+  if !renewed then return .fail "the flared pods were not recreated within 300 s"
+  let settled ← waitClusterSettled cfg 900 15
+  if !settled then return .fail s!"the cluster did not settle within 900 s of the restore: {repr (← readArch)}"
+  let mut fails : List String := []
+  let mut replayLines : List String := []
+  for p in (← flaredPods).getD [] do
+    for ln in (← initLog p.name "backup-wal-replay").splitOn "\n" do
+      if containsSubstr ln "replay base_seq=" then replayLines := replayLines ++ [ln.trim]
+  for ln in replayLines do c.event s!"restore: {ln}"
+  if replayLines.isEmpty then fails := fails ++ ["no `replay base_seq=...` summary line in any pod's backup-wal-replay log"]
+  for ln in replayLines do
+    if fieldOf ln "gap" != some "0" || fieldOf ln "conflict" != some "0" || fieldOf ln "complete" != some "1" then
+      fails := fails ++ [s!"replay not gap=0 conflict=0 complete=1: {ln.take 200}"]
+    if fieldOf ln "base_seq" != some (toString base0.2.1) then
+      fails := fails ++ [s!"the replay did not start from the test's base (seq {base0.2.1}): {ln.take 200}"]
+  let appliedMax := (replayLines.filterMap fun ln => (fieldOf ln "applied").bind (·.toNat?)).foldl max 0
+  if appliedMax < t6After.length then
+    fails := fails ++ [s!"the replay applied {appliedMax} batch(es), fewer than the {t6After.length} writes after the base"]
+  -- every copy, the master and the replica
+  let mut checked := 0
+  for p in (← flaredPods).getD [] do
+    let copy? ← match ← getPodIp p.name nsName with
+      | some pip => c.ownCopy pip
+      | none => pure none
+    match copy? with
+    | none => fails := fails ++ [s!"{p.name}: the copy cannot be read (no address or no dump)"]
+    | some copy =>
+      checked := checked + 1
+      let (missing, wrong, extra) := t6Diff want copy
+      for k in missing.take 50 do c.art "diff.txt" s!"{p.name} missing {k}"
+      for k in wrong.take 50 do c.art "diff.txt" s!"{p.name} wrong {k}"
+      for k in extra.take 50 do c.art "diff.txt" s!"{p.name} extra {k}"
+      c.event s!"{p.name}: {(copy.filter (·.1.startsWith t6Prefix)).length} test keys; missing {missing.length}, wrong value {wrong.length}, deleted but present {extra.length}"
+      if !missing.isEmpty || !wrong.isEmpty || !extra.isEmpty then
+        fails := fails ++ [s!"{p.name}: missing {missing.length} (first {missing.head?}), wrong value {wrong.length} (first {wrong.head?}), deleted but present {extra.length} (first {extra.head?})"]
+  if checked != 2 then fails := fails ++ [s!"{checked} of 2 copies were checked"]
+  c.event s!"SUMMARY T6: base seq {base0.2.1}; {t6Before.length} writes before, {t6After.length} after; expected {want.size} keys; replay applied(max) {appliedMax}; copies checked {checked}; failures {fails.length}"
+  if fails.isEmpty then return .pass else return .fail (String.intercalate "; " fails)
+
 /-! ## The suite -/
 
 private def setupInfra : IO Unit := do
@@ -954,7 +1096,8 @@ def suite : TestSuite :=
       { name := "T2 master switch: the old chain stops, needs_base, a backup Job, a new chain is followed and synced advances", run := switchTest },
       { name := "T3 on/off: walArchive false/true recreates only the archiver; flared pods untouched; the archive resumes after the last segment", run := toggleTest },
       { name := "T4 offline replay: until time, interrupted replay continues, an incomplete archive exits 4, a database past the base is refused", run := replayTest },
-      { name := "T5 the restore refuses an incomplete archive (corrupt newest segment) until accept-incomplete is set", run := refuseTest }
+      { name := "T5 the restore refuses an incomplete archive (corrupt newest segment) until accept-incomplete is set", run := refuseTest },
+      { name := "T6 exact restore: base + archive give back exactly the written keys and values (overwrites, deletes, rewrites) on every copy", run := exactRestoreTest }
     ] }
 
 end FlareOperator.E2E.Tests.WalArchive

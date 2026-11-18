@@ -5939,6 +5939,7 @@ void test_reseed_serve_to_a_slow_reader_completes_past_several_windows() {
 		cppcut_assert_equal(cp_seq, b.seq);
 		cut_assert_true(b.id == id);
 		cut_assert_true(b.id.complete());
+		cut_notify("wal archive: checked");
 	}
 
 	void test_wal_archive_base_marker_round_trip_and_refusals() {
@@ -5955,6 +5956,7 @@ void test_reseed_serve_to_a_slow_reader_completes_past_several_windows() {
 		cut_assert_equal_int(-1, wal_archive::parse_base("FLAREBASE 1 seq=42 epoch=e master_id=m time=1\n", got));	// no incarnation
 		cut_assert_equal_int(-1, wal_archive::parse_base("FLAREBASE 2 seq=42\n", got));
 		cut_assert_equal_int(-1, wal_archive::parse_base("FLAREBASE 1 seq=-1 incarnation=i epoch=e master_id=m time=1\n", got));
+		cut_notify("wal archive: checked");
 	}
 
 	// A segment is whole or refused: a flipped byte, a missing trailer or a
@@ -6002,6 +6004,7 @@ void test_reseed_serve_to_a_slow_reader_completes_past_several_windows() {
 		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, holed, 2000, path, err));
 		cut_assert_equal_int(-1, wal_archive::read_segment(path, got_id, got, err));
 		wa_reset_dirs();
+		cut_notify("wal archive: checked");
 	}
 
 	wal_archive::record wa_fake(uint64_t lsn, uint32_t count, int64_t t, const string& data = "x") {
@@ -6046,6 +6049,7 @@ void test_reseed_serve_to_a_slow_reader_completes_past_several_windows() {
 		p = wal_archive::plan_replay(10, straddle, 0);
 		cut_assert_true(p.conflict);
 		cppcut_assert_equal(static_cast<size_t>(0), p.apply.size());
+		cut_notify("wal archive: checked");
 	}
 
 	// The whole path: backup -> later writes archived -> restore the
@@ -6093,6 +6097,7 @@ void test_reseed_serve_to_a_slow_reader_completes_past_several_windows() {
 		cut_assert_true(restored == expected);
 		cut_assert_true(summary.find("gap=0") != string::npos, cut_message("%s", summary.c_str()));
 		wa_reset_dirs();
+		cut_notify("wal archive replay: %s", summary.c_str());
 	}
 
 	// RESUME RULE: a replay interrupted part way continues the same chain; a
@@ -6181,6 +6186,7 @@ void test_reseed_serve_to_a_slow_reader_completes_past_several_windows() {
 
 		cut_remove_path(wal_master_dir, NULL);
 		wa_reset_dirs();
+		cut_notify("wal archive: checked");
 	}
 
 	// The archiver reads the SOURCE's real reply: identity tuple in the EPOCH
@@ -6257,6 +6263,7 @@ void test_reseed_serve_to_a_slow_reader_completes_past_several_windows() {
 		shared_connection ru(new connection_sstream("SERVER_ERROR restored_unverified\r\n"));
 		cut_assert_equal_int(wal_archive::follower::response_retry,
 			wal_archive::follower::read_response(ru, id, cursor, out, more, latest, reason));
+		cut_notify("wal archive: checked");
 	}
 
 	// An existing slave follower still reads the longer EPOCH line.
@@ -6270,6 +6277,7 @@ void test_reseed_serve_to_a_slow_reader_completes_past_several_windows() {
 			s->get_incarnation(), 10, 1 << 20));
 		cppcut_assert_equal(static_cast<uint64_t>(10), op.get_server_latest_lsn());
 		drop_rocksdb(s, wal_slave_dir);
+		cut_notify("wal archive: checked");
 	}
 	// }}}
 

@@ -6266,6 +6266,149 @@ void test_reseed_serve_to_a_slow_reader_completes_past_several_windows() {
 		cut_notify("wal archive: checked");
 	}
 
+	// A canned repl_sync_wal source on a real TCP port: the first connection
+	// gets `first`, every later one `idle`.
+	struct canned_source {
+		int lfd;
+		int port;
+		string first, idle;
+		volatile bool stop;
+		int served;
+		pthread_t th;
+		canned_source(const string& f, const string& i): lfd(-1), port(0), first(f), idle(i), stop(false), served(0) {
+			lfd = socket(AF_INET, SOCK_STREAM, 0);
+			int one = 1;
+			setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+			struct sockaddr_in a;
+			memset(&a, 0, sizeof(a));
+			a.sin_family = AF_INET;
+			a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+			bind(lfd, (struct sockaddr*)&a, sizeof(a));
+			listen(lfd, 8);
+			socklen_t l = sizeof(a);
+			getsockname(lfd, (struct sockaddr*)&a, &l);
+			port = ntohs(a.sin_port);
+			fcntl(lfd, F_SETFL, fcntl(lfd, F_GETFL, 0) | O_NONBLOCK);
+			pthread_create(&th, NULL, run, this);
+		}
+		~canned_source() {
+			stop = true;
+			pthread_join(th, NULL);
+			::close(lfd);
+		}
+		static void* run(void* p) {
+			canned_source* s = static_cast<canned_source*>(p);
+			while (!s->stop) {
+				int fd = accept(s->lfd, NULL, NULL);
+				if (fd < 0) {
+					usleep(10000);
+					continue;
+				}
+				char c;
+				while (read(fd, &c, 1) == 1 && c != '\n') {}
+				const string& r = s->served++ == 0 ? s->first : s->idle;
+				size_t off = 0;
+				while (off < r.size()) {
+					ssize_t w = write(fd, r.data() + off, r.size() - off);
+					if (w <= 0) break;
+					off += static_cast<size_t>(w);
+				}
+				::close(fd);
+			}
+			return NULL;
+		}
+	};
+
+	struct stop_after {
+		volatile sig_atomic_t flag;
+		int usec;
+		pthread_t th;
+		explicit stop_after(int u): flag(0), usec(u) { pthread_create(&th, NULL, run, this); }
+		~stop_after() { pthread_join(th, NULL); }
+		static void* run(void* p) {
+			stop_after* s = static_cast<stop_after*>(p);
+			usleep(s->usec);
+			s->flag = 1;
+			return NULL;
+		}
+	};
+
+	// The follower as `flared --wal-archive-follow` runs it: real TCP, and NO
+	// process-wide stats object (the offline mode skips the server start-up).
+	// It must not crash, must write the batches to a closed segment and record
+	// the synced time (CI 44299609676: it died on the first read).
+	void test_wal_archive_follower_over_tcp_without_server_startup() {
+		wa_reset_dirs();
+		storage_rocksdb* m = make_rocksdb(wal_master_dir);
+		const uint64_t from = m->get_latest_sequence_number();
+		for (int i = 0; i < 3; i++) {
+			cut_assert_equal_int(0, storage_set_string(m, "t" + boost::lexical_cast<string>(i), "v"));
+		}
+		const uint64_t head = m->get_latest_sequence_number();
+		const wal_archive::identity id = wa_identity_of(m);
+		char request[BUFSIZ];
+		snprintf(request, sizeof(request), " %llu %s %s 100 1048576\r\n", (unsigned long long)from,
+			id.master_id.c_str(), id.epoch.c_str());
+		shared_connection c(new connection_sstream(request));
+		serving_sync_wal op(c, m);
+		cut_assert_equal_int(0, op._parse_text_server_parameters());
+		op._run_server();
+		const string reply = static_cast<connection_sstream*>(c.get())->get_output();
+		char idle[512];
+		snprintf(idle, sizeof(idle), "EPOCH %s %llu %s %s\r\nEND\r\n", id.epoch.c_str(),
+			(unsigned long long)head, id.incarnation.c_str(), id.master_id.c_str());
+		drop_rocksdb(m, wal_master_dir);
+
+		int rc = -1;
+		{
+			canned_source src(reply, idle);
+			wal_archive::follower::options o;
+			o.host = "127.0.0.1";
+			o.port = src.port;
+			o.id = id;
+			o.from_lsn = from;
+			o.out_dir = wa_seg_dir;
+			o.segment_seconds = 1;
+			o.poll_usec = 50000;
+			stats* saved = stats_object;
+			stats_object = NULL;
+			{
+				stop_after stopper(2500000);
+				wal_archive::follower f(o);
+				rc = f.run(&stopper.flag);
+			}
+			delete stats_object;
+			stats_object = saved;
+		}
+		cut_assert_equal_int(wal_archive::follower::exit_ok, rc);
+		vector<wal_archive::record> got;
+		DIR* d = opendir(wa_seg_dir);
+		cut_assert_not_null(d);
+		struct dirent* e;
+		int segments = 0;
+		while ((e = readdir(d)) != NULL) {
+			const string n = e->d_name;
+			if (n.size() > 4 && n.compare(n.size() - 4, 4, ".wal") == 0) {
+				wal_archive::identity sid;
+				vector<wal_archive::record> rs;
+				string err;
+				cut_assert_equal_int(0, wal_archive::read_segment(string(wa_seg_dir) + "/" + n, sid, rs, err));
+				cut_assert_true(sid == id);
+				got.insert(got.end(), rs.begin(), rs.end());
+				segments++;
+			}
+		}
+		closedir(d);
+		cut_assert_operator(segments, >=, 1);
+		cut_assert_false(got.empty());
+		cppcut_assert_equal(from + 1, got.front().lsn);
+		cppcut_assert_equal(head, got.back().last_lsn());
+		struct stat st;
+		cut_assert_equal_int(0, stat((string(wa_seg_dir) + "/synced").c_str(), &st));
+		wa_reset_dirs();
+		cut_notify("wal archive: follower over tcp, %d segment(s), %zu batches", segments, got.size());
+	}
+
 	// An existing slave follower still reads the longer EPOCH line.
 	void test_follow_client_accepts_the_identity_tuple_epoch_line() {
 		storage_rocksdb* s = make_rocksdb(wal_slave_dir);

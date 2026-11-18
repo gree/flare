@@ -42,7 +42,9 @@
 #include <rocksdb/db.h>
 #include <rocksdb/write_batch.h>
 
+#include "app.h"
 #include "connection_tcp.h"
+#include "stats.h"
 #include "logger.h"
 #include "storage_rocksdb.h"
 #include "util.h"
@@ -711,6 +713,13 @@ int follower::run(volatile sig_atomic_t* stop) {
 	if (this->_o.host.empty() || this->_o.port <= 0 || !this->_o.id.complete()
 			|| this->_o.out_dir.empty() || this->_o.segment_seconds <= 0) {
 		return exit_usage;
+	}
+	// `flared --wal-archive-follow` runs without the server's start-up, and
+	// connection_tcp counts every byte into the process-wide stats: without
+	// one the first read is a NULL dereference (CI 44299609676: the follower
+	// died on its first slice and was restarted every second).
+	if (stats_object == NULL) {
+		stats_object = new stats();
 	}
 	this->_write_position();
 	const int64_t segment_us = static_cast<int64_t>(this->_o.segment_seconds) * 1000000;

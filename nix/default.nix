@@ -59,7 +59,7 @@ stdenv.mkDerivation {
     # verification V capture decoder (flared --dump-checkpoint), by name
     grep -E 'test_dump_checkpoint_point_in_time_and_side_effect_free' test/run-tests.sh.log || echo "dump_checkpoint test NOT found in the cutter log"
     # WAL archive (base marker, segments, replay plan/journal, follower reply), by name
-    grep -E 'test_wal_archive_backup_writes_base_marker|test_wal_archive_base_marker_round_trip_and_refusals|test_wal_archive_segment_round_trip_and_corruption|test_wal_archive_plan_contiguity_duplicates_conflicts_and_time|test_wal_archive_replay_reaches_the_last_archived_batch|test_wal_archive_replay_resume_only_the_same_chain|test_wal_archive_follower_reads_a_source_reply|test_follow_client_accepts_the_identity_tuple_epoch_line' test/run-tests.sh.log || echo "WAL archive tests NOT found in the cutter log"
+    grep -E 'test_wal_archive_backup_writes_base_marker|test_wal_archive_base_marker_round_trip_and_refusals|test_wal_archive_segment_round_trip_and_corruption|test_wal_archive_plan_contiguity_duplicates_conflicts_and_time|test_wal_archive_replay_reaches_the_last_archived_batch|test_wal_archive_replay_resume_only_the_same_chain|test_wal_archive_follower_reads_a_source_reply|test_follow_client_accepts_the_identity_tuple_epoch_line|test_wal_archive_follower_over_tcp_without_server_startup' test/run-tests.sh.log || echo "WAL archive tests NOT found in the cutter log"
     # capture guards: write bounds for a connected peer that stops reading,
     # worst-case-pin capacity rule
     # switch gate: in-flight forwards as a value, one outcome per forward on shutdown

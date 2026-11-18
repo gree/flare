@@ -1002,6 +1002,7 @@ protected:
 	// newest `keep`, and the last-ditch empty-reopen used when a teardown/
 	// reopen (swap_in_snapshot / hard_reset) fails.
 	void _prune_named_backups(int keep);
+	void _write_checkpoint_base(const string& path, uint64_t seq);
 	int _emergency_reopen_empty(const char* who);
 
 public:

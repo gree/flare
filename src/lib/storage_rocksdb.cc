@@ -29,6 +29,7 @@
 #include <sys/vfs.h>
 #include "storage_rocksdb.h"
 #include "copy_switch_fs.h"
+#include "wal_archive.h"
 #include <time.h>
 
 #include <rocksdb/utilities/checkpoint.h>
@@ -6488,6 +6489,46 @@ namespace {
 	}
 }
 
+/**
+ *	WAL ARCHIVE base marker (wal_archive.h). Binds the checkpoint's sequence
+ *	number to the identity read FROM THE CHECKPOINT ITSELF — never from this
+ *	node's live state, which may already have moved on. A checkpoint whose
+ *	identity cannot be read, or whose own sequence number disagrees, gets no
+ *	marker: the backup stays usable, only the archive cannot extend it.
+ */
+void storage_rocksdb::_write_checkpoint_base(const string& path, uint64_t seq) {
+	rocksdb::DB* db = NULL;
+	rocksdb::Options opt;
+	opt.create_if_missing = false;
+	vector<rocksdb::ColumnFamilyHandle*> cf_handles;
+	rocksdb::Status s = open_read_only_all_cfs(opt, path, &db, cf_handles);
+	if (!s.ok()) {
+		log_warning("checkpoint %s: cannot read its identity (%s) -> no WAL archive base", path.c_str(), s.ToString().c_str());
+		return;
+	}
+	wal_archive::base b;
+	b.seq = seq;
+	b.time = time(NULL);
+	rocksdb::ReadOptions ro;
+	bool ok = db->GetLatestSequenceNumber() == seq;
+	ok = ok && db->Get(ro, kReplIncarnationKey, &b.id.incarnation).ok();
+	ok = ok && db->Get(ro, kReplSourceEpochKey, &b.id.epoch).ok();
+	ok = ok && db->Get(ro, kReplMasterIdKey, &b.id.master_id).ok();
+	const uint64_t own_seq = db->GetLatestSequenceNumber();
+	close_read_only(db, cf_handles);
+	if (!ok || !b.id.complete()) {
+		log_warning("checkpoint %s: identity incomplete or sequence %llu != %llu -> no WAL archive base",
+			path.c_str(), (unsigned long long)own_seq, (unsigned long long)seq);
+		return;
+	}
+	if (wal_archive::write_base_file(path, b) < 0) {
+		log_warning("checkpoint %s: could not write the WAL archive base", path.c_str());
+		return;
+	}
+	log_info("checkpoint %s: WAL archive base seq=%llu epoch=%s", path.c_str(),
+		(unsigned long long)seq, b.id.epoch.c_str());
+}
+
 int storage_rocksdb::create_named_backup(const string& name, string& out_path) {
 	if (!is_valid_backup_name(name)) {
 		log_err("invalid backup name [%s] (allowed: [A-Za-z0-9._-], no leading '.', no '/')", name.c_str());
@@ -6548,13 +6589,18 @@ int storage_rocksdb::create_named_backup(const string& name, string& out_path) {
 	// CreateCheckpoint requires the target directory to NOT already
 	// exist; it fails otherwise. That is the behavior we want (never
 	// silently overwrite an existing backup).
-	s = cp->CreateCheckpoint(path);
+	// The sequence number RocksDB reports for THIS checkpoint (it flushes
+	// first, so the checkpoint holds exactly 1..seq): the base the WAL
+	// archive replays forward from.
+	uint64_t checkpoint_seq = 0;
+	s = cp->CreateCheckpoint(path, 0, &checkpoint_seq);
 	delete cp;
 	if (!s.ok()) {
 		log_err("CreateCheckpoint(%s) failed: %s", path.c_str(), s.ToString().c_str());
 		this->incr_backup_failure();
 		return -1;
 	}
+	_write_checkpoint_base(path, checkpoint_seq);
 
 	out_path = path;
 	this->incr_backup_success();

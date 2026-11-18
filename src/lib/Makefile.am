@@ -126,5 +126,5 @@ if ENABLE_KYOTOCABINET
 libflare_la_SOURCES += storage_kch.h storage_kch.cc
 endif
 if ENABLE_ROCKSDB
-libflare_la_SOURCES += storage_rocksdb.h storage_rocksdb.cc
+libflare_la_SOURCES += storage_rocksdb.h storage_rocksdb.cc wal_archive.h wal_archive.cc
 endif

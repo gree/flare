@@ -60,7 +60,10 @@ open FlareOperator.Kubectl
 
 def cfg : ClusterConfig :=
   { name := "walarc", «namespace» := "flare-wal-archive", partitions := 1, replicas := 2,
-    debugPod := "debug-wal-archive", storageBackend := "rocksdb", useTmpfs := true, usePvc := false }
+    debugPod := "debug-wal-archive", storageBackend := "rocksdb", useTmpfs := true, usePvc := false,
+    -- the release's fullname: its ClusterRole/Binding must not collide with the
+    -- operator CI installed from the chart (44290874757: "ClusterRole flare-operator exists")
+    operatorName := "flare-operator-walarc" }
 
 private def nsName : String := cfg.«namespace»
 private def cluster : String := cfg.name

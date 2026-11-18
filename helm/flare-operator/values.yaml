@@ -414,6 +414,11 @@ cluster:
     # WAL archive: replay the archived WAL only up to this unix time ("" =
     # as far as it continues). A runtime flag like `enabled`.
     walUntil: ""
+    # WAL archive: an archive the replay cannot fully reach (gap, conflict,
+    # corrupt later segment) REFUSES the restore; true publishes it up to
+    # where the archive continues. A runtime flag; set it only for a restore
+    # you decided to accept, then set it back.
+    walAcceptIncomplete: false
     image:
       repository: ghcr.io/gree/flare-backup
       tag: ""

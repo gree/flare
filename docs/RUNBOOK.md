@@ -1136,6 +1136,14 @@ which master, why a new base) and `-c follow` (the follower's reason, e.g.
 - **FlareWalArchiveUploadFailing.** Segments stay on the archiver's emptyDir
   and are retried; they are lost if the archiver pod is deleted meanwhile.
 
+- **A restore stuck with `backup-wal-replay: REFUSED`.** The archive holds
+  history the replay cannot reach (its summary line: `gap=1`, `conflict=1` or
+  `corrupt_beyond>0`). Look at the segments named in the init log before
+  deciding. To restore up to `last_lsn` and lose the rest, set
+  `backup-bootstrap-wal-accept-incomplete: "true"` in `<cluster>-flags`; the
+  next init attempt publishes it with an `INCOMPLETE archive accepted`
+  warning. Set it back to `"false"` afterwards.
+
 Turning the archive off (`walArchive.enabled: false`) deletes the Deployment;
 segments already uploaded stay and remain usable for restore.
 

@@ -6266,6 +6266,98 @@ void test_reseed_serve_to_a_slow_reader_completes_past_several_windows() {
 		cut_notify("wal archive: checked");
 	}
 
+	// FAIL CLOSED on an incomplete archive: replay applies the contiguous part
+	// and returns 4 when the archive holds history it did not reach — a corrupt
+	// LAST segment (no gap shows for it), a missing middle segment, or a
+	// different batch at a covered position. A corrupt segment whose range is
+	// covered by another one costs nothing and stays 0.
+	void test_wal_archive_replay_refuses_an_incomplete_archive() {
+		wa_reset_dirs();
+		storage_rocksdb* s = make_rocksdb(wal_master_dir);
+		string cp;
+		cut_assert_equal_int(0, s->create_named_backup("20261118-000009", cp));
+		wal_archive::base b;
+		cut_assert_equal_int(0, wal_archive::read_base_file(cp, b));
+		for (int i = 0; i < 9; i++) {
+			cut_assert_equal_int(0, storage_set_string(s, "x" + boost::lexical_cast<string>(i), "v"));
+		}
+		vector<wal_archive::record> rs = wa_records_since(s, b.seq, 1000);
+		const wal_archive::identity id = wa_identity_of(s);
+		drop_rocksdb_noremove(s);
+		cut_assert_operator(rs.size(), >=, static_cast<size_t>(9));
+		vector<wal_archive::record> a(rs.begin(), rs.begin() + 3), m(rs.begin() + 3, rs.begin() + 6), z(rs.begin() + 6, rs.end());
+		string path, err, summary;
+		auto corrupt = [](const string& f) {
+			std::fstream io(f.c_str(), std::ios::in | std::ios::out | std::ios::binary);
+			io.seekp(-12, std::ios::end);
+			char c = 0;
+			io.read(&c, 1);
+			io.seekp(-12, std::ios::end);
+			c ^= 0x5a;
+			io.write(&c, 1);
+		};
+		auto reset_segs = [&]() { cut_remove_path(wa_seg_dir, NULL); mkdir(wa_seg_dir, 0700); };
+
+		// 1) the last segment corrupt: no gap, but history lost -> 4
+		wa_restore_from(cp);
+		reset_segs();
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, a, 1, path, err));
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, m, 2, path, err));
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, z, 3, path, err));
+		corrupt(path);
+		cut_assert_equal_int(4, wa_replay(0, summary), cut_message("%s", summary.c_str()));
+		cut_assert_true(summary.find("gap=0") != string::npos, cut_message("%s", summary.c_str()));
+		cut_assert_true(summary.find("corrupt_beyond=1 complete=0") != string::npos, cut_message("%s", summary.c_str()));
+		cppcut_assert_equal(m.back().last_lsn(), wa_seq_of(wa_restore_dir));	// the contiguous part is applied
+
+		// 2) a middle segment missing -> 4 (gap)
+		wa_restore_from(cp);
+		reset_segs();
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, a, 1, path, err));
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, z, 3, path, err));
+		cut_assert_equal_int(4, wa_replay(0, summary), cut_message("%s", summary.c_str()));
+		cut_assert_true(summary.find("gap=1") != string::npos, cut_message("%s", summary.c_str()));
+		cppcut_assert_equal(a.back().last_lsn(), wa_seq_of(wa_restore_dir));
+
+		// 3) a different batch at a covered position -> 4 (conflict)
+		wa_restore_from(cp);
+		reset_segs();
+		vector<wal_archive::record> other(m.begin(), m.begin() + 1);
+		other[0].data[other[0].data.size() - 1] ^= 0x01;	// a value byte: still a batch
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, a, 1, path, err));
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, m, 2, path, err));
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, other, 4, path, err));
+		cut_assert_equal_int(4, wa_replay(0, summary), cut_message("%s", summary.c_str()));
+		cut_assert_true(summary.find("conflict=1") != string::npos, cut_message("%s", summary.c_str()));
+
+		// 4) a corrupt duplicate of a covered range costs nothing -> 0
+		wa_restore_from(cp);
+		reset_segs();
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, a, 1, path, err));
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, a, 5, path, err));
+		corrupt(path);
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, m, 2, path, err));
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, z, 3, path, err));
+		cut_assert_equal_int(0, wa_replay(0, summary), cut_message("%s", summary.c_str()));
+		cut_assert_true(summary.find("corrupt=1 corrupt_beyond=0 complete=1") != string::npos, cut_message("%s", summary.c_str()));
+		cppcut_assert_equal(z.back().last_lsn(), wa_seq_of(wa_restore_dir));
+
+		// 5) past a time bound that stopped the replay, a corrupt segment is not wanted -> 0
+		wa_restore_from(cp);
+		reset_segs();
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, a, 1, path, err));
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, m, 2, path, err));
+		cut_assert_equal_int(0, wal_archive::write_segment(wa_seg_dir, id, z, 3, path, err));
+		corrupt(path);
+		cut_assert_equal_int(0, wa_replay(a.back().time_us, summary), cut_message("%s", summary.c_str()));
+		cut_assert_true(summary.find("until=1") != string::npos && summary.find("complete=1") != string::npos,
+			cut_message("%s", summary.c_str()));
+
+		cut_remove_path(wal_master_dir, NULL);
+		wa_reset_dirs();
+		cut_notify("wal archive: incomplete archives refused");
+	}
+
 	// A canned repl_sync_wal source on a real TCP port: the first connection
 	// gets `first`, every later one `idle`.
 	struct canned_source {

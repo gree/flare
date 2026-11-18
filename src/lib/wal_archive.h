@@ -202,9 +202,12 @@ private:
 // db_dir, which must hold the checkpoint FLARE_BASE describes. Writes a
 // one-line summary to `report`. A re-run after an interruption continues only
 // the same chain (the FLARE_REPLAY journal, see the resume rule in the .cc).
-// Return: 0 replayed (possibly nothing, possibly
-// stopped at a gap — the summary says), 1 the database could not be opened or
-// written, 3 the base marker is missing or does not describe this database.
+// Return: 0 replayed everything the archive holds
+// for this base (up to the time bound), 4 replayed only a part of it — a gap,
+// a conflict, or a corrupt segment holding later history (the contiguous part
+// IS applied; the caller decides whether to use it), 1 the database could not
+// be opened or written, 3 the base marker is missing or does not describe
+// this database.
 int replay(const string& db_dir, const string& seg_dir, int64_t until_us, FILE* report);
 // }}}
 

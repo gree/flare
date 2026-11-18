@@ -709,6 +709,32 @@ csv "$W/r_kill" > "$W/c_kill"
 if [ "$RCK" = 0 ] && cmp -s "$W/c_full" "$W/c_kill"; then
   chk kill PASS "killed=$KILLED after=${KD:-none}s journal_lines=$JL, rerun applied=$(field "$OUTK" applied), same keys as the full run"
 else chk kill FAIL "killed=$KILLED rc=$RCK $OUTK same_keys=$(cmp -s "$W/c_full" "$W/c_kill" && echo yes || echo no)"; fi
+
+# R4a: the LAST segment corrupt (no gap shows for it): exit 4, the contiguous part applied
+rm -rf "$W/seg_tail"; cp -a "$W/seg" "$W/seg_tail"
+LASTSEG=$(ls "$W/seg_tail" | sort | tail -1)
+SZ=$(stat -c %s "$W/seg_tail/$LASTSEG")
+printf 'Z' | dd of="$W/seg_tail/$LASTSEG" bs=1 seek=$((SZ - 12)) conv=notrunc 2>/dev/null
+fresh r_tail
+OUT=$(flared --wal-replay "$W/r_tail" "$W/seg_tail" 2>/dev/null); RC=$?
+echo "REPLAY tailcorrupt rc=$RC $OUT"
+if [ "$RC" = 4 ] && [ "$(field "$OUT" gap)" = 0 ] && [ "$(field "$OUT" corrupt_beyond)" = 1 ] && [ "$(field "$OUT" complete)" = 0 ] \
+   && [ "$(field "$OUT" last_lsn)" -lt "$LAST_FULL" ]; then
+  chk tailcorrupt PASS "$OUT"
+else chk tailcorrupt FAIL "rc=$RC (want 4) $OUT"; fi
+
+# R4b: a middle segment missing: exit 4 with gap=1
+if [ "$NSEG" -ge 3 ]; then
+  rm -rf "$W/seg_gap"; cp -a "$W/seg" "$W/seg_gap"
+  MID=$(ls "$W/seg_gap" | sort | sed -n "$((NSEG / 2 + 1))p")
+  rm -f "$W/seg_gap/$MID"
+  fresh r_gap
+  OUT=$(flared --wal-replay "$W/r_gap" "$W/seg_gap" 2>/dev/null); RC=$?
+  echo "REPLAY midgap rc=$RC $OUT"
+  if [ "$RC" = 4 ] && [ "$(field "$OUT" gap)" = 1 ] && [ "$(field "$OUT" complete)" = 0 ]; then
+    chk midgap PASS "$OUT"
+  else chk midgap FAIL "rc=$RC (want 4) $OUT"; fi
+else chk midgap FAIL "only $NSEG segment(s): need 3 to remove a middle one"; fi
 "##
   |>.replace "@UNTIL@" untilT |>.replace "@NA@" markersA |>.replace "@NB@" markersB
 
@@ -788,12 +814,100 @@ private def replayTest : IO TestResult := do
     if !ln.trim.isEmpty then c.event s!"offline: {ln.trim.take 400}"
   let chks := chkLines out1 ++ chkLines out2
   let mut fails : List String := []
-  for want in ["until", "full", "half", "kill", "past"] do
+  for want in ["until", "full", "half", "kill", "tailcorrupt", "midgap", "past"] do
     match chks.find? (·.1 == want) with
     | none => fails := fails ++ [s!"check `{want}` did not run (script output: {(out1 ++ out2).take 300})"]
     | some (_, v, d) => if v != "PASS" then fails := fails ++ [s!"{want}: {d.take 400}"]
   c.event s!"SUMMARY T4: {chks.map fun (n, v, _) => s!"{n}={v}"}"
   discard <| kubectl ["delete", "pod", replayPod, "-n", nsName, "--force", "--grace-period=0", "--ignore-not-found"]
+  if fails.isEmpty then return .pass else return .fail (String.intercalate "; " fails)
+
+/-! ## T5: the restore refuses an incomplete archive -/
+
+/-- Corrupts the newest segment of the latest base's chain in the bucket (a
+    byte of its trailer), as a damaged upload would. Prints the key. -/
+private def corruptNewestScript (chain : String) : String :=
+  r##"set -e
+EP="--endpoint-url @ENDPOINT@"
+P=s3://@BUCKET@/@CLUSTER@/wal/p0/@CHAIN@
+N=$(aws s3 ls $EP "$P/" | awk '{print $4}' | sort | tail -1)
+aws s3 cp $EP --no-progress "$P/$N" /tmp/seg >/dev/null
+SZ=$(stat -c %s /tmp/seg)
+printf 'Z' | dd of=/tmp/seg bs=1 seek=$((SZ - 12)) conv=notrunc 2>/dev/null
+aws s3 cp $EP --no-progress /tmp/seg "$P/$N" >/dev/null
+echo "CORRUPTED $N"
+"##
+  |>.replace "@ENDPOINT@" endpoint |>.replace "@BUCKET@" bucket |>.replace "@CLUSTER@" cluster |>.replace "@CHAIN@" chain
+
+private def setAcceptIncomplete (on : Bool) : IO (Except String String) :=
+  kubectlPatch "configmap" s!"{cluster}-flags" nsName
+    s!"\{\"data\":\{\"backup-bootstrap-wal-accept-incomplete\":\"{on}\"}}"
+
+private def refuseTest : IO TestResult := do
+  let c := ctx "restore-refuses-incomplete"
+  c.conditions ["T5: the newest archived segment corrupted in the bucket; every pod deleted; the restore must be refused until accept-incomplete is set"]
+  if !(← waitFollowing "a chain is followed" 900) then
+    return .fail (notSetUp s!"the archive is not following a chain: {repr (← readArch)}")
+  let some ip ← masterIp | return .fail (notSetUp "no master's address")
+  let mut stored := 0
+  for i in List.range 20 do
+    if (← memcachedSet cfg.debugPod nsName ip cfg.flarePort s!"walt5_{i}" s!"v{i}") then stored := stored + 1
+  let tW ← epochNow
+  if stored != 20 then return .fail (notSetUp s!"only {stored} of 20 writes were STORED")
+  let synced ← waitForCondition "the writes are in the bucket (synced past them)" 180 do
+    match ← readArch with
+    | some a => return a.synced > tW
+    | none => return false
+  if !synced then return .fail (notSetUp s!"the archive did not sync past the writes: {repr (← readArch)}")
+  let some (chain, _, _) ← latestBase | return .fail (unobservable "the latest base cannot be read")
+  -- stop the archiver first: it must not upload a later, intact segment
+  match ← setArchive false with
+  | .error e => return .fail (notSetUp s!"helm upgrade (archive off): {e.take 300}")
+  | .ok _ => pure ()
+  let _ ← waitForCondition "the archiver is gone" 180 do return (← archiverPod).isNone
+  let cor ← toolSh (corruptNewestScript chain) 120
+  let corOut := match cor with | .ok o => o.trim | .error e => s!"ERROR {e.take 300}"
+  c.event s!"bucket: {corOut}"
+  if !containsSubstr corOut "CORRUPTED " then return .fail (notSetUp s!"could not corrupt the newest segment: {corOut}")
+  let some pods0 ← flaredPods | return .fail (notSetUp "the flared pods cannot be read")
+  let oldUids := pods0.map (·.uid)
+  let _ ← kubectl (["delete", "pod"] ++ pods0.map (·.name) ++ ["-n", nsName, "--force", "--grace-period=0", "--wait=false"])
+  -- refused: backup-wal-replay says so, and no new flared pod becomes Ready
+  let mut refusedSeen := false
+  let mut readySeen := false
+  for _ in [0:60] do
+    IO.sleep 5000
+    for p in (← flaredPods).getD [] do
+      if !oldUids.contains p.uid then
+        if p.ready then readySeen := true
+        if containsSubstr (← initLog p.name "backup-wal-replay") "REFUSED" then refusedSeen := true
+    if refusedSeen then break
+  -- hold a little longer: still nothing Ready while refused
+  IO.sleep 30000
+  for p in (← flaredPods).getD [] do
+    if !oldUids.contains p.uid && p.ready then readySeen := true
+  c.event s!"refused seen {refusedSeen}, a new pod Ready while refused {readySeen}"
+  -- accept explicitly: published up to where the archive continues
+  match ← setAcceptIncomplete true with
+  | .error e => return .fail s!"could not set accept-incomplete: {e.take 300}"
+  | .ok _ => pure ()
+  let settled ← waitClusterSettled cfg 900 15
+  let mut lines : List String := []
+  for p in (← flaredPods).getD [] do
+    for ln in (← initLog p.name "backup-wal-replay").splitOn "\n" do
+      if containsSubstr ln "replay base_seq=" || containsSubstr ln "INCOMPLETE" then lines := lines ++ [ln.trim]
+  for ln in lines do c.event s!"restore: {ln}"
+  discard <| setAcceptIncomplete false
+  discard <| setArchive true
+  let mut fails : List String := []
+  if !refusedSeen then fails := fails ++ ["backup-wal-replay never logged REFUSED for the corrupt newest segment"]
+  if readySeen then fails := fails ++ ["a flared pod became Ready while the restore was refused"]
+  if !settled then fails := fails ++ ["the cluster did not settle after accept-incomplete was set"]
+  if !(lines.any fun ln => containsSubstr ln "corrupt_beyond=1" && containsSubstr ln "complete=0") then
+    fails := fails ++ [s!"no accepted replay with corrupt_beyond=1 complete=0: {lines.take 3}"]
+  if !(lines.any (containsSubstr · "INCOMPLETE archive accepted")) then
+    fails := fails ++ ["the accepted restore did not log the INCOMPLETE warning"]
+  c.event s!"SUMMARY T5: refused {refusedSeen}, Ready while refused {readySeen}, settled after accept {settled}, replay lines {lines.length}"
   if fails.isEmpty then return .pass else return .fail (String.intercalate "; " fails)
 
 /-! ## The suite -/
@@ -839,7 +953,8 @@ def suite : TestSuite :=
       { name := "T1 RPO under load: every ACK older than 60 s survives the loss of every pod (base + archive + replay)", run := rpoTest },
       { name := "T2 master switch: the old chain stops, needs_base, a backup Job, a new chain is followed and synced advances", run := switchTest },
       { name := "T3 on/off: walArchive false/true recreates only the archiver; flared pods untouched; the archive resumes after the last segment", run := toggleTest },
-      { name := "T4 offline replay: until time, interrupted replay continues, a database past the base is refused", run := replayTest }
+      { name := "T4 offline replay: until time, interrupted replay continues, an incomplete archive exits 4, a database past the base is refused", run := replayTest },
+      { name := "T5 the restore refuses an incomplete archive (corrupt newest segment) until accept-incomplete is set", run := refuseTest }
     ] }
 
 end FlareOperator.E2E.Tests.WalArchive

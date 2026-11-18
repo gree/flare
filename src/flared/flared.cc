@@ -976,6 +976,9 @@ int main(int argc, char **argv) {
 		//     needed (OUT_DIR/needs-base says why), 2 usage, 3 I/O.
 		//   flared --wal-replay DB_DIR SEGMENT_DIR [UNTIL_UNIX_SECONDS]
 		//     replays the segments onto the checkpoint in DB_DIR (offline).
+		//     Exit 0 complete, 4 only part of the archive was reachable (gap,
+		//     conflict, corrupt later segment; the part is applied), 3 the base
+		//     does not describe DB_DIR, 1 open/write error.
 		if (strcmp(argv[i], "--wal-archive-follow") == 0) {
 #ifdef HAVE_LIBROCKSDB
 			if (argc - i - 1 < 7) {

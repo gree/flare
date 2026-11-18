@@ -133,6 +133,10 @@ data:
   # this unix time (batches the archiver had received whole by then). Empty
   # = as far as the archive continues. For a restore to a point in time.
   backup-bootstrap-wal-until: {{ $bb.walUntil | default "" | quote }}
+  # WAL archive: when the archive holds history the replay cannot reach (a
+  # gap, a conflict, a corrupt later segment), the restore is REFUSED unless
+  # this is "true" — then it is published up to where the archive continues.
+  backup-bootstrap-wal-accept-incomplete: {{ $bb.walAcceptIncomplete | default false | quote }}
 {{- end }}
 ---
 apiVersion: flare.gree.net/v1alpha1
@@ -424,16 +428,28 @@ spec:
               [ -f "$DATA/flare.rocksdb.restore.pending" ] || exit 0
               WALD="$DATA/flare.rocksdb.restore.wal"
               UNTIL=$(tr -d '\r\n ' < /etc/flare-flags/backup-bootstrap-wal-until 2>/dev/null || true)
+              ACCEPT=$(tr -d '\r\n ' < /etc/flare-flags/backup-bootstrap-wal-accept-incomplete 2>/dev/null || true)
               if [ -f "$DATA/flare.rocksdb.restore/FLARE_BASE" ] && ls "$WALD"/*.wal >/dev/null 2>&1; then
-                OUT=$(flared --wal-replay "$DATA/flare.rocksdb.restore" "$WALD" $UNTIL) || {
-                  echo "backup-wal-replay: replay FAILED: $OUT" >&2
+                set +e
+                OUT=$(flared --wal-replay "$DATA/flare.rocksdb.restore" "$WALD" $UNTIL)
+                RC=$?
+                set -e
+                echo "backup-wal-replay: $OUT"
+                if [ "$RC" = 4 ] && [ "$ACCEPT" = "true" ]; then
+                  # explicitly accepted: published up to where the archive continues
+                  echo "backup-wal-replay: WARNING: INCOMPLETE archive accepted by backup-bootstrap-wal-accept-incomplete; restored only up to last_lsn" >&2
+                elif [ "$RC" != 0 ]; then
+                  # FAIL CLOSED: an incomplete archive (4: gap, conflict, corrupt
+                  # later segment) or a replay error is not published; nothing is
+                  # left in place and the next attempt downloads again
+                  if [ "$RC" = 4 ]; then
+                    echo "backup-wal-replay: REFUSED: the archive holds history this replay cannot reach (exit 4). Set backup-bootstrap-wal-accept-incomplete=true in the {{ $c.name }}-flags ConfigMap to restore up to last_lsn (RUNBOOK#wal-archive)" >&2
+                  else
+                    echo "backup-wal-replay: replay FAILED (exit $RC)" >&2
+                  fi
                   rm -rf "$DATA/flare.rocksdb.restore" "$WALD" "$DATA/flare.rocksdb.restore.pending"
                   exit 1
-                }
-                echo "backup-wal-replay: $OUT"
-                case "$OUT" in *" gap=1"*|*" conflict=1"*)
-                  echo "backup-wal-replay: WARNING: the archive does not continue past last_lsn; restored up to there" >&2 ;;
-                esac
+                fi
               else
                 echo "backup-wal-replay: no WAL to replay -> the base as it is"
               fi

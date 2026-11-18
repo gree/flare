@@ -330,9 +330,11 @@ node map, holds no copy, and does not pin the master's WAL.
   in sequence order, checking after each that the database's sequence number
   is the batch's end — the same database continued in its own sequence space.
   It applies only the run that continues the base without a hole; a hole, a
-  different batch at a position already covered, a segment of another
-  identity, or a batch with an operation it cannot reproduce stops it there
-  (fail closed; the summary line says `gap=1` / `conflict=1`). Every batch
+  different batch at a position already covered, or a batch with an operation
+  it cannot reproduce stops it there. A segment of another identity is
+  ignored. When the archive holds history the replay did not reach — a gap, a
+  conflict, or a corrupt segment holding later sequence numbers (a corrupt
+  LAST segment shows no gap) — it exits 4 with `complete=0` in its summary. Every batch
   is first recorded in a journal (`FLARE_REPLAY`) in the database directory,
   so a replay run again after an interruption continues only the same chain.
   The restored copy is still an unverified RESTORED copy until the partition
@@ -343,6 +345,14 @@ node map, holds no copy, and does not pin the master's WAL.
 The automated bootstrap (below) does it: `backup-bootstrap` downloads the base
 and the segments after its sequence number, `backup-wal-replay` (the flared
 image) replays them and moves the result into place.
+
+**An incomplete archive is refused.** If the replay exits 4, the restore is
+not published: the init container fails (the pod stays un-Ready, the next
+attempt downloads again) and logs `REFUSED`. To restore anyway up to where the
+archive continues — losing the history after `last_lsn` — set
+`backup-bootstrap-wal-accept-incomplete: "true"` in the `<cluster>-flags`
+ConfigMap (chart: `cluster.backupBootstrap.walAcceptIncomplete`), and set it
+back after the restore. RUNBOOK#wal-archive.
 
 **To a point in time.** Set `backup-bootstrap-wal-until` in the
 `<cluster>-flags` ConfigMap (chart: `cluster.backupBootstrap.walUntil`) to a

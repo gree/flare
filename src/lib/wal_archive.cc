@@ -854,14 +854,17 @@ int replay(const string& db_dir, const string& seg_dir, int64_t until_us, FILE* 
 
 	vector<record> all;
 	int foreign = 0, corrupt = 0, used = 0;
+	vector<string> corrupt_names;
 	for (size_t i = 0; i < names.size(); i++) {
 		identity id;
 		vector<record> rs;
 		string err;
 		if (read_segment(seg_dir + "/" + names[i], id, rs, err) < 0) {
-			// Not applied; the plan stops at the hole it leaves.
+			// Not applied. Whether it costs data is judged against the plan
+			// below (its name says which sequence numbers it held).
 			log_err("WAL segment %s refused: %s", names[i].c_str(), err.c_str());
 			corrupt++;
+			corrupt_names.push_back(names[i]);
 			continue;
 		}
 		if (id != b.id) {
@@ -1014,13 +1017,38 @@ int replay(const string& db_dir, const string& seg_dir, int64_t until_us, FILE* 
 		fprintf(report, "replay error=flush (%s)\n", fs.ToString().c_str());
 		return 1;
 	}
+	// COMPLETENESS. A refused segment that held sequence numbers past what
+	// was replayed is archived history this restore does not reach: with the
+	// last segment corrupt the plan has no gap to show for it. (One whose
+	// range is covered — a duplicate — costs nothing; one past a time bound
+	// that already stopped the replay is not wanted.) A gap or a conflict is
+	// the same: the archive holds more than was replayed.
+	int corrupt_beyond = 0;
+	for (size_t i = 0; i < corrupt_names.size(); i++) {
+		unsigned long long first = 0, last = 0;
+		long long ms = 0;
+		if (sscanf(corrupt_names[i].c_str(), "%llu-%llu-%lld", &first, &last, &ms) != 3) {
+			corrupt_beyond++;		// cannot tell what it held: assume the worst
+			continue;
+		}
+		if (last <= plan.last_lsn) {
+			continue;
+		}
+		if (plan.stopped_by_until && first > plan.last_lsn) {
+			continue;
+		}
+		corrupt_beyond++;
+	}
+	const bool complete = !plan.gap && !plan.conflict && corrupt_beyond == 0;
 	fprintf(report, "replay base_seq=%llu applied=%zu last_lsn=%llu last_time_us=%lld base_time=%lld"
-		" gap=%d gap_expected=%llu gap_found=%llu until=%d conflict=%d segments=%d foreign=%d corrupt=%d\n",
+		" gap=%d gap_expected=%llu gap_found=%llu until=%d conflict=%d segments=%d foreign=%d corrupt=%d"
+		" corrupt_beyond=%d complete=%d\n",
 		(unsigned long long)b.seq, applied, (unsigned long long)plan.last_lsn,
 		(long long)plan.last_time_us, (long long)b.time,
 		plan.gap ? 1 : 0, (unsigned long long)plan.gap_expected, (unsigned long long)plan.gap_found,
-		plan.stopped_by_until ? 1 : 0, plan.conflict ? 1 : 0, used, foreign, corrupt);
-	return 0;
+		plan.stopped_by_until ? 1 : 0, plan.conflict ? 1 : 0, used, foreign, corrupt,
+		corrupt_beyond, complete ? 1 : 0);
+	return complete ? 0 : 4;
 }
 // }}}
 

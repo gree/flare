@@ -1,0 +1,75 @@
+#!/bin/sh
+# flare-wal-follow <wal-dir>
+#
+# The FOLLOW half of the WAL archiver (docs/BACKUP_RESTORE.md, "WAL archive"),
+# run in the flared image next to flare-wal-upload (the flare-backup image)
+# with a shared <wal-dir>. Per partition directory <wal-dir>/p<N>:
+#
+#   start     written by flare-wal-upload:
+#             "<generation> <host> <port> <incarnation> <epoch> <master_id> <from_lsn>"
+#   out/      written by flared --wal-archive-follow: closed segments (*.wal),
+#             position, synced, needs-base
+#
+# This loop only runs what `start` says: one follower per partition, started
+# when `start` appears or changes, stopped when it changes or disappears. A
+# follower that stopped with out/needs-base is not restarted on the same
+# `start` (the uploader takes a new base and writes a new one); a follower
+# that died for any other reason is restarted.
+W="${1:-/wal}"
+SEG="${SEGMENT_SECONDS:-30}"
+
+stop_all() {
+  for f in "$W"/p*/pid; do
+    [ -f "$f" ] && kill -TERM "$(cat "$f")" 2>/dev/null
+  done
+  # the followers close their pending segment on SIGTERM
+  for f in "$W"/p*/pid; do
+    [ -f "$f" ] || continue
+    p=$(cat "$f")
+    while kill -0 "$p" 2>/dev/null; do sleep 0.2; done
+    rm -f "$f"
+  done
+  exit 0
+}
+trap stop_all TERM INT
+
+while :; do
+  for d in "$W"/p*; do
+    [ -d "$d" ] || continue
+    want=""; [ -f "$d/start" ] && want=$(cat "$d/start")
+    have=""; [ -f "$d/running" ] && have=$(cat "$d/running")
+    pid="";  [ -f "$d/pid" ] && pid=$(cat "$d/pid")
+    alive=0; [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && alive=1
+    if [ "$alive" = 1 ] && [ "$want" != "$have" ]; then
+      echo "flare-wal-follow: $(basename "$d"): start changed -> stopping the follower"
+      kill -TERM "$pid" 2>/dev/null
+      while kill -0 "$pid" 2>/dev/null; do sleep 0.2; done
+      alive=0
+    fi
+    [ "$alive" = 1 ] && continue
+    rm -f "$d/pid" "$d/running"
+    [ -n "$want" ] || continue
+    [ -f "$d/out/needs-base" ] && continue
+    # shellcheck disable=SC2086
+    set -- $want
+    if [ "$#" -ne 7 ]; then
+      echo "flare-wal-follow: $(basename "$d"): malformed start [$want] -> not following" >&2
+      continue
+    fi
+    mkdir -p "$d/out"
+    from="$7"
+    # A restart on the same chain resumes after what is already closed here
+    # (position: "<incarnation> <epoch> <master_id> <lsn> <unix>").
+    if [ -f "$d/out/position" ]; then
+      read -r pi pe pm pl _ < "$d/out/position"
+      if [ "$pi" = "$4" ] && [ "$pe" = "$5" ] && [ "$pm" = "$6" ] && [ "$pl" -gt "$from" ] 2>/dev/null; then
+        from="$pl"
+      fi
+    fi
+    echo "flare-wal-follow: $(basename "$d"): following $2:$3 from $from (epoch $5)"
+    flared --wal-archive-follow "$2" "$3" "$4" "$5" "$6" "$from" "$d/out" "$SEG" &
+    echo $! > "$d/pid"
+    echo "$want" > "$d/running"
+  done
+  sleep 1
+done

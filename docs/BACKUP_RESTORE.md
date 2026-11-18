@@ -279,6 +279,99 @@ Semantics to be aware of:
   delta on top) — but a live peer is fresher and usually faster; keep the
   flag for replicas=1 topologies.
 
+## WAL archive (`cluster.backup.walArchive`)
+
+The hourly backup restores to the hour. The WAL archive keeps the master's
+WAL after each backup in short segments in the same object storage, so a
+restore replays the base forward and loses only about the last
+`segmentSeconds` plus the upload time (target: 60 s).
+
+```yaml
+cluster:
+  backup:
+    enabled: true          # required: a new base is one run of this CronJob
+    role: master           # required: the replay is the master's own WAL
+    walArchive:
+      enabled: true
+      segmentSeconds: 30
+      retainSeconds: 172800   # time-bounded restore reaches 2 days back
+      rpoAlertSeconds: 120
+```
+
+Turning it on or off creates or deletes one Deployment, `<cluster>-wal-archive`;
+flared pods are not restarted. The archiver is not a node: it is not in the
+node map, holds no copy, and does not pin the master's WAL.
+
+### How it works
+
+- **Base.** Every `backup` checkpoint carries `FLARE_BASE`: the checkpoint's
+  exact sequence number (as RocksDB reports it for that checkpoint) and the
+  copy's identity read from the checkpoint itself — incarnation (the physical
+  copy), history epoch and master id. The backup runner uploads it with
+  CURRENT on every run.
+- **Segments.** The `follow` container runs `flared --wal-archive-follow`
+  against the partition's Active master with the ordinary `repl_sync_wal`
+  request, bound to the base's identity. The master names its identity on
+  the reply's first line and re-checks it after the slice; a slice during
+  which it changed is discarded. Batches are kept only when the reply ends
+  normally, each with its CRC, and written to a closed segment file every
+  `segmentSeconds` (or 64 MiB):
+  `<url>/<cluster>/wal/p<N>/<incarnation>/<epoch>/<master_id>/<first>-<last>-<ms>.wal`.
+- **Chain ends.** If the master moves, the copy is replaced, the history
+  changes, or the archiver falls behind the master's WAL retention
+  (`lsn_purged`; there is no pin), appending stops and the archiver runs the
+  backup CronJob once for a new base (at most every
+  `rebaseMinIntervalSeconds`). Old and new chains are never joined. **Until
+  the new base is uploaded, a restore reaches only the end of the old chain**
+  (`FlareWalArchiveNeedsBase`); a master switch is followed by one full base
+  upload.
+- **Replay.** `flared --wal-replay <db> <segments> [<until>]` opens the
+  restored checkpoint offline and writes the chain's batches, unchanged and
+  in sequence order, checking after each that the database's sequence number
+  is the batch's end — the same database continued in its own sequence space.
+  It applies only the run that continues the base without a hole; a hole, a
+  different batch at a position already covered, a segment of another
+  identity, or a batch with an operation it cannot reproduce stops it there
+  (fail closed; the summary line says `gap=1` / `conflict=1`). Every batch
+  is first recorded in a journal (`FLARE_REPLAY`) in the database directory,
+  so a replay run again after an interruption continues only the same chain.
+  The restored copy is still an unverified RESTORED copy until the partition
+  binding check passes, exactly as without the archive.
+
+### Restoring
+
+The automated bootstrap (below) does it: `backup-bootstrap` downloads the base
+and the segments after its sequence number, `backup-wal-replay` (the flared
+image) replays them and moves the result into place.
+
+**To a point in time.** Set `backup-bootstrap-wal-until` in the
+`<cluster>-flags` ConfigMap (chart: `cluster.backupBootstrap.walUntil`) to a
+unix time: batches the archiver had **received whole and CRC-verified** by then
+are replayed, the first later one and everything after it are not. This is
+the archiver's receive time, not the master's commit time (they differ by the
+replication delay, normally well under a second). Batches are atomic; there is
+no partial batch. The base must be older than that time — for a time before
+the newest hourly base, restore from a daily generation
+(`snapshots/<date>/p0`) of the same chain and replay with the same tool:
+
+```sh
+flared --wal-replay <restored checkpoint dir> <dir with the chain's segments> <unix time>
+# replay base_seq=... applied=... last_lsn=... last_time_us=... gap=0 ...
+```
+
+### Metrics and alerts
+
+| metric (per partition) | meaning |
+|---|---|
+| `flare_wal_archive_synced_timestamp_seconds` | everything the master had at this time is in object storage |
+| `flare_wal_archive_needs_base` | 1 = no chain can be followed until a new base arrives |
+| `flare_wal_archive_chain_active` | 1 = a chain is being followed |
+| `flare_wal_archive_upload_failures_total`, `flare_wal_archive_rebase_requests_total` | counters |
+
+Alerts: `FlareWalArchiveBehind` (archived data older than `rpoAlertSeconds`
+while a chain is followed), `FlareWalArchiveNeedsBase` (30 min without a
+chain), `FlareWalArchiveUploadFailing`. See RUNBOOK#wal-archive.
+
 ## Offline keyspace analysis (`cluster.analysis`)
 
 `flared --analyze-checkpoint <dir>` opens a RocksDB checkpoint READ-ONLY and
@@ -315,10 +408,9 @@ in its log) — no S3 write.
 - Writes between the last upload and the incident are lost. RPO = the tier-2a
   DELTA interval (hourly by default; tighten to `*/5`/`*/1` — deltas are cheap
   since only new SSTs upload). The daily tier-2b snapshot is for retained
-  point-in-time rollback, not RPO. Sub-minute/continuous RPO would need WAL
-  archiving to object storage (not implemented; the delta floor is the k8s
-  CronJob 1-minute granularity, and at minute-cadence on large data a
-  PVC-mounted aws-cli sidecar avoids the per-run intra-cluster checkpoint pull).
+  point-in-time rollback, not RPO. For an RPO of about a minute enable the
+  WAL archive (above); after a master switch it is the hourly RPO again until
+  the new base is uploaded.
 - Tier 1 alone does not survive PVC/namespace/cluster loss — enable tier 2.
 - The checkpoint contains the replication metadata keys (`__flare_repl_*`);
   after restore the node keeps its lineage token, so WAL sync against peers

@@ -33,6 +33,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <deque>
 #include <map>
 #include <sstream>
 
@@ -501,6 +502,7 @@ replay_plan plan_replay(uint64_t base_seq, const vector<record>& records, int64_
 // {{{ follower
 const char* const follower::kPositionFile = "position";
 const char* const follower::kNeedsBaseFile = "needs-base";
+const char* const follower::kSyncedFile = "synced";
 
 follower::response_result follower::classify_server_error(const string& body) {
 	vector<string> t = tokens(body);
@@ -649,7 +651,7 @@ follower::response_result follower::read_response(shared_connection c, const ide
 	}
 }
 
-follower::follower(const options& o): _o(o), _pending_bytes(0), _cursor(o.from_lsn) {
+follower::follower(const options& o): _o(o), _pending_bytes(0), _cursor(o.from_lsn), _synced_us(0) {
 }
 
 int follower::_close_segment(string& err) {
@@ -665,7 +667,34 @@ int follower::_close_segment(string& err) {
 	this->_pending.clear();
 	this->_pending_bytes = 0;
 	this->_write_position();
+	this->_note_synced();
 	return 0;
+}
+
+/**
+ *	SYNCED time: the latest moment t such that everything the source had at t
+ *	is in a CLOSED segment. Only advanced while nothing is pending in memory;
+ *	the driver turns it into the archive's RPO once the files are uploaded.
+ */
+void follower::_note_synced() {
+	if (!this->_pending.empty()) {
+		return;
+	}
+	int64_t t = 0;
+	while (!this->_observed.empty() && this->_observed.front().second <= this->_cursor) {
+		t = this->_observed.front().first;
+		this->_observed.pop_front();
+	}
+	if (t <= this->_synced_us) {
+		return;
+	}
+	this->_synced_us = t;
+	std::ostringstream o;
+	o << (t / 1000) << "\n";
+	string err;
+	if (write_file_atomically(this->_o.out_dir, kSyncedFile, o.str(), err) < 0) {
+		log_warning("could not record the synced time: %s", err.c_str());
+	}
 }
 
 void follower::_write_position() {
@@ -726,6 +755,7 @@ int follower::run(volatile sig_atomic_t* stop) {
 				(unsigned long long)this->_cursor, this->_o.id.master_id.c_str(),
 				this->_o.id.epoch.c_str(), (unsigned long long)this->_o.max_batches,
 				(unsigned long long)this->_o.max_bytes, line_delimiter);
+			const int64_t asked_us = now_us();
 			if (c->write(req, strlen(req)) >= 0) {
 				vector<record> got;
 				uint64_t latest = 0;
@@ -733,6 +763,12 @@ int follower::run(volatile sig_atomic_t* stop) {
 				for (size_t i = 0; i < got.size(); i++) {
 					this->_pending_bytes += got[i].data.size();
 					this->_pending.push_back(got[i]);
+				}
+				if (rr == response_ok && latest > 0) {
+					// Everything the source had acknowledged when it was asked
+					// is at or before `latest`.
+					this->_observed.push_back(std::make_pair(asked_us, latest));
+					this->_note_synced();
 				}
 			}
 			c->close();

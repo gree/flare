@@ -1,0 +1,158 @@
+{{- /* CONTINUOUS WAL ARCHIVE (docs/BACKUP_RESTORE.md, "WAL archive").
+       One Deployment, two containers sharing an emptyDir:
+         follow  (the flared image)        flare-wal-follow: runs
+                 `flared --wal-archive-follow` per partition, as `start` says;
+         upload  (the flare-backup image)  flare-wal-upload: uploads closed
+                 segments, binds the follower to the latest base's chain on
+                 the Active master, asks for a new base when the chain ends.
+       The archiver is not a node: it is not in the node map, holds no copy
+       and pins no WAL on the master (a reader that falls behind the
+       master's retention gets lsn_purged and a new base). Toggling
+       walArchive.enabled creates/deletes only this Deployment. */}}
+{{- if .Values.cluster.enabled }}
+{{- $c := .Values.cluster }}
+{{- $ns := .Values.namespace }}
+{{- $bk := $c.backup | default dict }}
+{{- $wa := $bk.walArchive | default dict }}
+{{- if $wa.enabled }}
+{{- $os := $c.objectStorage | default dict }}
+{{- if not $bk.enabled }}
+{{- fail "cluster.backup.walArchive.enabled requires cluster.backup.enabled (a new base is taken by running the backup CronJob)" }}
+{{- end }}
+{{- if ne ($bk.role | default "master") "master" }}
+{{- fail "cluster.backup.walArchive.enabled requires cluster.backup.role=master (the archive replays the master's own WAL onto the master's checkpoint)" }}
+{{- end }}
+{{- if not $os.url }}
+{{- fail "cluster.backup.walArchive.enabled requires cluster.objectStorage.url" }}
+{{- end }}
+{{- $sa := $bk.serviceAccount | default dict }}
+{{- $saName := $sa.name | default (printf "%s-backup" $c.name) }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $c.name }}-wal-archive
+  namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.clusterLabel" . | nindent 4 }}
+    {{- include "flare-operator.wellKnown" (dict "root" $ "name" "flared" "component" "wal-archive") | nindent 4 }}
+spec:
+  replicas: 1
+  # Never two archivers for one cluster: the old one stops before the new
+  # one starts (both would only duplicate segments, but one is enough).
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: flare-wal-archive
+      cluster: {{ $c.name }}
+  template:
+    metadata:
+      labels:
+        app: flare-wal-archive
+        cluster: {{ $c.name }}
+        {{- include "flare-operator.clusterLabel" . | nindent 8 }}
+        {{- include "flare-operator.wellKnown" (dict "root" $ "name" "flared" "component" "wal-archive") | nindent 8 }}
+        {{- with $c.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ $saName }}
+      # the follower closes its pending segment on SIGTERM; the uploader
+      # needs a moment to put it up before the emptyDir goes
+      terminationGracePeriodSeconds: 60
+      volumes:
+        - name: wal
+          emptyDir: {}
+        {{- if $os.projectedTokenAudience }}
+        - name: token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: {{ $os.projectedTokenAudience }}
+                  expirationSeconds: 3600
+                  path: token
+        {{- end }}
+      containers:
+        - name: follow
+          image: "{{ $c.image.repository }}:{{ $c.image.tag }}"
+          imagePullPolicy: {{ $c.image.pullPolicy }}
+          command: ["flare-wal-follow", "/wal"]
+          env:
+            - name: SEGMENT_SECONDS
+              value: {{ $wa.segmentSeconds | default 30 | quote }}
+          volumeMounts:
+            - name: wal
+              mountPath: /wal
+          {{- with $wa.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        - name: upload
+          image: "{{ ($bk.image).repository | default "ghcr.io/gree/flare-backup" }}:{{ ($bk.image).tag | default $c.image.tag }}"
+          imagePullPolicy: {{ $c.image.pullPolicy }}
+          command: ["flare-wal-upload"]
+          ports:
+            - name: metrics
+              containerPort: 9151
+          {{- if $os.credentialsSecret }}
+          envFrom:
+            - secretRef:
+                name: {{ $os.credentialsSecret }}
+          {{- end }}
+          env:
+            - name: CLUSTER
+              value: {{ $c.name | quote }}
+            - name: NAMESPACE
+              value: {{ $ns | quote }}
+            - name: FLARE_PORT
+              value: {{ $c.flarePort | quote }}
+            - name: OPERATOR_SVC
+              value: {{ include "flare-operator.fullname" . }}.{{ $ns }}.svc.cluster.local
+            - name: OPERATOR_PORT
+              value: {{ .Values.service.port | quote }}
+            - name: BUCKET
+              value: {{ $os.url | quote }}
+            - name: S3_ENDPOINT
+              value: {{ $os.endpoint | default "" | quote }}
+            - name: WAL_DIR
+              value: /wal
+            - name: RETAIN_SECONDS
+              value: {{ $wa.retainSeconds | default 172800 | quote }}
+            - name: REBASE_MIN_INTERVAL
+              value: {{ $wa.rebaseMinIntervalSeconds | default 600 | quote }}
+            - name: BACKUP_CRONJOB
+              value: {{ printf "%s-backup" $c.name | quote }}
+            {{- with $os.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          volumeMounts:
+            - name: wal
+              mountPath: /wal
+            {{- if $os.projectedTokenAudience }}
+            - name: token
+              mountPath: /var/run/secrets/sts
+              readOnly: true
+            {{- end }}
+{{- if .Values.monitoring.serviceMonitor.enabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ include "flare-operator.fullname" . }}-{{ $c.name }}-wal-archive
+  namespace: {{ $ns }}
+  labels:
+    {{- include "flare-operator.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app: flare-wal-archive
+      cluster: {{ $c.name }}
+  podMetricsEndpoints:
+    - port: metrics
+      interval: {{ .Values.monitoring.serviceMonitor.interval }}
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_label_cluster]
+          targetLabel: cluster
+{{- end }}
+{{- end }}
+{{- end }}

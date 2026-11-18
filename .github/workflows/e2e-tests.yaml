@@ -279,7 +279,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: /tmp/flared-images
-          key: flared-images-${{ hashFiles('Dockerfile.flare-node', 'Dockerfile.flare-node-rocksdb', 'autogen.sh', 'configure.ac', 'Makefile.am', 'config.guess', 'config.sub', 'depcomp', 'install-sh', 'missing', 'mkinstalldirs', 'AUTHORS', 'ChangeLog', 'COPYING', 'INSTALL', 'NEWS', 'src/**', 'test/**', 'scripts/flare-restore-hook') }}
+          key: flared-images-${{ hashFiles('Dockerfile.flare-node', 'Dockerfile.flare-node-rocksdb', 'autogen.sh', 'configure.ac', 'Makefile.am', 'config.guess', 'config.sub', 'depcomp', 'install-sh', 'missing', 'mkinstalldirs', 'AUTHORS', 'ChangeLog', 'COPYING', 'INSTALL', 'NEWS', 'src/**', 'test/**', 'scripts/flare-restore-hook', 'scripts/flare-wal-follow') }}
           lookup-only: true
 
       - name: Set up Docker Buildx
@@ -356,7 +356,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: /tmp/flared-images
-          key: flared-images-${{ hashFiles('Dockerfile.flare-node', 'Dockerfile.flare-node-rocksdb', 'autogen.sh', 'configure.ac', 'Makefile.am', 'config.guess', 'config.sub', 'depcomp', 'install-sh', 'missing', 'mkinstalldirs', 'AUTHORS', 'ChangeLog', 'COPYING', 'INSTALL', 'NEWS', 'src/**', 'test/**', 'scripts/flare-restore-hook') }}
+          key: flared-images-${{ hashFiles('Dockerfile.flare-node', 'Dockerfile.flare-node-rocksdb', 'autogen.sh', 'configure.ac', 'Makefile.am', 'config.guess', 'config.sub', 'depcomp', 'install-sh', 'missing', 'mkinstalldirs', 'AUTHORS', 'ChangeLog', 'COPYING', 'INSTALL', 'NEWS', 'src/**', 'test/**', 'scripts/flare-restore-hook', 'scripts/flare-wal-follow') }}
 
   e2e-test:
     # flared-images and lean-build only fill the caches: a leg runs whether
@@ -606,7 +606,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: /tmp/flared-images
-          key: flared-images-${{ hashFiles('Dockerfile.flare-node', 'Dockerfile.flare-node-rocksdb', 'autogen.sh', 'configure.ac', 'Makefile.am', 'config.guess', 'config.sub', 'depcomp', 'install-sh', 'missing', 'mkinstalldirs', 'AUTHORS', 'ChangeLog', 'COPYING', 'INSTALL', 'NEWS', 'src/**', 'test/**', 'scripts/flare-restore-hook') }}
+          key: flared-images-${{ hashFiles('Dockerfile.flare-node', 'Dockerfile.flare-node-rocksdb', 'autogen.sh', 'configure.ac', 'Makefile.am', 'config.guess', 'config.sub', 'depcomp', 'install-sh', 'missing', 'mkinstalldirs', 'AUTHORS', 'ChangeLog', 'COPYING', 'INSTALL', 'NEWS', 'src/**', 'test/**', 'scripts/flare-restore-hook', 'scripts/flare-wal-follow') }}
 
       - name: Load the flared images
         if: steps.flared_images.outputs.cache-hit == 'true'
@@ -690,7 +690,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: /tmp/flared-images
-          key: flared-images-${{ hashFiles('Dockerfile.flare-node', 'Dockerfile.flare-node-rocksdb', 'autogen.sh', 'configure.ac', 'Makefile.am', 'config.guess', 'config.sub', 'depcomp', 'install-sh', 'missing', 'mkinstalldirs', 'AUTHORS', 'ChangeLog', 'COPYING', 'INSTALL', 'NEWS', 'src/**', 'test/**', 'scripts/flare-restore-hook') }}
+          key: flared-images-${{ hashFiles('Dockerfile.flare-node', 'Dockerfile.flare-node-rocksdb', 'autogen.sh', 'configure.ac', 'Makefile.am', 'config.guess', 'config.sub', 'depcomp', 'install-sh', 'missing', 'mkinstalldirs', 'AUTHORS', 'ChangeLog', 'COPYING', 'INSTALL', 'NEWS', 'src/**', 'test/**', 'scripts/flare-restore-hook', 'scripts/flare-wal-follow') }}
 
       # Retried: the builder downloads the Lean toolchain from
       # releases.lean-lang.org, which returned HTTP 504 once (manual run

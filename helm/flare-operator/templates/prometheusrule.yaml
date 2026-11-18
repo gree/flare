@@ -399,4 +399,36 @@ spec:
           annotations:
             summary: "Flare pod {{`{{ $labels.pod }}`}}: last successful backup is stale"
             runbook: docs/RUNBOOK.md#backup-stale
+
+        # WAL archive (cluster.backup.walArchive). synced = the time up to
+        # which everything the master had is in object storage; the gap to now
+        # is what an all-copy loss would cost right now. Only while a chain is
+        # followed: the window after a master switch is FlareWalArchiveNeedsBase.
+        - alert: FlareWalArchiveBehind
+          expr: (time() - flare_wal_archive_synced_timestamp_seconds) > {{ ((((.Values.cluster).backup).walArchive).rpoAlertSeconds) | default 120 }} and on(cluster, partition) flare_wal_archive_chain_active == 1
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Flare WAL archive p{{`{{ $labels.partition }}`}}: archived data is {{`{{ $value | humanizeDuration }}`}} behind"
+            runbook: docs/RUNBOOK.md#wal-archive
+        # No chain can be followed (no base, or the chain ended: master switch,
+        # retention exceeded, copy replaced) and the new base has not arrived:
+        # a restore now reaches only the end of the previous chain.
+        - alert: FlareWalArchiveNeedsBase
+          expr: flare_wal_archive_needs_base == 1
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Flare WAL archive p{{`{{ $labels.partition }}`}}: waiting for a new base for 30m"
+            runbook: docs/RUNBOOK.md#wal-archive
+        - alert: FlareWalArchiveUploadFailing
+          expr: increase(flare_wal_archive_upload_failures_total[10m]) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Flare WAL archive: segment uploads failing"
+            runbook: docs/RUNBOOK.md#wal-archive
 {{- end }}

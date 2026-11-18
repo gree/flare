@@ -52,6 +52,8 @@
 #include <stdio.h>
 
 #include <string>
+#include <deque>
+#include <utility>
 #include <vector>
 
 #include "connection.h"
@@ -180,13 +182,17 @@ public:
 	// Files the driver reads, in out_dir.
 	static const char* const kPositionFile;		// "<incarnation> <epoch> <master_id> <lsn> <unix>"
 	static const char* const kNeedsBaseFile;	// "<reason> <lsn> <unix>"
+	static const char* const kSyncedFile;		// "<unix ms>": all the source had then is in closed segments
 
 private:
 	options			_o;
 	vector<record>	_pending;
 	uint64_t		_pending_bytes;
 	uint64_t		_cursor;
+	std::deque<std::pair<int64_t, uint64_t> >	_observed;	// (asked at, source latest)
+	int64_t			_synced_us;
 	int _close_segment(string& err);
+	void _note_synced();
 	void _write_position();
 };
 // }}}

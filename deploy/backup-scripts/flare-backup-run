@@ -64,8 +64,12 @@ for T in $TARGETS; do
   #    --delete removes the MANIFEST it names -> unrestorable mirror).
   #    A: new immutable objects, NO delete (old CURRENT stays valid).
   aws s3 sync "$SRC" "${DST}/" --size-only $EP || FAIL=1
-  #    B: force-refresh the fixed-name pointer files.
-  for f in CURRENT IDENTITY; do
+  #    B: force-refresh the fixed-name pointer files. FLARE_BASE (the WAL
+  #    archive's base: this checkpoint's sequence number and copy identity)
+  #    is fixed-name too and often the same size. A restore that reads a
+  #    CURRENT and a FLARE_BASE from different runs sees a database whose
+  #    sequence is not the base's and replays no WAL (fail closed).
+  for f in CURRENT IDENTITY FLARE_BASE; do
     [ -f "$SRC/$f" ] && aws s3 cp "$SRC/$f" "${DST}/$f" $EP
   done
   #    C: prune objects no longer in the checkpoint.

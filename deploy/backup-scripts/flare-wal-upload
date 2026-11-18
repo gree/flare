@@ -1,0 +1,186 @@
+#!/bin/sh
+# flare-wal-upload — the UPLOAD half of the WAL archiver (docs/BACKUP_RESTORE.md,
+# "WAL archive"), next to flare-wal-follow (flared image) with a shared WAL_DIR.
+#
+# Every INTERVAL seconds, per partition N (the operator's map, `node sync`):
+#   1. upload the follower's closed segments to
+#      <BUCKET>/<CLUSTER>/wal/p<N>/<incarnation>/<epoch>/<master_id>/<name>.wal
+#      (identity from each segment's own header), then delete them locally;
+#   2. decide the chain to follow: the base is <BUCKET>/<CLUSTER>/latest/p<N>/
+#      FLARE_BASE (written by flared into every checkpoint). The follower is
+#      pointed at the partition's Active master, bound to the base's identity
+#      (WAL_DIR/p<N>/start), resuming after the last archived segment of that
+#      chain;
+#   3. when the chain cannot continue (the follower wrote needs-base: purged,
+#      another copy/history/lineage) or the master moved, stop appending and
+#      ask for a new base: one run of the backup CronJob, at most every
+#      REBASE_MIN_INTERVAL seconds. Old and new chains are never joined.
+# Metrics (Prometheus text) are served on METRICS_PORT; segments older than
+# RETAIN_SECONDS are pruned once an hour.
+#
+# env: CLUSTER NAMESPACE FLARE_PORT OPERATOR_SVC OPERATOR_PORT BUCKET S3_ENDPOINT
+#      WAL_DIR(/wal) INTERVAL(5) RETAIN_SECONDS(172800) REBASE_MIN_INTERVAL(600)
+#      BACKUP_CRONJOB(<CLUSTER>-backup) METRICS_PORT(9151)
+EP=""; [ -n "$S3_ENDPOINT" ] && EP="--endpoint-url $S3_ENDPOINT"
+WAL_DIR="${WAL_DIR:-/wal}"
+INTERVAL="${INTERVAL:-5}"
+RETAIN_SECONDS="${RETAIN_SECONDS:-172800}"
+REBASE_MIN_INTERVAL="${REBASE_MIN_INTERVAL:-600}"
+BACKUP_CRONJOB="${BACKUP_CRONJOB:-${CLUSTER}-backup}"
+METRICS_PORT="${METRICS_PORT:-9151}"
+ROOT="${BUCKET}/${CLUSTER}"
+mkdir -p "$WAL_DIR"
+
+UPLOAD_FAILURES=0
+REBASE_REQUESTS=0
+LAST_PRUNE=0
+
+# Serve the metrics file (one scrape per connection).
+ncat -lk -p "$METRICS_PORT" --sh-exec \
+  "printf 'HTTP/1.0 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\n\r\n'; cat '$WAL_DIR/metrics' 2>/dev/null" &
+
+# stderr: some callers run inside $( ) and print their result on stdout
+log() { echo "flare-wal-upload: $*" >&2; }
+
+# Asks for a new base (rate limited, cluster wide: one backup run covers
+# every partition).
+rebase() {
+  now=$(date +%s)
+  last=$(cat "$WAL_DIR/rebase-at" 2>/dev/null || echo 0)
+  [ $((now - last)) -lt "$REBASE_MIN_INTERVAL" ] && return 0
+  echo "$now" > "$WAL_DIR/rebase-at"
+  if kubectl create job -n "$NAMESPACE" --from="cronjob/${BACKUP_CRONJOB}" "${BACKUP_CRONJOB}-wal-${now}" >/dev/null 2>&1; then
+    REBASE_REQUESTS=$((REBASE_REQUESTS + 1))
+    log "asked for a new base ($1): job ${BACKUP_CRONJOB}-wal-${now}"
+  else
+    log "could not create a backup job from cronjob/${BACKUP_CRONJOB} ($1)"
+  fi
+}
+
+# Uploads every closed segment under $1 for partition $2; prints the number
+# that could not be uploaded.
+upload_closed() {
+  failed=0
+  for f in "$1"/*.wal; do
+    [ -f "$f" ] || continue
+    # header: FLAREWAL 1 <incarnation> <epoch> <master_id>
+    set -- $(head -1 "$f")
+    if [ "$1" != "FLAREWAL" ] || [ "$#" -ne 5 ]; then
+      log "not a segment: $f (kept)"; failed=$((failed + 1)); continue
+    fi
+    key="${ROOT}/wal/p${PART}/$3/$4/$5/$(basename "$f")"
+    if aws s3 cp $EP --no-progress "$f" "$key" >/dev/null; then
+      rm -f "$f"
+    else
+      failed=$((failed + 1))
+    fi
+  done
+  echo "$failed"
+}
+
+# The last archived lsn of a chain in the bucket (0 if none).
+archived_through() {
+  aws s3 ls $EP "${ROOT}/wal/p${PART}/$1/$2/$3/" 2>/dev/null \
+    | awk '{print $4}' | sed -n 's/^[0-9]*-0*\([0-9][0-9]*\)-.*\.wal$/\1/p' | sort -n | tail -1
+}
+
+prune() {
+  cutoff=$(( $(date +%s) - RETAIN_SECONDS ))
+  b=$(echo "${BUCKET#s3://}" | cut -d/ -f1)
+  # `ls --recursive` prints keys from the bucket root
+  aws s3 ls $EP --recursive "${ROOT}/wal/" 2>/dev/null | while read -r day time _size key; do
+    t=$(date -d "$day $time" +%s 2>/dev/null) || continue
+    [ "$t" -lt "$cutoff" ] && aws s3 rm $EP "s3://${b}/${key}" >/dev/null 2>&1
+  done
+}
+
+bind() {   # bind() <reason>: follow the base's chain on the current master
+  LAST=$(archived_through "$B_INC" "$B_EPO" "$B_MID")
+  FROM="$B_SEQ"
+  [ -n "$LAST" ] && [ "$LAST" -gt "$B_SEQ" ] && FROM="$LAST"
+  rm -f "$D/out/needs-base"
+  echo "$(date +%s) $HOST $FLARE_PORT $B_INC $B_EPO $B_MID $FROM" > "$D/start.tmp"
+  mv "$D/start.tmp" "$D/start"
+  log "p${PART}: following ${HOST} from ${FROM} (base seq ${B_SEQ}, epoch ${B_EPO}; $1)"
+}
+
+while :; do
+  M="$WAL_DIR/metrics.tmp"
+  : > "$M"
+  # NODE <name> <port> <role> <state> <partition> ...; master=0, Active=0
+  MASTERS=$(printf 'node sync\r\n' | nc -w 5 "$OPERATOR_SVC" "$OPERATOR_PORT" \
+    | awk '/^NODE/ && $4==0 && $5==0 { part=$6; if (!(part in s)) { s[part]=1; split($2,a,"."); print a[1]":"part } }')
+  for T in $MASTERS; do
+    POD="${T%%:*}"; PART="${T##*:}"
+    HOST="${POD}.${CLUSTER}-nodes.${NAMESPACE}.svc.cluster.local"
+    D="$WAL_DIR/p${PART}"; mkdir -p "$D/out"
+
+    # 1) what is closed locally goes up first; `synced` is read BEFORE the
+    #    upload so it only claims what this pass uploaded
+    SYNCED_MS=$(cat "$D/out/synced" 2>/dev/null || echo 0)
+    F=$(upload_closed "$D/out" "$PART")
+    if [ "$F" -eq 0 ]; then
+      echo "$(date +%s) $SYNCED_MS" > "$D/uploaded"
+    else
+      UPLOAD_FAILURES=$((UPLOAD_FAILURES + F))
+    fi
+
+    # 2) the base and the chain
+    BASE=$(aws s3 cp $EP "${ROOT}/latest/p${PART}/FLARE_BASE" - 2>/dev/null)
+    B_SEQ=$(echo "$BASE" | sed -n 's/.* seq=\([0-9]*\).*/\1/p')
+    B_INC=$(echo "$BASE" | sed -n 's/.* incarnation=\([^ ]*\).*/\1/p')
+    B_EPO=$(echo "$BASE" | sed -n 's/.* epoch=\([^ ]*\).*/\1/p')
+    B_MID=$(echo "$BASE" | sed -n 's/.* master_id=\([^ ]*\).*/\1/p')
+    B_TIME=$(echo "$BASE" | sed -n 's/.* time=\([0-9]*\).*/\1/p')
+    NEEDS=0
+    if [ -z "$B_SEQ" ] || [ -z "$B_INC" ] || [ -z "$B_EPO" ] || [ -z "$B_MID" ]; then
+      rm -f "$D/start"; NEEDS=1
+      rebase "p${PART}: no base"
+    else
+      CUR=$(cat "$D/start" 2>/dev/null)
+      set -- $CUR    # gen host port inc epoch mid lsn
+      C_HOST="$2"; C_INC="$4"; C_EPO="$5"; C_MID="$6"
+      SAME_ID=0; [ "$C_INC $C_EPO $C_MID" = "$B_INC $B_EPO $B_MID" ] && SAME_ID=1
+      if [ -n "$CUR" ] && [ "$SAME_ID" = 1 ] && [ "$C_HOST" = "$HOST" ]; then
+        # following this base's chain on the current master
+        if [ -f "$D/out/needs-base" ]; then
+          set -- $(cat "$D/out/needs-base")   # reason lsn unix
+          if [ "$B_SEQ" -gt "${2:-0}" ]; then
+            # a newer base of the same copy (e.g. after lsn_purged): the chain
+            # restarts there; replay from an older base stops at the hole
+            bind "new base after $1"
+          else
+            NEEDS=1
+            rebase "p${PART}: $1"
+          fi
+        fi
+      elif [ -n "$CUR" ] && [ "$SAME_ID" = 1 ] && [ "$C_HOST" != "$HOST" ]; then
+        # the master moved: the old copy's WAL no longer gets the writes
+        log "p${PART}: master moved ${C_HOST} -> ${HOST}: stop appending, new base needed"
+        rm -f "$D/start"; NEEDS=1
+        rebase "p${PART}: master moved"
+      else
+        bind "new base"
+      fi
+    fi
+
+    set -- $(cat "$D/uploaded" 2>/dev/null)
+    echo "flare_wal_archive_synced_timestamp_seconds{partition=\"${PART}\"} $(( ${2:-0} / 1000 ))" >> "$M"
+    echo "flare_wal_archive_upload_timestamp_seconds{partition=\"${PART}\"} ${1:-0}" >> "$M"
+    echo "flare_wal_archive_base_timestamp_seconds{partition=\"${PART}\"} ${B_TIME:-0}" >> "$M"
+    echo "flare_wal_archive_needs_base{partition=\"${PART}\"} ${NEEDS}" >> "$M"
+    [ -f "$D/start" ] && ACTIVE=1 || ACTIVE=0
+    echo "flare_wal_archive_chain_active{partition=\"${PART}\"} ${ACTIVE}" >> "$M"
+  done
+  echo "flare_wal_archive_upload_failures_total ${UPLOAD_FAILURES}" >> "$M"
+  echo "flare_wal_archive_rebase_requests_total ${REBASE_REQUESTS}" >> "$M"
+  echo "flare_wal_archive_up 1" >> "$M"
+  mv "$M" "$WAL_DIR/metrics"
+
+  NOW=$(date +%s)
+  if [ $((NOW - LAST_PRUNE)) -ge 3600 ]; then
+    prune
+    LAST_PRUNE=$NOW
+  fi
+  sleep "$INTERVAL"
+done

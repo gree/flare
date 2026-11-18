@@ -42,8 +42,6 @@
 
 #include <limits>
 #include <sys/stat.h>
-#include <sys/resource.h>
-#include <sys/wait.h>
 #include <sys/types.h>
 #include <pthread.h>
 #include <atomic>
@@ -6360,20 +6358,38 @@ void test_reseed_serve_to_a_slow_reader_completes_past_several_windows() {
 		cut_notify("wal archive: incomplete archives refused");
 	}
 
-	long wa_rss_kb() {
-		FILE* f = fopen("/proc/self/statm", "r");
-		long pages = 0, resident = 0;
+	// One field of /proc/self/status, in KiB (VmRSS, VmHWM).
+	long wa_status_kb(const char* field) {
+		FILE* f = fopen("/proc/self/status", "r");
+		long kb = -1;
 		if (f != NULL) {
-			if (fscanf(f, "%ld %ld", &pages, &resident) != 2) resident = 0;
+			char line[256];
+			const size_t n = strlen(field);
+			while (fgets(line, sizeof(line), f) != NULL) {
+				if (strncmp(line, field, n) == 0 && line[n] == ':') {
+					kb = strtol(line + n + 1, NULL, 10);
+					break;
+				}
+			}
 			fclose(f);
 		}
-		return resident * (sysconf(_SC_PAGESIZE) / 1024);
+		return kb;
+	}
+
+	// Resets this process's peak RSS (VmHWM) to its current RSS.
+	bool wa_reset_peak_rss() {
+		FILE* f = fopen("/proc/self/clear_refs", "w");
+		if (f == NULL) return false;
+		const bool ok = fputs("5", f) >= 0;
+		return fclose(f) == 0 && ok;
 	}
 
 	// Builds a chain of `mib` MiB of 1 MiB values after a fresh base, writing
 	// segments of 16 batches as it reads them (the test itself never holds the
-	// chain), then replays it in a CHILD process and returns how much the
-	// child's peak RSS grew above what it inherited (KiB).
+	// chain), then replays it and returns how much the process's peak RSS grew
+	// above its RSS at the start of the replay (KiB). Measured in this process:
+	// a forked child would inherit RocksDB's background thread pool without
+	// its threads, and a replay that needs a flush would wait forever.
 	long wa_replay_growth_kb(int mib, string& summary) {
 		wa_reset_dirs();
 		storage_rocksdb* s = make_rocksdb(wal_master_dir);
@@ -6409,36 +6425,27 @@ void test_reseed_serve_to_a_slow_reader_completes_past_several_windows() {
 		}
 		drop_rocksdb_noremove(s);
 		wa_restore_from(cp);
-		const long before = wa_rss_kb();
-		int fds[2];
-		cut_assert_equal_int(0, pipe(fds));
-		pid_t pid = fork();
-		if (pid == 0) {
-			::close(fds[0]);
-			FILE* out = fdopen(fds[1], "w");
-			int rc = wal_archive::replay(wa_restore_dir, wa_seg_dir, 0, out);
-			fflush(out);
-			_exit(rc);
-		}
-		::close(fds[1]);
-		summary.clear();
-		char buf[512];
-		ssize_t n;
-		while ((n = read(fds[0], buf, sizeof(buf))) > 0) summary.append(buf, n);
-		::close(fds[0]);
-		int status = 0;
-		struct rusage ru;
-		memset(&ru, 0, sizeof(ru));
-		cut_assert_equal_int(pid, wait4(pid, &status, 0, &ru));
+		cut_assert_true(wa_reset_peak_rss(), cut_message("cannot reset the peak RSS (/proc/self/clear_refs)"));
+		const long before = wa_status_kb("VmRSS");
+		char* buf = NULL;
+		size_t len = 0;
+		FILE* out = open_memstream(&buf, &len);
+		cut_assert_not_null(out);
+		const int rc = wal_archive::replay(wa_restore_dir, wa_seg_dir, 0, out);
+		fclose(out);
+		const long peak = wa_status_kb("VmHWM");
+		summary.assign(buf, len);
+		free(buf);
 		cut_remove_path(wal_master_dir, NULL);
-		cut_assert_true(WIFEXITED(status) && WEXITSTATUS(status) == 0, cut_message("%s", summary.c_str()));
+		cut_assert_equal_int(0, rc, cut_message("%s", summary.c_str()));
 		cut_assert_true(summary.find("complete=1") != string::npos, cut_message("%s", summary.c_str()));
-		return ru.ru_maxrss - before;
+		cut_assert_true(before > 0 && peak >= before, cut_message("VmRSS %ld KiB, VmHWM %ld KiB", before, peak));
+		return peak - before;
 	}
 
 	// BOUNDED MEMORY: the replay reads the archive one record at a time, so
-	// the memory it uses does not grow with the chain. Measured in a child
-	// process (its peak RSS above what it inherited) for a 64 MiB and a
+	// the memory it uses does not grow with the chain. Measured in this
+	// process (its peak RSS above its RSS at the start) for a 64 MiB and a
 	// 256 MiB chain of 1 MiB batches: both stay far below the chain, and the
 	// larger chain does not cost proportionally more.
 	void test_wal_archive_replay_memory_does_not_grow_with_the_chain() {

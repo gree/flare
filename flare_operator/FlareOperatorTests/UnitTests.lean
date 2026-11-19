@@ -2335,6 +2335,32 @@ private def checkAuthoritativeHistory (ctx : Ctx) : IO Unit := do
     (let emptyNew := modern ⟨"uid-m9", "boot-m9", "u9:1"⟩ ⟨"M9", "7:new"⟩ true
      (rebind st 0 "m" emptyNew).1 == st && (bulk st 0 "m" emptyNew "t").1 == st
        && !(rebuildAllowed st 0 "m" emptyNew (modern bS h2 false)).1)
+  -- 44459609204 node-ops-apiserver-outage A3: the master's flared restarted
+  -- under an unchanged map and advanced its epoch (new tenure, no intent)
+  let h3p : Hist := ⟨"M", "3:p"⟩
+  let resumed := Seen.modern ⟨"uid-m", "boot-m9", "u1:3"⟩ h3p true false [] "promotion"
+  check ctx "history resumed master: the holder's SAME copy, still the map's master, on a newer epoch with reason promotion (new boot or not) is the next generation; rebuilds from it are allowed again"
+    ((match resumedMaster st 0 "m" (some "m") resumed "t" with
+      | (s', .recorded 0 r _) => r.gen == 4 && r.hist == h3p && r.binding.bootId == "boot-m9" && r.reason == "promotion"
+          && (rebuildAllowed s' 0 "m" resumed (modern bS h2 false)).1
+      | _ => false)
+      && !(rebuildAllowed st 0 "m" resumed (modern bS h2 false)).1
+      && (match resumedMaster st 0 "m" (some "m") (Seen.modern bM h3p true false [] "promotion") "t" with
+          | (_, .recorded 0 r _) => r.gen == 4 | _ => false))
+  check ctx "history resumed master REFUSED (nothing changes): not the holder, not the map's master, another copy id, an older or equal or unparsable epoch, a reason other than promotion, unhealthy, a pending intent or a hold"
+    ((resumedMaster st 0 "s" (some "s") resumed "t").1 == st
+      && (resumedMaster st 0 "m" (some "s") resumed "t").1 == st
+      && (resumedMaster st 0 "m" none resumed "t").1 == st
+      && (resumedMaster st 0 "m" (some "m") (Seen.modern ⟨"uid-m", "boot-m9", "u1:4"⟩ h3p true false [] "promotion") "t").1 == st
+      && (resumedMaster st 0 "m" (some "m") (Seen.modern bM ⟨"M", "1:old"⟩ true false [] "promotion") "t").1 == st
+      && (resumedMaster st 0 "m" (some "m") (Seen.modern bM ⟨"M", "2:x"⟩ true false [] "promotion") "t").1 == st
+      && (resumedMaster st 0 "m" (some "m") (Seen.modern bM ⟨"M", "x"⟩ true false [] "promotion") "t").1 == st
+      && (resumedMaster st 0 "m" (some "m") (Seen.modern bM h3p true false [] "bulk") "t").1 == st
+      && (resumedMaster st 0 "m" (some "m") (Seen.modern bM h3p true false [] "") "t").1 == st
+      && (resumedMaster st 0 "m" (some "m") (Seen.modern bM h3p false false [] "promotion") "t").1 == st
+      && (resumedMaster (st.setHold 0 (some "bulk part-way")) 0 "m" (some "m") resumed "t").1 == st.setHold 0 (some "bulk part-way")
+      && (let wi : Store := { st with intents := [{ id := "t-9", partition := 0, kind := "promotion", target := "s", binding := bS, fromGen := 3, fromHist := h2, expectedVersion := 9 }] }
+          (resumedMaster wi 0 "m" (some "m") resumed "t").1 == wi))
   -- (6) strict parser
   let full := { withI with origin := "first-build" }
   let txt := serialize full

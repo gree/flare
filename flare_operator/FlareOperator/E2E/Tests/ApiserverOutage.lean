@@ -30,6 +30,10 @@
       (per type, window, whether the restarted flared serves before the API
       returns), and after the API returns every acknowledged write is on the
       master and the replica, with one master and a settled cluster.
+  T4  the master's flared restarts while no operator runs (scaled to 0) and the
+      operator returns with the persisted map: the order T3 reaches only by
+      chance. The new master tenure is recorded in the authoritative history,
+      no replica rebuild is held on it, and 0 acknowledged writes are missing.
 -/
 import FlareOperator.E2E.Framework
 import FlareOperator.E2E.Helpers
@@ -344,6 +348,133 @@ private def outageTest (c : Ctx) (k : Kind) : IO TestResult := do
     apiUndrop cp
     apiStart cp
 
+private def operatorPodCount (c : Ctx) : IO (Option Nat) := do
+  match ← kubectl ["get", "pods", "-n", c.cfg.«namespace», "-l", s!"app={c.cfg.operatorName}", "-o",
+      "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}"] with
+  | .ok o => return some ((o.splitOn "\n").filter (!·.trim.isEmpty)).length
+  | .error _ => return none
+
+private def flaredRestarts (c : Ctx) (pod : String) : IO (Option Nat) := do
+  match ← kubectlGetJsonpath "pod" pod c.cfg.«namespace» "{.status.containerStatuses[?(@.name==\"flared\")].restartCount}" with
+  | .ok o => return o.trim.toNat?
+  | .error _ => return none
+
+/-- A4: the order A3 reaches only by chance (44459609204 attempts 1 and 2).
+    The master's flared restarts with the same copy while NO operator leader
+    exists, and the operator then comes back with the map it persisted, which
+    still names that node master: the restarted flared takes the role again
+    and starts a new master tenure (a new epoch, reason "promotion") with no
+    operator intent. The authoritative history must record that tenure
+    ("resumed as the partition's master"); before ddd2a0a5 it stayed at the
+    old epoch, the replica's rebuild from the master was held forever
+    ("REBUILD HELD (history)") and the replica missed acknowledged writes.
+    The operator is scaled to 0 instead of stopping the API so the order does
+    not depend on the kubelet's restart back-off. -/
+private def resumedMasterTest (c : Ctx) : IO TestResult := do
+  let ns := c.cfg.«namespace»
+  try
+    match ← c.placement with
+    | .error e => return .fail e
+    | .ok p =>
+      if !(← operatorSettled c) then return .fail (notSetUp "the operator did not finish its startup grace period")
+      if !(← waitForCondition "the cluster is settled before the test" 420 (settled c)) then
+        return .fail (notSetUp "the cluster was not settled (one master, active replica) at the start")
+      c.conditions ["apiserver-outage A4: the master's flared restarts while no operator runs; the operator returns with the persisted map, under a load of 4 x 200/s via the partition Service and 2 x 200/s via the all-pods Service"]
+      match ← c.ensureLoadWriter with
+      | .error e => return .fail (notSetUp e)
+      | .ok () => pure ()
+      let svcHost := s!"{c.cfg.name}-0.{ns}.svc.cluster.local"
+      let peerHost := s!"{c.cfg.name}-nodes-external.{ns}.svc.cluster.local"
+      let v0 ← masterMapVersion c
+      let fr0 ← flaredRestarts c p.master.name
+      if !(← c.startLoad "svc" svcHost 4 200) then return .fail (notSetUp "the client-path load did not start")
+      if !(← c.startLoad "peer" peerHost 2 200) then return .fail (notSetUp "the all-pods load did not start")
+      IO.sleep 10000
+      -- no operator
+      match ← kubectl ["scale", "deployment", c.cfg.operatorName, "-n", ns, "--replicas=0"] with
+      | .error e => return .fail (notSetUp s!"the operator could not be scaled to 0: {e.take 200}")
+      | .ok _ => pure ()
+      if !(← waitForCondition "no operator pod is left" 180 (return (← operatorPodCount c) == some 0)) then
+        return .fail (notSetUp "an operator pod was still there 180 s after scaling to 0")
+      c.event s!"operator scaled to 0 (master {p.master.name}@{p.master.node}, map v{v0}, flared restarts {fr0})"
+      -- the master's flared restarts with the same copy (tmpfs emptyDir kept)
+      let killOut ← match ← killFlared p.master.node p.master.uid with
+        | .ok o => pure o.trim
+        | .error e => pure s!"kill failed: {e.take 200}"
+      c.event s!"killed the master's flared on {p.master.node}: {killOut}"
+      if killOut != "killed=1" then return .fail (notSetUp s!"the master's flared was not killed ({killOut})")
+      let restarted ← waitForCondition "the master's flared container restarted" 330 do
+        return match ← flaredRestarts c p.master.name, fr0 with
+          | some n, some m => n > m
+          | _, _ => false
+      if !restarted then return .fail (notSetUp "the master's flared container was not restarted within 330 s")
+      -- its startup has asked for the map and is waiting for an index server
+      IO.sleep 15000
+      c.event "the master's flared restarted with no operator running; scaling the operator back to 1"
+      match ← kubectl ["scale", "deployment", c.cfg.operatorName, "-n", ns, "--replicas=1"] with
+      | .error e => return .fail (notSetUp s!"the operator could not be scaled back to 1: {e.take 200}")
+      | .ok _ => pure ()
+      let settledAfter ← waitForCondition "the cluster is settled after the operator returned" 420 (settled c)
+      -- a replica rebuild runs after settling; give the replica time to catch up
+      let v1 ← masterMapVersion c
+      let masterAfter := (← c.roles).bind (·.1)
+      let svc? ← c.stopLoad "svc" 4
+      let peer? ← c.stopLoad "peer" 2
+      let (some svcRes, some peerRes) := (svc?, peer?)
+        | return .fail (unobservable "a load log could not be read or failed its integrity check")
+      let svcS := loadStats svcRes
+      let peerS := loadStats peerRes
+      let acks : List WriteRec := ((svcRes.recs ++ peerRes.recs).filter (·.ack)).map (·.toWrite)
+      let ps := (← c.pods).getD []
+      let copyOf := fun (pod : String) => do
+        match ps.find? (·.name == pod) with
+        | some p => if p.ip.isEmpty then pure none else c.ownCopy p.ip
+        | none => pure none
+      let mm ← match masterAfter with
+        | some m => pure ((← copyOf m).map fun d => (missingAcks acks d).length)
+        | none => pure none
+      let replicaPod := (ps.find? (fun (r : PodRow) => some r.name != masterAfter)).map (·.name)
+      let mr ← do
+        let mut last : Option Nat := none
+        for _ in [0:18] do
+          if last != some 0 then
+            match replicaPod with
+            | none => pure ()
+            | some r =>
+              match ← copyOf r with
+              | some d =>
+                let miss := missingAcks acks d
+                last := some miss.length
+                if miss.length != 0 then
+                  c.art "missing.txt" s!"replica {r}: {miss.length} acknowledged write(s) not yet there"
+              | none => last := none
+            if last != some 0 then IO.sleep 10000
+        pure last
+      let opLog ← kubectlLogsLabel s!"app={c.cfg.operatorName}" ns 10000000
+      let opLines := (opLog.splitOn "\n").filter fun l =>
+        containsSubstr l "AUTHORITATIVE HISTORY" || containsSubstr l "REBUILD HELD" || containsSubstr l "PROMOTION"
+      for l in opLines do c.art "operator-history-lines.txt" l
+      let resumed := opLines.any (containsSubstr · "resumed as the partition's master")
+      let held := (opLines.filter (containsSubstr · "REBUILD HELD (history)")).length
+      let errs := svcS.errors + peerS.errors
+      let summary := s!"SUMMARY [A4 resumed master]: master {p.master.name} -> {masterAfter}, map v{v0} -> v{v1}, resumed recorded {resumed}, REBUILD HELD (history) {held}, errors {errs} by type {svcS.errorKinds ++ peerS.errorKinds}, missing on master {mm} / replica {mr}, settled {settledAfter}"
+      IO.eprintln s!"# [apiserver-outage] {summary}"
+      c.art "report.txt" summary
+      c.art "report.txt" (svcS.summary "svc")
+      c.art "report.txt" (peerS.summary "peer")
+      if !settledAfter then return .fail s!"the cluster did not settle within 420 s after the operator returned. {summary}"
+      match mm, mr with
+      | none, _ => return .fail (unobservable "the final master's copy could not be read")
+      | _, none => return .fail (unobservable "the replica's copy could not be read")
+      | some a, some b =>
+        if a != 0 || b != 0 then return .fail s!"DATA: {a} acknowledged write(s) missing on the final master, {b} on the replica. {summary}"
+      if held != 0 then return .fail s!"the replica's rebuild was held on the history ({held} time(s); operator-history-lines.txt). {summary}"
+      if masterAfter != some p.master.name || !resumed then
+        return .fail (notSetUp s!"the restarted master did not resume under the persisted map, so the path under test was not taken (master {masterAfter}, resumed recorded {resumed}; operator-history-lines.txt). {summary}")
+      return .pass
+  finally
+    discard <| kubectl ["scale", "deployment", c.cfg.operatorName, "-n", ns, "--replicas=1"]
+
 def suite : TestSuite :=
   { name := "node-ops-apiserver-outage"
     setup := do
@@ -359,6 +490,7 @@ def suite : TestSuite :=
     tests := [
       { name := "(A1) kube-apiserver down ~120 s under load: 0 write errors, 0 missing; the operator leader exits on the lost lease, resumes after the API returns, the cluster settles", run := outageTest ctx .long },
       { name := "(A2) kube-apiserver unreachable 10 s (port dropped) under load: 0 write errors, 0 missing; nothing happens (operator not restarted, no LOST LEASE, same master, same node map version)", run := outageTest ctx .blip },
-      { name := "(A3) kube-apiserver down ~90 s and the master's flared killed: errors characterised; after the API returns 0 acknowledged writes missing, one master, settled", run := outageTest ctx .killMaster } ] }
+      { name := "(A3) kube-apiserver down ~90 s and the master's flared killed: errors characterised; after the API returns 0 acknowledged writes missing, one master, settled", run := outageTest ctx .killMaster },
+      { name := "(A4) the master's flared restarts while no operator runs, and the operator returns with the persisted map: the new tenure is recorded, no rebuild held on the history, 0 acknowledged writes missing", run := resumedMasterTest ctx } ] }
 
 end FlareOperator.E2E.Tests.ApiserverOutage

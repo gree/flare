@@ -16,7 +16,10 @@
       persisted predecessor -> successor chain, that its copy became the new one;
     * seed — the recorded holder's copy was REPLACED by a cross-cluster seed
       (snapshot push): the same chain proves recorded copy -> current copy, with
-      the epoch reason "seed".
+      the epoch reason "seed";
+    * resumed master — the recorded holder, still the map's master with the
+      SAME copy, started a new master tenure by itself (its flared restarted):
+      a newer epoch with reason "promotion", recorded as "promotion".
   A corrupt, foreign, unreadable or HELD record is never adopted or overwritten
   automatically. A partition with no modern copy (tch, older flared) is
   UNTRACKED (the previous behaviour) only when every copy was observed
@@ -348,6 +351,41 @@ def rebind (s : Store) (p : Nat) (key : String) (seen : Seen) : Store × Change 
       (s.setPart p (.known r' h), .recorded p r' s!"the holder {key} restarted with the same copy and history: re-bound")
     else (s, .none)
   | _, _ => (s, .none)
+
+/-- The counter of a source epoch `N:uuid` (flared mints N+1 from the copy's
+    previous epoch and persists it in the copy). -/
+def epochCounter (epoch : String) : Option Nat :=
+  match epoch.splitOn ":" with
+  | n :: _ :: _ => n.toNat?
+  | _ => none
+
+/-- The holder RESUMED as master from a map that still names it master: no
+    operator promotion, so no intent, but flared started a new master tenure
+    and advanced its copy's source epoch (reason promotion; after a restart
+    its unsynced tail may be gone, so followers of the previous epoch
+    rebuild). The record follows only for the SAME copy (copy id unchanged —
+    an empty or replaced DB has another), healthy, the map's Active master of
+    the partition, an epoch with reason promotion whose counter is past the
+    recorded one (minted in this copy after it), and no intent or hold. The
+    boot id is not required to change: a re-bind may already have taken the
+    restarted process before it re-applied the role. Without this every
+    rebuild from the master was refused as "holds another history than the
+    record" and the replica stayed a proxy (44459609204
+    node-ops-apiserver-outage A3: the master's flared killed while the API
+    was down; the replica 3794 / 2576 acknowledged writes short). -/
+def resumedMaster (s : Store) (p : Nat) (key : String) (masterKey : Option String) (seen : Seen)
+    (now : String) : Store × Change :=
+  match s.part p, s.intentFor p, seen with
+  | some (.known r none), none, .modern b hs healthy _ _ epochReason =>
+    let newer := match epochCounter hs.epoch, epochCounter r.hist.epoch with
+      | some n, some m => n > m
+      | _, _ => false
+    if key == r.holder && masterKey == some key && b.copyId == r.binding.copyId
+        && hs != r.hist && epochReason == "promotion" && healthy && newer then
+      let r' : Record := { r with gen := r.gen + 1, hist := hs, binding := b, since := now, reason := "promotion" }
+      (s.setPart p (.known r' none), .recorded p r' s!"the holder {key} resumed as the partition's master with the same copy ({b.copyId}); its new tenure's epoch {hs.epoch} is generation {r'.gen}")
+    else (s, .none)
+  | _, _, _ => (s, .none)
 
 /-- Begin a promotion: refused while another intent of the partition is
     pending, or when the partition is not KNOWN. -/

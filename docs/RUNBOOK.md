@@ -1470,6 +1470,23 @@ proxy, and it too ends with the pod's delete.
 
 ### Tearing the whole cluster down
 
+**For a retired cluster only.** Everything in this section bypasses the
+operator's master handover: every pod goes at once, and on tmpfs its data
+with it. On a cluster that still serves, it loses the data. Before any step
+below, confirm all of:
+
+- no client reaches it: no client Service or load balancer selects its pods
+  (EndpointSlices empty), and the client connections have drained (every
+  pod's `curr_connections` is only the operator's own, `client_requests`
+  not growing);
+- cross-cluster replication from it is off (`cluster_replication off` on
+  every pod) and nothing replicates into it;
+- its data is no longer needed, or a backup has been restored from and
+  verified elsewhere.
+
+To keep a cluster running, do not use the override: stop pods one at a time
+through the guard (the handover moves each master first; see above).
+
 Deleting the FlareCluster or the namespace removes everything through
 Kubernetes' garbage collector, which the guard does not refuse. To delete
 only the StatefulSet with its pods, name it by UID and delete it:

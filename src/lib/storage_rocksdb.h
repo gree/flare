@@ -195,6 +195,7 @@ protected:
 	uint64_t _wal_ttl_seconds;
 	uint64_t _wal_size_limit_mb;
 	uint64_t _max_total_wal_size_mb = 16;
+	bool _blob_gc = true;
 	bool     _sync_writes;
 
 	// Master identity token (this node's DB lineage identifier, persisted
@@ -585,6 +586,17 @@ public:
 	// fails as if RocksDB refused it
 	static bool _test_enable_fault;
 	bool file_deletion_disables(uint64_t& n);
+	// Blob files of the default family: their total size and the bytes in
+	// them already known to be garbage (RocksDB's own accounting, updated by
+	// compactions). false when the DB is closed or a property is unknown.
+	bool blob_file_bytes(uint64_t& total, uint64_t& garbage);
+	// TEST SEAMS (unit tests only): flush the memtable; flush and compact
+	// the whole default family down to the bottom level
+	int flush_for_test();
+	int compact_for_test();
+	// TEST SEAM (unit tests only): blob garbage collection off, as before
+	// it was enabled; takes effect at the next open
+	void set_blob_gc_for_test(bool on) { this->_blob_gc = on; this->_options.enable_blob_garbage_collection = on; }
 	// Slave side: replace the live DB with the received checkpoint (staging
 	// dir is renamed into place under the whole-storage write lock — readers
 	// and writers are excluded for the swap) and seed the replication cursor

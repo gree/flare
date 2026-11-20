@@ -2368,6 +2368,69 @@ void test_dump_checkpoint_point_in_time_and_side_effect_free() {
 	drop_rocksdb(s, wal_master_dir);
 }
 
+// Blob garbage collection. A workload that keeps overwriting values >= 4 KB
+// (blob files) leaves the old values in blob files that still hold some live
+// ones; without GC those files are never rewritten, so the copy grows while
+// the number of items stays the same (seen live: 2.7 GB of live values in a
+// 5.5 GB copy). Same workload with GC on and with GC off (the control):
+// 400 keys of 8 KB, then 40 rounds that each overwrite a pseudo-random 30%
+// of them, flushing and compacting after every round.
+namespace {
+	struct blob_run {
+		uint64_t total;
+		uint64_t garbage;
+	};
+
+	blob_run run_overwrite_workload(bool gc) {
+		const char* dir = "tmp_rocksdb_blob_gc";
+		cut_remove_path(dir, NULL);
+		mkdir(dir, 0700);
+		storage_rocksdb* s = new storage_rocksdb(dir, 32, 4, 16, 4, 2, 86400, 1024);
+		s->set_blob_gc_for_test(gc);
+		s->open();
+		const int keys = 400;
+		const string value(8192, 'v');
+		uint32_t rnd = 12345;
+		for (int k = 0; k < keys; k++) {
+			cut_assert_equal_int(0, storage_set_string(s, "k" + std::to_string(k), value));
+		}
+		cut_assert_equal_int(0, s->flush_for_test());
+		for (int round = 0; round < 40; round++) {
+			for (int k = 0; k < keys; k++) {
+				rnd = rnd * 1103515245u + 12345u;
+				if ((rnd >> 16) % 10 < 3) {
+					cut_assert_equal_int(0, storage_set_string(s, "k" + std::to_string(k), value));
+				}
+			}
+			cut_assert_equal_int(0, s->flush_for_test());
+			cut_assert_equal_int(0, s->compact_for_test());
+		}
+		blob_run r;
+		cut_assert_true(s->blob_file_bytes(r.total, r.garbage));
+		cut_assert_equal_int(keys, static_cast<int>(s->count()));
+		string out;
+		cut_assert_equal_int(0, storage_get_string(s, "k7", out));
+		cut_assert_equal_string(value.c_str(), out.c_str());
+		s->close();
+		delete s;
+		cut_remove_path(dir, NULL);
+		return r;
+	}
+}
+
+void test_blob_gc_reclaims_overwritten_values() {
+	const uint64_t live = 400 * 8192;
+	blob_run on = run_overwrite_workload(true);
+	blob_run off = run_overwrite_workload(false);
+	cut_notify("blob files after 40 overwrite rounds: GC on %llu bytes (garbage %llu), GC off %llu bytes (garbage %llu), live values %llu bytes",
+		(unsigned long long)on.total, (unsigned long long)on.garbage,
+		(unsigned long long)off.total, (unsigned long long)off.garbage, (unsigned long long)live);
+	// the control shows the growth GC removes
+	cut_assert_operator(off.total, >, 3 * live);
+	// with GC the blob files stay within twice the live values
+	cut_assert_operator(on.total, <, 2 * live);
+}
+
 // SPACE-AWARE REBUILD (2026-10-04) used to discard the stale copy when two
 // did not fit. Copy retention (design §9) replaced that rule: no room stops
 // the rebuild (copy_capacity.h, test_copy_switch); nothing is discarded.

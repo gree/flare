@@ -386,6 +386,14 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 			// replica staging a copy of THIS node needs), the reserve, why the
 			// last staged rebuild stopped ("" = not blocked), retained copies
 			_send_stat("rocksdb_copy_bytes"                 , rdb->local_copy_bytes());
+			// blob files and the garbage RocksDB has found in them (blob GC)
+			{
+				uint64_t blob_total = 0, blob_garbage = 0;
+				if (rdb->blob_file_bytes(blob_total, blob_garbage)) {
+					_send_stat("rocksdb_blob_file_bytes"        , static_cast<long long>(blob_total));
+					_send_stat("rocksdb_blob_garbage_bytes"     , static_cast<long long>(blob_garbage));
+				}
+			}
 			_send_stat("rocksdb_rebuild_reserve_bytes"      , static_cast<long long>(rdb->get_rebuild_reserve_bytes()));
 			_send_stat("rebuild_blocked"                    , rdb->get_rebuild_blocked());
 			// design §10: parked = blocked and waiting for rebuild_resume (no

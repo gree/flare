@@ -241,6 +241,15 @@ void storage_rocksdb::_setup_rocksdb_options() {
 	// Enable blob files for large values (memcached often has large values)
 	this->_options.enable_blob_files = true;
 	this->_options.min_blob_size = 4096;  // Values >= 4KB go to blob files
+	// Blob garbage collection. Without it an overwritten or deleted value
+	// stays in its blob file until every value in that file is dead, so a
+	// workload that overwrites keys grows the copy while curr_items stays
+	// flat (seen live: 2.7 GB of live values in a 5.5 GB copy). Compactions
+	// rewrite the live values of the oldest quarter of the blob files, and
+	// once garbage is at least half of those files a compaction is forced.
+	this->_options.enable_blob_garbage_collection = this->_blob_gc;
+	this->_options.blob_garbage_collection_age_cutoff = 0.25;
+	this->_options.blob_garbage_collection_force_threshold = 0.5;
 
 	// WAL retention configuration
 	this->_options.WAL_ttl_seconds = this->_wal_ttl_seconds;
@@ -5082,6 +5091,36 @@ uint32_t storage_rocksdb::count() {
 	// periodically, so every scrape burned a full O(N) sweep and thrashed the
 	// block cache.
 	return static_cast<uint32_t>(this->_curr_items.fetch());
+}
+
+bool storage_rocksdb::blob_file_bytes(uint64_t& total, uint64_t& garbage) {
+	total = garbage = 0;
+	pthread_rwlock_rdlock(&this->_mutex_wholelock);
+	const bool ok = this->_db != NULL
+		&& this->_db->GetIntProperty("rocksdb.total-blob-file-size", &total)
+		&& this->_db->GetIntProperty("rocksdb.live-blob-file-garbage-size", &garbage);
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	return ok;
+}
+
+int storage_rocksdb::compact_for_test() {
+	pthread_rwlock_rdlock(&this->_mutex_wholelock);
+	int r = -1;
+	if (this->_db != NULL) {
+		rocksdb::CompactRangeOptions o;
+		o.bottommost_level_compaction = rocksdb::BottommostLevelCompaction::kForce;
+		r = (this->_db->Flush(rocksdb::FlushOptions()).ok()
+			&& this->_db->CompactRange(o, NULL, NULL).ok()) ? 0 : -1;
+	}
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	return r;
+}
+
+int storage_rocksdb::flush_for_test() {
+	pthread_rwlock_rdlock(&this->_mutex_wholelock);
+	const int r = (this->_db != NULL && this->_db->Flush(rocksdb::FlushOptions()).ok()) ? 0 : -1;
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	return r;
 }
 
 uint64_t storage_rocksdb::size() {

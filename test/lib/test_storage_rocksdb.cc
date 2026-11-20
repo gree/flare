@@ -2386,7 +2386,7 @@ namespace {
 		cut_remove_path(dir, NULL);
 		mkdir(dir, 0700);
 		storage_rocksdb* s = new storage_rocksdb(dir, 32, 4, 16, 4, 2, 86400, 1024);
-		s->set_blob_gc_for_test(gc);
+		s->set_blob_gc(gc);
 		s->open();
 		const int keys = 400;
 		const string value(8192, 'v');

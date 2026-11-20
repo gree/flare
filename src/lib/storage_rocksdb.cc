@@ -247,6 +247,7 @@ void storage_rocksdb::_setup_rocksdb_options() {
 	// flat (seen live: 2.7 GB of live values in a 5.5 GB copy). Compactions
 	// rewrite the live values of the oldest quarter of the blob files, and
 	// once garbage is at least half of those files a compaction is forced.
+	// ini rocksdb-blob-gc=false turns it off (set_blob_gc before open).
 	this->_options.enable_blob_garbage_collection = this->_blob_gc;
 	this->_options.blob_garbage_collection_age_cutoff = 0.25;
 	this->_options.blob_garbage_collection_force_threshold = 0.5;
@@ -1136,6 +1137,7 @@ storage_rocksdb* storage_rocksdb::open_staging(const string& attempt, bool exist
 	s->_staging = true;
 	s->_data_path = path;
 	s->set_max_total_wal_size_mb(this->_max_total_wal_size_mb);
+	s->set_blob_gc(this->_blob_gc);
 	if (s->open() < 0) {
 		log_err("staging: the copy at [%s] does not open", path.c_str());
 		delete s;

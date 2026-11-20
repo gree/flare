@@ -594,9 +594,10 @@ public:
 	// the whole default family down to the bottom level
 	int flush_for_test();
 	int compact_for_test();
-	// TEST SEAM (unit tests only): blob garbage collection off, as before
-	// it was enabled; takes effect at the next open
-	void set_blob_gc_for_test(bool on) { this->_blob_gc = on; this->_options.enable_blob_garbage_collection = on; }
+	// Blob garbage collection (ini rocksdb-blob-gc, default on); takes
+	// effect at the next open
+	void set_blob_gc(bool on) { this->_blob_gc = on; this->_options.enable_blob_garbage_collection = on; }
+	bool get_blob_gc() const { return this->_blob_gc; }
 	// Slave side: replace the live DB with the received checkpoint (staging
 	// dir is renamed into place under the whole-storage write lock — readers
 	// and writers are excluded for the swap) and seed the replication cursor

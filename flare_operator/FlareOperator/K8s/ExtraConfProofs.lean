@@ -30,7 +30,7 @@ theorem keys_prefixFree : RocksdbConfigSpec.keys.Pairwise PrefixFree := by
   unfold PrefixFree RocksdbConfigSpec.keys RocksdbConfigSpec.entries
   decide
 
-theorem keys_length : RocksdbConfigSpec.keys.length = 21 := by
+theorem keys_length : RocksdbConfigSpec.keys.length = 22 := by
   simp [RocksdbConfigSpec.keys, RocksdbConfigSpec.entries]
 
 /-- The line order is fixed by the key list, whatever the values are. -/
@@ -200,6 +200,14 @@ theorem syncWrites_false (r : RocksdbConfigSpec) (h : r.syncWrites = some false)
 theorem syncWrites_none (r : RocksdbConfigSpec) (h : r.syncWrites = none) :
     ∀ s, ("rocksdb-sync-writes = " ++ s) ∉ r.lines :=
   not_mem_none r "rocksdb-sync-writes" (by simp [RocksdbConfigSpec.entries, h])
+
+theorem blobGc_some (r : RocksdbConfigSpec) (b : Bool) (h : r.blobGc = some b) :
+    r.lines.count ("rocksdb-blob-gc = " ++ (if b then "true" else "false")) = 1 :=
+  count_some r "rocksdb-blob-gc" (if b then "true" else "false") (by simp [RocksdbConfigSpec.entries, h])
+
+theorem blobGc_none (r : RocksdbConfigSpec) (h : r.blobGc = none) :
+    ∀ s, ("rocksdb-blob-gc = " ++ s) ∉ r.lines :=
+  not_mem_none r "rocksdb-blob-gc" (by simp [RocksdbConfigSpec.entries, h])
 
 theorem resyncFailureThreshold_some (r : RocksdbConfigSpec) (v : Nat) (h : r.resyncFailureThreshold = some v) :
     r.lines.count ("rocksdb-resync-failure-threshold = " ++ toString v) = 1 :=

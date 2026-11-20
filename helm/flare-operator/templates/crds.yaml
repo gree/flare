@@ -136,6 +136,9 @@ spec:
                     syncWrites:
                       type: boolean
                       description: Force sync=true on every write (rocksdb-sync-writes)
+                    blobGc:
+                      type: boolean
+                      description: RocksDB blob garbage collection, reclaiming overwritten values of 4 KB or more (rocksdb-blob-gc; flared default true; takes effect at the next flared restart)
                     resyncFailureThreshold:
                       type: integer
                       minimum: 1

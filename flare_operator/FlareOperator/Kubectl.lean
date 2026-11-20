@@ -118,6 +118,7 @@ private def getFlareClusterFromJson (json : Lean.Json) (name ns : String)
     walTtlSeconds := rocksdbObj.getObjValD "walTtlSeconds" |>.getNat?.toOption
     walSizeLimitMb := rocksdbObj.getObjValD "walSizeLimitMb" |>.getNat?.toOption
     syncWrites := rocksdbObj.getObjValD "syncWrites" |>.getBool?.toOption
+    blobGc := rocksdbObj.getObjValD "blobGc" |>.getBool?.toOption
     resyncFailureThreshold := rocksdbObj.getObjValD "resyncFailureThreshold" |>.getNat?.toOption
     walMaxBatchBytes := rocksdbObj.getObjValD "walMaxBatchBytes" |>.getNat?.toOption
     walSyncBwlimit := rocksdbObj.getObjValD "walSyncBwlimit" |>.getNat?.toOption

@@ -359,6 +359,7 @@ int flared::startup(int argc, char **argv) {
 				ini_option_object().get_rocksdb_wal_max_batch_bytes());
 			rdb->set_max_total_wal_size_mb(
 				ini_option_object().get_rocksdb_max_total_wal_size_mb());
+			rdb->set_blob_gc(ini_option_object().is_rocksdb_blob_gc());
 			rdb->set_wal_sync_bwlimit(
 				ini_option_object().get_rocksdb_wal_sync_bwlimit());
 			rdb->set_wal_sync_interval(

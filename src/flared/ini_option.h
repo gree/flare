@@ -113,6 +113,7 @@ private:
 	uint64_t		_rocksdb_wal_size_limit_mb;
 	uint64_t		_rocksdb_max_total_wal_size_mb;
 	bool			_rocksdb_sync_writes;
+	bool			_rocksdb_blob_gc;
 	int				_rocksdb_resync_failure_threshold;
 	// Hard cap on a single replicated WriteBatch in bytes. Batches
 	// beyond this limit abort WAL sync with SERVER_ERROR batch_too_large
@@ -308,6 +309,7 @@ public:
 	uint64_t get_rocksdb_wal_size_limit_mb() { return this->_rocksdb_wal_size_limit_mb; }
 	uint64_t get_rocksdb_max_total_wal_size_mb() { return this->_rocksdb_max_total_wal_size_mb; }
 	bool is_rocksdb_sync_writes() { return this->_rocksdb_sync_writes; }
+	bool is_rocksdb_blob_gc() { return this->_rocksdb_blob_gc; }
 	int get_rocksdb_resync_failure_threshold() { return this->_rocksdb_resync_failure_threshold; }
 	uint64_t get_rocksdb_wal_max_batch_bytes() { return this->_rocksdb_wal_max_batch_bytes; }
 	int get_rocksdb_wal_sync_bwlimit() { return this->_rocksdb_wal_sync_bwlimit; }

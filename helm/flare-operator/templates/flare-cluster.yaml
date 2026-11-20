@@ -392,6 +392,9 @@ spec:
               value: {{ printf "%s/%s" $os.url $c.name | quote }}
             - name: MAX_AGE_SECONDS
               value: {{ $bb.maxAgeSeconds | default 7200 | quote }}
+            {{- if include "flare-operator.s3Bandwidth" $ }}
+            {{- include "flare-operator.s3ConfigEnv" $ | nindent 12 }}
+            {{- end }}
             {{- with $os.endpoint }}
             - name: S3_ENDPOINT
               value: {{ . | quote }}
@@ -405,6 +408,9 @@ spec:
             - name: flare-flags
               mountPath: /etc/flare-flags
               readOnly: true
+            {{- if include "flare-operator.s3Bandwidth" $ }}
+            {{- include "flare-operator.s3ConfigMount" $ | nindent 12 }}
+            {{- end }}
             {{- if $os.projectedTokenAudience }}
             - name: bootstrap-token
               mountPath: /var/run/secrets/sts
@@ -650,6 +656,9 @@ spec:
         - name: flare-flags
           configMap:
             name: {{ $c.name }}-flags
+        {{- end }}
+        {{- if and $bbProvision (include "flare-operator.s3Bandwidth" $) }}
+        {{- include "flare-operator.s3ConfigVolume" $ | nindent 8 }}
         {{- end }}
         {{- if and $bbProvision $os.projectedTokenAudience }}
         # Keyless object-storage auth for backup-bootstrap: a projected SA

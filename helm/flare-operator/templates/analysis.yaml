@@ -69,7 +69,11 @@ spec:
         spec:
           restartPolicy: Never
           serviceAccountName: {{ $saName }}
+          {{- $bw := include "flare-operator.s3Bandwidth" $ }}
           volumes:
+            {{- if $bw }}
+            {{- include "flare-operator.s3ConfigVolume" $ | nindent 12 }}
+            {{- end }}
             - name: work
               {{- if $an.workVolumeClaimName }}
               persistentVolumeClaim:
@@ -100,14 +104,22 @@ spec:
               volumeMounts:
                 - name: work
                   mountPath: /work
+                {{- if $bw }}
+                {{- include "flare-operator.s3ConfigMount" $ | nindent 16 }}
+                {{- end }}
                 {{- if $os.projectedTokenAudience }}
                 - name: token
                   mountPath: /var/run/secrets/sts
                   readOnly: true
                 {{- end }}
-              {{- with $os.extraEnv }}
+              {{- if or $os.extraEnv $bw }}
               env:
+                {{- if $bw }}
+                {{- include "flare-operator.s3ConfigEnv" $ | nindent 16 }}
+                {{- end }}
+                {{- with $os.extraEnv }}
                 {{- toYaml . | nindent 16 }}
+                {{- end }}
               {{- end }}
               command:
                 - sh
@@ -159,14 +171,22 @@ spec:
               volumeMounts:
                 - name: work
                   mountPath: /work
+                {{- if $bw }}
+                {{- include "flare-operator.s3ConfigMount" $ | nindent 16 }}
+                {{- end }}
                 {{- if $os.projectedTokenAudience }}
                 - name: token
                   mountPath: /var/run/secrets/sts
                   readOnly: true
                 {{- end }}
-              {{- with $os.extraEnv }}
+              {{- if or $os.extraEnv $bw }}
               env:
+                {{- if $bw }}
+                {{- include "flare-operator.s3ConfigEnv" $ | nindent 16 }}
+                {{- end }}
+                {{- with $os.extraEnv }}
                 {{- toYaml . | nindent 16 }}
+                {{- end }}
               {{- end }}
               command:
                 - bash

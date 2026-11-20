@@ -1,0 +1,23 @@
+{{- /*
+aws-cli config for every container that runs `aws s3` (backup CronJob, WAL
+archive uploader, backup-bootstrap, analysis): s3.max_bandwidth caps each
+transfer command (cluster.objectStorage.maxBandwidth). Rendered only when the
+cap is set; see flare-operator.s3Bandwidth in _helpers.tpl.
+*/ -}}
+{{- if .Values.cluster.enabled }}
+{{- $bw := include "flare-operator.s3Bandwidth" . }}
+{{- if $bw }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.cluster.name }}-s3-config
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "flare-operator.clusterLabel" . | nindent 4 }}
+data:
+  config: |
+    [default]
+    s3 =
+      max_bandwidth = {{ $bw }}
+{{- end }}
+{{- end }}

@@ -115,8 +115,13 @@ spec:
         spec:
           restartPolicy: Never
           serviceAccountName: {{ $saName }}
-          {{- if $os.projectedTokenAudience }}
+          {{- $bw := include "flare-operator.s3Bandwidth" $ }}
+          {{- if or $os.projectedTokenAudience $bw }}
           volumes:
+            {{- if $bw }}
+            {{- include "flare-operator.s3ConfigVolume" $ | nindent 12 }}
+            {{- end }}
+            {{- if $os.projectedTokenAudience }}
             # Keyless (web-identity) auth: a projected SA token with the
             # cloud-side audience; pair with objectStorage.extraEnv.
             - name: token
@@ -126,6 +131,7 @@ spec:
                       audience: {{ $os.projectedTokenAudience }}
                       expirationSeconds: 3600
                       path: token
+            {{- end }}
           {{- end }}
           containers:
             - name: backup
@@ -136,11 +142,16 @@ spec:
                 - secretRef:
                     name: {{ $os.credentialsSecret }}
               {{- end }}
-              {{- if $os.projectedTokenAudience }}
+              {{- if or $os.projectedTokenAudience $bw }}
               volumeMounts:
+                {{- if $bw }}
+                {{- include "flare-operator.s3ConfigMount" $ | nindent 16 }}
+                {{- end }}
+                {{- if $os.projectedTokenAudience }}
                 - name: token
                   mountPath: /var/run/secrets/sts
                   readOnly: true
+                {{- end }}
               {{- end }}
               env:
                 - name: CLUSTER
@@ -166,6 +177,9 @@ spec:
                   value: {{ $bk.keepDays | default 14 | quote }}
                 - name: SNAPSHOT_AFTER_HOUR_UTC
                   value: {{ $bk.snapshotAfterHourUtc | default 0 | quote }}
+                {{- if $bw }}
+                {{- include "flare-operator.s3ConfigEnv" $ | nindent 16 }}
+                {{- end }}
                 {{- with $os.extraEnv }}
                 {{- toYaml . | nindent 16 }}
                 {{- end }}

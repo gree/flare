@@ -343,6 +343,16 @@ cluster:
     extraEnv: []
     # optional Secret with static credentials (envFrom) for non-OIDC setups
     credentialsSecret: ""
+    # Transfer cap for every `aws s3` command the chart runs (backup CronJob,
+    # WAL archive uploader, backup-bootstrap restore, analysis), e.g. "50MB/s"
+    # (aws-cli s3.max_bandwidth: <n>KB/s, <n>MB/s, <n>GB/s or <n>/s in bytes).
+    # It is per command: the backup runner sends one partition at a time, so
+    # one backup run stays under it; the WAL uploader and a restore are
+    # separate commands that can run at the same time. Use it to keep backups
+    # and restores from filling a shared link to the object store. Empty = no
+    # cap (aws-cli default). A lower cap makes a restore of a whole copy
+    # slower: size it against the restore time you accept.
+    maxBandwidth: ""
 
   # Backup CronJob: ONE strictly-ordered runner (flare-backup-run, baked into
   # the flare-backup image): per-partition checkpoint -> pull -> restore-

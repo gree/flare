@@ -456,6 +456,11 @@ jobs:
         # no cert-manager runs in kind)
         run: python3 -m unittest discover -s scripts/tests -p 'test_helm_webhook_tls.py' -v
 
+      - name: Test the object-storage transfer cap (chart render)
+        # cluster.objectStorage.maxBandwidth reaches every container that
+        # runs `aws s3`; nothing renders when it is unset
+        run: python3 -m unittest discover -s scripts/tests -p 'test_helm_s3_bandwidth.py' -v
+
       - name: Test the restore hook (provenance check before replacement)
         run: python3 -m unittest discover -s scripts/tests -p 'test_restore_hook.py'
 

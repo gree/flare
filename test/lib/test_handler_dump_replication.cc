@@ -32,6 +32,8 @@
 
 #include <cppcutter.h>
 #include <time.h>
+#include <algorithm>
+#include <vector>
 
 using namespace std;
 using namespace gree::flare;
@@ -373,10 +375,16 @@ namespace test_handler_dump_replication {
 		cl->set_partition(0, master);
 		prepare_storage(70);
 
+		// the storage iterates in key order: key0, key1, key10, key11, ...
+		vector<string> keys;
+		for (int i = 0; i < 70; i++) {
+			keys.push_back(boost::lexical_cast<string>(i));
+		}
+		sort(keys.begin(), keys.end());
+
 		shared_thread t = start_handler();
-		response_dump("STORED", 0);
-		for (int i = 1; i < 70; i++) {
-			response_dump("NOT_STORED", i);
+		for (size_t i = 0; i < keys.size(); i++) {
+			response_dump(i == 0 ? "STORED" : "NOT_STORED", boost::lexical_cast<int>(keys[i]));
 		}
 
 		usleep(200 * 1000);

@@ -60,9 +60,13 @@ spec:
       # the follower closes its pending segment on SIGTERM; the uploader
       # needs a moment to put it up before the emptyDir goes
       terminationGracePeriodSeconds: 60
+      {{- $bw := include "flare-operator.s3Bandwidth" $ }}
       volumes:
         - name: wal
           emptyDir: {}
+        {{- if $bw }}
+        {{- include "flare-operator.s3ConfigVolume" $ | nindent 8 }}
+        {{- end }}
         {{- if $os.projectedTokenAudience }}
         - name: token
           projected:
@@ -122,12 +126,18 @@ spec:
               value: {{ $wa.rebaseMinIntervalSeconds | default 600 | quote }}
             - name: BACKUP_CRONJOB
               value: {{ printf "%s-backup" $c.name | quote }}
+            {{- if $bw }}
+            {{- include "flare-operator.s3ConfigEnv" $ | nindent 12 }}
+            {{- end }}
             {{- with $os.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
           volumeMounts:
             - name: wal
               mountPath: /wal
+            {{- if $bw }}
+            {{- include "flare-operator.s3ConfigMount" $ | nindent 12 }}
+            {{- end }}
             {{- if $os.projectedTokenAudience }}
             - name: token
               mountPath: /var/run/secrets/sts

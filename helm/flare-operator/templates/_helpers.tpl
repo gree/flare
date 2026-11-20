@@ -194,3 +194,43 @@ operator created must not be the one pruned.
 {{- printf "%s-webhook-tls" (include "flare-operator.fullname" .) -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Object-storage transfer cap (cluster.objectStorage.maxBandwidth), validated.
+aws-cli v2 reads s3.max_bandwidth only from its config file, so when it is
+set the chart renders <cluster>-s3-config and every container that runs
+`aws s3` mounts it and points AWS_CONFIG_FILE at it (the s3ConfigEnv /
+s3ConfigMount / s3ConfigVolume items below). Empty = no cap, nothing renders.
+*/}}
+{{- define "flare-operator.s3Bandwidth" -}}
+{{- $os := (.Values.cluster).objectStorage | default dict -}}
+{{- $bw := $os.maxBandwidth | default "" | toString -}}
+{{- if $bw -}}
+{{- if not (regexMatch "^[1-9][0-9]*(KB|MB|GB)?/s$" $bw) -}}
+{{- fail (printf "cluster.objectStorage.maxBandwidth %q: use <n>KB/s, <n>MB/s or <n>GB/s (or <n>/s in bytes)" $bw) -}}
+{{- end -}}
+{{- range ($os.extraEnv | default list) -}}
+{{- if eq (.name | default "") "AWS_CONFIG_FILE" -}}
+{{- fail "cluster.objectStorage.maxBandwidth sets AWS_CONFIG_FILE; remove it from objectStorage.extraEnv" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $bw -}}
+{{- end -}}
+
+{{- define "flare-operator.s3ConfigEnv" -}}
+- name: AWS_CONFIG_FILE
+  value: /etc/flare-s3/config
+{{- end -}}
+
+{{- define "flare-operator.s3ConfigMount" -}}
+- name: s3-config
+  mountPath: /etc/flare-s3
+  readOnly: true
+{{- end -}}
+
+{{- define "flare-operator.s3ConfigVolume" -}}
+- name: s3-config
+  configMap:
+    name: {{ .Values.cluster.name }}-s3-config
+{{- end -}}

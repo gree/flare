@@ -1986,12 +1986,16 @@ int storage_rocksdb::set(entry& e, result& r, int b) {
 		// Write to RocksDB
 		rocksdb::Slice key_slice(e.key);
 		rocksdb::Slice value_slice(reinterpret_cast<char*>(p), entry::header_size + e.size);
-		rocksdb::Status status = this->_db->Put(this->_write_options, key_slice, value_slice);
+		rocksdb::Status status = _test_put_fault ? rocksdb::Status::IOError("injected put failure")
+			: this->_db->Put(this->_write_options, key_slice, value_slice);
 
+		// A write that failed is an error (op_set answers SERVER_ERROR), not
+		// NOT_STORED: NOT_STORED is the answer of the version check and of
+		// add/replace, and a cross-cluster forward or seed counts it as a
+		// no-op (the destination already holds that key).
 		if (!this->_note_write_status(status, "set")) {
 			log_err("RocksDB::Put() failed: %s", status.ToString().c_str());
-			r = result_not_stored;
-			throw 0;
+			throw -1;
 		}
 
 		r = (b & behavior_touch) ? result_touched : result_stored;
@@ -2965,6 +2969,7 @@ storage_rocksdb::pending_read storage_rocksdb::_read_pending_locked(pending_hist
 
 bool storage_rocksdb::_test_pending_read_fault = false;
 bool storage_rocksdb::_test_enable_fault = false;
+bool storage_rocksdb::_test_put_fault = false;
 
 // RocksDB's own reading of "rocksdb.is-file-deletions-enabled" (8.3.2
 // answers 1 while deletions are enabled and 0 while any disable is held,

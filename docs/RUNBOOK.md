@@ -2541,6 +2541,14 @@ docs/review-cross-cluster-2026-10-11.md):
   anything but `completed_snapshot_push` / `completed_dump` means the
   destination does NOT hold the data that existed before the enable
   (`failed_connect`: never started; `failed_transfer`: partly copied).
+  A seed key the destination answers `NOT_STORED` (its version check: it
+  holds that key at the same or a newer version — a write forwarded during
+  the seed, or a destination that already had the copy) is a no-op,
+  counted as `cluster_replication[seed_noop_not_stored]`, like a forward's
+  `forward_noop_set_not_stored`; a write the destination could not make
+  answers `SERVER_ERROR` and fails the seed. A seed with writes flowing
+  therefore completes. It still sends no deletions: a key the destination
+  holds and the source does not stays — verification V finds it.
 - Verify the destination's contents against the source with writes stopped
   before a cutover — counts and drop counters say how many, never which
   keys (procedure V in docs/review-cross-cluster-2026-10-11.md §7.5).

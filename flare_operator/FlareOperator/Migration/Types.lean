@@ -318,14 +318,17 @@ def forwardTerminal (name : String) : Bool :=
 /-- Counters known NOT to be an outcome of an enqueued forward:
     `forward_dropped_unqueued` is counted INSTEAD of forward_enqueued (the
     queue never took it), the retry counters count attempts, and the seed's
-    five counters (handler_dump_replication.cc). Exact names, no prefix: any
+    six counters (handler_dump_replication.cc; seed_noop_not_stored counts a
+    key the destination already held at the same or a newer version — not a
+    loss, the loss over the attempt stays seed_failed). Exact names, no prefix: any
     other `cluster_replication[...]` name is unknown → the reply is not
     trusted and the switch holds (a new counter is never silently summed or
     ignored; flared adding one holds every switch until this list knows it). -/
 def forwardNonTerminal (name : String) : Bool :=
   [ "forward_enqueued", "forward_dropped_unqueued", "forward_retried",
     "forward_server_error_retried", "seed_started", "seed_connect_attempts",
-    "seed_failed", "seed_snapshot_push_disabled", "seed_completed" ].contains name
+    "seed_failed", "seed_snapshot_push_disabled", "seed_completed",
+    "seed_noop_not_stored" ].contains name
 
 /-- The pure part of `sourcePodsRepl`: one pod's stats reply → its applied
     replication state, or why it is not trusted. Strict (review 2026-10-12):

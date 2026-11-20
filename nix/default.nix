@@ -77,6 +77,8 @@ stdenv.mkDerivation {
     # a slave that is a proxy in its own map: reconstruction abandoned (aborted), no source attempt
     grep -E 'test_reconstruction_of_a_slave_that_is_a_proxy_in_its_map_is_abandoned_before_any_source_attempt|test_reconstruction_of_a_slave_demoted_to_a_proxy_while_retrying_ends_at_the_next_attempt|test_reconstruction_of_a_slave_of_the_partition_is_not_abandoned_and_retries|test_reconstruction_of_a_parked_slave_demoted_to_a_proxy_leaves_the_parked_wait|test_reconstruction_of_a_parked_slave_of_the_partition_keeps_waiting_until_resumed' test/run-tests.sh.log || echo "reconstruction proxy abandon tests NOT found in the cutter log"
     grep -E 'test_write_progress_timeout_ends_a_write_to_a_peer_that_stopped_reading|test_write_deadline_ends_a_write_even_with_a_longer_progress_timeout|test_write_bounds_do_not_end_a_write_the_peer_reads|test_capture_capacity_refuses_unknowns_and_short_space' test/run-tests.sh.log || echo "capture guard tests NOT found in the cutter log"
+    # blob garbage collection: overwritten values are reclaimed (GC off is the control)
+    grep -E 'test_blob_gc_reclaims_overwritten_values' test/run-tests.sh.log || echo "blob GC test NOT found in the cutter log"
     # read timeouts: opened connections 30 s in the k8s build, accepted (client) connections net_read_timeout
     grep -E 'test_effective_read_timeout_is_the_same_rule_at_startup_and_reload|test_accepted_connections_use_net_read_timeout_in_every_build' test/run-tests.sh.log || echo "read timeout tests NOT found in the cutter log"
     # a forwarding connection the sender has not used for proxy_idle_close_sec is closed by the sender and reopened on the next forward

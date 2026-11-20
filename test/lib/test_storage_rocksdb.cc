@@ -45,6 +45,8 @@
 #include <sys/types.h>
 #include <pthread.h>
 #include <atomic>
+#include <thread>
+#include <cstring>
 #include <unistd.h>
 #include <dirent.h>
 #include <dirent.h>
@@ -2366,6 +2368,206 @@ void test_dump_checkpoint_point_in_time_and_side_effect_free() {
 
 	s->remove_snapshot_checkpoint(cp);
 	drop_rocksdb(s, wal_master_dir);
+}
+
+// Blob garbage collection. A workload that keeps overwriting values >= 4 KB
+// (blob files) leaves the old values in blob files that still hold some live
+// ones; without GC those files are never rewritten, so the copy grows while
+// the number of items stays the same (seen live: 2.7 GB of live values in a
+// 5.5 GB copy). Same workload with GC on and with GC off (the control):
+// 400 keys of 8 KB, then 40 rounds that each overwrite a pseudo-random 30%
+// of them, flushing and compacting after every round.
+namespace {
+	struct blob_run {
+		uint64_t total;
+		uint64_t garbage;
+	};
+
+	blob_run run_overwrite_workload(bool gc) {
+		const char* dir = "tmp_rocksdb_blob_gc";
+		cut_remove_path(dir, NULL);
+		mkdir(dir, 0700);
+		storage_rocksdb* s = new storage_rocksdb(dir, 32, 4, 16, 4, 2, 86400, 1024);
+		s->set_blob_gc(gc);
+		s->open();
+		const int keys = 400;
+		const string value(8192, 'v');
+		uint32_t rnd = 12345;
+		for (int k = 0; k < keys; k++) {
+			cut_assert_equal_int(0, storage_set_string(s, "k" + std::to_string(k), value));
+		}
+		cut_assert_equal_int(0, s->flush_for_test());
+		for (int round = 0; round < 40; round++) {
+			for (int k = 0; k < keys; k++) {
+				rnd = rnd * 1103515245u + 12345u;
+				if ((rnd >> 16) % 10 < 3) {
+					cut_assert_equal_int(0, storage_set_string(s, "k" + std::to_string(k), value));
+				}
+			}
+			cut_assert_equal_int(0, s->flush_for_test());
+			cut_assert_equal_int(0, s->compact_for_test());
+		}
+		blob_run r;
+		cut_assert_true(s->blob_file_bytes(r.total, r.garbage));
+		cut_assert_equal_int(keys, static_cast<int>(s->count()));
+		string out;
+		cut_assert_equal_int(0, storage_get_string(s, "k7", out));
+		cut_assert_equal_string(value.c_str(), out.c_str());
+		s->close();
+		delete s;
+		cut_remove_path(dir, NULL);
+		return r;
+	}
+}
+
+void test_blob_gc_reclaims_overwritten_values() {
+	const uint64_t live = 400 * 8192;
+	blob_run on = run_overwrite_workload(true);
+	blob_run off = run_overwrite_workload(false);
+	cut_notify("blob files after 40 overwrite rounds: GC on %llu bytes (garbage %llu), GC off %llu bytes (garbage %llu), live values %llu bytes",
+		(unsigned long long)on.total, (unsigned long long)on.garbage,
+		(unsigned long long)off.total, (unsigned long long)off.garbage, (unsigned long long)live);
+	// the control shows the growth GC removes
+	cut_assert_operator(off.total, >, 3 * live);
+	// with GC the blob files stay within twice the live values
+	cut_assert_operator(on.total, <, 2 * live);
+}
+
+// Blob GC peak (measurement, not run by CI): the test above compacts by hand
+// and reads only the end state. This one leaves every flush and compaction
+// to RocksDB, as flared runs it, and samples the data dir every 50 ms while
+// an overwrite load runs and for 60 s after it, so the peak includes old blob
+// files and their rewrites existing at the same time. Runs only when
+// FLARE_BLOB_GC_SOAK_DIR names a directory (a tmpfs to measure RAM); GC on
+// first, then off (the control), each in a fresh directory. Options are
+// flared's defaults with the WAL retention used on tmpfs clusters
+// (rocksdb-wal-ttl-seconds 10800, rocksdb-wal-size-limit-mb 1024).
+namespace {
+	struct dir_bytes {
+		uint64_t all;		// every file under the dir (WAL archive included)
+		uint64_t data;		// *.sst + *.blob
+		uint64_t blob;		// *.blob
+	};
+
+	void sum_dir(const string& path, dir_bytes& b) {
+		DIR* d = opendir(path.c_str());
+		if (d == NULL) {
+			return;
+		}
+		struct dirent* e;
+		while ((e = readdir(d)) != NULL) {
+			const string n = e->d_name;
+			if (n == "." || n == "..") {
+				continue;
+			}
+			const string f = path + "/" + n;
+			struct stat st;
+			if (lstat(f.c_str(), &st) != 0) {
+				continue;	// removed by a compaction meanwhile
+			}
+			if (S_ISDIR(st.st_mode)) {
+				sum_dir(f, b);
+				continue;
+			}
+			const uint64_t sz = static_cast<uint64_t>(st.st_size);
+			b.all += sz;
+			const bool is_blob = n.size() > 5 && n.compare(n.size() - 5, 5, ".blob") == 0;
+			const bool is_sst = n.size() > 4 && n.compare(n.size() - 4, 4, ".sst") == 0;
+			if (is_blob) {
+				b.blob += sz;
+			}
+			if (is_blob || is_sst) {
+				b.data += sz;
+			}
+		}
+		closedir(d);
+	}
+
+	struct soak_result {
+		dir_bytes peak;		// each field's own maximum over the run
+		dir_bytes end;		// after the load and 60 s of idle compaction
+		uint64_t live;		// value bytes of the final items
+		double seconds;
+	};
+
+	soak_result run_soak(const string& dir, bool gc) {
+		cut_remove_path(dir.c_str(), NULL);
+		mkdir(dir.c_str(), 0700);
+		storage_rocksdb* s = new storage_rocksdb(dir, 32, 4, 512, 64, 3, 10800, 1024);
+		s->set_blob_gc(gc);
+		cut_assert_equal_int(0, s->open());
+		// 40000 values of 8 KB (blob files) and 400000 of 200 B (inline)
+		const int large = 40000, small = 400000;
+		const string big(8192, 'b'), little(200, 's');
+		for (int k = 0; k < large; k++) {
+			cut_assert_equal_int(0, storage_set_string(s, "L" + std::to_string(k), big));
+		}
+		for (int k = 0; k < small; k++) {
+			cut_assert_equal_int(0, storage_set_string(s, "S" + std::to_string(k), little));
+		}
+		soak_result r;
+		memset(&r, 0, sizeof(r));
+		std::atomic<bool> stop(false);
+		std::thread sampler([&]() {
+			while (!stop.load()) {
+				dir_bytes b = {0, 0, 0};
+				sum_dir(dir, b);
+				r.peak.all = std::max(r.peak.all, b.all);
+				r.peak.data = std::max(r.peak.data, b.data);
+				r.peak.blob = std::max(r.peak.blob, b.blob);
+				usleep(50 * 1000);
+			}
+		});
+		struct timespec t0, t1;
+		clock_gettime(CLOCK_MONOTONIC, &t0);
+		// 600000 overwrites of random keys, 1 in 3 a large value: about
+		// 1.6 GB of blob writes, 5x the live blob values
+		uint32_t rnd = 4242;
+		for (int i = 0; i < 600000; i++) {
+			rnd = rnd * 1103515245u + 12345u;
+			const uint32_t x = rnd >> 8;
+			if (x % 3 == 0) {
+				cut_assert_equal_int(0, storage_set_string(s, "L" + std::to_string(x % large), big));
+			} else {
+				cut_assert_equal_int(0, storage_set_string(s, "S" + std::to_string(x % small), little));
+			}
+		}
+		clock_gettime(CLOCK_MONOTONIC, &t1);
+		sleep(60);
+		stop.store(true);
+		sampler.join();
+		sum_dir(dir, r.end);
+		r.live = static_cast<uint64_t>(large) * big.size() + static_cast<uint64_t>(small) * little.size();
+		r.seconds = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
+		cut_assert_equal_int(large + small, static_cast<int>(s->count()));
+		string out;
+		cut_assert_equal_int(0, storage_get_string(s, "L7", out));
+		cut_assert_equal_string(big.c_str(), out.c_str());
+		s->close();
+		delete s;
+		cut_remove_path(dir.c_str(), NULL);
+		return r;
+	}
+}
+
+void test_blob_gc_peak_on_tmpfs_soak() {
+	const char* base = getenv("FLARE_BLOB_GC_SOAK_DIR");
+	if (base == NULL || *base == '\0') {
+		cut_omit("FLARE_BLOB_GC_SOAK_DIR is not set (measurement only)");
+	}
+	const soak_result on = run_soak(string(base) + "/gc-on", true);
+	const soak_result off = run_soak(string(base) + "/gc-off", false);
+	const soak_result* rs[2] = {&on, &off};
+	const char* names[2] = {"GC on", "GC off"};
+	for (int i = 0; i < 2; i++) {
+		const soak_result& r = *rs[i];
+		cut_notify("%s: load %.1f s; live values %llu; peak all %llu / data(sst+blob) %llu / blob %llu; after 60 s idle all %llu / data %llu / blob %llu",
+			names[i], r.seconds, (unsigned long long)r.live,
+			(unsigned long long)r.peak.all, (unsigned long long)r.peak.data, (unsigned long long)r.peak.blob,
+			(unsigned long long)r.end.all, (unsigned long long)r.end.data, (unsigned long long)r.end.blob);
+	}
+	// GC must leave less blob data than the control
+	cut_assert_operator(on.end.blob, <, off.end.blob);
 }
 
 // SPACE-AWARE REBUILD (2026-10-04) used to discard the stale copy when two

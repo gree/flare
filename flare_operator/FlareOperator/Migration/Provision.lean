@@ -40,6 +40,7 @@ def rocksdbSpecYaml (r : RocksdbConfigSpec) : String :=
     r.walTtlSeconds.map (s!"    walTtlSeconds: {·}"),
     r.walSizeLimitMb.map (s!"    walSizeLimitMb: {·}"),
     r.syncWrites.map (fun b => s!"    syncWrites: {if b then "true" else "false"}"),
+    r.blobGc.map (fun b => s!"    blobGc: {if b then "true" else "false"}"),
     r.resyncFailureThreshold.map (s!"    resyncFailureThreshold: {·}"),
     r.walMaxBatchBytes.map (s!"    walMaxBatchBytes: {·}"),
     r.walSyncBwlimit.map (s!"    walSyncBwlimit: {·}"),

@@ -122,6 +122,12 @@ structure RocksdbConfigSpec where
   /-- Force `sync=true` on every write for strict durability.
       flared: `rocksdb-sync-writes`. -/
   syncWrites : Option Bool := none
+  /-- RocksDB blob garbage collection: compactions rewrite the live values of
+      old blob files, so overwritten values >= 4 KB are reclaimed (without it
+      a copy under an overwrite workload grows while its item count is flat).
+      flared default true; false turns it off. Startup-only: takes effect at
+      the next flared restart. flared: `rocksdb-blob-gc`. -/
+  blobGc : Option Bool := none
   /-- Consecutive resync failures before the slave self-demotes.
       flared: `rocksdb-resync-failure-threshold`. -/
   resyncFailureThreshold : Option Nat := none
@@ -203,7 +209,7 @@ structure RocksdbConfigSpec where
 /-- True when at least one rocksdb field has been set by the user. -/
 def RocksdbConfigSpec.hasAny (r : RocksdbConfigSpec) : Bool :=
   r.blockCacheSizeMb.isSome || r.writeBufferSizeMb.isSome || r.maxWriteBufferNumber.isSome ||
-  r.walTtlSeconds.isSome || r.walSizeLimitMb.isSome || r.syncWrites.isSome ||
+  r.walTtlSeconds.isSome || r.walSizeLimitMb.isSome || r.syncWrites.isSome || r.blobGc.isSome ||
   r.resyncFailureThreshold.isSome || r.walMaxBatchBytes.isSome ||
   r.walSyncBwlimit.isSome || r.walSyncInterval.isSome || r.snapshotBwlimit.isSome ||
   r.flushAllEnabled.isSome || r.backupKeep.isSome || r.readUnavailableError.isSome ||
@@ -224,6 +230,7 @@ def RocksdbConfigSpec.entries (r : RocksdbConfigSpec) : List (String × Option S
     ("rocksdb-wal-ttl-seconds", r.walTtlSeconds.map toString),
     ("rocksdb-wal-size-limit-mb", r.walSizeLimitMb.map toString),
     ("rocksdb-sync-writes", r.syncWrites.map bool),
+    ("rocksdb-blob-gc", r.blobGc.map bool),
     ("rocksdb-resync-failure-threshold", r.resyncFailureThreshold.map toString),
     ("rocksdb-wal-max-batch-bytes", r.walMaxBatchBytes.map toString),
     ("rocksdb-wal-sync-bwlimit", r.walSyncBwlimit.map toString),

@@ -225,6 +225,11 @@ cluster:
   # (S3 already holds the history; a local checkpoint on a RAM disk is not a
   # durable restore point anyway). E.g. {walSizeLimitMb: 512, walTtlSeconds:
   # 3600, backupKeep: 1}.
+  # blobGc (flared default true) is RocksDB blob garbage collection: values of
+  # 4 KB or more live in blob files, and without GC an overwritten value stays
+  # there while any other value in its file is live, so the copy grows under an
+  # overwrite workload while the item count is flat. blobGc: false turns it
+  # off. Startup-only: it applies at the next flared restart.
   # Startup-only memory knobs, for example:
   # rocksdb: {blockCacheSizeMb: 64, writeBufferSizeMb: 16, maxWriteBufferNumber: 3}
   # These are NOT an RSS cap: allow for all column families, compaction,

@@ -8434,9 +8434,9 @@
       ],
       "tasks": [],
       "review": {
-        "commit": "230457af06445b9034ce6eb3ca0cba6ea33e10d5",
-        "date": "2026-11-18",
-        "note": "Change-impact note for feat/redundant-copy-discard (407db5ba..beac2dad), claim unchanged: the operator now tells a parked replica it may discard a redundant copy (RedundantCopy.decide; flared rebuild_resume discard and copy.discarded). Read in this control's referenced file(s): flare-cluster.yaml: the flared container gets the FLARE_POD_UID env (downward API); readiness, probes and the update strategy are not touched. The node map, topology publication, promotion and delete gates this control describes are not changed; no claim, check or scenario of this control changes. Follow-up feature/wal-archive 4e7ecac3..230457af (flare-wal-archive: continuous WAL archive to object storage). Read in this control's referenced file(s): flare-cluster.yaml: the flags ConfigMap gains backup-bootstrap-wal-until; backup-bootstrap also downloads the base's WAL segments and leaves the restore pending; the new init container backup-wal-replay replays them (flared --wal-replay) and then does the RESTORED marker and move backup-bootstrap did before; an incomplete archive (replay exit 4) or a replay error is not published unless backup-bootstrap-wal-accept-incomplete is true (fail closed); the flared container, probes, preStop, roles and promotion are unchanged. No claim, check or scenario of this control changes."
+        "commit": "bfab6d76a9409a1ef6066e74d3efc51dac81c576",
+        "date": "2026-11-20",
+        "note": "Change-impact note for feat/s3-bwlimit (8760b783..bfab6d76), claim unchanged: cluster.objectStorage.maxBandwidth caps aws s3 transfers through an aws-cli config file. Read in this control's referenced file(s): flare-cluster.yaml: the backup-bootstrap init container gets, only when maxBandwidth is set, the env AWS_CONFIG_FILE=/etc/flare-s3/config and a read-only mount of the <cluster>-s3-config ConfigMap, and the pod gets that ConfigMap volume (only with bootstrap provisioning). No readiness probe, startup/readiness gate, serving flag, preStop, flared argument or container other than backup-bootstrap changed; with maxBandwidth unset the render is unchanged. Evidence: test_helm_s3_bandwidth (6 tests ok); aws-cli 2.15.0 reads the file; on SeaweedFS a 10MB/s cap moved 100 MiB in 11.7 s up / 11.8 s down vs 2.4 s / 1.8 s uncapped. This control's checks, scenarios and status are unchanged."
       },
       "status": {
         "implemented": {

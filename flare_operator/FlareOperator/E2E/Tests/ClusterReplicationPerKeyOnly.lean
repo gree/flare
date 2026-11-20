@@ -24,7 +24,10 @@
        faults T4), and V MATCHes again after more changes;
     5. in-cluster replica snapshots are not disabled by the switch: a
        source slave started empty reseeds by snapshot
-       (`rocksdb_snapshot_bootstrap` moved on it).
+       (`rocksdb_snapshot_bootstrap` moved on it);
+    6. a seed over a destination that already holds every key at the same
+       version completes: NOT_STORED is a no-op (`seed_noop_not_stored`),
+       not a failure.
 -/
 import FlareOperator.E2E.Framework
 import FlareOperator.E2E.Helpers
@@ -345,6 +348,39 @@ def suite : TestSuite := {
         if !containsSubstr reply "SERVER_ERROR snapshot_push_disabled" then
           return .fail s!"the push was not refused by the destination's switch: {reply}"
         if identAfter != identBefore || items1 != items0 then return .fail "the destination changed"
+        return .pass },
+
+    -- A seed over a destination that already holds the copy at the same
+    -- versions (a re-seed; also what a write forwarded during a seed
+    -- leaves): the destination answers NOT_STORED by its version check.
+    -- The dump counted that as a failure (failed_transfer, and 64 in a row
+    -- aborted it), so a seed with writes flowing never completed; it is a
+    -- no-op now, as a forward counts it (seed_noop_not_stored).
+    { name := "a seed over a destination that already holds every key at the same version completes (completed_dump); the NOT_STORED answers are counted as seed_noop_not_stored, not as seed_failed"
+      run := do
+        let some sIp ← masterIp cfgSrc | return .fail "no source master"
+        let some dIp ← masterIp cfgDst | return .fail "no destination master"
+        match ← patchRepl "{\"enabled\":false}" with
+        | .error e => return .fail s!"disable failed: {e}"
+        | .ok _ => pure ()
+        if !(← waitReplicationOff sIp) then return .fail "replication still on after the disable"
+        let sItems ← getCurrItems cfgSrc.debugPod cfgSrc.«namespace» sIp cfgSrc.flarePort
+        let dItems0 ← getCurrItems cfgDst.debugPod cfgDst.«namespace» dIp cfgDst.flarePort
+        let f0 ← statNat cfgSrc sIp "cluster_replication[seed_failed]"
+        let n0 ← statNat cfgSrc sIp "cluster_replication[seed_noop_not_stored]"
+        let st0 ← statNat cfgSrc sIp "cluster_replication[seed_started]"
+        match ← patchRepl s!"\{\"enabled\":true,\"serverName\":\"{dstSvc}\",\"port\":{cfgDst.flarePort},\"mode\":\"duplicate\",\"concurrency\":1,\"snapshotPush\":false}" with
+        | .error e => return .fail s!"enable failed: {e}"
+        | .ok _ => pure ()
+        let st ← waitSeed sIp st0 (fun s => s.startsWith "failed" || s.startsWith "completed") 400
+        let f1 ← statNat cfgSrc sIp "cluster_replication[seed_failed]"
+        let n1 ← statNat cfgSrc sIp "cluster_replication[seed_noop_not_stored]"
+        let dItems1 ← getCurrItems cfgDst.debugPod cfgDst.«namespace» dIp cfgDst.flarePort
+        IO.eprintln s!"# re-seed: state {st}; seed_noop_not_stored {n0} → {n1}; seed_failed {f0} → {f1}; source items {sItems}; destination items {dItems0} → {dItems1}"
+        if st != "completed_dump" then return .fail s!"seed state {st}, want completed_dump"
+        if f1 != f0 then return .fail s!"seed_failed moved {f0} → {f1}"
+        if n1 ≤ n0 then return .fail "no NOT_STORED answer was counted: the destination did not hold the keys"
+        if dItems1 != dItems0 then return .fail s!"the destination's items changed {dItems0} → {dItems1}"
         return .pass }
   ]
 }

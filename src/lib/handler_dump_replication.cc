@@ -269,13 +269,28 @@ int handler_dump_replication::run() {
 			}
 		}
 
-		storage::result r;
-		if (this->_storage->get(e, r) < 0) {
-			if (r == storage::result_not_found) {
-				log_info("skipping entry [key not found (perhaps expired)] (key=%s)", e.key.c_str());
-			} else {
-				log_err("skipping entry [get() error] (key=%s)", e.key.c_str());
-			}
+		// A key the iteration yields can be gone by the time it is read (a
+		// delete or an expiry after iter_begin): get() then returns 0 with
+		// result_not_found, not a negative code, and leaves the entry as it
+		// was. Checking only the return code sent the PREVIOUS key's value
+		// and version under this key's name (kind, rc76: every one of 577
+		// differing keys on the destination held another key's value).
+		// Skip on not_found whatever the return code, as op_dump does, and
+		// read each key into a fresh entry so nothing of the previous one
+		// can be sent.
+		{
+			const string key = e.key;
+			e = storage::entry();
+			e.key = key;
+		}
+		storage::result r = storage::result_none;
+		const int got = this->_storage->get(e, r);
+		if (r == storage::result_not_found) {
+			log_info("skipping entry [key not found (deleted or expired after the iteration began)] (key=%s)", e.key.c_str());
+			continue;
+		}
+		if (got < 0) {
+			log_err("skipping entry [get() error] (key=%s)", e.key.c_str());
 			continue;
 		}
 

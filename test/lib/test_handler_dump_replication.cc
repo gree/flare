@@ -414,6 +414,29 @@ namespace test_handler_dump_replication {
 		cut_assert_equal_int(1, (int)crepl("seed_connect_attempts"));
 	}
 
+	// A key the iteration yields but that is gone when it is read (deleted
+	// or expired after iter_begin) is skipped. get() answers 0 with
+	// result_not_found for it, and the seed used to send the previous key's
+	// value under its name: here key1 would have gone out carrying key0's
+	// entry, before key2.
+	void test_run_seed_skips_key_gone_after_iteration_began() {
+		cluster::node master = cl->set_node("localhost", port, cluster::role_master, cluster::state_active);
+		cl->set_partition(0, master);
+		prepare_storage(3);
+		st->get_not_found.insert("key1");
+
+		shared_thread t = start_handler();
+		response_dump("STORED", 0);
+		response_dump("STORED", 2);
+
+		usleep(200 * 1000);
+		cut_assert_equal_boolean(false, t->is_running());
+		cut_assert_equal_string("completed_dump", stats_object->get_crepl_seed_state().c_str());
+		cut_assert_equal_int(1, (int)crepl("seed_completed"));
+		cut_assert_equal_int(0, (int)crepl("seed_failed"));
+		cut_assert_equal_int(0, (int)crepl("seed_noop_not_stored"));
+	}
+
 	void test_run_failure_database_busy() {
 		// prepare
 		cluster::node master = cl->set_node("localhost", port, cluster::role_master, cluster::state_active);

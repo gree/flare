@@ -2736,7 +2736,7 @@ void test_blob_gc_peak_on_tmpfs_soak() {
 
 // Blob GC pass peak (measurement, not run by CI; FLARE_BLOB_GC_SOAK_DIR as
 // above): the extra space one blob_gc_compact_step pass takes while it runs.
-// The copy has the pf-dev shape: built with GC off (30000 cold 8 KB values,
+// The copy has the shape seen live: built with GC off (30000 cold 8 KB values,
 // 400000 values of 200 B, then 10000 hot 8 KB values overwritten 30% at a
 // time for 15 rounds, flushed and compacted each round), reopened with GC on
 // and SSTs cut at 64 KB so the pass has many steps. The data dir is sampled

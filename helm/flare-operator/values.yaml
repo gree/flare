@@ -232,7 +232,7 @@ cluster:
   # off. Startup-only: it applies at the next flared restart.
   # RocksDB forces a GC compaction only when its OLDEST blob files are mostly
   # garbage, so a copy whose oldest values are never overwritten keeps files
-  # that are almost all garbage (pf-dev: 2.37 GB of 2.86 GB). flared checks
+  # that are almost all garbage (seen live: 2.37 GB of 2.86 GB). flared checks
   # every blobCompactIntervalSeconds (default 600, 0 = off) and, while the
   # garbage is at least blobCompactPercent (default 50) of the blob bytes and
   # at least blobCompactMinMb (default 512), compacts one SST at a time,

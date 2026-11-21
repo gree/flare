@@ -32,6 +32,8 @@
 
 #include <cppcutter.h>
 #include <time.h>
+#include <algorithm>
+#include <vector>
 
 using namespace std;
 using namespace gree::flare;
@@ -364,8 +366,38 @@ namespace test_handler_dump_replication {
 		cut_assert(crepl("seed_connect_attempts") >= 2);
 	}
 
-	// A destination that answers but does not store: the seed ends FAILED,
-	// not completed, and is not retried.
+	// A destination that already holds a key at the same or a newer version
+	// answers NOT_STORED (its version check): a no-op, counted, and the seed
+	// completes — also for a run longer than the 64-in-a-row abort (a
+	// destination that already holds the whole copy).
+	void test_run_seed_not_stored_is_noop_and_completes() {
+		cluster::node master = cl->set_node("localhost", port, cluster::role_master, cluster::state_active);
+		cl->set_partition(0, master);
+		prepare_storage(70);
+
+		// the storage iterates in key order: key0, key1, key10, key11, ...
+		vector<string> keys;
+		for (int i = 0; i < 70; i++) {
+			keys.push_back(boost::lexical_cast<string>(i));
+		}
+		sort(keys.begin(), keys.end());
+
+		shared_thread t = start_handler();
+		for (size_t i = 0; i < keys.size(); i++) {
+			response_dump(i == 0 ? "STORED" : "NOT_STORED", boost::lexical_cast<int>(keys[i]));
+		}
+
+		usleep(200 * 1000);
+		cut_assert_equal_boolean(false, t->is_running());
+		cut_assert_equal_string("completed_dump", stats_object->get_crepl_seed_state().c_str());
+		cut_assert_equal_int(1, (int)crepl("seed_completed"));
+		cut_assert_equal_int(0, (int)crepl("seed_failed"));
+		cut_assert_equal_int(69, (int)crepl("seed_noop_not_stored"));
+	}
+
+	// A destination that answers but does not store (a write it could not
+	// make answers SERVER_ERROR): the seed ends FAILED, not completed, and
+	// is not retried.
 	void test_run_seed_not_stored_is_failed_transfer() {
 		cluster::node master = cl->set_node("localhost", port, cluster::role_master, cluster::state_active);
 		cl->set_partition(0, master);

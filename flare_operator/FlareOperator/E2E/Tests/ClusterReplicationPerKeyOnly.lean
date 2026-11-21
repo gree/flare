@@ -24,7 +24,13 @@
        faults T4), and V MATCHes again after more changes;
     5. in-cluster replica snapshots are not disabled by the switch: a
        source slave started empty reseeds by snapshot
-       (`rocksdb_snapshot_bootstrap` moved on it).
+       (`rocksdb_snapshot_bootstrap` moved on it);
+    6. a seed over a destination that already holds every key at the same
+       version completes: NOT_STORED is a no-op (`seed_noop_not_stored`),
+       not a failure;
+    7. a seed while writes flow completes: keys overwritten after it started
+       reach the destination first (checked: more NOT_STORED than the keys
+       the destination held), and V MATCHes.
 -/
 import FlareOperator.E2E.Framework
 import FlareOperator.E2E.Helpers
@@ -134,7 +140,7 @@ private def runProc (cmd : String) (args : List String) : IO (UInt32 × String �
   return (o.exitCode, o.stdout, o.stderr)
 
 /-- Capture both masters and compare. (exit code, verdict line, report head). -/
-private def runV (tag : String) : IO (Except String (UInt32 × String)) := do
+private def runV (tag : String) (baseline : String := "baseline") (attempt : String := "crp-per-key-only") : IO (Except String (UInt32 × String)) := do
   let sd ← scriptsDir
   let dir := s!"{vDir}/{tag}"
   let _ ← runProc "rm" ["-rf", dir]
@@ -148,7 +154,7 @@ private def runV (tag : String) : IO (Except String (UInt32 × String)) := do
     "--src-dump", s!"{dir}/src/{sPod}.dump", "--dst-dump", s!"{dir}/dst/{dPod}.dump",
     "--src-pre", s!"{dir}/src/pre.json", "--src-post", s!"{dir}/src/post.json",
     "--dst-pre", s!"{dir}/dst/pre.json", "--dst-post", s!"{dir}/dst/post.json",
-    "--attempt-baseline", s!"{vDir}/baseline/stats.json", "--attempt-id", "crp-per-key-only",
+    "--attempt-baseline", s!"{vDir}/{baseline}/stats.json", "--attempt-id", attempt,
     "--report", s!"{dir}/report.json"]
   let verdict := ((err.splitOn "\n").find? (·.startsWith "verdict: ")).getD ""
   let report ← try IO.FS.readFile s!"{dir}/report.json" catch _ => pure ""
@@ -345,7 +351,107 @@ def suite : TestSuite := {
         if !containsSubstr reply "SERVER_ERROR snapshot_push_disabled" then
           return .fail s!"the push was not refused by the destination's switch: {reply}"
         if identAfter != identBefore || items1 != items0 then return .fail "the destination changed"
-        return .pass }
+        return .pass },
+
+    -- A seed over a destination that already holds the copy at the same
+    -- versions (a re-seed; also what a write forwarded during a seed
+    -- leaves): the destination answers NOT_STORED by its version check.
+    -- The dump counted that as a failure (failed_transfer, and 64 in a row
+    -- aborted it), so a seed with writes flowing never completed; it is a
+    -- no-op now, as a forward counts it (seed_noop_not_stored).
+    { name := "a seed over a destination that already holds every key at the same version completes (completed_dump); the NOT_STORED answers are counted as seed_noop_not_stored, not as seed_failed"
+      run := do
+        let some sIp ← masterIp cfgSrc | return .fail "no source master"
+        let some dIp ← masterIp cfgDst | return .fail "no destination master"
+        match ← patchRepl "{\"enabled\":false}" with
+        | .error e => return .fail s!"disable failed: {e}"
+        | .ok _ => pure ()
+        if !(← waitReplicationOff sIp) then return .fail "replication still on after the disable"
+        let sItems ← getCurrItems cfgSrc.debugPod cfgSrc.«namespace» sIp cfgSrc.flarePort
+        let dItems0 ← getCurrItems cfgDst.debugPod cfgDst.«namespace» dIp cfgDst.flarePort
+        let f0 ← statNat cfgSrc sIp "cluster_replication[seed_failed]"
+        let n0 ← statNat cfgSrc sIp "cluster_replication[seed_noop_not_stored]"
+        let st0 ← statNat cfgSrc sIp "cluster_replication[seed_started]"
+        match ← patchRepl s!"\{\"enabled\":true,\"serverName\":\"{dstSvc}\",\"port\":{cfgDst.flarePort},\"mode\":\"duplicate\",\"concurrency\":1,\"snapshotPush\":false}" with
+        | .error e => return .fail s!"enable failed: {e}"
+        | .ok _ => pure ()
+        let st ← waitSeed sIp st0 (fun s => s.startsWith "failed" || s.startsWith "completed") 400
+        let f1 ← statNat cfgSrc sIp "cluster_replication[seed_failed]"
+        let n1 ← statNat cfgSrc sIp "cluster_replication[seed_noop_not_stored]"
+        let dItems1 ← getCurrItems cfgDst.debugPod cfgDst.«namespace» dIp cfgDst.flarePort
+        IO.eprintln s!"# re-seed: state {st}; seed_noop_not_stored {n0} → {n1}; seed_failed {f0} → {f1}; source items {sItems}; destination items {dItems0} → {dItems1}"
+        if st != "completed_dump" then return .fail s!"seed state {st}, want completed_dump"
+        if f1 != f0 then return .fail s!"seed_failed moved {f0} → {f1}"
+        if n1 ≤ n0 then return .fail "no NOT_STORED answer was counted: the destination did not hold the keys"
+        if dItems1 != dItems0 then return .fail s!"the destination's items changed {dItems0} → {dItems1}"
+        return .pass },
+
+    -- The seed while writes flow: a key overwritten on the source after the
+    -- seed started is forwarded at once and reaches the destination before
+    -- the dump gets to it (the zz_ keys sort after every filler key, and the
+    -- dump iterates in key order over what existed when it started); the
+    -- dump's older version is then NOT_STORED. Before, that failed the seed
+    -- (failed_transfer; 272 such keys in a kind run with writers on). The
+    -- interleaving is checked, not assumed: the NOT_STORED answers must
+    -- exceed the ones for the keys the destination already held.
+    { name := "a seed while writes flow completes (completed_dump): keys overwritten after the seed started reach the destination first, their older dumped versions are counted as seed_noop_not_stored; V MATCHes after the writes stop"
+      run := do
+        let some sIp ← masterIp cfgSrc | return .fail "no source master"
+        let some dIp ← masterIp cfgDst | return .fail "no destination master"
+        match ← patchRepl "{\"enabled\":false}" with
+        | .error e => return .fail s!"disable failed: {e}"
+        | .ok _ => pure ()
+        if !(← waitReplicationOff sIp) then return .fail "replication still on after the disable"
+        -- the destination already holds the source's keys (test 7): their
+        -- NOT_STORED answers are the static part of the count
+        let dItems0 ← getCurrItems cfgDst.debugPod cfgDst.«namespace» dIp cfgDst.flarePort
+        let fillers := 60000
+        let late := 50
+        let bulk := s!"i=0; while [ $i -lt {fillers} ]; do printf 'set crp_f_%05d 0 0 1\\r\\nx\\r\\n' $i; i=$((i+1)); done; i=0; while [ $i -lt {late} ]; do printf 'set zz_k_%03d 0 0 3\\r\\nold\\r\\n' $i; i=$((i+1)); done"
+        match ← execInDebugPod cfgSrc.debugPod cfgSrc.«namespace» s!"({bulk}) | nc -w 10 {sIp} {cfgSrc.flarePort} | grep -c STORED" with
+        | .error e => return .fail s!"bulk write failed: {e}"
+        | .ok o => if o.trim != toString (fillers + late) then return .fail s!"bulk write stored {o.trim} of {fillers + late}"
+        let sd ← scriptsDir
+        let some sPod ← masterPod cfgSrc | return .fail "no source master pod"
+        let _ ← runProc "rm" ["-rf", s!"{vDir}/baseline-live"]
+        let (cb, _, eb) ← runProc "python3" [s!"{sd}/flare_v_capture_kind.py", "--stats-only", "--ns", cfgSrc.«namespace»,
+                                             "--out", s!"{vDir}/baseline-live", sPod]
+        if cb != 0 then return .fail s!"baseline stats failed: {eb}"
+        let f0 ← statNat cfgSrc sIp "cluster_replication[seed_failed]"
+        let n0 ← statNat cfgSrc sIp "cluster_replication[seed_noop_not_stored]"
+        let st0 ← statNat cfgSrc sIp "cluster_replication[seed_started]"
+        match ← patchRepl s!"\{\"enabled\":true,\"serverName\":\"{dstSvc}\",\"port\":{cfgDst.flarePort},\"mode\":\"duplicate\",\"concurrency\":1,\"snapshotPush\":false}" with
+        | .error e => return .fail s!"enable failed: {e}"
+        | .ok _ => pure ()
+        -- overwrite the late keys as soon as this seed started
+        let started ← waitForCondition "the seed started" 300 do
+          return (← statNat cfgSrc sIp "cluster_replication[seed_started]") > st0
+        if !started then return .fail "the seed did not start within 300 s"
+        let stAtWrite ← statOf cfgSrc sIp "cluster_replication_seed"
+        let over := s!"i=0; while [ $i -lt {late} ]; do printf 'set zz_k_%03d 0 0 3\\r\\nnew\\r\\n' $i; i=$((i+1)); done"
+        match ← execInDebugPod cfgSrc.debugPod cfgSrc.«namespace» s!"({over}) | nc -w 5 {sIp} {cfgSrc.flarePort} | grep -c STORED" with
+        | .error e => return .fail s!"overwrite failed: {e}"
+        | .ok o => if o.trim != toString late then return .fail s!"overwrite stored {o.trim} of {late}"
+        let stAfterWrite ← statOf cfgSrc sIp "cluster_replication_seed"
+        let st ← waitSeed sIp st0 (fun s => s.startsWith "failed" || s.startsWith "completed") 600
+        let f1 ← statNat cfgSrc sIp "cluster_replication[seed_failed]"
+        let n1 ← statNat cfgSrc sIp "cluster_replication[seed_noop_not_stored]"
+        let interleaved : Int := (n1 : Int) - (n0 : Int) - (dItems0 : Int)
+        IO.eprintln s!"# live seed: state {st} (at the overwrite {stAtWrite.getD "?"} → {stAfterWrite.getD "?"}); seed_noop_not_stored {n0} → {n1} (destination held {dItems0} before: {interleaved} interleaved); seed_failed {f0} → {f1}"
+        if st != "completed_dump" then return .fail s!"seed state {st}, want completed_dump"
+        if f1 != f0 then return .fail s!"seed_failed moved {f0} → {f1}"
+        if interleaved < 1 then
+          return .fail s!"no interleaving observed (the seed passed the zz_ keys before their overwrite reached the destination): the test did not exercise a seed with writes flowing"
+        -- the writes have stopped (nothing else writes): wait for the
+        -- forwards to settle, then V over the whole copy
+        IO.sleep 10000
+        match ← runV "live" (baseline := "baseline-live") (attempt := "crp-live-seed") with
+        | .error e => return .fail e
+        | .ok (c, verdict) =>
+          if c != 0 then return .fail s!"want MATCH (exit 0), got exit {c}: {verdict}"
+          let dump ← try IO.FS.readFile s!"{vDir}/live/dst/{(← masterPod cfgDst).getD ""}.dump" catch _ => pure ""
+          if !containsSubstr dump "VALUE zz_k_000 0 3 " then return .fail "zz_k_000 is not on the destination"
+          return .pass }
   ]
 }
 

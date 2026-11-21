@@ -3364,6 +3364,10 @@ def checkMigrationForwardGate (ctx : Ctx) : IO Unit := do
       && podReplOf "s0" (st (sbase ++ [gauge 0, cn "forward_missing_set_not_found" "1"])) == none
       && podReplOf "s0" (st (sbase ++ [gauge 0, cn "seed_new" "1"])) == none
       && (podReplOf "s0" (st (sbase ++ [gauge 0, cn "forward_failed_touch_not_stored" "1", cn "seed_snapshot_push_disabled" "1"]))).isSome)
+  check ctx "podReplOf: seed_noop_not_stored (a dump key the destination already held at the same or a newer version) is a known non-terminal counter: trusted, not an outcome of a forward"
+    (settledOf (st (sbase ++ [gauge 0, cn "seed_noop_not_stored" "272", cn "seed_completed" "1"])) == some true
+      && settledOf (st (sbase ++ [gauge 0, cn "forward_enqueued" "1", cn "seed_noop_not_stored" "1"])) == some false
+      && forwardNonTerminal "seed_noop_not_stored" && !forwardTerminal "seed_noop_not_stored")
   check ctx "podReplOf: a forward answered and counted BEFORE forward_enqueued is (a very fast queue) reads in flight 1, enqueued 0, outcome 1 → held as in flight, never as 'more outcomes'"
     (settledOf (st (sbase ++ [gauge 1, cn "forward_applied" "1"])) == some false
       && ((podsHold "duplicate" (parsed0 [st (sbase ++ [gauge 1, cn "forward_applied" "1"])])).getD "").endsWith "in flight")

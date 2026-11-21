@@ -577,6 +577,48 @@ void test_wal_pin_free_space_floor_releases() {
 	delete s;
 }
 
+// NOT_STORED is the version check's answer only: a versioned set at the
+// same or an older version is NOT_STORED (rc 0), and a write RocksDB refused
+// is an error (rc -1, op_set answers SERVER_ERROR). A cross-cluster forward
+// and seed count NOT_STORED as a no-op, so a failed write must not look like
+// one (before, a failed Put answered NOT_STORED too).
+void test_set_not_stored_only_by_version_put_failure_is_error() {
+	const char dir[] = "tmp_rocksdb_set_put_fault";
+	storage_rocksdb* s = make_rocksdb(dir);
+	const string value = "v";
+	shared_byte data(new uint8_t[1]);
+	data.get()[0] = 'v';
+	storage::entry e;
+	e.key = "k";
+	e.size = value.size();
+	e.data = data;
+	e.version = 5;
+	storage::result r;
+	cut_assert_equal_int(0, s->set(e, r, 0));
+	cut_assert_equal_int(storage::result_stored, r);
+	e.version = 5;
+	cut_assert_equal_int(0, s->set(e, r, 0));
+	cut_assert_equal_int(storage::result_not_stored, r);
+	e.version = 4;
+	cut_assert_equal_int(0, s->set(e, r, 0));
+	cut_assert_equal_int(storage::result_not_stored, r);
+
+	storage_rocksdb::_test_put_fault = true;
+	storage::entry f;
+	f.key = "k2";
+	f.size = value.size();
+	f.data = data;
+	f.version = 1;
+	int rc = s->set(f, r, 0);
+	storage_rocksdb::_test_put_fault = false;
+	cut_assert_equal_int(-1, rc);
+	string out;
+	cut_assert_equal_int(-1, storage_get_string(s, "k2", out));
+	cut_assert_equal_int(0, s->set(f, r, 0));
+	cut_assert_equal_int(storage::result_stored, r);
+	drop_rocksdb(s, dir);
+}
+
 void test_wal_pin_failed_enable_then_new_pin_stays_balanced() {
 	const char dir[] = "tmp_rocksdb_wal_pin_enfail";
 	storage_rocksdb* s = make_small_wal(dir);

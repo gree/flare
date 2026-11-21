@@ -285,7 +285,12 @@ int handler_dump_replication::run() {
 		// or mis-routed every key still ended in "dump replication
 		// completed" + a recorded resync SUCCESS (observed live: a 15.8M-key
 		// cross-cluster dump was ACKed key by key and silently stored
-		// nowhere). Any result other than STORED counts as a failure; a
+		// nowhere). STORED is applied. NOT_STORED is the destination's
+		// version check: it holds this key at the same or a newer version
+		// (a write forwarded during the seed, or a destination that already
+		// had the copy), as a forward counts it (forward_noop_set_not_stored);
+		// a write the destination could not make answers SERVER_ERROR
+		// (storage_rocksdb::set). Any other result counts as a failure; a
 		// consecutive run means the destination is systemically not
 		// persisting -> abort loudly instead of completing a lie.
 		op_set* p = new op_set(this->_connection, NULL, NULL);
@@ -296,6 +301,9 @@ int handler_dump_replication::run() {
 		}
 		if (p->get_result() == op::result_stored) {
 			consecutive_set_failures = 0;
+		} else if (p->get_result() == op::result_not_stored) {
+			consecutive_set_failures = 0;
+			stats_object->crepl_incr("seed_noop_not_stored");
 		} else {
 			set_failures++;
 			consecutive_set_failures++;
@@ -331,11 +339,15 @@ int handler_dump_replication::run() {
 				   this->_replication_server_name.c_str(), this->_replication_server_port);
 	}
 	// The seed's outcome, for `stats`. "completed_*" says the transfer ran
-	// to its end with every set STORED (or the snapshot push confirmed) —
+	// to its end with every set STORED or NOT_STORED by the version check
+	// (or the snapshot push confirmed) —
 	// not that the destination equals this cluster: writes forwarded during
 	// the seed can still have been dropped (counted separately), and a
-	// failed seed is NOT retried here (a destination already partly written
-	// answers NOT_STORED for what it holds, which the dump counts as failed).
+	// failed seed is NOT retried here. A destination already partly written
+	// answers NOT_STORED for what it holds: counted as seed_noop_not_stored,
+	// not as a failure. It does not remove a key the destination holds and
+	// this cluster does not (a per-key dump sends only present keys):
+	// verification V finds such keys.
 	if (via_snapshot_push) {
 		stats_object->set_crepl_seed_state("completed_snapshot_push");
 		stats_object->crepl_incr("seed_completed");

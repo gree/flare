@@ -585,6 +585,9 @@ public:
 	// TEST SEAM (unit tests only): EnableFileDeletions of a WAL_PIN release
 	// fails as if RocksDB refused it
 	static bool _test_enable_fault;
+	// TEST SEAM (unit tests only): the Put of set() fails as if RocksDB
+	// refused the write
+	static bool _test_put_fault;
 	bool file_deletion_disables(uint64_t& n);
 	// Blob files of the default family: their total size and the bytes in
 	// them already known to be garbage (RocksDB's own accounting, updated by

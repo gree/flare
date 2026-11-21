@@ -178,6 +178,13 @@ populated destination:
 | key present at a NEWER version (written on the destination, or another lineage) | NOT_STORED — the source's value never lands; counted as failure |
 | expired on the source, present on the destination | the source skips it (get → not found); the destination expires it at the same absolute time unless its clock differs |
 
+Changed later (flare-dump-seed-notstored): the dump counts NOT_STORED as a
+no-op (`seed_noop_not_stored`), as a forward does, and a write the
+destination could not make answers SERVER_ERROR (it answered NOT_STORED
+before). A seed with writes flowing, or over a destination at the same
+versions, completes; the two rows above that stay wrong (a dropped delete,
+a newer value written on the destination) are found by V, not by the seed.
+
 So: re-seeding a populated destination needs it EMPTY first (then snapshot
 push copies whole files, or the merge dump runs onto nothing). A
 destination with ≤ 4096 items is replaced by snapshot push WITHOUT an

@@ -331,6 +331,13 @@ protected:
 	// blob_gc_compact_step: steps that compacted, and steps that failed
 	AtomicCounter _blob_gc_compactions;
 	AtomicCounter _blob_gc_compact_errors;
+	// steps that found another compaction in the way (nothing done, no error)
+	AtomicCounter _blob_gc_busy;
+	bool _blob_gc_abort_once_for_test;
+	bool _blob_gc_ioerror_for_test;
+	// the RocksDB status of the last step that failed ("" until one fails)
+	mutable pthread_mutex_t _mutex_blob_gc_last_error;
+	std::string _blob_gc_last_error;
 	// D1 (WSTR-0 audit): physically delete an entry found expired by get()
 	// only on the partition MASTER (its delete reaches replicas through the
 	// WAL). A replica filters the expired value but never deletes it by its
@@ -612,13 +619,21 @@ public:
 	// live blobs, never the whole copy, so the extra space at a time is about
 	// one SST. Returns 1 when it compacted, 0 when below the thresholds, GC
 	// is off (rocksdb-blob-gc false) or no SST references a blob file, -1 on
-	// an error.
+	// an error, 2 when a compaction RocksDB runs on its own is in the way
+	// (nothing done, no error: the pass tries again after its pause).
 	int blob_gc_compact_step(double min_ratio, uint64_t min_garbage_bytes);
 	// SSTs (L1 and below) that reference a blob file: the steps of one pass
 	// (each step moves the SST it compacts to the end of the order)
 	int blob_referencing_ssts();
 	uint64_t get_blob_gc_compactions()        { return this->_blob_gc_compactions.fetch(); }
 	uint64_t get_blob_gc_compact_errors()     { return this->_blob_gc_compact_errors.fetch(); }
+	uint64_t get_blob_gc_busy()               { return this->_blob_gc_busy.fetch(); }
+	std::string get_blob_gc_last_error() const {
+		pthread_mutex_lock(&this->_mutex_blob_gc_last_error);
+		const std::string e = this->_blob_gc_last_error;
+		pthread_mutex_unlock(&this->_mutex_blob_gc_last_error);
+		return e;
+	}
 	// TEST SEAMS (unit tests only): flush the memtable; flush and compact
 	// the whole default family down to the bottom level
 	int flush_for_test();
@@ -627,6 +642,10 @@ public:
 	// open; small values give a small copy several SSTs), and the names of
 	// the default family's SSTs below L0
 	void set_target_file_size_for_test(uint64_t bytes) { this->_options.target_file_size_base = bytes; }
+	// the next blob_gc_compact_step finds its CompactFiles refused with
+	// Status::Aborted, as when another compaction is in the way, or (io)
+	// failed with Status::IOError, a failure the step counts
+	void set_blob_gc_abort_once_for_test(bool io = false) { this->_blob_gc_abort_once_for_test = true; this->_blob_gc_ioerror_for_test = io; }
 	std::vector<std::string> sst_files_for_test();
 	// Blob garbage collection (ini rocksdb-blob-gc, default on); takes
 	// effect at the next open
@@ -710,6 +729,10 @@ public:
 private:
 	// Same, with _repl_apply_lock already held exclusively.
 	uint64_t _collect_tombstones_locked(uint64_t budget);
+	// blob_gc_compact_step: pick the SST to compact; whether the picked SST
+	// was taken by another compaction (gone, or being compacted)
+	bool _blob_gc_pick(std::string& name, int& level_out, uint64_t& oldest);
+	bool _blob_gc_pick_taken(const std::string& name);
 public:
 	/**
 	 *	Tombstone count (pf-dev 2026-10-20: the full metadata scan used to

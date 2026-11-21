@@ -116,12 +116,14 @@ int handler_dump_replication::_retract_if_gone(const storage::entry& seeded) {
 	storage::entry now;
 	now.key = seeded.key;
 	storage::result r = storage::result_none;
-	const int got = this->_storage->get(now, r);
+	// behavior_read_error: only a real absence retracts; a read the store
+	// failed is not taken for a delete (that would remove a valid copy)
+	const int got = this->_storage->get(now, r, storage::behavior_read_error);
+	if (got < 0) {
+		log_err("seed: cannot read key again after its set (key=%s) -> it may have been deleted meanwhile; failing the seed", seeded.key.c_str());
+		return 1;
+	}
 	if (r != storage::result_not_found) {
-		if (got < 0) {
-			log_err("seed: cannot read key again after its set (key=%s) -> it may have been deleted meanwhile; failing the seed", seeded.key.c_str());
-			return 1;
-		}
 		return 0;
 	}
 	if (seeded.version == 0) {
@@ -324,20 +326,24 @@ int handler_dump_replication::run() {
 		// differing keys on the destination held another key's value).
 		// Skip on not_found whatever the return code, as op_dump does, and
 		// read each key into a fresh entry so nothing of the previous one
-		// can be sent.
+		// can be sent. behavior_read_error: a read the store failed (an I/O
+		// error, a record it cannot decode) is -1, not "not found" — such a
+		// key is not skipped quietly: the seed fails (failed_transfer), as a
+		// key it could not send.
 		{
 			const string key = e.key;
 			e = storage::entry();
 			e.key = key;
 		}
 		storage::result r = storage::result_none;
-		const int got = this->_storage->get(e, r);
+		const int got = this->_storage->get(e, r, storage::behavior_read_error);
+		if (got < 0) {
+			log_err("seed: cannot read key (key=%s) -> failing the seed", e.key.c_str());
+			set_failures++;
+			break;
+		}
 		if (r == storage::result_not_found) {
 			log_info("skipping entry [key not found (deleted or expired after the iteration began)] (key=%s)", e.key.c_str());
-			continue;
-		}
-		if (got < 0) {
-			log_err("skipping entry [get() error] (key=%s)", e.key.c_str());
 			continue;
 		}
 

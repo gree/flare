@@ -501,6 +501,57 @@ namespace test_handler_dump_replication {
 		cut_assert_equal_int(0, (int)crepl("seed_completed"));
 	}
 
+	// A key the store fails to read (an I/O error; storage_rocksdb::get
+	// answers it as "not found" unless asked with behavior_read_error) is not
+	// skipped quietly: the seed stops and fails, and key2 is not sent.
+	void test_run_seed_fails_on_a_read_error() {
+		cluster::node master = cl->set_node("localhost", port, cluster::role_master, cluster::state_active);
+		cl->set_partition(0, master);
+		prepare_storage(3);
+		st->get_error.insert("key1");
+
+		shared_thread t = start_handler();
+		response_dump("STORED", 0);
+
+		usleep(200 * 1000);
+		cut_assert_equal_boolean(false, t->is_running());
+		cut_assert_equal_string("failed_transfer", stats_object->get_crepl_seed_state().c_str());
+		cut_assert_equal_int(1, (int)crepl("seed_failed"));
+		cut_assert_equal_int(0, (int)crepl("seed_completed"));
+	}
+
+	// The second read after a STORED fails in the store: that is not taken
+	// for a delete (a retraction would remove a valid copy on the
+	// destination). No delete is sent; the seed goes on to key1 and ends
+	// failed, since the key could not be checked.
+	void test_run_seed_does_not_retract_on_a_read_error() {
+		cluster::node master = cl->set_node("localhost", port, cluster::role_master, cluster::state_active);
+		cl->set_partition(0, master);
+		st->set_helper("key0", "VALUE", 0, 7);
+		st->set_helper("key1", "VALUE", 0, 3);
+
+		shared_thread t = start_handler();
+		char *p, *q;
+		cs[0]->readline(&p);
+		cs[0]->readline(&q);
+		cut_assert_equal_string("set key0 0 0 5 7\n", p);
+		delete[] p;
+		delete[] q;
+		st->add_get_error("key0");
+		cs[0]->writeline("STORED");
+
+		cs[0]->readline(&p);
+		cs[0]->readline(&q);
+		cut_assert_equal_string("set key1 0 0 5 3\n", p);
+		delete[] p;
+		delete[] q;
+		cs[0]->writeline("STORED");
+
+		usleep(200 * 1000);
+		cut_assert_equal_string("failed_transfer", stats_object->get_crepl_seed_state().c_str());
+		cut_assert_equal_int(1, (int)crepl("seed_failed"));
+	}
+
 	void test_run_failure_database_busy() {
 		// prepare
 		cluster::node master = cl->set_node("localhost", port, cluster::role_master, cluster::state_active);

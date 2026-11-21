@@ -45,6 +45,16 @@ public:
 	// expired after iter_begin): get() answers 0 + result_not_found and leaves
 	// the entry untouched, as storage_rocksdb::get does
 	std::set<string>	get_not_found;
+	// keys whose read fails in the store (an I/O error): get() answers -1 +
+	// result_none with behavior_read_error, and 0 + result_not_found without
+	// it, as storage_rocksdb::get does
+	std::set<string>	get_error;
+	// add to get_error while a handler thread may read (under the mutex)
+	void add_get_error(const string& key) {
+		pthread_mutex_lock(&this->_mutex);
+		this->get_error.insert(key);
+		pthread_mutex_unlock(&this->_mutex);
+	}
 
 protected:
 	map<string, storage::entry>						_map;

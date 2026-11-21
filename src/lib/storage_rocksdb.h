@@ -647,6 +647,11 @@ public:
 	// failed with Status::IOError, a failure the step counts
 	void set_blob_gc_abort_once_for_test(bool io = false) { this->_blob_gc_abort_once_for_test = true; this->_blob_gc_ioerror_for_test = io; }
 	std::vector<std::string> sst_files_for_test();
+	// write a raw default-family record (unit tests only: a record get()
+	// cannot decode)
+	int put_raw_for_test(const std::string& key, const std::string& value) {
+		return this->_db != NULL && this->_db->Put(this->_write_options, key, value).ok() ? 0 : -1;
+	}
 	// Blob garbage collection (ini rocksdb-blob-gc, default on); takes
 	// effect at the next open
 	void set_blob_gc(bool on) { this->_blob_gc = on; this->_options.enable_blob_garbage_collection = on; }

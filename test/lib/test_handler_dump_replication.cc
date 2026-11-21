@@ -437,6 +437,70 @@ namespace test_handler_dump_replication {
 		cut_assert_equal_int(0, (int)crepl("seed_noop_not_stored"));
 	}
 
+	// The seed has read key0 (version 7) and sent it; the source deletes
+	// key0 before the destination's STORED arrives. Its forwarded delete may
+	// have reached the destination first, and the destination does not
+	// compare this plain versioned set with that delete, so the seed must
+	// retract exactly what it seeded: "delete key0 0 7". A newer value on
+	// the destination has a higher version and refuses that delete.
+	void seed_key0_then_delete_it_before_stored(const char* retract_answer) {
+		cluster::node master = cl->set_node("localhost", port, cluster::role_master, cluster::state_active);
+		cl->set_partition(0, master);
+		st->set_helper("key0", "VALUE", 0, 7);
+		st->set_helper("key1", "VALUE", 0, 3);
+
+		shared_thread t = start_handler();
+		char *p, *q, *d;
+		cs[0]->readline(&p);
+		cs[0]->readline(&q);
+		cut_assert_equal_string("set key0 0 0 5 7\n", p);
+		delete[] p;
+		delete[] q;
+		storage::entry gone;
+		gone.key = "key0";
+		storage::result r;
+		st->remove(gone, r);
+		cs[0]->writeline("STORED");
+
+		cs[0]->readline(&d);
+		cut_assert_equal_string("delete key0 0 7\n", d);
+		delete[] d;
+		cs[0]->writeline(retract_answer);
+	}
+
+	void test_run_seed_retracts_key_deleted_before_its_set_was_stored() {
+		seed_key0_then_delete_it_before_stored("DELETED");
+		char *p, *q;
+		cs[0]->readline(&p);
+		cs[0]->readline(&q);
+		cut_assert_equal_string("set key1 0 0 5 3\n", p);
+		delete[] p;
+		delete[] q;
+		cs[0]->writeline("STORED");
+
+		usleep(200 * 1000);
+		cut_assert_equal_string("completed_dump", stats_object->get_crepl_seed_state().c_str());
+		cut_assert_equal_int(1, (int)crepl("seed_completed"));
+		cut_assert_equal_int(0, (int)crepl("seed_failed"));
+	}
+
+	// A retraction the destination does not accept leaves the key there:
+	// the seed fails instead of completing.
+	void test_run_seed_fails_when_retraction_is_refused() {
+		seed_key0_then_delete_it_before_stored("SERVER_ERROR i/o error");
+		char *p, *q;
+		cs[0]->readline(&p);
+		cs[0]->readline(&q);
+		delete[] p;
+		delete[] q;
+		cs[0]->writeline("STORED");
+
+		usleep(200 * 1000);
+		cut_assert_equal_string("failed_transfer", stats_object->get_crepl_seed_state().c_str());
+		cut_assert_equal_int(1, (int)crepl("seed_failed"));
+		cut_assert_equal_int(0, (int)crepl("seed_completed"));
+	}
+
 	void test_run_failure_database_busy() {
 		// prepare
 		cluster::node master = cl->set_node("localhost", port, cluster::role_master, cluster::state_active);

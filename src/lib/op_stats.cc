@@ -397,6 +397,16 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 				_send_stat("rocksdb_blob_gc_compactions"     , static_cast<long long>(rdb->get_blob_gc_compactions()));
 				_send_stat("rocksdb_blob_gc_compact_errors"  , static_cast<long long>(rdb->get_blob_gc_compact_errors()));
 				_send_stat("rocksdb_blob_gc_busy"            , static_cast<long long>(rdb->get_blob_gc_busy()));
+				// the SST and RocksDB status of the last failed step, "-" until one fails
+				{
+					string e = rdb->get_blob_gc_last_error();
+					for (size_t i = 0; i < e.size(); i++) {
+						if (e[i] == '\r' || e[i] == '\n') {
+							e[i] = ' ';
+						}
+					}
+					_send_stat("rocksdb_blob_gc_last_error"      , e.empty() ? string("-") : e);
+				}
 			}
 			_send_stat("rocksdb_rebuild_reserve_bytes"      , static_cast<long long>(rdb->get_rebuild_reserve_bytes()));
 			_send_stat("rebuild_blocked"                    , rdb->get_rebuild_blocked());

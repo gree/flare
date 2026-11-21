@@ -2610,6 +2610,16 @@ void test_blob_gc_compact_step_reclaims_garbage_gc_left() {
 	cut_assert_equal_string(cold.c_str(), out.c_str());
 	cut_assert_equal_int(0, storage_get_string(s, "h7", out));
 	cut_assert_equal_string(hot.c_str(), out.c_str());
+
+	// a step that fails (seam: CompactFiles answers IOError) is counted, and
+	// its SST and RocksDB status are kept for stats rocksdb_blob_gc_last_error
+	cut_assert_equal_string("", s->get_blob_gc_last_error().c_str());
+	s->set_blob_gc_abort_once_for_test(true);
+	cut_assert_equal_int(-1, s->blob_gc_compact_step(0.0, 0));
+	cut_assert_equal_int(1, static_cast<int>(s->get_blob_gc_compact_errors()));
+	const string last_error = s->get_blob_gc_last_error();
+	cut_assert_true(last_error.find(".sst: IO error: test: compaction failed") != string::npos,
+		cut_message("last error: %s", last_error.c_str()));
 	s->close();
 	delete s;
 	cut_remove_path(dir, NULL);

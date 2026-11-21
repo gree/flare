@@ -165,6 +165,7 @@ storage_rocksdb::storage_rocksdb(
 	_blob_gc_compact_errors(0),
 	_blob_gc_busy(0),
 	_blob_gc_abort_once_for_test(false),
+	_blob_gc_ioerror_for_test(false),
 	_lazy_expiry_delete(false),
 	_follow_generation(0),
 	_expire_filtered(0),
@@ -5160,7 +5161,9 @@ int storage_rocksdb::blob_gc_compact_step(double min_ratio, uint64_t min_garbage
 		co.compression = this->_options.compression;
 		if (this->_blob_gc_abort_once_for_test) {
 			this->_blob_gc_abort_once_for_test = false;
-			st = rocksdb::Status::Aborted("test: another compaction in the way");
+			st = this->_blob_gc_ioerror_for_test
+				? rocksdb::Status::IOError("test: compaction failed")
+				: rocksdb::Status::Aborted("test: another compaction in the way");
 		} else {
 			st = this->_db->CompactFiles(co, this->_cf_default, {pick_name}, pick_level);
 		}

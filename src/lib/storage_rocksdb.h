@@ -334,6 +334,7 @@ protected:
 	// steps that found another compaction in the way (nothing done, no error)
 	AtomicCounter _blob_gc_busy;
 	bool _blob_gc_abort_once_for_test;
+	bool _blob_gc_ioerror_for_test;
 	// the RocksDB status of the last step that failed ("" until one fails)
 	mutable pthread_mutex_t _mutex_blob_gc_last_error;
 	std::string _blob_gc_last_error;
@@ -642,8 +643,9 @@ public:
 	// the default family's SSTs below L0
 	void set_target_file_size_for_test(uint64_t bytes) { this->_options.target_file_size_base = bytes; }
 	// the next blob_gc_compact_step finds its CompactFiles refused with
-	// Status::Aborted, as when another compaction is in the way
-	void set_blob_gc_abort_once_for_test() { this->_blob_gc_abort_once_for_test = true; }
+	// Status::Aborted, as when another compaction is in the way, or (io)
+	// failed with Status::IOError, a failure the step counts
+	void set_blob_gc_abort_once_for_test(bool io = false) { this->_blob_gc_abort_once_for_test = true; this->_blob_gc_ioerror_for_test = io; }
 	std::vector<std::string> sst_files_for_test();
 	// Blob garbage collection (ini rocksdb-blob-gc, default on); takes
 	// effect at the next open

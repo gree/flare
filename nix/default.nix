@@ -83,6 +83,7 @@ stdenv.mkDerivation {
     grep -E 'test_blob_gc_compact_step_reclaims_garbage_gc_left' test/run-tests.sh.log || echo "blob GC compaction step test NOT found in the cutter log"
     # cross-cluster seed: NOT_STORED (version check) is a no-op, a failed write is an error
     grep -E 'test_run_seed_not_stored_is_noop_and_completes|test_set_not_stored_only_by_version_put_failure_is_error' test/run-tests.sh.log || echo "seed not-stored tests NOT found in the cutter log"
+    grep -E 'test_run_seed_skips_key_gone_after_iteration_began|test_run_seed_retracts_key_deleted_before_its_set_was_stored|test_run_seed_fails_when_retraction_is_refused' test/run-tests.sh.log || echo "seed gone-key tests NOT found in the cutter log"
     # read timeouts: opened connections 30 s in the k8s build, accepted (client) connections net_read_timeout
     grep -E 'test_effective_read_timeout_is_the_same_rule_at_startup_and_reload|test_accepted_connections_use_net_read_timeout_in_every_build' test/run-tests.sh.log || echo "read timeout tests NOT found in the cutter log"
     # a forwarding connection the sender has not used for proxy_idle_close_sec is closed by the sender and reopened on the next forward

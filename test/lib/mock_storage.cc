@@ -73,7 +73,9 @@ int mock_storage::incr(entry& e, uint64_t value, result& r, bool increment, int 
 int mock_storage::get(entry& e, result& r, int b) {
 	pthread_mutex_lock(&this->_mutex);
 	map<string, storage::entry>::iterator it = this->_map.find(e.key);
-	if (it != this->_map.end()) {
+	if (this->get_not_found.count(e.key) > 0) {
+		r = result_not_found;
+	} else if (it != this->_map.end()) {
 		r = result_found;
 		e = (*it).second;
 	} else {

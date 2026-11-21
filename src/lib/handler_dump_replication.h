@@ -74,6 +74,7 @@ private:
 	long _sleep_for_bwlimit(int bytes_written, int bwlimit);
 	shared_connection _open_bounded(const string& name, int port);
 	bool _wait_or_shutdown(int ms);
+	int _retract_if_gone(const storage::entry& seeded);
 };
 
 }	// namespace flare

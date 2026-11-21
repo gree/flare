@@ -27,6 +27,7 @@
 #ifndef MOCK_STORAGE_H
 #define MOCK_STORAGE_H
 
+#include <set>
 #include <string>
 
 #include <storage.h>
@@ -40,6 +41,10 @@ namespace flare {
 class mock_storage : public storage {
 public:
 	int		iter_wait;
+	// keys the iteration still yields but get() no longer finds (deleted or
+	// expired after iter_begin): get() answers 0 + result_not_found and leaves
+	// the entry untouched, as storage_rocksdb::get does
+	std::set<string>	get_not_found;
 
 protected:
 	map<string, storage::entry>						_map;

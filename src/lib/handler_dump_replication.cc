@@ -32,6 +32,7 @@
 #include "connection_tcp.h"
 #include "handler_proxy.h"
 #include "op_set.h"
+#include "op_delete.h"
 #include "op_repl_snapshot_push.h"
 #include "op_meta.h"
 #include <inttypes.h>
@@ -100,6 +101,52 @@ bool handler_dump_replication::_wait_or_shutdown(int ms) {
 		usleep(100 * 1000);
 	}
 	return !this->_thread->is_shutdown_request();
+}
+
+/**
+ *	After a seeded set was STORED: if the key is gone from this source now,
+ *	send the destination a delete at the seeded version, so a set that
+ *	arrived after the key's forwarded delete does not leave it there.
+ *	0: nothing to retract, or retracted (DELETED, or NOT_FOUND: a newer
+ *	version or no key there); 1: not retracted (the destination answered
+ *	something else, the source could not be read, or the seeded entry had
+ *	no version to bound the delete) — the seed must fail; -1: no answer.
+ */
+int handler_dump_replication::_retract_if_gone(const storage::entry& seeded) {
+	storage::entry now;
+	now.key = seeded.key;
+	storage::result r = storage::result_none;
+	const int got = this->_storage->get(now, r);
+	if (r != storage::result_not_found) {
+		if (got < 0) {
+			log_err("seed: cannot read key again after its set (key=%s) -> it may have been deleted meanwhile; failing the seed", seeded.key.c_str());
+			return 1;
+		}
+		return 0;
+	}
+	if (seeded.version == 0) {
+		log_err("seed: key deleted after its set but the seeded entry has no version (key=%s) -> an unversioned delete could remove a newer value; failing the seed", seeded.key.c_str());
+		return 1;
+	}
+
+	storage::entry d;
+	d.key = seeded.key;
+	d.version = seeded.version;
+	op_delete* p = new op_delete(this->_connection, NULL, NULL);
+	if (p->run_client(d) < 0) {
+		delete p;
+		return -1;
+	}
+	const op::result answered = p->get_result();
+	delete p;
+	if (answered == op::result_deleted || answered == op::result_not_found) {
+		log_info("seed: retracted a key deleted after its set (key=%s, version=%llu, result=%d)",
+				seeded.key.c_str(), (unsigned long long)seeded.version, static_cast<int>(answered));
+		return 0;
+	}
+	log_err("seed: retracting a key deleted after its set was not accepted (key=%s, version=%llu, result=%d) -> failing the seed",
+			seeded.key.c_str(), (unsigned long long)seeded.version, static_cast<int>(answered));
+	return 1;
 }
 
 int handler_dump_replication::run() {
@@ -269,13 +316,28 @@ int handler_dump_replication::run() {
 			}
 		}
 
-		storage::result r;
-		if (this->_storage->get(e, r) < 0) {
-			if (r == storage::result_not_found) {
-				log_info("skipping entry [key not found (perhaps expired)] (key=%s)", e.key.c_str());
-			} else {
-				log_err("skipping entry [get() error] (key=%s)", e.key.c_str());
-			}
+		// A key the iteration yields can be gone by the time it is read (a
+		// delete or an expiry after iter_begin): get() then returns 0 with
+		// result_not_found, not a negative code, and leaves the entry as it
+		// was. Checking only the return code sent the PREVIOUS key's value
+		// and version under this key's name (kind, rc76: every one of 577
+		// differing keys on the destination held another key's value).
+		// Skip on not_found whatever the return code, as op_dump does, and
+		// read each key into a fresh entry so nothing of the previous one
+		// can be sent.
+		{
+			const string key = e.key;
+			e = storage::entry();
+			e.key = key;
+		}
+		storage::result r = storage::result_none;
+		const int got = this->_storage->get(e, r);
+		if (r == storage::result_not_found) {
+			log_info("skipping entry [key not found (deleted or expired after the iteration began)] (key=%s)", e.key.c_str());
+			continue;
+		}
+		if (got < 0) {
+			log_err("skipping entry [get() error] (key=%s)", e.key.c_str());
 			continue;
 		}
 
@@ -301,6 +363,23 @@ int handler_dump_replication::run() {
 		}
 		if (p->get_result() == op::result_stored) {
 			consecutive_set_failures = 0;
+			// The key can be deleted here between the read above and this
+			// STORED, and its forwarded delete can reach the destination
+			// FIRST: the destination does not compare a plain versioned set
+			// with the delete it already applied (only a local dump does), so
+			// this set brought the key back there. Read the key again now
+			// that the set is applied: if it is gone, retract exactly what
+			// was seeded with a delete at the seeded version. A newer value
+			// on the destination has a higher version and refuses it; a
+			// delete after this read is forwarded after this set was applied.
+			const int retracted = this->_retract_if_gone(e);
+			if (retracted < 0) {
+				delete p;
+				set_failures++;
+				break;
+			} else if (retracted > 0) {
+				set_failures++;
+			}
 		} else if (p->get_result() == op::result_not_stored) {
 			consecutive_set_failures = 0;
 			stats_object->crepl_incr("seed_noop_not_stored");

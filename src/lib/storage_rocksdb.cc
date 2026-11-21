@@ -161,6 +161,8 @@ storage_rocksdb::storage_rocksdb(
 	_wal_sync_crc_mismatch(0),
 	_wal_fallback_to_dump(0),
 	_expire_reaped(0),
+	_blob_gc_compactions(0),
+	_blob_gc_compact_errors(0),
 	_lazy_expiry_delete(false),
 	_follow_generation(0),
 	_expire_filtered(0),
@@ -5108,6 +5110,134 @@ bool storage_rocksdb::blob_file_bytes(uint64_t& total, uint64_t& garbage) {
 		&& this->_db->GetIntProperty("rocksdb.live-blob-file-garbage-size", &garbage);
 	pthread_rwlock_unlock(&this->_mutex_wholelock);
 	return ok;
+}
+
+int storage_rocksdb::blob_gc_compact_step(double min_ratio, uint64_t min_garbage_bytes) {
+	pthread_rwlock_rdlock(&this->_mutex_wholelock);
+	if (this->_db == NULL || this->_corrupted || !this->_blob_gc) {
+		pthread_rwlock_unlock(&this->_mutex_wholelock);
+		return 0;
+	}
+	uint64_t total = 0, garbage = 0;
+	if (!this->_db->GetIntProperty("rocksdb.total-blob-file-size", &total)
+			|| !this->_db->GetIntProperty("rocksdb.live-blob-file-garbage-size", &garbage)) {
+		pthread_rwlock_unlock(&this->_mutex_wholelock);
+		this->_blob_gc_compact_errors.incr();
+		return -1;
+	}
+	if (total == 0 || garbage < min_garbage_bytes
+			|| static_cast<double>(garbage) < min_ratio * static_cast<double>(total)) {
+		pthread_rwlock_unlock(&this->_mutex_wholelock);
+		return 0;
+	}
+	// The SST (L1 and below) whose oldest blob reference is the oldest:
+	// compacting it rewrites that reference, so the next step picks another
+	// SST and the steps go round every SST that points into a blob file.
+	// L0 is left to the automatic compactions that take it down.
+	rocksdb::ColumnFamilyMetaData meta;
+	this->_db->GetColumnFamilyMetaData(this->_cf_default, &meta);
+	std::string pick_name;
+	int pick_level = -1;
+	uint64_t pick_oldest = 0;
+	for (const rocksdb::LevelMetaData& level : meta.levels) {
+		if (level.level == 0) {
+			continue;
+		}
+		for (const rocksdb::SstFileMetaData& f : level.files) {
+			if (f.oldest_blob_file_number == 0 || f.being_compacted) {
+				continue;
+			}
+			if (pick_level < 0 || f.oldest_blob_file_number < pick_oldest) {
+				pick_name = f.relative_filename;
+				pick_level = level.level;
+				pick_oldest = f.oldest_blob_file_number;
+			}
+		}
+	}
+	if (pick_level < 0) {
+		pthread_rwlock_unlock(&this->_mutex_wholelock);
+		return 0;
+	}
+	// CompactFiles on that one file into its own level: no file of another
+	// level joins (CompactRange would take every file overlapping the range
+	// level by level, so a wide upper-level file can pull in much of the
+	// bottom level). CompactFiles takes the blob GC age cutoff from the
+	// column family's options, so it is 1.0 (every blob the file references
+	// is rewritten) for this call only. With every blob file inside the
+	// cutoff, RocksDB's own forced GC would mark the SSTs of the oldest batch
+	// and compact them alongside, so the force threshold is 1.0 (off) for the
+	// same call; an automatic compaction that starts meanwhile relocates all
+	// its blobs, which costs work, not data. Both go back afterwards.
+	rocksdb::Status st = this->_db->SetOptions(this->_cf_default,
+		{{"blob_garbage_collection_force_threshold", "1.0"},
+		 {"blob_garbage_collection_age_cutoff", "1.0"}});
+	if (st.ok()) {
+		rocksdb::CompactionOptions co;
+		co.compression = this->_options.compression;
+		st = this->_db->CompactFiles(co, this->_cf_default, {pick_name}, pick_level);
+		char cutoff[32], force[32];
+		snprintf(cutoff, sizeof(cutoff), "%g", this->_options.blob_garbage_collection_age_cutoff);
+		snprintf(force, sizeof(force), "%g", this->_options.blob_garbage_collection_force_threshold);
+		rocksdb::Status rs = this->_db->SetOptions(this->_cf_default,
+			{{"blob_garbage_collection_age_cutoff", cutoff},
+			 {"blob_garbage_collection_force_threshold", force}});
+		if (!rs.ok()) {
+			log_err("blob GC compaction: restoring blob_garbage_collection_age_cutoff %s / force_threshold %s failed: %s",
+				cutoff, force, rs.ToString().c_str());
+			if (st.ok()) {
+				st = rs;
+			}
+		}
+	}
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	if (!st.ok()) {
+		log_warning("blob GC compaction of %s (L%d, oldest blob file %llu) failed: %s",
+			pick_name.c_str(), pick_level, (unsigned long long)pick_oldest, st.ToString().c_str());
+		this->_blob_gc_compact_errors.incr();
+		return -1;
+	}
+	this->_blob_gc_compactions.incr();
+	log_debug("blob GC compaction: %s (L%d, oldest blob file %llu); garbage %llu of %llu blob bytes before",
+		pick_name.c_str(), pick_level, (unsigned long long)pick_oldest,
+		(unsigned long long)garbage, (unsigned long long)total);
+	return 1;
+}
+
+int storage_rocksdb::blob_referencing_ssts() {
+	int n = 0;
+	pthread_rwlock_rdlock(&this->_mutex_wholelock);
+	if (this->_db != NULL) {
+		rocksdb::ColumnFamilyMetaData meta;
+		this->_db->GetColumnFamilyMetaData(this->_cf_default, &meta);
+		for (const rocksdb::LevelMetaData& level : meta.levels) {
+			for (const rocksdb::SstFileMetaData& f : level.files) {
+				if (level.level > 0 && f.oldest_blob_file_number != 0) {
+					n++;
+				}
+			}
+		}
+	}
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	return n;
+}
+
+std::vector<std::string> storage_rocksdb::sst_files_for_test() {
+	std::vector<std::string> names;
+	pthread_rwlock_rdlock(&this->_mutex_wholelock);
+	if (this->_db != NULL) {
+		rocksdb::ColumnFamilyMetaData meta;
+		this->_db->GetColumnFamilyMetaData(this->_cf_default, &meta);
+		for (const rocksdb::LevelMetaData& level : meta.levels) {
+			for (const rocksdb::SstFileMetaData& f : level.files) {
+				if (level.level > 0) {
+					names.push_back(f.relative_filename);
+				}
+			}
+		}
+	}
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
+	std::sort(names.begin(), names.end());
+	return names;
 }
 
 int storage_rocksdb::compact_for_test() {

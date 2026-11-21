@@ -122,6 +122,10 @@ ini_option::ini_option():
 		_reap_expired_chunk_sleep_msec(default_reap_expired_chunk_sleep_msec),
 		_metrics_server_port(default_metrics_server_port),
 		_storage_check_interval(default_storage_check_interval),
+		_rocksdb_blob_compact_interval(default_rocksdb_blob_compact_interval),
+		_rocksdb_blob_compact_percent(default_rocksdb_blob_compact_percent),
+		_rocksdb_blob_compact_min_mb(default_rocksdb_blob_compact_min_mb),
+		_rocksdb_blob_compact_pause_ms(default_rocksdb_blob_compact_pause_ms),
 		_log_stderr(false) {
 	pthread_mutex_init(&this->_mutex_index_servers, NULL);
 }
@@ -541,6 +545,18 @@ int ini_option::load() {
 		if (opt_var_map.count("storage-check-interval")) {
 			this->_storage_check_interval = opt_var_map["storage-check-interval"].as<int>();
 		}
+		if (opt_var_map.count("rocksdb-blob-compact-interval")) {
+			this->_rocksdb_blob_compact_interval = opt_var_map["rocksdb-blob-compact-interval"].as<int>();
+		}
+		if (opt_var_map.count("rocksdb-blob-compact-percent")) {
+			this->_rocksdb_blob_compact_percent = opt_var_map["rocksdb-blob-compact-percent"].as<int>();
+		}
+		if (opt_var_map.count("rocksdb-blob-compact-min-mb")) {
+			this->_rocksdb_blob_compact_min_mb = opt_var_map["rocksdb-blob-compact-min-mb"].as<int>();
+		}
+		if (opt_var_map.count("rocksdb-blob-compact-pause-ms")) {
+			this->_rocksdb_blob_compact_pause_ms = opt_var_map["rocksdb-blob-compact-pause-ms"].as<int>();
+		}
 	} catch (int e) {
 		cout << option << endl;
 		return -1;
@@ -712,6 +728,22 @@ int ini_option::reload() {
 		if (opt_var_map.count("storage-check-interval")) {
 			log_notice("  storage_check_interval: %d -> %d", this->_storage_check_interval, opt_var_map["storage-check-interval"].as<int>());
 			this->_storage_check_interval = opt_var_map["storage-check-interval"].as<int>();
+		}
+		if (opt_var_map.count("rocksdb-blob-compact-interval")) {
+			log_notice("  rocksdb_blob_compact_interval: %d -> %d", this->_rocksdb_blob_compact_interval, opt_var_map["rocksdb-blob-compact-interval"].as<int>());
+			this->_rocksdb_blob_compact_interval = opt_var_map["rocksdb-blob-compact-interval"].as<int>();
+		}
+		if (opt_var_map.count("rocksdb-blob-compact-percent")) {
+			log_notice("  rocksdb_blob_compact_percent: %d -> %d", this->_rocksdb_blob_compact_percent, opt_var_map["rocksdb-blob-compact-percent"].as<int>());
+			this->_rocksdb_blob_compact_percent = opt_var_map["rocksdb-blob-compact-percent"].as<int>();
+		}
+		if (opt_var_map.count("rocksdb-blob-compact-min-mb")) {
+			log_notice("  rocksdb_blob_compact_min_mb: %d -> %d", this->_rocksdb_blob_compact_min_mb, opt_var_map["rocksdb-blob-compact-min-mb"].as<int>());
+			this->_rocksdb_blob_compact_min_mb = opt_var_map["rocksdb-blob-compact-min-mb"].as<int>();
+		}
+		if (opt_var_map.count("rocksdb-blob-compact-pause-ms")) {
+			log_notice("  rocksdb_blob_compact_pause_ms: %d -> %d", this->_rocksdb_blob_compact_pause_ms, opt_var_map["rocksdb-blob-compact-pause-ms"].as<int>());
+			this->_rocksdb_blob_compact_pause_ms = opt_var_map["rocksdb-blob-compact-pause-ms"].as<int>();
 		}
 
 		// The remaining rocksdb options require reopening the DB (block cache,
@@ -1015,7 +1047,11 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("reap-expired-chunk-size",				program_options::value<int>(),		"keys scanned per chunk before the throttle sleep (default 10000, dynamic, rocksdb only)")
 		("reap-expired-chunk-sleep-msec",		program_options::value<int>(),		"throttle sleep between chunks in msec (default 100, dynamic, rocksdb only)")
 		("metrics-server-port",					program_options::value<int>(),		"port for the native Prometheus /metrics endpoint; 0 = disabled (default 0, static)")
-		("storage-check-interval",				program_options::value<int>(),		"seconds between periodic full-checksum storage integrity checks; 0 = disabled (default 0, dynamic, rocksdb only)");
+		("storage-check-interval",				program_options::value<int>(),		"seconds between periodic full-checksum storage integrity checks; 0 = disabled (default 0, dynamic, rocksdb only)")
+		("rocksdb-blob-compact-interval",	program_options::value<int>(),		"seconds between checks for blob garbage RocksDB's GC left behind; when found, SSTs are compacted one at a time until it is below the thresholds; 0 = off (default 600, dynamic, rocksdb only)")
+		("rocksdb-blob-compact-percent",		program_options::value<int>(),		"compact while the blob garbage is at least this percent of the blob file bytes (default 50, dynamic, rocksdb only)")
+		("rocksdb-blob-compact-min-mb",		program_options::value<int>(),		"and at least this many MB (default 512, dynamic, rocksdb only)")
+		("rocksdb-blob-compact-pause-ms",	program_options::value<int>(),		"pause between two SST compactions (default 1000, dynamic, rocksdb only)");
 
 	return 0;
 }

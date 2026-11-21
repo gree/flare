@@ -2111,9 +2111,9 @@
         "SAF-09"
       ],
       "review": {
-        "commit": "7afb4038d5d85abeea6655f86cf1137fa6ec9ee8",
+        "commit": "981c845b1175cd2d919d36c6e80dba755232e286",
         "date": "2026-11-21",
-        "note": "Change-impact note for fix/dump-seed-notstored (76c24868..7afb4038), claim unchanged: a cross-cluster per-key seed counts the destination's NOT_STORED (its version check) as a no-op, seed_noop_not_stored, and a failed RocksDB write answers SERVER_ERROR. Read in this control's referenced file(s): UnitTests.lean: one added check (seed_noop_not_stored is a known non-terminal replication counter: a reply carrying it is trusted and it is not summed as a forward outcome); no existing check changes. Migration/Types.lean (not referenced by this control) adds the name to forwardNonTerminal. No topology, leader, lease or authority code changes. Evidence: flare_unit 1046 ok (kjob-run-flare-operator-9b80). This control's checks, scenarios and status are unchanged."
+        "note": "Change-impact note for fix/blob-gc-compact (345553ac..981c845b), claim unchanged: flared reclaims the blob garbage RocksDB's own GC leaves behind (it forces a compaction only when the oldest blob files are mostly garbage) with a background pass that compacts each SST referencing a blob file once, one SST at a time, when the garbage is at least rocksdb-blob-compact-percent and rocksdb-blob-compact-min-mb; FlareCluster spec.rocksdb.blobCompact* set the thresholds. Read in this control's referenced file(s): FlareCluster.lean: RocksdbConfigSpec gets four optional fields (blobCompactIntervalSeconds, blobCompactPercent, blobCompactMinMb, blobCompactPauseMs), counted in hasAny and rendered as rocksdb-blob-compact-* after rocksdb-blob-gc only when set; entries renders each value through @[simp, noinline] natValue/boolValue instead of an inline Option.map (same strings; the inline form compiled in time doubling with each field); no other type or function changes; UnitTests.lean: one added check (blob compaction thresholds render into extra.conf only when set, after rocksdb-blob-gc); no existing check changes. Evidence: cutter test_blob_gc_compact_step_reclaims_garbage_gc_left and test_blob_gc_reclaims_overwritten_values ok (kjob-run-flare-blob-gc-compac-3ddb); flare_unit 1047 ok (kjob-run-flare-operator-f900). No claim, check or scenario changes."
       },
       "status": {
         "implemented": {
@@ -3347,9 +3347,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "7afb4038d5d85abeea6655f86cf1137fa6ec9ee8",
+        "commit": "981c845b1175cd2d919d36c6e80dba755232e286",
         "date": "2026-11-21",
-        "note": "Change-impact note for fix/dump-seed-notstored (76c24868..7afb4038), claim unchanged: a cross-cluster per-key seed counts the destination's NOT_STORED (its version check) as a no-op, seed_noop_not_stored, and a failed RocksDB write answers SERVER_ERROR. Read in this control's referenced file(s): UnitTests.lean: one added check (seed_noop_not_stored is a known non-terminal replication counter: a reply carrying it is trusted and it is not summed as a forward outcome); no existing check changes. Evidence: flare_unit 1046 ok (kjob-run-flare-operator-9b80). This control's checks, scenarios and status are unchanged."
+        "note": "Change-impact note for fix/blob-gc-compact (345553ac..981c845b), claim unchanged: flared reclaims the blob garbage RocksDB's own GC leaves behind (it forces a compaction only when the oldest blob files are mostly garbage) with a background pass that compacts each SST referencing a blob file once, one SST at a time, when the garbage is at least rocksdb-blob-compact-percent and rocksdb-blob-compact-min-mb; FlareCluster spec.rocksdb.blobCompact* set the thresholds. Read in this control's referenced file(s): UnitTests.lean: one added check (blob compaction thresholds render into extra.conf only when set, after rocksdb-blob-gc); no existing check changes. Evidence: cutter test_blob_gc_compact_step_reclaims_garbage_gc_left and test_blob_gc_reclaims_overwritten_values ok (kjob-run-flare-blob-gc-compac-3ddb); flare_unit 1047 ok (kjob-run-flare-operator-f900). No claim, check or scenario changes."
       },
       "status": {
         "implemented": {
@@ -4623,9 +4623,9 @@
         "SAF-08"
       ],
       "review": {
-        "commit": "7afb4038d5d85abeea6655f86cf1137fa6ec9ee8",
+        "commit": "981c845b1175cd2d919d36c6e80dba755232e286",
         "date": "2026-11-21",
-        "note": "Change-impact note for fix/dump-seed-notstored (76c24868..7afb4038), claim unchanged: a cross-cluster per-key seed counts the destination's NOT_STORED (its version check) as a no-op, seed_noop_not_stored, and a failed RocksDB write answers SERVER_ERROR. Read in this control's referenced file(s): UnitTests.lean: one added check (seed_noop_not_stored is a known non-terminal replication counter: a reply carrying it is trusted and it is not summed as a forward outcome); no existing check changes. Evidence: flare_unit 1046 ok (kjob-run-flare-operator-9b80). This control's checks, scenarios and status are unchanged."
+        "note": "Change-impact note for fix/blob-gc-compact (345553ac..981c845b), claim unchanged: flared reclaims the blob garbage RocksDB's own GC leaves behind (it forces a compaction only when the oldest blob files are mostly garbage) with a background pass that compacts each SST referencing a blob file once, one SST at a time, when the garbage is at least rocksdb-blob-compact-percent and rocksdb-blob-compact-min-mb; FlareCluster spec.rocksdb.blobCompact* set the thresholds. Read in this control's referenced file(s): UnitTests.lean: one added check (blob compaction thresholds render into extra.conf only when set, after rocksdb-blob-gc); no existing check changes. Evidence: cutter test_blob_gc_compact_step_reclaims_garbage_gc_left and test_blob_gc_reclaims_overwritten_values ok (kjob-run-flare-blob-gc-compac-3ddb); flare_unit 1047 ok (kjob-run-flare-operator-f900). No claim, check or scenario changes."
       },
       "status": {
         "implemented": {
@@ -5124,9 +5124,9 @@
         "SAF-08"
       ],
       "review": {
-        "commit": "7afb4038d5d85abeea6655f86cf1137fa6ec9ee8",
+        "commit": "981c845b1175cd2d919d36c6e80dba755232e286",
         "date": "2026-11-21",
-        "note": "Change-impact note for fix/dump-seed-notstored (76c24868..7afb4038), claim unchanged: a cross-cluster per-key seed counts the destination's NOT_STORED (its version check) as a no-op, seed_noop_not_stored, and a failed RocksDB write answers SERVER_ERROR. Read in this control's referenced file(s): UnitTests.lean: one added check (seed_noop_not_stored is a known non-terminal replication counter: a reply carrying it is trusted and it is not summed as a forward outcome); no existing check changes. Evidence: flare_unit 1046 ok (kjob-run-flare-operator-9b80). This control's checks, scenarios and status are unchanged."
+        "note": "Change-impact note for fix/blob-gc-compact (345553ac..981c845b), claim unchanged: flared reclaims the blob garbage RocksDB's own GC leaves behind (it forces a compaction only when the oldest blob files are mostly garbage) with a background pass that compacts each SST referencing a blob file once, one SST at a time, when the garbage is at least rocksdb-blob-compact-percent and rocksdb-blob-compact-min-mb; FlareCluster spec.rocksdb.blobCompact* set the thresholds. Read in this control's referenced file(s): UnitTests.lean: one added check (blob compaction thresholds render into extra.conf only when set, after rocksdb-blob-gc); no existing check changes. Evidence: cutter test_blob_gc_compact_step_reclaims_garbage_gc_left and test_blob_gc_reclaims_overwritten_values ok (kjob-run-flare-blob-gc-compac-3ddb); flare_unit 1047 ok (kjob-run-flare-operator-f900). No claim, check or scenario changes."
       },
       "status": {
         "implemented": {
@@ -6241,9 +6241,9 @@
         "SAF-07"
       ],
       "review": {
-        "commit": "7afb4038d5d85abeea6655f86cf1137fa6ec9ee8",
+        "commit": "981c845b1175cd2d919d36c6e80dba755232e286",
         "date": "2026-11-21",
-        "note": "Change-impact note for fix/dump-seed-notstored (76c24868..7afb4038), claim unchanged: a cross-cluster per-key seed counts the destination's NOT_STORED (its version check) as a no-op, seed_noop_not_stored, and a failed RocksDB write answers SERVER_ERROR. Read in this control's referenced file(s): UnitTests.lean: one added check (seed_noop_not_stored is a known non-terminal replication counter: a reply carrying it is trusted and it is not summed as a forward outcome); no existing check changes. Evidence: flare_unit 1046 ok (kjob-run-flare-operator-9b80). This control's checks, scenarios and status are unchanged."
+        "note": "Change-impact note for fix/blob-gc-compact (345553ac..981c845b), claim unchanged: flared reclaims the blob garbage RocksDB's own GC leaves behind (it forces a compaction only when the oldest blob files are mostly garbage) with a background pass that compacts each SST referencing a blob file once, one SST at a time, when the garbage is at least rocksdb-blob-compact-percent and rocksdb-blob-compact-min-mb; FlareCluster spec.rocksdb.blobCompact* set the thresholds. Read in this control's referenced file(s): UnitTests.lean: one added check (blob compaction thresholds render into extra.conf only when set, after rocksdb-blob-gc); no existing check changes. Evidence: cutter test_blob_gc_compact_step_reclaims_garbage_gc_left and test_blob_gc_reclaims_overwritten_values ok (kjob-run-flare-blob-gc-compac-3ddb); flare_unit 1047 ok (kjob-run-flare-operator-f900). No claim, check or scenario changes."
       },
       "status": {
         "implemented": {
@@ -7025,9 +7025,9 @@
         "SAF-08"
       ],
       "review": {
-        "commit": "7afb4038d5d85abeea6655f86cf1137fa6ec9ee8",
+        "commit": "981c845b1175cd2d919d36c6e80dba755232e286",
         "date": "2026-11-21",
-        "note": "Change-impact note for fix/dump-seed-notstored (76c24868..7afb4038), claim unchanged: a cross-cluster per-key seed counts the destination's NOT_STORED (its version check) as a no-op, seed_noop_not_stored, and a failed RocksDB write answers SERVER_ERROR. Read in this control's referenced file(s): storage_rocksdb.cc: set() returns -1 when RocksDB refuses the Put (op_set answers SERVER_ERROR) instead of NOT_STORED, and a unit-test-only seam can fail that Put; the version check, add/replace and every other path are unchanged. Evidence: flare_unit 1046 ok (kjob-run-flare-operator-9b80). This control's checks, scenarios and status are unchanged."
+        "note": "Change-impact note for fix/blob-gc-compact (345553ac..981c845b), claim unchanged: flared reclaims the blob garbage RocksDB's own GC leaves behind (it forces a compaction only when the oldest blob files are mostly garbage) with a background pass that compacts each SST referencing a blob file once, one SST at a time, when the garbage is at least rocksdb-blob-compact-percent and rocksdb-blob-compact-min-mb; FlareCluster spec.rocksdb.blobCompact* set the thresholds. Read in this control's referenced file(s): storage_rocksdb.cc: new blob_gc_compact_step (when blob garbage is over the given ratio and bytes, CompactFiles of the one L1+ default-family SST with the oldest blob reference into its own level, with blob_garbage_collection_age_cutoff 1.0 and force_threshold 1.0 set by SetOptions for that call and restored after; under the whole-storage read lock; skipped when closed, corrupted or blob GC off), blob_referencing_ssts, counters, and test seams; no existing function changes. Evidence: cutter test_blob_gc_compact_step_reclaims_garbage_gc_left and test_blob_gc_reclaims_overwritten_values ok (kjob-run-flare-blob-gc-compac-3ddb); flare_unit 1047 ok (kjob-run-flare-operator-f900). No claim, check or scenario changes."
       },
       "status": {
         "implemented": {
@@ -10062,9 +10062,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "7afb4038d5d85abeea6655f86cf1137fa6ec9ee8",
+        "commit": "981c845b1175cd2d919d36c6e80dba755232e286",
         "date": "2026-11-21",
-        "note": "Change-impact note for fix/dump-seed-notstored (76c24868..7afb4038), claim unchanged: a cross-cluster per-key seed counts the destination's NOT_STORED (its version check) as a no-op, seed_noop_not_stored, and a failed RocksDB write answers SERVER_ERROR. Read in this control's referenced file(s): UnitTests.lean: one added check (seed_noop_not_stored is a known non-terminal replication counter: a reply carrying it is trusted and it is not summed as a forward outcome); no existing check changes; test_storage_rocksdb.cc: one added test (a versioned set at the same or an older version is NOT_STORED with rc 0; a Put failed through the seam returns -1 and stores nothing); no existing test changes. Evidence: flare_unit 1046 ok (kjob-run-flare-operator-9b80). This control's checks, scenarios and status are unchanged."
+        "note": "Change-impact note for fix/blob-gc-compact (345553ac..981c845b), claim unchanged: flared reclaims the blob garbage RocksDB's own GC leaves behind (it forces a compaction only when the oldest blob files are mostly garbage) with a background pass that compacts each SST referencing a blob file once, one SST at a time, when the garbage is at least rocksdb-blob-compact-percent and rocksdb-blob-compact-min-mb; FlareCluster spec.rocksdb.blobCompact* set the thresholds. Read in this control's referenced file(s): UnitTests.lean: one added check (blob compaction thresholds render into extra.conf only when set, after rocksdb-blob-gc); no existing check changes; test_storage_rocksdb.cc: added test_blob_gc_compact_step_reclaims_garbage_gc_left and the omitted-in-CI measurement test_blob_gc_compact_pass_peak_soak; no existing test changes. Evidence: cutter test_blob_gc_compact_step_reclaims_garbage_gc_left and test_blob_gc_reclaims_overwritten_values ok (kjob-run-flare-blob-gc-compac-3ddb); flare_unit 1047 ok (kjob-run-flare-operator-f900). No claim, check or scenario changes."
       },
       "status": {
         "implemented": {
@@ -10603,9 +10603,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "7afb4038d5d85abeea6655f86cf1137fa6ec9ee8",
+        "commit": "981c845b1175cd2d919d36c6e80dba755232e286",
         "date": "2026-11-21",
-        "note": "Change-impact note for fix/dump-seed-notstored (76c24868..7afb4038), claim unchanged: a cross-cluster per-key seed counts the destination's NOT_STORED (its version check) as a no-op, seed_noop_not_stored, and a failed RocksDB write answers SERVER_ERROR. Read in this control's referenced file(s): storage_rocksdb.cc: set() returns -1 when RocksDB refuses the Put (op_set answers SERVER_ERROR) instead of NOT_STORED, and a unit-test-only seam can fail that Put; the version check, add/replace and every other path are unchanged; test_storage_rocksdb.cc: one added test (a versioned set at the same or an older version is NOT_STORED with rc 0; a Put failed through the seam returns -1 and stores nothing); no existing test changes. Evidence: flare_unit 1046 ok (kjob-run-flare-operator-9b80). This control's checks, scenarios and status are unchanged."
+        "note": "Change-impact note for fix/blob-gc-compact (345553ac..981c845b), claim unchanged: flared reclaims the blob garbage RocksDB's own GC leaves behind (it forces a compaction only when the oldest blob files are mostly garbage) with a background pass that compacts each SST referencing a blob file once, one SST at a time, when the garbage is at least rocksdb-blob-compact-percent and rocksdb-blob-compact-min-mb; FlareCluster spec.rocksdb.blobCompact* set the thresholds. Read in this control's referenced file(s): storage_rocksdb.cc: new blob_gc_compact_step (when blob garbage is over the given ratio and bytes, CompactFiles of the one L1+ default-family SST with the oldest blob reference into its own level, with blob_garbage_collection_age_cutoff 1.0 and force_threshold 1.0 set by SetOptions for that call and restored after; under the whole-storage read lock; skipped when closed, corrupted or blob GC off), blob_referencing_ssts, counters, and test seams; no existing function changes; test_storage_rocksdb.cc: added test_blob_gc_compact_step_reclaims_garbage_gc_left and the omitted-in-CI measurement test_blob_gc_compact_pass_peak_soak; no existing test changes. Evidence: cutter test_blob_gc_compact_step_reclaims_garbage_gc_left and test_blob_gc_reclaims_overwritten_values ok (kjob-run-flare-blob-gc-compac-3ddb); flare_unit 1047 ok (kjob-run-flare-operator-f900). No claim, check or scenario changes."
       },
       "status": {
         "implemented": {
@@ -12051,9 +12051,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "7afb4038d5d85abeea6655f86cf1137fa6ec9ee8",
+        "commit": "981c845b1175cd2d919d36c6e80dba755232e286",
         "date": "2026-11-21",
-        "note": "Change-impact note for fix/dump-seed-notstored (76c24868..7afb4038), claim unchanged: a cross-cluster per-key seed counts the destination's NOT_STORED (its version check) as a no-op, seed_noop_not_stored, and a failed RocksDB write answers SERVER_ERROR. Read in this control's referenced file(s): UnitTests.lean: one added check (seed_noop_not_stored is a known non-terminal replication counter: a reply carrying it is trusted and it is not summed as a forward outcome); no existing check changes; storage_rocksdb.cc: set() returns -1 when RocksDB refuses the Put (op_set answers SERVER_ERROR) instead of NOT_STORED, and a unit-test-only seam can fail that Put; the version check, add/replace and every other path are unchanged; test_storage_rocksdb.cc: one added test (a versioned set at the same or an older version is NOT_STORED with rc 0; a Put failed through the seam returns -1 and stores nothing); no existing test changes. Evidence: flare_unit 1046 ok (kjob-run-flare-operator-9b80). This control's checks, scenarios and status are unchanged."
+        "note": "Change-impact note for fix/blob-gc-compact (345553ac..981c845b), claim unchanged: flared reclaims the blob garbage RocksDB's own GC leaves behind (it forces a compaction only when the oldest blob files are mostly garbage) with a background pass that compacts each SST referencing a blob file once, one SST at a time, when the garbage is at least rocksdb-blob-compact-percent and rocksdb-blob-compact-min-mb; FlareCluster spec.rocksdb.blobCompact* set the thresholds. Read in this control's referenced file(s): UnitTests.lean: one added check (blob compaction thresholds render into extra.conf only when set, after rocksdb-blob-gc); no existing check changes; storage_rocksdb.cc: new blob_gc_compact_step (when blob garbage is over the given ratio and bytes, CompactFiles of the one L1+ default-family SST with the oldest blob reference into its own level, with blob_garbage_collection_age_cutoff 1.0 and force_threshold 1.0 set by SetOptions for that call and restored after; under the whole-storage read lock; skipped when closed, corrupted or blob GC off), blob_referencing_ssts, counters, and test seams; no existing function changes; test_storage_rocksdb.cc: added test_blob_gc_compact_step_reclaims_garbage_gc_left and the omitted-in-CI measurement test_blob_gc_compact_pass_peak_soak; no existing test changes. Evidence: cutter test_blob_gc_compact_step_reclaims_garbage_gc_left and test_blob_gc_reclaims_overwritten_values ok (kjob-run-flare-blob-gc-compac-3ddb); flare_unit 1047 ok (kjob-run-flare-operator-f900). No claim, check or scenario changes."
       },
       "status": {
         "implemented": {
@@ -12250,9 +12250,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "7afb4038d5d85abeea6655f86cf1137fa6ec9ee8",
+        "commit": "981c845b1175cd2d919d36c6e80dba755232e286",
         "date": "2026-11-21",
-        "note": "Change-impact note for fix/dump-seed-notstored (76c24868..7afb4038), claim unchanged: a cross-cluster per-key seed counts the destination's NOT_STORED (its version check) as a no-op, seed_noop_not_stored, and a failed RocksDB write answers SERVER_ERROR. Read in this control's referenced file(s): storage_rocksdb.cc: set() returns -1 when RocksDB refuses the Put (op_set answers SERVER_ERROR) instead of NOT_STORED, and a unit-test-only seam can fail that Put; the version check, add/replace and every other path are unchanged; test_storage_rocksdb.cc: one added test (a versioned set at the same or an older version is NOT_STORED with rc 0; a Put failed through the seam returns -1 and stores nothing); no existing test changes. Evidence: flare_unit 1046 ok (kjob-run-flare-operator-9b80). This control's checks, scenarios and status are unchanged."
+        "note": "Change-impact note for fix/blob-gc-compact (345553ac..981c845b), claim unchanged: flared reclaims the blob garbage RocksDB's own GC leaves behind (it forces a compaction only when the oldest blob files are mostly garbage) with a background pass that compacts each SST referencing a blob file once, one SST at a time, when the garbage is at least rocksdb-blob-compact-percent and rocksdb-blob-compact-min-mb; FlareCluster spec.rocksdb.blobCompact* set the thresholds. Read in this control's referenced file(s): storage_rocksdb.cc: new blob_gc_compact_step (when blob garbage is over the given ratio and bytes, CompactFiles of the one L1+ default-family SST with the oldest blob reference into its own level, with blob_garbage_collection_age_cutoff 1.0 and force_threshold 1.0 set by SetOptions for that call and restored after; under the whole-storage read lock; skipped when closed, corrupted or blob GC off), blob_referencing_ssts, counters, and test seams; no existing function changes; test_storage_rocksdb.cc: added test_blob_gc_compact_step_reclaims_garbage_gc_left and the omitted-in-CI measurement test_blob_gc_compact_pass_peak_soak; no existing test changes. Evidence: cutter test_blob_gc_compact_step_reclaims_garbage_gc_left and test_blob_gc_reclaims_overwritten_values ok (kjob-run-flare-blob-gc-compac-3ddb); flare_unit 1047 ok (kjob-run-flare-operator-f900). No claim, check or scenario changes."
       },
       "status": {
         "implemented": {
@@ -12786,9 +12786,9 @@
         "SAF-10"
       ],
       "review": {
-        "commit": "7afb4038d5d85abeea6655f86cf1137fa6ec9ee8",
+        "commit": "981c845b1175cd2d919d36c6e80dba755232e286",
         "date": "2026-11-21",
-        "note": "Change-impact note for fix/dump-seed-notstored (76c24868..7afb4038), claim unchanged: a cross-cluster per-key seed counts the destination's NOT_STORED (its version check) as a no-op, seed_noop_not_stored, and a failed RocksDB write answers SERVER_ERROR. Read in this control's referenced file(s): storage_rocksdb.cc: set() returns -1 when RocksDB refuses the Put (op_set answers SERVER_ERROR) instead of NOT_STORED, and a unit-test-only seam can fail that Put; the version check, add/replace and every other path are unchanged; test_storage_rocksdb.cc: one added test (a versioned set at the same or an older version is NOT_STORED with rc 0; a Put failed through the seam returns -1 and stores nothing); no existing test changes. Evidence: flare_unit 1046 ok (kjob-run-flare-operator-9b80). This control's checks, scenarios and status are unchanged."
+        "note": "Change-impact note for fix/blob-gc-compact (345553ac..981c845b), claim unchanged: flared reclaims the blob garbage RocksDB's own GC leaves behind (it forces a compaction only when the oldest blob files are mostly garbage) with a background pass that compacts each SST referencing a blob file once, one SST at a time, when the garbage is at least rocksdb-blob-compact-percent and rocksdb-blob-compact-min-mb; FlareCluster spec.rocksdb.blobCompact* set the thresholds. Read in this control's referenced file(s): storage_rocksdb.cc: new blob_gc_compact_step (when blob garbage is over the given ratio and bytes, CompactFiles of the one L1+ default-family SST with the oldest blob reference into its own level, with blob_garbage_collection_age_cutoff 1.0 and force_threshold 1.0 set by SetOptions for that call and restored after; under the whole-storage read lock; skipped when closed, corrupted or blob GC off), blob_referencing_ssts, counters, and test seams; no existing function changes; test_storage_rocksdb.cc: added test_blob_gc_compact_step_reclaims_garbage_gc_left and the omitted-in-CI measurement test_blob_gc_compact_pass_peak_soak; no existing test changes. Evidence: cutter test_blob_gc_compact_step_reclaims_garbage_gc_left and test_blob_gc_reclaims_overwritten_values ok (kjob-run-flare-blob-gc-compac-3ddb); flare_unit 1047 ok (kjob-run-flare-operator-f900). No claim, check or scenario changes."
       },
       "status": {
         "implemented": {

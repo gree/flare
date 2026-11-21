@@ -230,6 +230,15 @@ cluster:
   # there while any other value in its file is live, so the copy grows under an
   # overwrite workload while the item count is flat. blobGc: false turns it
   # off. Startup-only: it applies at the next flared restart.
+  # RocksDB forces a GC compaction only when its OLDEST blob files are mostly
+  # garbage, so a copy whose oldest values are never overwritten keeps files
+  # that are almost all garbage (seen live: 2.37 GB of 2.86 GB). flared checks
+  # every blobCompactIntervalSeconds (default 600, 0 = off) and, while the
+  # garbage is at least blobCompactPercent (default 50) of the blob bytes and
+  # at least blobCompactMinMb (default 512), compacts one SST at a time,
+  # blobCompactPauseMs (default 1000) apart. Each step rewrites one SST and
+  # its live values, so the extra space at a time is about one SST. Dynamic
+  # (SIGHUP), e.g. {blobCompactPercent: 30, blobCompactMinMb: 256}.
   # Startup-only memory knobs, for example:
   # rocksdb: {blockCacheSizeMb: 64, writeBufferSizeMb: 16, maxWriteBufferNumber: 3}
   # These are NOT an RSS cap: allow for all column families, compaction,

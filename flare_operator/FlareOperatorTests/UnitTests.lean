@@ -1105,6 +1105,12 @@ private def checkBreakerUnavailable (ctx : Ctx) : IO Unit := do
       && ({ blobGc := some false } : RocksdbConfigSpec).hasAny
       && ({ syncWrites := some true, blobGc := some false } : RocksdbConfigSpec).toExtraConf
         == "rocksdb-sync-writes = true\nrocksdb-blob-gc = false")
+  check ctx "blob compaction thresholds render into extra.conf only when set, after rocksdb-blob-gc"
+    (({ blobGc := some true, blobCompactIntervalSeconds := some 300, blobCompactPercent := some 40,
+        blobCompactMinMb := some 256, blobCompactPauseMs := some 500 } : RocksdbConfigSpec).toExtraConf
+        == "rocksdb-blob-gc = true\nrocksdb-blob-compact-interval = 300\nrocksdb-blob-compact-percent = 40\nrocksdb-blob-compact-min-mb = 256\nrocksdb-blob-compact-pause-ms = 500"
+      && ({ blobCompactIntervalSeconds := some 0 } : RocksdbConfigSpec).toExtraConf == "rocksdb-blob-compact-interval = 0"
+      && ({ blobCompactPercent := some 40 } : RocksdbConfigSpec).hasAny)
   check ctx "maxTotalThreadQueue renders into extra.conf"
     (({ maxTotalThreadQueue := some 200000 } : RocksdbConfigSpec).toExtraConf == "max-total-thread-queue = 200000")
   check ctx "breaker floor: one dead node of two (50%) does not trip with the default minimum of 2"

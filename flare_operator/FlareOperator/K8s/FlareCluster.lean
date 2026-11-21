@@ -128,6 +128,20 @@ structure RocksdbConfigSpec where
       flared default true; false turns it off. Startup-only: takes effect at
       the next flared restart. flared: `rocksdb-blob-gc`. -/
   blobGc : Option Bool := none
+  /-- Blob garbage RocksDB's own GC leaves behind: it forces a compaction
+      only when the OLDEST blob files are mostly garbage, so a copy whose
+      oldest values are never overwritten keeps files that are almost all
+      garbage (seen live: 2.37 GB of 2.86 GB). Every interval flared checks
+      the blob files and, while the garbage is at least the percent and the
+      MB below, compacts one SST at a time with the pause between two.
+      All dynamic (SIGHUP). flared: `rocksdb-blob-compact-interval` (seconds,
+      default 600, 0 = off), `rocksdb-blob-compact-percent` (default 50),
+      `rocksdb-blob-compact-min-mb` (default 512),
+      `rocksdb-blob-compact-pause-ms` (default 1000). -/
+  blobCompactIntervalSeconds : Option Nat := none
+  blobCompactPercent : Option Nat := none
+  blobCompactMinMb : Option Nat := none
+  blobCompactPauseMs : Option Nat := none
   /-- Consecutive resync failures before the slave self-demotes.
       flared: `rocksdb-resync-failure-threshold`. -/
   resyncFailureThreshold : Option Nat := none
@@ -210,6 +224,8 @@ structure RocksdbConfigSpec where
 def RocksdbConfigSpec.hasAny (r : RocksdbConfigSpec) : Bool :=
   r.blockCacheSizeMb.isSome || r.writeBufferSizeMb.isSome || r.maxWriteBufferNumber.isSome ||
   r.walTtlSeconds.isSome || r.walSizeLimitMb.isSome || r.syncWrites.isSome || r.blobGc.isSome ||
+  r.blobCompactIntervalSeconds.isSome || r.blobCompactPercent.isSome ||
+  r.blobCompactMinMb.isSome || r.blobCompactPauseMs.isSome ||
   r.resyncFailureThreshold.isSome || r.walMaxBatchBytes.isSome ||
   r.walSyncBwlimit.isSome || r.walSyncInterval.isSome || r.snapshotBwlimit.isSome ||
   r.flushAllEnabled.isSome || r.backupKeep.isSome || r.readUnavailableError.isSome ||
@@ -217,35 +233,48 @@ def RocksdbConfigSpec.hasAny (r : RocksdbConfigSpec) : Bool :=
   r.maxTotalThreadQueue.isSome || r.noreplyWindowLimit.isSome || r.rebuildReserveBytes.isSome ||
   r.clientIdleTimeoutSeconds.isSome
 
+/-- A field's rendered value. `noinline`: inlined, each `Option.map` became a
+    two-way match with the rest of the `entries` list copied into both
+    branches, so compiling `entries` doubled with every field (16 fields 18 s,
+    22 minutes, 26 hours). -/
+@[simp, noinline] def RocksdbConfigSpec.natValue (v : Option Nat) : Option String :=
+  v.map toString
+
+@[simp, noinline] def RocksdbConfigSpec.boolValue (v : Option Bool) : Option String :=
+  v.map fun b => if b then "true" else "false"
+
 /-- Every `RocksdbConfigSpec` field as its flared key and its rendered value
     (`none` = unset). The ONE place the key names live: `toExtraConf` and the
     proofs in `K8s/ExtraConfProofs.lean` both read it. The order is the order
     of the lines in `extra.conf` (not quite the declaration order:
     `rebuildReserveBytes` is emitted after `backupKeep`). -/
 def RocksdbConfigSpec.entries (r : RocksdbConfigSpec) : List (String × Option String) :=
-  let bool := fun (b : Bool) => if b then "true" else "false"
-  [ ("rocksdb-block-cache-size-mb", r.blockCacheSizeMb.map toString),
-    ("rocksdb-write-buffer-size-mb", r.writeBufferSizeMb.map toString),
-    ("rocksdb-max-write-buffer-number", r.maxWriteBufferNumber.map toString),
-    ("rocksdb-wal-ttl-seconds", r.walTtlSeconds.map toString),
-    ("rocksdb-wal-size-limit-mb", r.walSizeLimitMb.map toString),
-    ("rocksdb-sync-writes", r.syncWrites.map bool),
-    ("rocksdb-blob-gc", r.blobGc.map bool),
-    ("rocksdb-resync-failure-threshold", r.resyncFailureThreshold.map toString),
-    ("rocksdb-wal-max-batch-bytes", r.walMaxBatchBytes.map toString),
-    ("rocksdb-wal-sync-bwlimit", r.walSyncBwlimit.map toString),
-    ("rocksdb-wal-sync-interval", r.walSyncInterval.map toString),
-    ("rocksdb-snapshot-bwlimit", r.snapshotBwlimit.map toString),
-    ("flush-all-enabled", r.flushAllEnabled.map bool),
-    ("rocksdb-backup-keep", r.backupKeep.map toString),
-    ("rocksdb-rebuild-reserve-bytes", r.rebuildReserveBytes.map toString),
-    ("read-unavailable-error", r.readUnavailableError.map bool),
-    ("repl-identity-forward", r.replIdentityForward.map bool),
-    ("repl-follow-enabled", r.replFollowEnabled.map bool),
-    ("repl-follow-poll-interval-usec", r.replFollowPollIntervalUsec.map toString),
-    ("max-total-thread-queue", r.maxTotalThreadQueue.map toString),
-    ("noreply-window-limit", r.noreplyWindowLimit.map toString),
-    ("client-idle-timeout", r.clientIdleTimeoutSeconds.map toString) ]
+  [ ("rocksdb-block-cache-size-mb", natValue r.blockCacheSizeMb),
+    ("rocksdb-write-buffer-size-mb", natValue r.writeBufferSizeMb),
+    ("rocksdb-max-write-buffer-number", natValue r.maxWriteBufferNumber),
+    ("rocksdb-wal-ttl-seconds", natValue r.walTtlSeconds),
+    ("rocksdb-wal-size-limit-mb", natValue r.walSizeLimitMb),
+    ("rocksdb-sync-writes", boolValue r.syncWrites),
+    ("rocksdb-blob-gc", boolValue r.blobGc),
+    ("rocksdb-blob-compact-interval", natValue r.blobCompactIntervalSeconds),
+    ("rocksdb-blob-compact-percent", natValue r.blobCompactPercent),
+    ("rocksdb-blob-compact-min-mb", natValue r.blobCompactMinMb),
+    ("rocksdb-blob-compact-pause-ms", natValue r.blobCompactPauseMs),
+    ("rocksdb-resync-failure-threshold", natValue r.resyncFailureThreshold),
+    ("rocksdb-wal-max-batch-bytes", natValue r.walMaxBatchBytes),
+    ("rocksdb-wal-sync-bwlimit", natValue r.walSyncBwlimit),
+    ("rocksdb-wal-sync-interval", natValue r.walSyncInterval),
+    ("rocksdb-snapshot-bwlimit", natValue r.snapshotBwlimit),
+    ("flush-all-enabled", boolValue r.flushAllEnabled),
+    ("rocksdb-backup-keep", natValue r.backupKeep),
+    ("rocksdb-rebuild-reserve-bytes", natValue r.rebuildReserveBytes),
+    ("read-unavailable-error", boolValue r.readUnavailableError),
+    ("repl-identity-forward", boolValue r.replIdentityForward),
+    ("repl-follow-enabled", boolValue r.replFollowEnabled),
+    ("repl-follow-poll-interval-usec", natValue r.replFollowPollIntervalUsec),
+    ("max-total-thread-queue", natValue r.maxTotalThreadQueue),
+    ("noreply-window-limit", natValue r.noreplyWindowLimit),
+    ("client-idle-timeout", natValue r.clientIdleTimeoutSeconds) ]
 
 /-- The flared keys, in line order. -/
 def RocksdbConfigSpec.keys : List String :=

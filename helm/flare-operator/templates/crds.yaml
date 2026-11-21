@@ -139,6 +139,23 @@ spec:
                     blobGc:
                       type: boolean
                       description: RocksDB blob garbage collection, reclaiming overwritten values of 4 KB or more (rocksdb-blob-gc; flared default true; takes effect at the next flared restart)
+                    blobCompactIntervalSeconds:
+                      type: integer
+                      minimum: 0
+                      description: Seconds between checks for blob garbage RocksDB's GC left behind; while it is above blobCompactPercent and blobCompactMinMb, flared compacts one SST at a time (rocksdb-blob-compact-interval; flared default 600; 0 = off; dynamic)
+                    blobCompactPercent:
+                      type: integer
+                      minimum: 0
+                      maximum: 100
+                      description: Compact while the blob garbage is at least this percent of the blob file bytes (rocksdb-blob-compact-percent; flared default 50; dynamic)
+                    blobCompactMinMb:
+                      type: integer
+                      minimum: 0
+                      description: And while the blob garbage is at least this many MB (rocksdb-blob-compact-min-mb; flared default 512; dynamic)
+                    blobCompactPauseMs:
+                      type: integer
+                      minimum: 0
+                      description: Pause between two SST compactions in milliseconds (rocksdb-blob-compact-pause-ms; flared default 1000; dynamic)
                     resyncFailureThreshold:
                       type: integer
                       minimum: 1

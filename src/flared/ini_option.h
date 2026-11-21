@@ -151,6 +151,10 @@ private:
 	// Periodic full-checksum storage integrity check interval in seconds
 	// (0 = disabled). Opt-in because VerifyChecksum reads every file.
 	int				_storage_check_interval;
+	int				_rocksdb_blob_compact_interval;
+	int				_rocksdb_blob_compact_percent;
+	int				_rocksdb_blob_compact_min_mb;
+	int				_rocksdb_blob_compact_pause_ms;
 public:
 	static const int default_back_log = 30;
 	static const int default_index_server_port = 12120;
@@ -222,6 +226,10 @@ public:
 	static const int      default_reap_expired_chunk_sleep_msec   = 100;    // throttle sleep between chunks
 	static const int      default_metrics_server_port             = 0;      // disabled
 	static const int      default_storage_check_interval          = 0;      // disabled (opt-in; reads all files)
+	static const int      default_rocksdb_blob_compact_interval = 600;   // seconds between checks; 0 = off
+	static const int      default_rocksdb_blob_compact_percent = 50;     // garbage share of the blob bytes, %
+	static const int      default_rocksdb_blob_compact_min_mb  = 512;    // and at least this much garbage
+	static const int      default_rocksdb_blob_compact_pause_ms = 1000;  // between two SST compactions
 	static const int default_thread_pool_size = 5;
 	static const uint32_t default_proxy_prior_netmask = 0x00;
 	static const uint32_t default_max_total_thread_queue = 0;				// unlimited
@@ -330,6 +338,10 @@ public:
 	int get_reap_expired_chunk_sleep_msec() { return this->_reap_expired_chunk_sleep_msec; }
 	int get_metrics_server_port() { return this->_metrics_server_port; }
 	int get_storage_check_interval() { return this->_storage_check_interval; }
+	int get_rocksdb_blob_compact_interval() { return this->_rocksdb_blob_compact_interval; }
+	int get_rocksdb_blob_compact_percent() { return this->_rocksdb_blob_compact_percent; }
+	int get_rocksdb_blob_compact_min_mb() { return this->_rocksdb_blob_compact_min_mb; }
+	int get_rocksdb_blob_compact_pause_ms() { return this->_rocksdb_blob_compact_pause_ms; }
 
 private:
 	int _setup_cli_option(program_options::options_description& option);

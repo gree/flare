@@ -79,6 +79,8 @@ stdenv.mkDerivation {
     grep -E 'test_write_progress_timeout_ends_a_write_to_a_peer_that_stopped_reading|test_write_deadline_ends_a_write_even_with_a_longer_progress_timeout|test_write_bounds_do_not_end_a_write_the_peer_reads|test_capture_capacity_refuses_unknowns_and_short_space' test/run-tests.sh.log || echo "capture guard tests NOT found in the cutter log"
     # blob garbage collection: overwritten values are reclaimed (GC off is the control)
     grep -E 'test_blob_gc_reclaims_overwritten_values' test/run-tests.sh.log || echo "blob GC test NOT found in the cutter log"
+    # blob garbage the automatic GC leaves: reclaimed one SST at a time
+    grep -E 'test_blob_gc_compact_step_reclaims_garbage_gc_left' test/run-tests.sh.log || echo "blob GC compaction step test NOT found in the cutter log"
     # cross-cluster seed: NOT_STORED (version check) is a no-op, a failed write is an error
     grep -E 'test_run_seed_not_stored_is_noop_and_completes|test_set_not_stored_only_by_version_put_failure_is_error' test/run-tests.sh.log || echo "seed not-stored tests NOT found in the cutter log"
     # read timeouts: opened connections 30 s in the k8s build, accepted (client) connections net_read_timeout

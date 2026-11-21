@@ -21,6 +21,7 @@ flared_SOURCES = \
 	handler_metrics.h handler_metrics.cc \
 	handler_reaper.h handler_reaper.cc \
 	handler_storage_check.h handler_storage_check.cc \
+	handler_blob_gc.h handler_blob_gc.cc \
 	handler_mysql_replication.h handler_mysql_replication.cc \
 	handler_request.h handler_request.cc \
 	op_parser_binary_node.h op_parser_binary_node.cc \

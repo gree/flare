@@ -37,6 +37,7 @@
 #include "handler_metrics.h"
 #include "handler_reaper.h"
 #include "handler_storage_check.h"
+#include "handler_blob_gc.h"
 #include "handler_request.h"
 #include "op_repl_snapshot_push.h"
 #ifdef ENABLE_MYSQL_REPLICATION
@@ -408,6 +409,13 @@ int flared::startup(int argc, char **argv) {
 	shared_thread th_storage_check = this->_other_thread_pool->get(thread_pool::thread_type_storage_check);
 	handler_storage_check* h_storage_check = new handler_storage_check(th_storage_check, this->_cluster, this->_storage);
 	th_storage_check->trigger(h_storage_check);
+
+	// blob garbage the automatic GC leaves behind (see handler_blob_gc.h);
+	// idle when rocksdb-blob-compact-interval is 0 or on non-rocksdb
+	// backends
+	shared_thread th_blob_gc = this->_other_thread_pool->get(thread_pool::thread_type_blob_gc);
+	handler_blob_gc* h_blob_gc = new handler_blob_gc(th_blob_gc, this->_storage);
+	th_blob_gc->trigger(h_blob_gc);
 
 	// native Prometheus /metrics endpoint: every node exports its own metrics,
 	// so observability shares the node's fault domain instead of a central

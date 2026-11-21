@@ -37,6 +37,7 @@
 
 #include <cstdio>
 #include <map>
+#include <vector>
 #include <rocksdb/db.h>
 #include <rocksdb/options.h>
 #include <rocksdb/table.h>
@@ -327,6 +328,9 @@ protected:
 	// Total entries physically reaped by the background expire crawler
 	// (reap_expired) plus the lazy delete-on-get path. Monotonic.
 	AtomicCounter _expire_reaped;
+	// blob_gc_compact_step: steps that compacted, and steps that failed
+	AtomicCounter _blob_gc_compactions;
+	AtomicCounter _blob_gc_compact_errors;
 	// D1 (WSTR-0 audit): physically delete an entry found expired by get()
 	// only on the partition MASTER (its delete reaches replicas through the
 	// WAL). A replica filters the expired value but never deletes it by its
@@ -593,10 +597,37 @@ public:
 	// them already known to be garbage (RocksDB's own accounting, updated by
 	// compactions). false when the DB is closed or a property is unknown.
 	bool blob_file_bytes(uint64_t& total, uint64_t& garbage);
+	// Blob garbage the automatic GC leaves behind. RocksDB forces a
+	// compaction only when the OLDEST batch of blob files is at least
+	// blob_garbage_collection_force_threshold garbage. When that batch holds
+	// mostly live values (keys never overwritten), nothing is forced, and
+	// files that are almost all garbage stay until an ordinary compaction
+	// rewrites the SSTs that still point into them, which a copy with few
+	// writes rarely gets (seen live: 2.37 GB of 2.86 GB garbage, one forced
+	// GC in 22 h, the oldest batch 20% garbage). One step: when the garbage
+	// is at least min_garbage_bytes and min_ratio of the blob bytes, compact
+	// the ONE default-family SST (L1 and below) with the oldest blob
+	// reference into its own level, relocating every blob it references
+	// (age cutoff 1.0 for that compaction). A step rewrites one SST and its
+	// live blobs, never the whole copy, so the extra space at a time is about
+	// one SST. Returns 1 when it compacted, 0 when below the thresholds, GC
+	// is off (rocksdb-blob-gc false) or no SST references a blob file, -1 on
+	// an error.
+	int blob_gc_compact_step(double min_ratio, uint64_t min_garbage_bytes);
+	// SSTs (L1 and below) that reference a blob file: the steps of one pass
+	// (each step moves the SST it compacts to the end of the order)
+	int blob_referencing_ssts();
+	uint64_t get_blob_gc_compactions()        { return this->_blob_gc_compactions.fetch(); }
+	uint64_t get_blob_gc_compact_errors()     { return this->_blob_gc_compact_errors.fetch(); }
 	// TEST SEAMS (unit tests only): flush the memtable; flush and compact
 	// the whole default family down to the bottom level
 	int flush_for_test();
 	int compact_for_test();
+	// TEST SEAMS: the SST size a compaction splits its output at (before
+	// open; small values give a small copy several SSTs), and the names of
+	// the default family's SSTs below L0
+	void set_target_file_size_for_test(uint64_t bytes) { this->_options.target_file_size_base = bytes; }
+	std::vector<std::string> sst_files_for_test();
 	// Blob garbage collection (ini rocksdb-blob-gc, default on); takes
 	// effect at the next open
 	void set_blob_gc(bool on) { this->_blob_gc = on; this->_options.enable_blob_garbage_collection = on; }

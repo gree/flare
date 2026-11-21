@@ -57,6 +57,7 @@
 #include <wal_archive.h>
 #include <fstream>
 #include <iterator>
+#include <algorithm>
 
 using namespace std;
 
@@ -2473,6 +2474,127 @@ void test_blob_gc_reclaims_overwritten_values() {
 	cut_assert_operator(off.total, >, 3 * live);
 	// with GC the blob files stay within twice the live values
 	cut_assert_operator(on.total, <, 2 * live);
+}
+
+// Blob garbage the automatic GC leaves behind (seen live on a copy whose
+// garbage built up before GC was on: 2.37 GB of 2.86 GB garbage, and
+// RocksDB forced one GC in 22 h). RocksDB forces a compaction only when the
+// OLDEST batch of blob files is mostly garbage; here the oldest file holds
+// the keys that are never overwritten, so it is not, while the later files
+// are almost all garbage with a few live values each. The copy is built with
+// GC off (900 cold keys and 300 hot keys in the first blob file, so it is
+// at most a quarter garbage and RocksDB never forces its GC; then the hot
+// keys overwritten 30% at a time for 40 rounds, flushed and compacted each
+// round), then reopened with GC on. A
+// small SST size splits the copy into several SSTs.
+// Below the thresholds blob_gc_compact_step does nothing; above them one
+// pass, as handler_blob_gc runs it (one step per SST that references a blob
+// file, the first with the thresholds), reclaims it one SST at a time (each
+// step compacts exactly one SST).
+void test_blob_gc_compact_step_reclaims_garbage_gc_left() {
+	const char* dir = "tmp_rocksdb_blob_gc_step";
+	cut_remove_path(dir, NULL);
+	mkdir(dir, 0700);
+	storage_rocksdb* s = new storage_rocksdb(dir, 32, 4, 16, 4, 2, 86400, 1024);
+	s->set_blob_gc(false);
+	s->set_target_file_size_for_test(1024);
+	s->open();
+	const int keys = 300;
+	const int cold_keys = 3 * keys;
+	const string cold(8192, 'c');
+	const string hot(8192, 'h');
+	for (int k = 0; k < cold_keys; k++) {
+		cut_assert_equal_int(0, storage_set_string(s, "c" + std::to_string(k), cold));
+	}
+	for (int k = 0; k < keys; k++) {
+		cut_assert_equal_int(0, storage_set_string(s, "h" + std::to_string(k), hot));
+	}
+	cut_assert_equal_int(0, s->flush_for_test());
+	cut_assert_equal_int(0, s->compact_for_test());
+	uint32_t rnd = 12345;
+	for (int round = 0; round < 40; round++) {
+		for (int k = 0; k < keys; k++) {
+			rnd = rnd * 1103515245u + 12345u;
+			if ((rnd >> 16) % 10 < 3) {
+				cut_assert_equal_int(0, storage_set_string(s, "h" + std::to_string(k), hot));
+			}
+		}
+		cut_assert_equal_int(0, s->flush_for_test());
+		cut_assert_equal_int(0, s->compact_for_test());
+	}
+	s->close();
+	s->set_blob_gc(true);
+	s->open();
+
+	uint64_t total0 = 0, garbage0 = 0;
+	cut_assert_true(s->blob_file_bytes(total0, garbage0));
+	// the shape: at least half of the blob bytes are garbage
+	cut_assert_operator(2 * garbage0, >=, total0);
+
+	// below the thresholds: nothing is compacted
+	cut_assert_equal_int(0, s->blob_gc_compact_step(0.5, total0 + 1));
+	cut_assert_equal_int(0, s->blob_gc_compact_step(1.01, 0));
+	cut_assert_equal_int(0, static_cast<int>(s->get_blob_gc_compactions()));
+
+	const size_t ssts0 = s->sst_files_for_test().size();
+	cut_assert_operator(ssts0, >=, 3u);
+	const int pass = s->blob_referencing_ssts();
+	cut_assert_operator(pass, >=, 3);
+	int steps = 0;
+	int r = s->blob_gc_compact_step(0.5, 0);
+	while (r == 1) {
+		steps++;
+		if (steps >= pass) {
+			break;
+		}
+		r = s->blob_gc_compact_step(0.0, 0);
+	}
+	cut_assert_equal_int(1, r);
+	cut_assert_equal_int(pass, steps);
+	uint64_t total1 = 0, garbage1 = 0;
+	cut_assert_true(s->blob_file_bytes(total1, garbage1));
+	cut_notify("blob files before %llu bytes (garbage %llu) in %d SSTs, after %d steps %llu bytes (garbage %llu), live values %llu bytes",
+		(unsigned long long)total0, (unsigned long long)garbage0, static_cast<int>(ssts0), steps,
+		(unsigned long long)total1, (unsigned long long)garbage1,
+		(unsigned long long)((cold_keys + keys) * 8192));
+	// every step compacted exactly one SST: the LOG since the reopen has one
+	// manual compaction per step, each with a single input file. RocksDB's
+	// own forced GC may join in once the steps have moved the live values
+	// out of the oldest blob files; those are its usual single-file jobs.
+	{
+		std::ifstream log(string(dir) + "/flare.rocksdb/LOG");
+		string line;
+		int manual = 0;
+		while (std::getline(log, line)) {
+			if (line.find("\"event\": \"compaction_started\"") == string::npos
+					|| line.find("\"compaction_reason\": \"ManualCompaction\"") == string::npos) {
+				continue;
+			}
+			manual++;
+			const size_t f = line.find("\"files_L");
+			cut_assert_true(f != string::npos);
+			cut_assert_true(line.find("\"files_L", f + 1) == string::npos);	// one level
+			const size_t open = line.find('[', f), close = line.find(']', f);
+			cut_assert_true(open != string::npos && close != string::npos);
+			cut_assert_true(line.find(',', open) > close);						// one file
+		}
+		cut_assert_equal_int(steps, manual);
+	}
+	cut_assert_equal_int(steps, static_cast<int>(s->get_blob_gc_compactions()));
+	cut_assert_equal_int(0, static_cast<int>(s->get_blob_gc_compact_errors()));
+	// after the pass the garbage is at most a tenth of the blob bytes
+	cut_assert_operator(10 * garbage1, <=, total1);
+	cut_assert_operator(total1, <, total0);
+	// the data is unchanged
+	cut_assert_equal_int(cold_keys + keys, static_cast<int>(s->count()));
+	string out;
+	cut_assert_equal_int(0, storage_get_string(s, "c7", out));
+	cut_assert_equal_string(cold.c_str(), out.c_str());
+	cut_assert_equal_int(0, storage_get_string(s, "h7", out));
+	cut_assert_equal_string(hot.c_str(), out.c_str());
+	s->close();
+	delete s;
+	cut_remove_path(dir, NULL);
 }
 
 // Blob GC peak (measurement, not run by CI): the test above compacts by hand

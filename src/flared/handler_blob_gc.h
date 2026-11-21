@@ -47,6 +47,9 @@ protected:
 	storage*	_storage;
 
 public:
+	// busy steps in a row (another compaction in the way) that end a pass
+	static const int busy_limit = 10;
+
 	handler_blob_gc(shared_thread t, storage* st);
 	virtual ~handler_blob_gc();
 

@@ -1470,15 +1470,44 @@ proxy, and it too ends with the pod's delete.
 
 ### Tearing the whole cluster down
 
+**For a retired cluster only.** Everything in this section bypasses the
+operator's master handover: every pod goes at once, and on tmpfs its data
+with it. On a cluster that still serves, it loses the data. Before any step
+below, confirm all of:
+
+- no client reaches it: no client Service or load balancer selects its pods
+  (EndpointSlices empty), and the client connections have drained (every
+  pod's `curr_connections` is only the operator's own, `client_requests`
+  not growing);
+- cross-cluster replication from it is off (`cluster_replication off` on
+  every pod) and nothing replicates into it;
+- its data is no longer needed, or a backup has been restored from and
+  verified elsewhere.
+
+To keep a cluster running, do not use the override: stop pods one at a time
+through the guard (the handover moves each master first; see above).
+
 Deleting the FlareCluster or the namespace removes everything through
 Kubernetes' garbage collector, which the guard does not refuse. To delete
-only the StatefulSet with its pods (for example before `helm uninstall`),
-name it by UID:
+only the StatefulSet with its pods, name it by UID and delete it:
 
 ```sh
 UID=$(kubectl get statefulset <name>-nodes -n <ns> -o jsonpath='{.metadata.uid}')
 kubectl annotate statefulset <name>-nodes -n <ns> --overwrite flare.gree.net/delete-override=$UID
+kubectl delete statefulset <name>-nodes -n <ns>
 ```
+
+Do this BEFORE `helm uninstall` (or removing the release from Argo CD).
+Helm and Argo CD delete the webhook Service before the StatefulSet, so the
+StatefulSet's delete then reaches no guard and is refused (failurePolicy
+Fail) even with the annotation: the uninstall fails, and a second attempt
+passes only because the webhook configuration is gone by then — a delete
+with no guard. With the StatefulSet deleted first, the uninstall passes at
+once. The operator's Lease (`<name>-operator-lease`) and ConfigMaps
+(`<name>-node-map`, `-history`, `-config`) are not part of the release:
+delete them too before a cluster of the same name is created again
+(otherwise the new operator finds a Lease that records a node map, no map,
+and refuses to start from an empty one).
 
 ### Break-glass: deleting a pod anyway {#node-guard-break-glass}
 

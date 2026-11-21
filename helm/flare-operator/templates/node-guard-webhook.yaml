@@ -10,10 +10,16 @@
   (41275671570 G1). Evictions have their own rule with no selector (an
   Eviction carries none of the pod's labels); there the operator tells the
   cluster's flared pods apart by their immutable spec.subdomain and allows
-  every other pod of the namespace (review of 62dddf9). It writes nothing
-  (sideEffects: None). failurePolicy Fail: with no operator answering, these
-  operations are refused — the escape hatches are the delete-override
-  annotation or nodeGuard.enabled=false.
+  every other pod of the namespace (review of 62dddf9). Each webhook has
+  matchConditions on what cannot be changed by hand: the pod's
+  spec.subdomain (<cluster>-nodes), the evicted pod's name
+  (<cluster>-nodes-<n>), the StatefulSet's name (<cluster>-nodes). So the API
+  server calls the webhook only for this release's objects, and an operator
+  that does not answer holds nothing else of the namespace (other apps,
+  another flare release). It writes nothing (sideEffects: None).
+  failurePolicy Fail: with no operator answering, these operations are
+  refused — the escape hatches are the delete-override annotation (while the
+  operator answers) or nodeGuard.enabled=false.
   The certificate comes from nodeGuard.tls.mode (docs/RUNBOOK.md#node-guard-tls):
   helm generates it per render (as the SAF-10 eviction webhook), so the Secret
   and the caBundle always change together; that suits one render per helm

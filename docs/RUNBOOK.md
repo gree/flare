@@ -191,8 +191,8 @@ helm upgrade flare ./helm/flare-operator -n <ns> --reset-then-reuse-values \
 
 The StatefulSet stays `OnDelete`, so no flared pod is replaced. An rc68 or
 older operator does not replace pods (it has no rolling) and does not serve
-the webhook, so `nodeGuard.enabled=false` is required (otherwise every flared
-pod delete and every eviction in the namespace is refused); the chart
+the webhook, so `nodeGuard.enabled=false` is required (otherwise every delete
+and eviction of the release's flared pods is refused); the chart
 refuses `nodeReplacement.enabled` without the guard. Any flared change after
 that is by hand: graceful deletes, one pod at a time, a master last. This
 combination is not exercised by a test.
@@ -308,9 +308,11 @@ propagation are dead.
    ConfigMap; the cluster shape must NOT churn (verified by the
    operator-restart e2e). A fresh 120s dead-detection grace follows — factor
    it into any concurrent incident.
-3. While no operator leader answers, the node guard fails closed: flared pod
-   deletes, every eviction in the namespace (`kubectl drain` included) and
-   StatefulSet updates are refused. See
+3. While no operator leader answers, the node guard fails closed for the
+   release's own objects: deletes and evictions of its flared pods
+   (`kubectl drain` of their nodes included) and changes of its StatefulSet
+   are refused. Other pods and StatefulSets of the namespace are not affected
+   (the webhooks' `matchConditions`). See
    [The operator is down](#node-guard-operator-down).
 
 ## `LEASE CHECK: authority NOT confirmed` (mid-pass lease check) {#lease-check}
@@ -1532,16 +1534,25 @@ an error naming that new pod after the old one is already gone; check with
 ### The operator is down (the webhook fails closed) {#node-guard-operator-down}
 
 `failurePolicy: Fail`: with no operator leader answering, every call to the
-webhook fails, so in the release's namespace these are refused:
+webhook fails. The webhooks are called only for the release's own objects
+(`matchConditions`): the pods whose `spec.subdomain` is `<cluster>-nodes`,
+evictions of pods named `<cluster>-nodes-<n>`, and the StatefulSet
+`<cluster>-nodes`. So in the release's namespace these are refused:
 
-- the DELETE of every pod but the operator's own (flared pods, backup Job
-  pods, debug pods): `failed calling webhook "pods.node-guard.flare.gree.net"`;
-- **every eviction of every pod**, not only flared ones (the operator's own
-  pods, backup Jobs, anything else in the namespace): `kubectl drain` keeps
-  failing with `failed calling webhook "evictions.node-guard.flare.gree.net"`;
-- every StatefulSet UPDATE and DELETE (`"statefulsets.node-guard.flare.gree.net"`),
-  which also makes a `helm upgrade` that touches the flared StatefulSet fail.
+- the DELETE of the release's flared pods:
+  `failed calling webhook "pods.node-guard.flare.gree.net"`;
+- the eviction of the release's flared pods: `kubectl drain` of a node that
+  runs one keeps failing with
+  `failed calling webhook "evictions.node-guard.flare.gree.net"`;
+- every UPDATE and DELETE of the release's StatefulSet
+  (`"statefulsets.node-guard.flare.gree.net"`), which also makes a
+  `helm upgrade` that touches it fail.
 
+The other pods and StatefulSets of the namespace (other apps, another flare
+release, backup Job pods, debug pods) are deleted, evicted and changed as
+usual. A chart rendered with an empty `clusterName` has no
+`matchConditions` (it cannot name the cluster): then every pod delete, every
+eviction and every StatefulSet change of the namespace is refused, as before.
 A `kubectl delete pod` of the operator's own pod is not affected.
 The override annotation does not help here (nothing answers to read it).
 Bring the operator back first. If that is not possible, turn the guard off

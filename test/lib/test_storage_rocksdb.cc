@@ -2540,17 +2540,35 @@ void test_blob_gc_compact_step_reclaims_garbage_gc_left() {
 	cut_assert_operator(ssts0, >=, 3u);
 	const int pass = s->blob_referencing_ssts();
 	cut_assert_operator(pass, >=, 3);
+	// as the pass does: a busy step (another compaction in the way) is
+	// tried again after a pause and is not a step
 	int steps = 0;
+	int busy = 0;
+	// another compaction in the way of the first step (seam: its
+	// CompactFiles is refused with Status::Aborted): busy, not an error
+	s->set_blob_gc_abort_once_for_test();
 	int r = s->blob_gc_compact_step(0.5, 0);
-	while (r == 1) {
-		steps++;
-		if (steps >= pass) {
+	cut_assert_equal_int(2, r);
+	cut_assert_equal_int(1, static_cast<int>(s->get_blob_gc_busy()));
+	cut_assert_equal_int(0, static_cast<int>(s->get_blob_gc_compact_errors()));
+	cut_assert_equal_string("", s->get_blob_gc_last_error().c_str());
+	while (r == 1 || r == 2) {
+		if (r == 1) {
+			steps++;
+			busy = 0;
+			if (steps >= pass) {
+				break;
+			}
+		} else if (++busy >= 50) {
 			break;
+		} else {
+			usleep(100 * 1000);
 		}
 		r = s->blob_gc_compact_step(0.0, 0);
 	}
-	cut_assert_equal_int(1, r);
+	cut_assert_equal_int(1, r, cut_message("step %d of %d: %s", steps + 1, pass, s->get_blob_gc_last_error().c_str()));
 	cut_assert_equal_int(pass, steps);
+	cut_notify("blob GC steps that found another compaction in the way: %llu", (unsigned long long)s->get_blob_gc_busy());
 	uint64_t total1 = 0, garbage1 = 0;
 	cut_assert_true(s->blob_file_bytes(total1, garbage1));
 	cut_notify("blob files before %llu bytes (garbage %llu) in %d SSTs, after %d steps %llu bytes (garbage %llu), live values %llu bytes",

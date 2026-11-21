@@ -75,8 +75,13 @@ int handler_blob_gc::run() {
 		const double ratio = ini_option_object().get_rocksdb_blob_compact_percent() / 100.0;
 		const uint64_t min_bytes = static_cast<uint64_t>(ini_option_object().get_rocksdb_blob_compact_min_mb()) * 1024 * 1024;
 		const int pass = rdb->blob_referencing_ssts();
+		// A step answers 1 (compacted), 0 (nothing to do), -1 (failed,
+		// counted) or 2 (another compaction was in the way: nothing done, try
+		// again after the pause; a pass gives up after busy_limit in a row).
 		int r = rdb->blob_gc_compact_step(ratio, min_bytes);
-		for (int done = 1; r == 1 && done < pass; done++) {
+		int done = r == 1 ? 1 : 0;
+		int busy = r == 2 ? 1 : 0;
+		while ((r == 1 || r == 2) && done < pass && busy < busy_limit) {
 			if (!this->_sleep_interruptible_ms(ini_option_object().get_rocksdb_blob_compact_pause_ms())) {
 				break;
 			}
@@ -84,7 +89,13 @@ int handler_blob_gc::run() {
 			if (ini_option_object().get_rocksdb_blob_compact_interval() < 1) {
 				break;
 			}
-			r = rdb->blob_gc_compact_step(0.0, 0);	// 1, 0 (nothing left) or -1 (counted)
+			r = rdb->blob_gc_compact_step(0.0, 0);
+			if (r == 1) {
+				done++;
+				busy = 0;
+			} else if (r == 2) {
+				busy++;
+			}
 		}
 		this->_thread->set_state("wait");
 		this->_thread->set_op("");

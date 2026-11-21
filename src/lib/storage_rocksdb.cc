@@ -163,6 +163,8 @@ storage_rocksdb::storage_rocksdb(
 	_expire_reaped(0),
 	_blob_gc_compactions(0),
 	_blob_gc_compact_errors(0),
+	_blob_gc_busy(0),
+	_blob_gc_abort_once_for_test(false),
 	_lazy_expiry_delete(false),
 	_follow_generation(0),
 	_expire_filtered(0),
@@ -192,6 +194,7 @@ storage_rocksdb::storage_rocksdb(
 	pthread_mutex_init(&this->_mutex_rebuild_status, NULL);
 	pthread_mutex_init(&this->_mutex_wal_pin, NULL);
 	pthread_mutex_init(&this->_mutex_switch_unresolved, NULL);
+	pthread_mutex_init(&this->_mutex_blob_gc_last_error, NULL);
 	this->_wholelock_writers_waiting = 0;
 	pthread_mutex_init(&this->_tomb_count_mutex, NULL);
 	this->_tomb_scans = 0;
@@ -219,6 +222,7 @@ storage_rocksdb::~storage_rocksdb() {
 	pthread_mutex_destroy(&this->_tomb_live_mutex);
 	pthread_mutex_destroy(&this->_mutex_wal_pin);
 	pthread_mutex_destroy(&this->_resync_failure_mutex);
+	pthread_mutex_destroy(&this->_mutex_blob_gc_last_error);
 	pthread_mutex_destroy(&this->_orphan_scan_mutex);
 	pthread_rwlock_destroy(&this->_mutex_master_id);
 	pthread_mutex_destroy(&this->_mutex_rebuild_status);
@@ -5130,31 +5134,10 @@ int storage_rocksdb::blob_gc_compact_step(double min_ratio, uint64_t min_garbage
 		pthread_rwlock_unlock(&this->_mutex_wholelock);
 		return 0;
 	}
-	// The SST (L1 and below) whose oldest blob reference is the oldest:
-	// compacting it rewrites that reference, so the next step picks another
-	// SST and the steps go round every SST that points into a blob file.
-	// L0 is left to the automatic compactions that take it down.
-	rocksdb::ColumnFamilyMetaData meta;
-	this->_db->GetColumnFamilyMetaData(this->_cf_default, &meta);
 	std::string pick_name;
 	int pick_level = -1;
 	uint64_t pick_oldest = 0;
-	for (const rocksdb::LevelMetaData& level : meta.levels) {
-		if (level.level == 0) {
-			continue;
-		}
-		for (const rocksdb::SstFileMetaData& f : level.files) {
-			if (f.oldest_blob_file_number == 0 || f.being_compacted) {
-				continue;
-			}
-			if (pick_level < 0 || f.oldest_blob_file_number < pick_oldest) {
-				pick_name = f.relative_filename;
-				pick_level = level.level;
-				pick_oldest = f.oldest_blob_file_number;
-			}
-		}
-	}
-	if (pick_level < 0) {
+	if (!this->_blob_gc_pick(pick_name, pick_level, pick_oldest)) {
 		pthread_rwlock_unlock(&this->_mutex_wholelock);
 		return 0;
 	}
@@ -5171,10 +5154,16 @@ int storage_rocksdb::blob_gc_compact_step(double min_ratio, uint64_t min_garbage
 	rocksdb::Status st = this->_db->SetOptions(this->_cf_default,
 		{{"blob_garbage_collection_force_threshold", "1.0"},
 		 {"blob_garbage_collection_age_cutoff", "1.0"}});
+	bool restored = true;
 	if (st.ok()) {
 		rocksdb::CompactionOptions co;
 		co.compression = this->_options.compression;
-		st = this->_db->CompactFiles(co, this->_cf_default, {pick_name}, pick_level);
+		if (this->_blob_gc_abort_once_for_test) {
+			this->_blob_gc_abort_once_for_test = false;
+			st = rocksdb::Status::Aborted("test: another compaction in the way");
+		} else {
+			st = this->_db->CompactFiles(co, this->_cf_default, {pick_name}, pick_level);
+		}
 		char cutoff[32], force[32];
 		snprintf(cutoff, sizeof(cutoff), "%g", this->_options.blob_garbage_collection_age_cutoff);
 		snprintf(force, sizeof(force), "%g", this->_options.blob_garbage_collection_force_threshold);
@@ -5182,17 +5171,38 @@ int storage_rocksdb::blob_gc_compact_step(double min_ratio, uint64_t min_garbage
 			{{"blob_garbage_collection_age_cutoff", cutoff},
 			 {"blob_garbage_collection_force_threshold", force}});
 		if (!rs.ok()) {
+			restored = false;
 			log_err("blob GC compaction: restoring blob_garbage_collection_age_cutoff %s / force_threshold %s failed: %s",
 				cutoff, force, rs.ToString().c_str());
 			if (st.ok()) {
 				st = rs;
 			}
 		}
+		// A compaction RocksDB runs on its own can be in the way between the
+		// pick and CompactFiles: it holds the picked SST or an overlapping
+		// one, or writes the same level in an overlapping range (all
+		// Status::Aborted in RocksDB 8.9 CompactFiles), or it has already
+		// compacted the SST away (InvalidArgument: does not exist). Nothing
+		// was done and nothing is wrong: the step answers busy and the pass
+		// tries again after its pause. Seen as a step answering -1 in
+		// test_blob_gc_compact_step_reclaims_garbage_gc_left (nix-linux
+		// 44906184820).
+		if (!st.ok() && restored
+				&& (st.IsAborted() || (st.IsInvalidArgument() && this->_blob_gc_pick_taken(pick_name)))) {
+			pthread_rwlock_unlock(&this->_mutex_wholelock);
+			this->_blob_gc_busy.incr();
+			log_info("blob GC compaction: %s (L%d) is in the way of another compaction (%s); trying again later",
+				pick_name.c_str(), pick_level, st.ToString().c_str());
+			return 2;
+		}
 	}
 	pthread_rwlock_unlock(&this->_mutex_wholelock);
 	if (!st.ok()) {
 		log_warning("blob GC compaction of %s (L%d, oldest blob file %llu) failed: %s",
 			pick_name.c_str(), pick_level, (unsigned long long)pick_oldest, st.ToString().c_str());
+		pthread_mutex_lock(&this->_mutex_blob_gc_last_error);
+		this->_blob_gc_last_error = pick_name + ": " + st.ToString();
+		pthread_mutex_unlock(&this->_mutex_blob_gc_last_error);
 		this->_blob_gc_compact_errors.incr();
 		return -1;
 	}
@@ -5201,6 +5211,46 @@ int storage_rocksdb::blob_gc_compact_step(double min_ratio, uint64_t min_garbage
 		pick_name.c_str(), pick_level, (unsigned long long)pick_oldest,
 		(unsigned long long)garbage, (unsigned long long)total);
 	return 1;
+}
+
+// The SST (L1 and below) whose oldest blob reference is the oldest and that
+// no compaction holds: compacting it rewrites that reference, so the next
+// step picks another SST and the steps go round every SST that points into
+// a blob file. L0 is left to the automatic compactions that take it down.
+bool storage_rocksdb::_blob_gc_pick(std::string& name, int& level_out, uint64_t& oldest) {
+	rocksdb::ColumnFamilyMetaData meta;
+	this->_db->GetColumnFamilyMetaData(this->_cf_default, &meta);
+	level_out = -1;
+	for (const rocksdb::LevelMetaData& level : meta.levels) {
+		if (level.level == 0) {
+			continue;
+		}
+		for (const rocksdb::SstFileMetaData& f : level.files) {
+			if (f.oldest_blob_file_number == 0 || f.being_compacted) {
+				continue;
+			}
+			if (level_out < 0 || f.oldest_blob_file_number < oldest) {
+				name = f.relative_filename;
+				level_out = level.level;
+				oldest = f.oldest_blob_file_number;
+			}
+		}
+	}
+	return level_out >= 0;
+}
+
+// true when the SST is gone or a compaction holds it now
+bool storage_rocksdb::_blob_gc_pick_taken(const std::string& name) {
+	rocksdb::ColumnFamilyMetaData meta;
+	this->_db->GetColumnFamilyMetaData(this->_cf_default, &meta);
+	for (const rocksdb::LevelMetaData& level : meta.levels) {
+		for (const rocksdb::SstFileMetaData& f : level.files) {
+			if (f.relative_filename == name) {
+				return f.being_compacted;
+			}
+		}
+	}
+	return true;
 }
 
 int storage_rocksdb::blob_referencing_ssts() {

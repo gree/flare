@@ -396,6 +396,7 @@ int op_stats::_send_stats(thread_pool* req_tp, thread_pool* other_tp, storage* s
 				// SST compactions run for the garbage the automatic GC left
 				_send_stat("rocksdb_blob_gc_compactions"     , static_cast<long long>(rdb->get_blob_gc_compactions()));
 				_send_stat("rocksdb_blob_gc_compact_errors"  , static_cast<long long>(rdb->get_blob_gc_compact_errors()));
+				_send_stat("rocksdb_blob_gc_busy"            , static_cast<long long>(rdb->get_blob_gc_busy()));
 			}
 			_send_stat("rocksdb_rebuild_reserve_bytes"      , static_cast<long long>(rdb->get_rebuild_reserve_bytes()));
 			_send_stat("rebuild_blocked"                    , rdb->get_rebuild_blocked());

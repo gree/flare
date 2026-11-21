@@ -95,6 +95,17 @@ def kubectlApplyManifest (manifest : String) (verb : String := "apply") : IO (Ex
   catch e =>
     return .error s!"kubectl {verb} error: {e}"
 
+/-- An optional field of a JSON object (none when absent or of another
+    type). `noinline`: inlined, every `Except.toOption` of the 26
+    `spec.rocksdb` fields became a two-way match with the rest of the
+    structure copied into both branches, so compiling the parse doubled with
+    every field (16 fields 5 s, 26 more than 200 s). -/
+@[noinline] private def optNat (o : Lean.Json) (k : String) : Option Nat :=
+  (o.getObjValD k).getNat?.toOption
+
+@[noinline] private def optBool (o : Lean.Json) (k : String) : Option Bool :=
+  (o.getObjValD k).getBool?.toOption
+
 /-- Parse a FlareClusterView from a Lean.Json object. -/
 private def getFlareClusterFromJson (json : Lean.Json) (name ns : String)
     : Except String FlareClusterView := do
@@ -112,28 +123,32 @@ private def getFlareClusterFromJson (json : Lean.Json) (name ns : String)
   }
   let rocksdbObj := spec.getObjValD "rocksdb"
   let rocksdb : RocksdbConfigSpec := {
-    blockCacheSizeMb := rocksdbObj.getObjValD "blockCacheSizeMb" |>.getNat?.toOption
-    writeBufferSizeMb := rocksdbObj.getObjValD "writeBufferSizeMb" |>.getNat?.toOption
-    maxWriteBufferNumber := rocksdbObj.getObjValD "maxWriteBufferNumber" |>.getNat?.toOption
-    walTtlSeconds := rocksdbObj.getObjValD "walTtlSeconds" |>.getNat?.toOption
-    walSizeLimitMb := rocksdbObj.getObjValD "walSizeLimitMb" |>.getNat?.toOption
-    syncWrites := rocksdbObj.getObjValD "syncWrites" |>.getBool?.toOption
-    blobGc := rocksdbObj.getObjValD "blobGc" |>.getBool?.toOption
-    resyncFailureThreshold := rocksdbObj.getObjValD "resyncFailureThreshold" |>.getNat?.toOption
-    walMaxBatchBytes := rocksdbObj.getObjValD "walMaxBatchBytes" |>.getNat?.toOption
-    walSyncBwlimit := rocksdbObj.getObjValD "walSyncBwlimit" |>.getNat?.toOption
-    snapshotBwlimit := rocksdbObj.getObjValD "snapshotBwlimit" |>.getNat?.toOption
-    flushAllEnabled := rocksdbObj.getObjValD "flushAllEnabled" |>.getBool?.toOption
-    walSyncInterval := rocksdbObj.getObjValD "walSyncInterval" |>.getNat?.toOption
-    backupKeep := rocksdbObj.getObjValD "backupKeep" |>.getNat?.toOption
-    readUnavailableError := rocksdbObj.getObjValD "readUnavailableError" |>.getBool?.toOption
-    replIdentityForward := rocksdbObj.getObjValD "replIdentityForward" |>.getBool?.toOption
-    replFollowEnabled := rocksdbObj.getObjValD "replFollowEnabled" |>.getBool?.toOption
-    replFollowPollIntervalUsec := rocksdbObj.getObjValD "replFollowPollIntervalUsec" |>.getNat?.toOption
-    maxTotalThreadQueue := rocksdbObj.getObjValD "maxTotalThreadQueue" |>.getNat?.toOption
-    noreplyWindowLimit := rocksdbObj.getObjValD "noreplyWindowLimit" |>.getNat?.toOption
-    rebuildReserveBytes := rocksdbObj.getObjValD "rebuildReserveBytes" |>.getNat?.toOption
-    clientIdleTimeoutSeconds := rocksdbObj.getObjValD "clientIdleTimeoutSeconds" |>.getNat?.toOption
+    blockCacheSizeMb := optNat rocksdbObj "blockCacheSizeMb"
+    writeBufferSizeMb := optNat rocksdbObj "writeBufferSizeMb"
+    maxWriteBufferNumber := optNat rocksdbObj "maxWriteBufferNumber"
+    walTtlSeconds := optNat rocksdbObj "walTtlSeconds"
+    walSizeLimitMb := optNat rocksdbObj "walSizeLimitMb"
+    syncWrites := optBool rocksdbObj "syncWrites"
+    blobGc := optBool rocksdbObj "blobGc"
+    blobCompactIntervalSeconds := optNat rocksdbObj "blobCompactIntervalSeconds"
+    blobCompactPercent := optNat rocksdbObj "blobCompactPercent"
+    blobCompactMinMb := optNat rocksdbObj "blobCompactMinMb"
+    blobCompactPauseMs := optNat rocksdbObj "blobCompactPauseMs"
+    resyncFailureThreshold := optNat rocksdbObj "resyncFailureThreshold"
+    walMaxBatchBytes := optNat rocksdbObj "walMaxBatchBytes"
+    walSyncBwlimit := optNat rocksdbObj "walSyncBwlimit"
+    snapshotBwlimit := optNat rocksdbObj "snapshotBwlimit"
+    flushAllEnabled := optBool rocksdbObj "flushAllEnabled"
+    walSyncInterval := optNat rocksdbObj "walSyncInterval"
+    backupKeep := optNat rocksdbObj "backupKeep"
+    readUnavailableError := optBool rocksdbObj "readUnavailableError"
+    replIdentityForward := optBool rocksdbObj "replIdentityForward"
+    replFollowEnabled := optBool rocksdbObj "replFollowEnabled"
+    replFollowPollIntervalUsec := optNat rocksdbObj "replFollowPollIntervalUsec"
+    maxTotalThreadQueue := optNat rocksdbObj "maxTotalThreadQueue"
+    noreplyWindowLimit := optNat rocksdbObj "noreplyWindowLimit"
+    rebuildReserveBytes := optNat rocksdbObj "rebuildReserveBytes"
+    clientIdleTimeoutSeconds := optNat rocksdbObj "clientIdleTimeoutSeconds"
   }
   -- The circuit breaker knobs were published in the CRD examples and the
   -- Runbook but never parsed — the safety valve silently ran on defaults

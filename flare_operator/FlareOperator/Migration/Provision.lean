@@ -30,25 +30,38 @@ namespace FlareOperator.Migration.Provision
 
 open FlareOperator.K8s
 
+/-- One `spec.rocksdb` YAML line for a set field. `noinline` for the same
+    reason as `RocksdbConfigSpec.natValue`: inlined, each `Option.map`
+    copies the rest of the list into both branches of its match. -/
+@[noinline] private def natLine (k : String) (v : Option Nat) : Option String :=
+  v.map (s!"    {k}: {·}")
+
+@[noinline] private def boolLine (k : String) (v : Option Bool) : Option String :=
+  v.map fun b => s!"    {k}: {if b then "true" else "false"}"
+
 /-- Render `spec.rocksdb` fields as CR YAML lines (2-space indented under
     `rocksdb:`). Empty string when nothing is set. -/
 def rocksdbSpecYaml (r : RocksdbConfigSpec) : String :=
   let fields : List (Option String) := [
-    r.blockCacheSizeMb.map (s!"    blockCacheSizeMb: {·}"),
-    r.writeBufferSizeMb.map (s!"    writeBufferSizeMb: {·}"),
-    r.maxWriteBufferNumber.map (s!"    maxWriteBufferNumber: {·}"),
-    r.walTtlSeconds.map (s!"    walTtlSeconds: {·}"),
-    r.walSizeLimitMb.map (s!"    walSizeLimitMb: {·}"),
-    r.syncWrites.map (fun b => s!"    syncWrites: {if b then "true" else "false"}"),
-    r.blobGc.map (fun b => s!"    blobGc: {if b then "true" else "false"}"),
-    r.resyncFailureThreshold.map (s!"    resyncFailureThreshold: {·}"),
-    r.walMaxBatchBytes.map (s!"    walMaxBatchBytes: {·}"),
-    r.walSyncBwlimit.map (s!"    walSyncBwlimit: {·}"),
-    r.walSyncInterval.map (s!"    walSyncInterval: {·}"),
-    r.snapshotBwlimit.map (s!"    snapshotBwlimit: {·}"),
-    r.flushAllEnabled.map (fun b => s!"    flushAllEnabled: {if b then "true" else "false"}"),
+    natLine "blockCacheSizeMb" r.blockCacheSizeMb,
+    natLine "writeBufferSizeMb" r.writeBufferSizeMb,
+    natLine "maxWriteBufferNumber" r.maxWriteBufferNumber,
+    natLine "walTtlSeconds" r.walTtlSeconds,
+    natLine "walSizeLimitMb" r.walSizeLimitMb,
+    boolLine "syncWrites" r.syncWrites,
+    boolLine "blobGc" r.blobGc,
+    natLine "blobCompactIntervalSeconds" r.blobCompactIntervalSeconds,
+    natLine "blobCompactPercent" r.blobCompactPercent,
+    natLine "blobCompactMinMb" r.blobCompactMinMb,
+    natLine "blobCompactPauseMs" r.blobCompactPauseMs,
+    natLine "resyncFailureThreshold" r.resyncFailureThreshold,
+    natLine "walMaxBatchBytes" r.walMaxBatchBytes,
+    natLine "walSyncBwlimit" r.walSyncBwlimit,
+    natLine "walSyncInterval" r.walSyncInterval,
+    natLine "snapshotBwlimit" r.snapshotBwlimit,
+    boolLine "flushAllEnabled" r.flushAllEnabled,
     -- copy retention §9: unset, every staged rebuild of the target stops
-    r.rebuildReserveBytes.map (s!"    rebuildReserveBytes: {·}")
+    natLine "rebuildReserveBytes" r.rebuildReserveBytes
   ]
   let lines := fields.filterMap id
   if lines.isEmpty then "" else "\n  rocksdb:\n" ++ String.intercalate "\n" lines

@@ -28,6 +28,13 @@
 {{- $fullname := include "flare-operator.fullname" . }}
 {{- $svc := printf "%s-webhook" $fullname }}
 {{- $ns := .Values.namespace }}
+{{- /* the FlareCluster this operator judges for: its flared pods have
+     spec.subdomain <name>-nodes and are named <name>-nodes-<n>, its
+     StatefulSet is <name>-nodes. Empty when the chart does not know it (no
+     clusterName, no managed cluster): then no matchConditions are rendered
+     and every pod/eviction/StatefulSet of the namespace reaches the webhook,
+     as before. */}}
+{{- $guarded := .Values.clusterName | default (ternary .Values.cluster.name "" (and .Values.cluster.enabled (not (empty .Values.cluster.name)))) }}
 {{- $tls := .Values.nodeGuard.tls | default dict }}
 {{- $caBundle := "" }}
 {{- $certName := printf "%s-node-guard" $fullname }}
@@ -179,6 +186,15 @@ webhooks:
         - key: app.kubernetes.io/name
           operator: NotIn
           values: [{{ include "flare-operator.name" . | quote }}]
+    {{- with $guarded }}
+    # only this cluster's flared pods reach the webhook (the operator allows
+    # every other pod anyway): with the operator away, the other pods of the
+    # namespace (other apps, another flare cluster) are deleted as usual.
+    # spec.subdomain cannot change after the pod is created, unlike a label.
+    matchConditions:
+      - name: flared-pod-of-this-cluster
+        expression: 'oldObject != null && has(oldObject.spec) && has(oldObject.spec.subdomain) && oldObject.spec.subdomain == "{{ . }}-nodes"'
+    {{- end }}
     rules:
       - apiGroups: [""]
         apiVersions: ["v1"]
@@ -206,6 +222,13 @@ webhooks:
     namespaceSelector:
       matchLabels:
         kubernetes.io/metadata.name: {{ $ns }}
+    {{- with $guarded }}
+    # the Eviction names its pod (request.name) and carries nothing else of
+    # it: only this cluster's flared pods (<name>-nodes-<n>) reach the webhook
+    matchConditions:
+      - name: flared-pod-of-this-cluster
+        expression: 'request.name.startsWith("{{ . }}-nodes-")'
+    {{- end }}
     rules:
       - apiGroups: [""]
         apiVersions: ["v1"]
@@ -230,6 +253,12 @@ webhooks:
     namespaceSelector:
       matchLabels:
         kubernetes.io/metadata.name: {{ $ns }}
+    {{- with $guarded }}
+    # only this cluster's StatefulSet (the operator allows every other one)
+    matchConditions:
+      - name: flared-statefulset-of-this-cluster
+        expression: 'request.name == "{{ . }}-nodes"'
+    {{- end }}
     rules:
       - apiGroups: ["apps"]
         apiVersions: ["v1"]

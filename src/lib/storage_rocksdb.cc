@@ -167,6 +167,8 @@ storage_rocksdb::storage_rocksdb(
 	_blob_gc_low_space(0),
 	_blob_gc_space_avail_for_test(-1),
 	_blob_gc_space_capacity_for_test(0),
+	_blob_gc_step_need_for_test(-1),
+	_blob_gc_last_need(0),
 	_blob_gc_abort_once_for_test(false),
 	_blob_gc_ioerror_for_test(false),
 	_lazy_expiry_delete(false),
@@ -5146,30 +5148,44 @@ int storage_rocksdb::blob_gc_compact_step(double min_ratio, uint64_t min_garbage
 		pthread_rwlock_unlock(&this->_mutex_wholelock);
 		return 0;
 	}
+	std::string pick_name;
+	int pick_level = -1;
+	uint64_t pick_oldest = 0;
+	uint64_t need = 0;
+	if (!this->_blob_gc_pick(pick_name, pick_level, pick_oldest, need)) {
+		pthread_rwlock_unlock(&this->_mutex_wholelock);
+		return 0;
+	}
+	if (this->_blob_gc_step_need_for_test >= 0) {
+		need = static_cast<uint64_t>(this->_blob_gc_step_need_for_test);
+	}
+	pthread_mutex_lock(&this->_mutex_blob_gc_last_error);
+	this->_blob_gc_last_need = need;
+	pthread_mutex_unlock(&this->_mutex_blob_gc_last_error);
 	if (min_free_percent > 0) {
-		// free space as a rebuild sees it (on tmpfs, also the memory cgroup's
-		// headroom); a data dir it cannot read counts as full
+		// The step writes its output before the files it replaces go, and a
+		// local backup checkpoint may keep those until the next backup, so
+		// count none of them as freed: the step starts only if, after
+		// writing its largest possible output (need, from the pick) and a
+		// margin, min_free_percent of the data dir is still free. Free space
+		// as a rebuild sees it (on tmpfs, also the memory cgroup's
+		// headroom); a data dir it cannot read counts as full.
 		int64_t avail = this->_blob_gc_space_avail_for_test;
 		uint64_t capacity = this->_blob_gc_space_capacity_for_test;
 		if (avail < 0) {
 			avail = this->rebuild_space_available();
 			capacity = this->get_data_dir_capacity_bytes();
 		}
+		const double margin = static_cast<double>(need) / 10.0 + static_cast<double>(blob_gc_step_margin_bytes);
 		if (avail < 0 || capacity == 0
-				|| static_cast<double>(avail) * 100.0 < static_cast<double>(min_free_percent) * static_cast<double>(capacity)) {
+				|| (static_cast<double>(avail) - static_cast<double>(need) - margin) * 100.0
+					< static_cast<double>(min_free_percent) * static_cast<double>(capacity)) {
 			pthread_rwlock_unlock(&this->_mutex_wholelock);
 			this->_blob_gc_low_space.incr();
-			log_info("blob GC compaction: %lld of %llu bytes free under the data dir, below rocksdb-blob-compact-min-free-percent %d; trying again at the next check",
-				(long long)avail, (unsigned long long)capacity, min_free_percent);
+			log_info("blob GC compaction: %s (L%d) may write %llu bytes (+%.0f margin) with %lld of %llu bytes free under the data dir, which would leave less than rocksdb-blob-compact-min-free-percent %d; trying again at the next check",
+				pick_name.c_str(), pick_level, (unsigned long long)need, margin, (long long)avail, (unsigned long long)capacity, min_free_percent);
 			return 3;
 		}
-	}
-	std::string pick_name;
-	int pick_level = -1;
-	uint64_t pick_oldest = 0;
-	if (!this->_blob_gc_pick(pick_name, pick_level, pick_oldest)) {
-		pthread_rwlock_unlock(&this->_mutex_wholelock);
-		return 0;
 	}
 	// CompactFiles on that one file into its own level: no file of another
 	// level joins (CompactRange would take every file overlapping the range
@@ -5249,10 +5265,11 @@ int storage_rocksdb::blob_gc_compact_step(double min_ratio, uint64_t min_garbage
 // no compaction holds: compacting it rewrites that reference, so the next
 // step picks another SST and the steps go round every SST that points into
 // a blob file. L0 is left to the automatic compactions that take it down.
-bool storage_rocksdb::_blob_gc_pick(std::string& name, int& level_out, uint64_t& oldest) {
+bool storage_rocksdb::_blob_gc_pick(std::string& name, int& level_out, uint64_t& oldest, uint64_t& need) {
 	rocksdb::ColumnFamilyMetaData meta;
 	this->_db->GetColumnFamilyMetaData(this->_cf_default, &meta);
 	level_out = -1;
+	uint64_t sst_size = 0;
 	for (const rocksdb::LevelMetaData& level : meta.levels) {
 		if (level.level == 0) {
 			continue;
@@ -5265,10 +5282,25 @@ bool storage_rocksdb::_blob_gc_pick(std::string& name, int& level_out, uint64_t&
 				name = f.relative_filename;
 				level_out = level.level;
 				oldest = f.oldest_blob_file_number;
+				sst_size = f.size;
 			}
 		}
 	}
-	return level_out >= 0;
+	if (level_out < 0) {
+		return false;
+	}
+	// The most the step can write: the SST again, and every live value of
+	// every blob file it may reference. RocksDB records only the oldest blob
+	// file an SST references, so every blob file from that one on counts,
+	// with its garbage taken out (the step drops garbage, it does not copy
+	// it). Values other SSTs reference are counted too: an upper bound.
+	need = sst_size;
+	for (const rocksdb::BlobMetaData& b : meta.blob_files) {
+		if (b.blob_file_number >= oldest) {
+			need += b.blob_file_size > b.garbage_blob_bytes ? b.blob_file_size - b.garbage_blob_bytes : 0;
+		}
+	}
+	return true;
 }
 
 // true when the SST is gone or a compaction holds it now

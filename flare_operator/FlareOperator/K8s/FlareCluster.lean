@@ -138,10 +138,11 @@ structure RocksdbConfigSpec where
       default 600, 0 = off), `rocksdb-blob-compact-percent` (default 50),
       `rocksdb-blob-compact-min-mb` (default 512),
       `rocksdb-blob-compact-pause-ms` (default 1000). A step compacts only
-      while at least the free percent of the data dir is free: a local
-      backup checkpoint keeps the files a compaction replaces until the next
-      backup (seen live: 5.3G -> 7.7G of an 8G tmpfs);
-      `rocksdb-blob-compact-min-free-percent` (default 25, 0 = no floor). -/
+      if, after its largest possible output and a margin, the free percent
+      of the data dir stays free: a local backup checkpoint keeps the files
+      a compaction replaces until the next backup (seen live: 5.3G -> 7.7G
+      of an 8G tmpfs); `rocksdb-blob-compact-min-free-percent` (default 25,
+      0 = no check). -/
   blobCompactIntervalSeconds : Option Nat := none
   blobCompactPercent : Option Nat := none
   blobCompactMinMb : Option Nat := none

@@ -240,9 +240,11 @@ cluster:
   # its live values. The files it replaces stay while a local backup
   # checkpoint hardlinks them (until the next backup), so a pass right after
   # a backup can need the whole rewritten copy on top of the old one (pf-dev:
-  # 5.3G -> 7.7G of an 8G tmpfs). A step therefore runs only while at least
-  # blobCompactMinFreePercent (default 25, 0 = no floor) of the data dir is
-  # free; the pass resumes at a later check. Dynamic (SIGHUP), e.g.
+  # 5.3G -> 7.7G of an 8G tmpfs). A step therefore runs only if, after its
+  # largest possible output (the SST and the live values of every blob file
+  # it may reference, counting nothing as freed) and a margin, at least
+  # blobCompactMinFreePercent (default 25, 0 = no check) of the data dir
+  # stays free; the pass resumes at a later check. Dynamic (SIGHUP), e.g.
   # {blobCompactPercent: 30, blobCompactMinMb: 256}.
   # Startup-only memory knobs, for example:
   # rocksdb: {blockCacheSizeMb: 64, writeBufferSizeMb: 16, maxWriteBufferNumber: 3}

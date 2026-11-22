@@ -1060,7 +1060,7 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("rocksdb-blob-compact-percent",		program_options::value<int>(),		"compact while the blob garbage is at least this percent of the blob file bytes (default 50, dynamic, rocksdb only)")
 		("rocksdb-blob-compact-min-mb",		program_options::value<int>(),		"and at least this many MB (default 512, dynamic, rocksdb only)")
 		("rocksdb-blob-compact-pause-ms",	program_options::value<int>(),		"pause between two SST compactions (default 1000, dynamic, rocksdb only)")
-		("rocksdb-blob-compact-min-free-percent",	program_options::value<int>(),	"compact only while at least this percent of the data dir is free; a local backup holds the files a compaction replaces until the next backup (default 25, 0 = no floor, dynamic, rocksdb only)");
+		("rocksdb-blob-compact-min-free-percent",	program_options::value<int>(),	"compact one SST only if, after its largest possible output (the SST and the live values of the blob files it may reference) and a margin, at least this percent of the data dir stays free; a local backup holds the files a compaction replaces until the next backup (default 25, 0 = no check, dynamic, rocksdb only)");
 
 	return 0;
 }

@@ -79,8 +79,9 @@ int handler_blob_gc::run() {
 		// A step answers 1 (compacted), 0 (nothing to do), -1 (failed,
 		// counted), 2 (another compaction was in the way: nothing done, try
 		// again after the pause; a pass gives up after busy_limit in a row)
-		// or 3 (the data dir is short of free space: the pass ends, the next
-		// check tries again, after a backup has let go of the old files).
+		// or 3 (the step's largest possible output would leave less than the
+		// free floor: the pass ends, a later check tries again, after a
+		// backup has let go of the old files).
 		int r = rdb->blob_gc_compact_step(ratio, min_bytes, min_free);
 		int done = r == 1 ? 1 : 0;
 		int busy = r == 2 ? 1 : 0;

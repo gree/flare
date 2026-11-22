@@ -337,6 +337,10 @@ protected:
 	AtomicCounter _blob_gc_low_space;
 	int64_t _blob_gc_space_avail_for_test;		// -1 = none (the real statvfs)
 	uint64_t _blob_gc_space_capacity_for_test;
+	int64_t _blob_gc_step_need_for_test;		// -1 = none (estimated from the pick)
+	// the most the last step that picked an SST could write (bytes; under
+	// _mutex_blob_gc_last_error)
+	uint64_t _blob_gc_last_need;
 	bool _blob_gc_abort_once_for_test;
 	bool _blob_gc_ioerror_for_test;
 	// the RocksDB status of the last step that failed ("" until one fails)
@@ -625,12 +629,15 @@ public:
 	// is off (rocksdb-blob-gc false) or no SST references a blob file, -1 on
 	// an error, 2 when a compaction RocksDB runs on its own is in the way
 	// (nothing done, no error: the pass tries again after its pause), 3 when
-	// the data dir's free space is below min_free_percent of its capacity
-	// (nothing done, no error: the pass ends and the next one tries again).
-	// A compaction writes its output before the files it replaces go, and a
-	// local backup checkpoint hardlinks those files until the next backup,
-	// so a pass right after a backup can need the whole rewritten copy on
-	// top of the old one (live on a tmpfs cluster: 5.3G -> 7.7G of 8G).
+	// the step's largest possible output (the SST and the live values of
+	// every blob file it may reference) plus a margin (a tenth of it and
+	// blob_gc_step_margin_bytes) would leave less than min_free_percent of
+	// the data dir free, or the free space cannot be read (nothing done, no
+	// error: the pass ends and a later check tries again). The step counts
+	// none of the files it replaces as freed: a compaction writes its output
+	// before they go, and a local backup checkpoint hardlinks them until the
+	// next backup (live on a tmpfs cluster, a pass right after a backup: the
+	// master 5.3G -> 7.7G of 8G). min_free_percent 0 turns the check off.
 	int blob_gc_compact_step(double min_ratio, uint64_t min_garbage_bytes, int min_free_percent = 0);
 	// SSTs (L1 and below) that reference a blob file: the steps of one pass
 	// (each step moves the SST it compacts to the end of the order)
@@ -639,6 +646,13 @@ public:
 	uint64_t get_blob_gc_compact_errors()     { return this->_blob_gc_compact_errors.fetch(); }
 	uint64_t get_blob_gc_busy()               { return this->_blob_gc_busy.fetch(); }
 	uint64_t get_blob_gc_low_space()          { return this->_blob_gc_low_space.fetch(); }
+	uint64_t get_blob_gc_last_need() const {
+		pthread_mutex_lock(&this->_mutex_blob_gc_last_error);
+		const uint64_t n = this->_blob_gc_last_need;
+		pthread_mutex_unlock(&this->_mutex_blob_gc_last_error);
+		return n;
+	}
+	static const uint64_t blob_gc_step_margin_bytes = 64ULL << 20;
 	std::string get_blob_gc_last_error() const {
 		pthread_mutex_lock(&this->_mutex_blob_gc_last_error);
 		const std::string e = this->_blob_gc_last_error;
@@ -660,6 +674,9 @@ public:
 	// blob_gc_compact_step sees this free space and capacity instead of the
 	// data dir's (avail -1: back to the real ones)
 	void set_blob_gc_space_for_test(int64_t avail, uint64_t capacity) { this->_blob_gc_space_avail_for_test = avail; this->_blob_gc_space_capacity_for_test = capacity; }
+	// blob_gc_compact_step takes this as the step's largest output instead
+	// of the estimate from the pick (-1: back to the estimate)
+	void set_blob_gc_step_need_for_test(int64_t need) { this->_blob_gc_step_need_for_test = need; }
 	std::vector<std::string> sst_files_for_test();
 	// a RocksDB integer property of the default family (unit tests only)
 	uint64_t int_property_for_test(const char* name) {
@@ -755,7 +772,8 @@ private:
 	uint64_t _collect_tombstones_locked(uint64_t budget);
 	// blob_gc_compact_step: pick the SST to compact; whether the picked SST
 	// was taken by another compaction (gone, or being compacted)
-	bool _blob_gc_pick(std::string& name, int& level_out, uint64_t& oldest);
+	// also the most the step compacting it can write (need, bytes)
+	bool _blob_gc_pick(std::string& name, int& level_out, uint64_t& oldest, uint64_t& need);
 	bool _blob_gc_pick_taken(const std::string& name);
 public:
 	/**

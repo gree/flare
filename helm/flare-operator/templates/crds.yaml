@@ -160,7 +160,7 @@ spec:
                       type: integer
                       minimum: 0
                       maximum: 100
-                      description: Compact only while at least this percent of the data dir is free; a local backup keeps the files a compaction replaces until the next backup (rocksdb-blob-compact-min-free-percent; flared default 25; 0 = no floor; dynamic)
+                      description: Compact an SST only if, after its largest possible output (the SST and the live values of the blob files it may reference) and a margin, at least this percent of the data dir stays free; a local backup keeps the files a compaction replaces until the next backup (rocksdb-blob-compact-min-free-percent; flared default 25; 0 = no check; dynamic)
                     resyncFailureThreshold:
                       type: integer
                       minimum: 1

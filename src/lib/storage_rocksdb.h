@@ -647,6 +647,11 @@ public:
 	// failed with Status::IOError, a failure the step counts
 	void set_blob_gc_abort_once_for_test(bool io = false) { this->_blob_gc_abort_once_for_test = true; this->_blob_gc_ioerror_for_test = io; }
 	std::vector<std::string> sst_files_for_test();
+	// a RocksDB integer property of the default family (unit tests only)
+	uint64_t int_property_for_test(const char* name) {
+		uint64_t v = 0;
+		return this->_db != NULL && this->_db->GetIntProperty(name, &v) ? v : UINT64_MAX;
+	}
 	// write a raw default-family record (unit tests only: a record get()
 	// cannot decode)
 	int put_raw_for_test(const std::string& key, const std::string& value) {

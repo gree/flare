@@ -345,15 +345,30 @@ void test_wal_live_size_is_bounded() {
 		snprintf(key, sizeof(key), "bound_%d", i);
 		cut_assert_equal_int(0, storage_set_string(s, key, value));
 	}
-	// the flush the bound requests runs in the background
+	// RocksDB checks max_total_wal_size on a WRITE, and only switches the WAL
+	// again once the flush the previous switch asked for has finished: a
+	// fast writer puts everything after the first switch into the next WAL
+	// before that flush is done, and with no write after it nothing checks
+	// the bound again (kjob, 16 CPUs: 3.19 MB left in WAL 10 every run,
+	// "Try to delete WAL files size 1049024, prev total WAL file size
+	// 4215236"). So keep writing while waiting, as a live copy does: the
+	// next write after the flush switches the WAL and the old one is
+	// archived.
 	const string db = string(dir) + "/flare.rocksdb";
 	uint64_t live = live_wal_bytes(db);
+	int waited_ms = 0;
 	for (int i = 0; i < 100 && live >= 2 * 1024 * 1024; i++) {
 		usleep(50 * 1000);
+		waited_ms += 50;
+		cut_assert_equal_int(0, storage_set_string(s, "bound_tick", value));
 		live = live_wal_bytes(db);
 	}
 	// ~4 MB written: the live WAL holds about the bound, not all of it
-	cut_assert_operator(live, <, static_cast<uint64_t>(2 * 1024 * 1024));
+	cut_assert_operator(live, <, static_cast<uint64_t>(2 * 1024 * 1024),
+		cut_message("live WAL %llu bytes after %d ms; running flushes %llu, flush pending %llu",
+			(unsigned long long)live, waited_ms,
+			(unsigned long long)s->int_property_for_test("rocksdb.num-running-flushes"),
+			(unsigned long long)s->int_property_for_test("rocksdb.mem-table-flush-pending")));
 	// a position from before the switch is still served (archived WAL)
 	vector<pair<uint64_t, rocksdb::WriteBatch> > updates;
 	cut_assert_equal_int(0, s->get_updates_since(first, updates, 16, 1024 * 1024));

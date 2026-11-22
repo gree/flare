@@ -2079,6 +2079,10 @@ int storage_rocksdb::get(entry& e, result& r, int b) {
 				r = result_not_found;
 			} else {
 				log_err("RocksDB::Get() failed: %s", status.ToString().c_str());
+				if (b & behavior_read_error) {
+					r = result_none;
+					throw -1;
+				}
 				r = result_not_found;
 			}
 			throw 0;
@@ -2086,6 +2090,10 @@ int storage_rocksdb::get(entry& e, result& r, int b) {
 
 		if (value.size() < static_cast<size_t>(entry::header_size)) {
 			log_err("invalid data size (key=%s, size=%zu)", e.key.c_str(), value.size());
+			if (b & behavior_read_error) {
+				r = result_none;
+				throw -1;
+			}
 			r = result_not_found;
 			throw 0;
 		}

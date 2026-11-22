@@ -235,6 +235,38 @@ void test_wal_get_latest_sequence_number_monotonic() {
 }
 
 /*
+ *	A record get() cannot decode is "not found" to a client read (0 +
+ *	result_not_found, as before), but -1 with behavior_read_error: a caller
+ *	that acts on "not found" (the cross-cluster seed skipping or retracting
+ *	a key) can tell a failed read from a real absence.
+ */
+void test_get_read_error_only_with_behavior_read_error() {
+	storage_rocksdb* m = make_rocksdb(wal_master_dir);
+	cut_assert_equal_int(0, m->put_raw_for_test("short", "x"));
+
+	storage::entry e;
+	e.key = "short";
+	storage::result r = storage::result_none;
+	cut_assert_equal_int(0, m->get(e, r));
+	cut_assert_equal_int(storage::result_not_found, r);
+
+	storage::entry e2;
+	e2.key = "short";
+	r = storage::result_none;
+	cut_assert_equal_int(-1, m->get(e2, r, storage::behavior_read_error));
+	cut_assert_equal_int(storage::result_none, r);
+
+	// a key that is not there is still "not found", also with the flag
+	storage::entry e3;
+	e3.key = "absent";
+	r = storage::result_none;
+	cut_assert_equal_int(0, m->get(e3, r, storage::behavior_read_error));
+	cut_assert_equal_int(storage::result_not_found, r);
+
+	drop_rocksdb(m, wal_master_dir);
+}
+
+/*
  *	Reopen after writes that were never flushed to an SST: the counter must
  *	be exact. The old seed read rocksdb.estimate-num-keys, which does not see
  *	WAL-only keys — the SAF-10d crash test found curr_items short by exactly

@@ -69,6 +69,11 @@ public:
 		behavior_prepend				= 0x01 << 8,
 		behavior_dump						= 0x01 << 9,
 		behavior_touch					= 0x01 << 10,
+		// get(): a read the store failed (an I/O error, a record it cannot
+		// decode) returns -1 with result_none instead of result_not_found +
+		// 0, so a caller that acts on "not found" (a seed skipping a key,
+		// retracting it on the destination) can tell it from a real absence
+		behavior_read_error			= 0x01 << 11,
 	};
 
 	enum									result {

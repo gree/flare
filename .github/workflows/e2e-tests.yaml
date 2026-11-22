@@ -456,6 +456,11 @@ jobs:
         # no cert-manager runs in kind)
         run: python3 -m unittest discover -s scripts/tests -p 'test_helm_webhook_tls.py' -v
 
+      - name: Test the node guard's matchConditions (chart render)
+        # only the release's own flared pods, their evictions and its
+        # StatefulSet reach the webhook
+        run: python3 -m unittest discover -s scripts/tests -p 'test_helm_node_guard_match.py' -v
+
       - name: Test the object-storage transfer cap (chart render)
         # cluster.objectStorage.maxBandwidth reaches every container that
         # runs `aws s3`; nothing renders when it is unset

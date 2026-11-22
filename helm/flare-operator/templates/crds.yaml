@@ -156,6 +156,11 @@ spec:
                       type: integer
                       minimum: 0
                       description: Pause between two SST compactions in milliseconds (rocksdb-blob-compact-pause-ms; flared default 1000; dynamic)
+                    blobCompactMinFreePercent:
+                      type: integer
+                      minimum: 0
+                      maximum: 100
+                      description: Compact only while at least this percent of the data dir is free; a local backup keeps the files a compaction replaces until the next backup (rocksdb-blob-compact-min-free-percent; flared default 25; 0 = no floor; dynamic)
                     resyncFailureThreshold:
                       type: integer
                       minimum: 1

@@ -164,6 +164,9 @@ storage_rocksdb::storage_rocksdb(
 	_blob_gc_compactions(0),
 	_blob_gc_compact_errors(0),
 	_blob_gc_busy(0),
+	_blob_gc_low_space(0),
+	_blob_gc_space_avail_for_test(-1),
+	_blob_gc_space_capacity_for_test(0),
 	_blob_gc_abort_once_for_test(false),
 	_blob_gc_ioerror_for_test(false),
 	_lazy_expiry_delete(false),
@@ -5125,7 +5128,7 @@ bool storage_rocksdb::blob_file_bytes(uint64_t& total, uint64_t& garbage) {
 	return ok;
 }
 
-int storage_rocksdb::blob_gc_compact_step(double min_ratio, uint64_t min_garbage_bytes) {
+int storage_rocksdb::blob_gc_compact_step(double min_ratio, uint64_t min_garbage_bytes, int min_free_percent) {
 	pthread_rwlock_rdlock(&this->_mutex_wholelock);
 	if (this->_db == NULL || this->_corrupted || !this->_blob_gc) {
 		pthread_rwlock_unlock(&this->_mutex_wholelock);
@@ -5142,6 +5145,24 @@ int storage_rocksdb::blob_gc_compact_step(double min_ratio, uint64_t min_garbage
 			|| static_cast<double>(garbage) < min_ratio * static_cast<double>(total)) {
 		pthread_rwlock_unlock(&this->_mutex_wholelock);
 		return 0;
+	}
+	if (min_free_percent > 0) {
+		// free space as a rebuild sees it (on tmpfs, also the memory cgroup's
+		// headroom); a data dir it cannot read counts as full
+		int64_t avail = this->_blob_gc_space_avail_for_test;
+		uint64_t capacity = this->_blob_gc_space_capacity_for_test;
+		if (avail < 0) {
+			avail = this->rebuild_space_available();
+			capacity = this->get_data_dir_capacity_bytes();
+		}
+		if (avail < 0 || capacity == 0
+				|| static_cast<double>(avail) * 100.0 < static_cast<double>(min_free_percent) * static_cast<double>(capacity)) {
+			pthread_rwlock_unlock(&this->_mutex_wholelock);
+			this->_blob_gc_low_space.incr();
+			log_info("blob GC compaction: %lld of %llu bytes free under the data dir, below rocksdb-blob-compact-min-free-percent %d; trying again at the next check",
+				(long long)avail, (unsigned long long)capacity, min_free_percent);
+			return 3;
+		}
 	}
 	std::string pick_name;
 	int pick_level = -1;

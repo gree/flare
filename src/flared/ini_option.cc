@@ -126,6 +126,7 @@ ini_option::ini_option():
 		_rocksdb_blob_compact_percent(default_rocksdb_blob_compact_percent),
 		_rocksdb_blob_compact_min_mb(default_rocksdb_blob_compact_min_mb),
 		_rocksdb_blob_compact_pause_ms(default_rocksdb_blob_compact_pause_ms),
+		_rocksdb_blob_compact_min_free_percent(default_rocksdb_blob_compact_min_free_percent),
 		_log_stderr(false) {
 	pthread_mutex_init(&this->_mutex_index_servers, NULL);
 }
@@ -557,6 +558,9 @@ int ini_option::load() {
 		if (opt_var_map.count("rocksdb-blob-compact-pause-ms")) {
 			this->_rocksdb_blob_compact_pause_ms = opt_var_map["rocksdb-blob-compact-pause-ms"].as<int>();
 		}
+		if (opt_var_map.count("rocksdb-blob-compact-min-free-percent")) {
+			this->_rocksdb_blob_compact_min_free_percent = opt_var_map["rocksdb-blob-compact-min-free-percent"].as<int>();
+		}
 	} catch (int e) {
 		cout << option << endl;
 		return -1;
@@ -744,6 +748,10 @@ int ini_option::reload() {
 		if (opt_var_map.count("rocksdb-blob-compact-pause-ms")) {
 			log_notice("  rocksdb_blob_compact_pause_ms: %d -> %d", this->_rocksdb_blob_compact_pause_ms, opt_var_map["rocksdb-blob-compact-pause-ms"].as<int>());
 			this->_rocksdb_blob_compact_pause_ms = opt_var_map["rocksdb-blob-compact-pause-ms"].as<int>();
+		}
+		if (opt_var_map.count("rocksdb-blob-compact-min-free-percent")) {
+			log_notice("  rocksdb_blob_compact_min_free_percent: %d -> %d", this->_rocksdb_blob_compact_min_free_percent, opt_var_map["rocksdb-blob-compact-min-free-percent"].as<int>());
+			this->_rocksdb_blob_compact_min_free_percent = opt_var_map["rocksdb-blob-compact-min-free-percent"].as<int>();
 		}
 
 		// The remaining rocksdb options require reopening the DB (block cache,
@@ -1051,7 +1059,8 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("rocksdb-blob-compact-interval",	program_options::value<int>(),		"seconds between checks for blob garbage RocksDB's GC left behind; when found, SSTs are compacted one at a time until it is below the thresholds; 0 = off (default 600, dynamic, rocksdb only)")
 		("rocksdb-blob-compact-percent",		program_options::value<int>(),		"compact while the blob garbage is at least this percent of the blob file bytes (default 50, dynamic, rocksdb only)")
 		("rocksdb-blob-compact-min-mb",		program_options::value<int>(),		"and at least this many MB (default 512, dynamic, rocksdb only)")
-		("rocksdb-blob-compact-pause-ms",	program_options::value<int>(),		"pause between two SST compactions (default 1000, dynamic, rocksdb only)");
+		("rocksdb-blob-compact-pause-ms",	program_options::value<int>(),		"pause between two SST compactions (default 1000, dynamic, rocksdb only)")
+		("rocksdb-blob-compact-min-free-percent",	program_options::value<int>(),	"compact only while at least this percent of the data dir is free; a local backup holds the files a compaction replaces until the next backup (default 25, 0 = no floor, dynamic, rocksdb only)");
 
 	return 0;
 }

@@ -30,7 +30,7 @@ theorem keys_prefixFree : RocksdbConfigSpec.keys.Pairwise PrefixFree := by
   unfold PrefixFree RocksdbConfigSpec.keys RocksdbConfigSpec.entries
   decide
 
-theorem keys_length : RocksdbConfigSpec.keys.length = 26 := by
+theorem keys_length : RocksdbConfigSpec.keys.length = 27 := by
   simp [RocksdbConfigSpec.keys, RocksdbConfigSpec.entries]
 
 /-- The line order is fixed by the key list, whatever the values are. -/
@@ -240,6 +240,14 @@ theorem blobCompactPauseMs_some (r : RocksdbConfigSpec) (v : Nat) (h : r.blobCom
 theorem blobCompactPauseMs_none (r : RocksdbConfigSpec) (h : r.blobCompactPauseMs = none) :
     ∀ s, ("rocksdb-blob-compact-pause-ms = " ++ s) ∉ r.lines :=
   not_mem_none r "rocksdb-blob-compact-pause-ms" (by simp [RocksdbConfigSpec.entries, h])
+
+theorem blobCompactMinFreePercent_some (r : RocksdbConfigSpec) (v : Nat) (h : r.blobCompactMinFreePercent = some v) :
+    r.lines.count ("rocksdb-blob-compact-min-free-percent = " ++ toString v) = 1 :=
+  count_some r "rocksdb-blob-compact-min-free-percent" (toString v) (by simp [RocksdbConfigSpec.entries, h])
+
+theorem blobCompactMinFreePercent_none (r : RocksdbConfigSpec) (h : r.blobCompactMinFreePercent = none) :
+    ∀ s, ("rocksdb-blob-compact-min-free-percent = " ++ s) ∉ r.lines :=
+  not_mem_none r "rocksdb-blob-compact-min-free-percent" (by simp [RocksdbConfigSpec.entries, h])
 
 theorem resyncFailureThreshold_some (r : RocksdbConfigSpec) (v : Nat) (h : r.resyncFailureThreshold = some v) :
     r.lines.count ("rocksdb-resync-failure-threshold = " ++ toString v) = 1 :=

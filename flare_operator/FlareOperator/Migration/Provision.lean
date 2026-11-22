@@ -54,6 +54,7 @@ def rocksdbSpecYaml (r : RocksdbConfigSpec) : String :=
     natLine "blobCompactPercent" r.blobCompactPercent,
     natLine "blobCompactMinMb" r.blobCompactMinMb,
     natLine "blobCompactPauseMs" r.blobCompactPauseMs,
+    natLine "blobCompactMinFreePercent" r.blobCompactMinFreePercent,
     natLine "resyncFailureThreshold" r.resyncFailureThreshold,
     natLine "walMaxBatchBytes" r.walMaxBatchBytes,
     natLine "walSyncBwlimit" r.walSyncBwlimit,

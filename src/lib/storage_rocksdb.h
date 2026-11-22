@@ -333,6 +333,10 @@ protected:
 	AtomicCounter _blob_gc_compact_errors;
 	// steps that found another compaction in the way (nothing done, no error)
 	AtomicCounter _blob_gc_busy;
+	// steps refused because the data dir's free space was below the floor
+	AtomicCounter _blob_gc_low_space;
+	int64_t _blob_gc_space_avail_for_test;		// -1 = none (the real statvfs)
+	uint64_t _blob_gc_space_capacity_for_test;
 	bool _blob_gc_abort_once_for_test;
 	bool _blob_gc_ioerror_for_test;
 	// the RocksDB status of the last step that failed ("" until one fails)
@@ -620,14 +624,21 @@ public:
 	// one SST. Returns 1 when it compacted, 0 when below the thresholds, GC
 	// is off (rocksdb-blob-gc false) or no SST references a blob file, -1 on
 	// an error, 2 when a compaction RocksDB runs on its own is in the way
-	// (nothing done, no error: the pass tries again after its pause).
-	int blob_gc_compact_step(double min_ratio, uint64_t min_garbage_bytes);
+	// (nothing done, no error: the pass tries again after its pause), 3 when
+	// the data dir's free space is below min_free_percent of its capacity
+	// (nothing done, no error: the pass ends and the next one tries again).
+	// A compaction writes its output before the files it replaces go, and a
+	// local backup checkpoint hardlinks those files until the next backup,
+	// so a pass right after a backup can need the whole rewritten copy on
+	// top of the old one (live on a tmpfs cluster: 5.3G -> 7.7G of 8G).
+	int blob_gc_compact_step(double min_ratio, uint64_t min_garbage_bytes, int min_free_percent = 0);
 	// SSTs (L1 and below) that reference a blob file: the steps of one pass
 	// (each step moves the SST it compacts to the end of the order)
 	int blob_referencing_ssts();
 	uint64_t get_blob_gc_compactions()        { return this->_blob_gc_compactions.fetch(); }
 	uint64_t get_blob_gc_compact_errors()     { return this->_blob_gc_compact_errors.fetch(); }
 	uint64_t get_blob_gc_busy()               { return this->_blob_gc_busy.fetch(); }
+	uint64_t get_blob_gc_low_space()          { return this->_blob_gc_low_space.fetch(); }
 	std::string get_blob_gc_last_error() const {
 		pthread_mutex_lock(&this->_mutex_blob_gc_last_error);
 		const std::string e = this->_blob_gc_last_error;
@@ -646,6 +657,9 @@ public:
 	// Status::Aborted, as when another compaction is in the way, or (io)
 	// failed with Status::IOError, a failure the step counts
 	void set_blob_gc_abort_once_for_test(bool io = false) { this->_blob_gc_abort_once_for_test = true; this->_blob_gc_ioerror_for_test = io; }
+	// blob_gc_compact_step sees this free space and capacity instead of the
+	// data dir's (avail -1: back to the real ones)
+	void set_blob_gc_space_for_test(int64_t avail, uint64_t capacity) { this->_blob_gc_space_avail_for_test = avail; this->_blob_gc_space_capacity_for_test = capacity; }
 	std::vector<std::string> sst_files_for_test();
 	// a RocksDB integer property of the default family (unit tests only)
 	uint64_t int_property_for_test(const char* name) {

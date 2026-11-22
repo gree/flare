@@ -137,11 +137,17 @@ structure RocksdbConfigSpec where
       All dynamic (SIGHUP). flared: `rocksdb-blob-compact-interval` (seconds,
       default 600, 0 = off), `rocksdb-blob-compact-percent` (default 50),
       `rocksdb-blob-compact-min-mb` (default 512),
-      `rocksdb-blob-compact-pause-ms` (default 1000). -/
+      `rocksdb-blob-compact-pause-ms` (default 1000). A step compacts only
+      if, after its largest possible output and a margin, the free percent
+      of the data dir stays free: a local backup checkpoint keeps the files
+      a compaction replaces until the next backup (seen live: 5.3G -> 7.7G
+      of an 8G tmpfs); `rocksdb-blob-compact-min-free-percent` (default 25,
+      0 = no check). -/
   blobCompactIntervalSeconds : Option Nat := none
   blobCompactPercent : Option Nat := none
   blobCompactMinMb : Option Nat := none
   blobCompactPauseMs : Option Nat := none
+  blobCompactMinFreePercent : Option Nat := none
   /-- Consecutive resync failures before the slave self-demotes.
       flared: `rocksdb-resync-failure-threshold`. -/
   resyncFailureThreshold : Option Nat := none
@@ -225,7 +231,7 @@ def RocksdbConfigSpec.hasAny (r : RocksdbConfigSpec) : Bool :=
   r.blockCacheSizeMb.isSome || r.writeBufferSizeMb.isSome || r.maxWriteBufferNumber.isSome ||
   r.walTtlSeconds.isSome || r.walSizeLimitMb.isSome || r.syncWrites.isSome || r.blobGc.isSome ||
   r.blobCompactIntervalSeconds.isSome || r.blobCompactPercent.isSome ||
-  r.blobCompactMinMb.isSome || r.blobCompactPauseMs.isSome ||
+  r.blobCompactMinMb.isSome || r.blobCompactPauseMs.isSome || r.blobCompactMinFreePercent.isSome ||
   r.resyncFailureThreshold.isSome || r.walMaxBatchBytes.isSome ||
   r.walSyncBwlimit.isSome || r.walSyncInterval.isSome || r.snapshotBwlimit.isSome ||
   r.flushAllEnabled.isSome || r.backupKeep.isSome || r.readUnavailableError.isSome ||
@@ -260,6 +266,7 @@ def RocksdbConfigSpec.entries (r : RocksdbConfigSpec) : List (String × Option S
     ("rocksdb-blob-compact-percent", natValue r.blobCompactPercent),
     ("rocksdb-blob-compact-min-mb", natValue r.blobCompactMinMb),
     ("rocksdb-blob-compact-pause-ms", natValue r.blobCompactPauseMs),
+    ("rocksdb-blob-compact-min-free-percent", natValue r.blobCompactMinFreePercent),
     ("rocksdb-resync-failure-threshold", natValue r.resyncFailureThreshold),
     ("rocksdb-wal-max-batch-bytes", natValue r.walMaxBatchBytes),
     ("rocksdb-wal-sync-bwlimit", natValue r.walSyncBwlimit),

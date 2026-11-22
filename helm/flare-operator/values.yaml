@@ -237,8 +237,15 @@ cluster:
   # garbage is at least blobCompactPercent (default 50) of the blob bytes and
   # at least blobCompactMinMb (default 512), compacts one SST at a time,
   # blobCompactPauseMs (default 1000) apart. Each step rewrites one SST and
-  # its live values, so the extra space at a time is about one SST. Dynamic
-  # (SIGHUP), e.g. {blobCompactPercent: 30, blobCompactMinMb: 256}.
+  # its live values. The files it replaces stay while a local backup
+  # checkpoint hardlinks them (until the next backup), so a pass right after
+  # a backup can need the whole rewritten copy on top of the old one (pf-dev:
+  # 5.3G -> 7.7G of an 8G tmpfs). A step therefore runs only if, after its
+  # largest possible output (the SST and the live values of every blob file
+  # it may reference, counting nothing as freed) and a margin, at least
+  # blobCompactMinFreePercent (default 25, 0 = no check) of the data dir
+  # stays free; the pass resumes at a later check. Dynamic (SIGHUP), e.g.
+  # {blobCompactPercent: 30, blobCompactMinMb: 256}.
   # Startup-only memory knobs, for example:
   # rocksdb: {blockCacheSizeMb: 64, writeBufferSizeMb: 16, maxWriteBufferNumber: 3}
   # These are NOT an RSS cap: allow for all column families, compaction,

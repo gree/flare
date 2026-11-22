@@ -81,6 +81,7 @@ stdenv.mkDerivation {
     grep -E 'test_blob_gc_reclaims_overwritten_values' test/run-tests.sh.log || echo "blob GC test NOT found in the cutter log"
     # blob garbage the automatic GC leaves: reclaimed one SST at a time
     grep -E 'test_blob_gc_compact_step_reclaims_garbage_gc_left' test/run-tests.sh.log || echo "blob GC compaction step test NOT found in the cutter log"
+    grep -E 'test_blob_gc_compact_step_stops_below_free_floor' test/run-tests.sh.log || echo "blob GC free-space floor test NOT found in the cutter log"
     # cross-cluster seed: NOT_STORED (version check) is a no-op, a failed write is an error
     grep -E 'test_run_seed_not_stored_is_noop_and_completes|test_set_not_stored_only_by_version_put_failure_is_error' test/run-tests.sh.log || echo "seed not-stored tests NOT found in the cutter log"
     grep -E 'test_run_seed_skips_key_gone_after_iteration_began|test_run_seed_retracts_key_deleted_before_its_set_was_stored|test_run_seed_fails_when_retraction_is_refused|test_run_seed_fails_on_a_read_error|test_run_seed_does_not_retract_on_a_read_error|test_get_read_error_only_with_behavior_read_error' test/run-tests.sh.log || echo "seed gone-key tests NOT found in the cutter log"

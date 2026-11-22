@@ -155,6 +155,7 @@ private:
 	int				_rocksdb_blob_compact_percent;
 	int				_rocksdb_blob_compact_min_mb;
 	int				_rocksdb_blob_compact_pause_ms;
+	int				_rocksdb_blob_compact_min_free_percent;
 public:
 	static const int default_back_log = 30;
 	static const int default_index_server_port = 12120;
@@ -230,6 +231,7 @@ public:
 	static const int      default_rocksdb_blob_compact_percent = 50;     // garbage share of the blob bytes, %
 	static const int      default_rocksdb_blob_compact_min_mb  = 512;    // and at least this much garbage
 	static const int      default_rocksdb_blob_compact_pause_ms = 1000;  // between two SST compactions
+	static const int      default_rocksdb_blob_compact_min_free_percent = 25; // of the data dir, left after a step's largest output; 0 = no check
 	static const int default_thread_pool_size = 5;
 	static const uint32_t default_proxy_prior_netmask = 0x00;
 	static const uint32_t default_max_total_thread_queue = 0;				// unlimited
@@ -342,6 +344,7 @@ public:
 	int get_rocksdb_blob_compact_percent() { return this->_rocksdb_blob_compact_percent; }
 	int get_rocksdb_blob_compact_min_mb() { return this->_rocksdb_blob_compact_min_mb; }
 	int get_rocksdb_blob_compact_pause_ms() { return this->_rocksdb_blob_compact_pause_ms; }
+	int get_rocksdb_blob_compact_min_free_percent() { return this->_rocksdb_blob_compact_min_free_percent; }
 
 private:
 	int _setup_cli_option(program_options::options_description& option);

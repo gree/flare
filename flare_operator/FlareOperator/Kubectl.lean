@@ -134,6 +134,7 @@ private def getFlareClusterFromJson (json : Lean.Json) (name ns : String)
     blobCompactPercent := optNat rocksdbObj "blobCompactPercent"
     blobCompactMinMb := optNat rocksdbObj "blobCompactMinMb"
     blobCompactPauseMs := optNat rocksdbObj "blobCompactPauseMs"
+    blobCompactMinFreePercent := optNat rocksdbObj "blobCompactMinFreePercent"
     resyncFailureThreshold := optNat rocksdbObj "resyncFailureThreshold"
     walMaxBatchBytes := optNat rocksdbObj "walMaxBatchBytes"
     walSyncBwlimit := optNat rocksdbObj "walSyncBwlimit"

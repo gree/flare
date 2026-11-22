@@ -74,11 +74,15 @@ int handler_blob_gc::run() {
 		// it just below: half the blob bytes garbage at the default 50%).
 		const double ratio = ini_option_object().get_rocksdb_blob_compact_percent() / 100.0;
 		const uint64_t min_bytes = static_cast<uint64_t>(ini_option_object().get_rocksdb_blob_compact_min_mb()) * 1024 * 1024;
+		const int min_free = ini_option_object().get_rocksdb_blob_compact_min_free_percent();
 		const int pass = rdb->blob_referencing_ssts();
 		// A step answers 1 (compacted), 0 (nothing to do), -1 (failed,
-		// counted) or 2 (another compaction was in the way: nothing done, try
-		// again after the pause; a pass gives up after busy_limit in a row).
-		int r = rdb->blob_gc_compact_step(ratio, min_bytes);
+		// counted), 2 (another compaction was in the way: nothing done, try
+		// again after the pause; a pass gives up after busy_limit in a row)
+		// or 3 (the step's largest possible output would leave less than the
+		// free floor: the pass ends, a later check tries again, after a
+		// backup has let go of the old files).
+		int r = rdb->blob_gc_compact_step(ratio, min_bytes, min_free);
 		int done = r == 1 ? 1 : 0;
 		int busy = r == 2 ? 1 : 0;
 		while ((r == 1 || r == 2) && done < pass && busy < busy_limit) {
@@ -89,7 +93,7 @@ int handler_blob_gc::run() {
 			if (ini_option_object().get_rocksdb_blob_compact_interval() < 1) {
 				break;
 			}
-			r = rdb->blob_gc_compact_step(0.0, 0);
+			r = rdb->blob_gc_compact_step(0.0, 0, min_free);
 			if (r == 1) {
 				done++;
 				busy = 0;

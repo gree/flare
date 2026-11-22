@@ -2672,6 +2672,115 @@ void test_blob_gc_compact_step_reclaims_garbage_gc_left() {
 	cut_remove_path(dir, NULL);
 }
 
+// A step starts only if, after writing its largest possible output (the SST
+// and the live values of every blob file it may reference) and a margin (a
+// tenth of it and 64 MiB), at least min_free_percent of the data dir stays
+// free. It counts none of the files it replaces as freed: a compaction
+// writes its output before they go, and a local backup checkpoint keeps
+// them until the next backup (live on a tmpfs cluster, a pass right after a
+// backup: 5.3G -> 7.7G of 8G). Refused: nothing done, answers 3, counted in
+// low_space, not an error. min_free_percent 0 turns the check off; free
+// space that cannot be read counts as full.
+void test_blob_gc_compact_step_stops_below_free_floor() {
+	const char* dir = "tmp_rocksdb_blob_gc_free_floor";
+	cut_remove_path(dir, NULL);
+	mkdir(dir, 0700);
+	storage_rocksdb* s = new storage_rocksdb(dir, 32, 4, 16, 4, 2, 86400, 1024);
+	s->set_blob_gc(true);
+	s->set_target_file_size_for_test(1024);
+	s->open();
+	const string value(8192, 'v');
+	for (int k = 0; k < 200; k++) {
+		cut_assert_equal_int(0, storage_set_string(s, "k" + std::to_string(k), value));
+	}
+	cut_assert_equal_int(0, s->flush_for_test());
+	cut_assert_equal_int(0, s->compact_for_test());
+	for (int k = 0; k < 200; k += 2) {
+		cut_assert_equal_int(0, storage_set_string(s, "k" + std::to_string(k), value));
+	}
+	cut_assert_equal_int(0, s->flush_for_test());
+	cut_assert_equal_int(0, s->compact_for_test());
+	cut_assert_operator(s->blob_referencing_ssts(), >=, 2);
+	// a local backup holds the current files, as the hourly one does
+	string backup;
+	cut_assert_equal_int(0, s->create_named_backup("20261122-090004", backup));
+	const uint64_t GiB = 1ULL << 30, MiB = 1ULL << 20;
+	int low = 0, done = 0;
+
+	// the reviewed case: a step that may write 2.4 GiB with 2.1 GiB free of
+	// 8 GiB is refused, whatever the floor
+	s->set_blob_gc_step_need_for_test(static_cast<int64_t>(24 * GiB / 10));
+	s->set_blob_gc_space_for_test(static_cast<int64_t>(21 * GiB / 10), 8 * GiB);
+	cut_assert_equal_int(3, s->blob_gc_compact_step(0.0, 0, 25));
+	cut_assert_equal_int(++low, static_cast<int>(s->get_blob_gc_low_space()));
+	cut_assert_equal_int(3, s->blob_gc_compact_step(0.0, 0, 1));
+	cut_assert_equal_int(++low, static_cast<int>(s->get_blob_gc_low_space()));
+	cut_assert_equal_int(0, static_cast<int>(s->get_blob_gc_compactions()));
+	cut_assert_equal_int(0, static_cast<int>(s->get_blob_gc_compact_errors()));
+	cut_assert_equal_int(static_cast<int>(24 * GiB / 10 / MiB), static_cast<int>(s->get_blob_gc_last_need() / MiB));
+
+	// the boundary: free = need + need/10 + 64 MiB + 25% of the capacity
+	// compacts; a byte less is refused
+	const uint64_t need = 100 * MiB, cap = 8 * GiB;
+	const uint64_t enough = need + need / 10 + 64 * MiB + cap / 4;
+	s->set_blob_gc_step_need_for_test(static_cast<int64_t>(need));
+	s->set_blob_gc_space_for_test(static_cast<int64_t>(enough - 1), cap);
+	cut_assert_equal_int(3, s->blob_gc_compact_step(0.0, 0, 25));
+	cut_assert_equal_int(++low, static_cast<int>(s->get_blob_gc_low_space()));
+	s->set_blob_gc_space_for_test(static_cast<int64_t>(enough), cap);
+	cut_assert_equal_int(1, s->blob_gc_compact_step(0.0, 0, 25));
+	cut_assert_equal_int(++done, static_cast<int>(s->get_blob_gc_compactions()));
+
+	// a step that writes nothing still keeps the floor
+	s->set_blob_gc_step_need_for_test(0);
+	s->set_blob_gc_space_for_test(static_cast<int64_t>(cap / 4), cap);
+	cut_assert_equal_int(3, s->blob_gc_compact_step(0.0, 0, 25));
+	cut_assert_equal_int(++low, static_cast<int>(s->get_blob_gc_low_space()));
+	// free space that cannot be read counts as full
+	s->set_blob_gc_space_for_test(static_cast<int64_t>(cap), 0);
+	cut_assert_equal_int(3, s->blob_gc_compact_step(0.0, 0, 25));
+	cut_assert_equal_int(++low, static_cast<int>(s->get_blob_gc_low_space()));
+	// below the garbage thresholds the space is not looked at
+	cut_assert_equal_int(0, s->blob_gc_compact_step(1.01, 0, 25));
+	cut_assert_equal_int(low, static_cast<int>(s->get_blob_gc_low_space()));
+	// min_free_percent 0: no check
+	s->set_blob_gc_space_for_test(0, cap);
+	cut_assert_equal_int(1, s->blob_gc_compact_step(0.0, 0, 0));
+	cut_assert_equal_int(++done, static_cast<int>(s->get_blob_gc_compactions()));
+
+	// the estimate from the pick: the SST and the live bytes of every blob
+	// file from its oldest on, so at least the live blob bytes when it
+	// starts from the oldest blob file
+	uint64_t total = 0, garbage = 0;
+	cut_assert_true(s->blob_file_bytes(total, garbage));
+	s->set_blob_gc_step_need_for_test(-1);
+	s->set_blob_gc_space_for_test(static_cast<int64_t>(cap), cap);
+	cut_assert_equal_int(3, s->blob_gc_compact_step(0.0, 0, 100));
+	cut_assert_operator(s->get_blob_gc_last_need(), >, 0u);
+	cut_notify("step estimate %llu bytes; blob files %llu bytes, garbage %llu",
+		(unsigned long long)s->get_blob_gc_last_need(), (unsigned long long)total, (unsigned long long)garbage);
+	cut_assert_operator(s->get_blob_gc_last_need(), >=, total - garbage);
+	cut_assert_equal_int(++low, static_cast<int>(s->get_blob_gc_low_space()));
+	// with the real data dir (statvfs; tmpfs also the memory cgroup), 100%
+	// free after the step is never met
+	s->set_blob_gc_space_for_test(-1, 0);
+	cut_assert_equal_int(3, s->blob_gc_compact_step(0.0, 0, 100));
+	cut_assert_equal_int(++low, static_cast<int>(s->get_blob_gc_low_space()));
+
+	cut_assert_equal_int(done, static_cast<int>(s->get_blob_gc_compactions()));
+	cut_assert_equal_int(0, static_cast<int>(s->get_blob_gc_compact_errors()));
+	// the data is unchanged
+	cut_assert_equal_int(200, static_cast<int>(s->count()));
+	string out;
+	for (int k = 0; k < 200; k += 37) {
+		cut_assert_equal_int(0, storage_get_string(s, "k" + std::to_string(k), out));
+		cut_assert_equal_string(value.c_str(), out.c_str());
+	}
+	s->close();
+	delete s;
+	cut_remove_path(dir, NULL);
+}
+
 // Blob GC peak (measurement, not run by CI): the test above compacts by hand
 // and reads only the end state. This one leaves every flush and compaction
 // to RocksDB, as flared runs it, and samples the data dir every 50 ms while

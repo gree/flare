@@ -460,6 +460,10 @@ int storage_tch::get(entry& e, result& r, int b) {
 
 		tmp_data = (uint8_t*)tchdbget(this->_db, e.key.c_str(), e.key.size(), &tmp_len);
 		if (tmp_data == NULL) {
+			if ((b & behavior_read_error) && tchdbecode(this->_db) != TCENOREC) {
+				log_err("get failed (key=%s, ecode=%d)", e.key.c_str(), tchdbecode(this->_db));
+				throw -1;
+			}
 			r = result_not_found;
 			throw 0;
 		}

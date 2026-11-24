@@ -2,8 +2,8 @@
   StateMachine/ServiceSelector.lean - repointing a client Service at a
   partition's master without touching its IP families.
 
-  mon-prod (IPv4-only cluster): every pass logged
-  `failed to patch service flare-mon-prod-N: spec.ipFamilyPolicy: Invalid value:
+  A production IPv4-only cluster: every pass logged
+  `failed to patch service flare-prod-N: spec.ipFamilyPolicy: Invalid value:
   "RequireDualStack": this cluster is not configured for dual-stack services`
   twice. The operator sends only `spec.selector`; the Service object itself
   carries `ipFamilyPolicy: RequireDualStack` / `ipFamilies: [IPv4, IPv6]`, and

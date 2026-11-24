@@ -10064,7 +10064,7 @@
       "review": {
         "commit": "60cc34f44277de5c4c75ae2bd88f22939b9bde91",
         "date": "2026-11-24",
-        "note": "Change-impact note for fix/operator-parallel-reads (7ae01d5d..60cc34f4), claim unchanged: under a bulk write load (mon-prod fill, ~4-5k writes/s per partition) a reconcile pass took 18-31 s, the 15 s lease lapsed and the operator exited with LOST LEASE every 10-15 min. Read in this control's referenced file(s): UnitTests.lean: imports and runs the new UnitTestsPass suite (one read per node per pass, concurrent reads, one version nudge per pass, LeaseKeeper decisions, the Service patch); no existing check changes. Evidence: kjob lake build flare_operator ok; kjob lake exe flare_unit 1068 checks passed (kjob flare-op-parallel-reads). No claim, check or scenario changes."
+        "note": "Change-impact note for fix/operator-parallel-reads (7ae01d5d..60cc34f4), claim unchanged: under a bulk write load (a production bulk fill, ~4-5k writes/s per partition) a reconcile pass took 18-31 s, the 15 s lease lapsed and the operator exited with LOST LEASE every 10-15 min. Read in this control's referenced file(s): UnitTests.lean: imports and runs the new UnitTestsPass suite (one read per node per pass, concurrent reads, one version nudge per pass, LeaseKeeper decisions, the Service patch); no existing check changes. Evidence: kjob lake build flare_operator ok; kjob lake exe flare_unit 1068 checks passed (kjob flare-op-parallel-reads). No claim, check or scenario changes."
       },
       "status": {
         "implemented": {
@@ -12053,7 +12053,7 @@
       "review": {
         "commit": "60cc34f44277de5c4c75ae2bd88f22939b9bde91",
         "date": "2026-11-24",
-        "note": "Change-impact note for fix/operator-parallel-reads (7ae01d5d..60cc34f4), claim unchanged: under a bulk write load (mon-prod fill, ~4-5k writes/s per partition) a reconcile pass took 18-31 s, the 15 s lease lapsed and the operator exited with LOST LEASE every 10-15 min. Read in this control's referenced file(s): UnitTests.lean: imports and runs the new UnitTestsPass suite (one read per node per pass, concurrent reads, one version nudge per pass, LeaseKeeper decisions, the Service patch); no existing check changes. Evidence: kjob lake build flare_operator ok; kjob lake exe flare_unit 1068 checks passed (kjob flare-op-parallel-reads). No claim, check or scenario changes."
+        "note": "Change-impact note for fix/operator-parallel-reads (7ae01d5d..60cc34f4), claim unchanged: under a bulk write load (a production bulk fill, ~4-5k writes/s per partition) a reconcile pass took 18-31 s, the 15 s lease lapsed and the operator exited with LOST LEASE every 10-15 min. Read in this control's referenced file(s): UnitTests.lean: imports and runs the new UnitTestsPass suite (one read per node per pass, concurrent reads, one version nudge per pass, LeaseKeeper decisions, the Service patch); no existing check changes. Evidence: kjob lake build flare_operator ok; kjob lake exe flare_unit 1068 checks passed (kjob flare-op-parallel-reads). No claim, check or scenario changes."
       },
       "status": {
         "implemented": {

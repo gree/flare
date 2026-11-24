@@ -1,7 +1,7 @@
 /-
   E2E/Tests/SlowReconcileLease.lean — slow reconcile passes (flare-operator-slow-reconcile).
 
-  Under a bulk write load (mon-prod) a reconcile pass took 18-31 s, longer
+  Under a bulk write load (a production cluster) a reconcile pass took 18-31 s, longer
   than the 15 s leader lease. The loop renewed the lease once per pass, so the
   standby took it and the leader logged `LOST LEASE -- exiting` every 10-15
   min. A pass also read every node one after the other (the sum of the node

@@ -149,19 +149,19 @@ def results : IO (List (String × Bool)) := do
               decide .renewed 0 lease 0 0 == .keep && decide .failed 14999 lease 0 0 == .keep
                 && decide .failed 15000 lease 0 0 != .keep && decide .otherHolder 0 lease 0 0 != .keep)]
   -- service selector
-  let shape4 := ServiceSelector.parseShape "flare-mon-prod-nodes-1|RequireDualStack|[\"IPv4\",\"IPv6\"]"
+  let shape4 := ServiceSelector.parseShape "flare-prod-nodes-1|RequireDualStack|[\"IPv4\",\"IPv6\"]"
   r := r ++ [("service: the shape is read from one get",
-              shape4 == some { selector := some "flare-mon-prod-nodes-1", ipFamilyPolicy := "RequireDualStack", ipFamilies := ["IPv4", "IPv6"] }
+              shape4 == some { selector := some "flare-prod-nodes-1", ipFamilyPolicy := "RequireDualStack", ipFamilies := ["IPv4", "IPv6"] }
                 && ServiceSelector.parseShape "|SingleStack|[\"IPv4\"]" == some { selector := none, ipFamilyPolicy := "SingleStack", ipFamilies := ["IPv4"] }
                 && ServiceSelector.parseShape "garbage" == none)]
   r := r ++ [("service: no patch when the selector already names the master's pod; a patch otherwise or when unreadable",
-              !ServiceSelector.needsPatch shape4 "flare-mon-prod-nodes-1" && ServiceSelector.needsPatch shape4 "flare-mon-prod-nodes-2"
+              !ServiceSelector.needsPatch shape4 "flare-prod-nodes-1" && ServiceSelector.needsPatch shape4 "flare-prod-nodes-2"
                 && ServiceSelector.needsPatch none "x")]
-  let sel := ServiceSelector.selectorPatch "flare-mon-prod-nodes-1"
+  let sel := ServiceSelector.selectorPatch "flare-prod-nodes-1"
   r := r ++ [("service: the patch sent first carries the selector and no ip family / dual-stack field",
               has sel "statefulset.kubernetes.io/pod-name" && !has sel "ipFamil" && !has sel "DualStack" && !has sel "IPv6")]
-  let err := "The Service \"flare-mon-prod-0\" is invalid: \n* spec.ipFamilyPolicy: Invalid value: \"RequireDualStack\": this cluster is not configured for dual-stack services\n* spec.ipFamilies[1]: Invalid value: \"IPv6\": not configured on this cluster"
-  let fb := ServiceSelector.singleStackPatch shape4 "flare-mon-prod-nodes-1"
+  let err := "The Service \"flare-prod-0\" is invalid: \n* spec.ipFamilyPolicy: Invalid value: \"RequireDualStack\": this cluster is not configured for dual-stack services\n* spec.ipFamilies[1]: Invalid value: \"IPv6\": not configured on this cluster"
+  let fb := ServiceSelector.singleStackPatch shape4 "flare-prod-nodes-1"
   r := r ++ [("service: the dual-stack refusal is recognised (and another error is not); the retry is SingleStack with the Service's own first family, no IPv6",
               ServiceSelector.dualStackUnsupported err && !ServiceSelector.dualStackUnsupported "connection refused"
                 && (match fb with | some p => has p "\"ipFamilyPolicy\":\"SingleStack\"" && has p "[\"IPv4\"]" && !has p "IPv6" | none => false)

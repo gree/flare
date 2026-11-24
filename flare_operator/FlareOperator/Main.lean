@@ -817,7 +817,7 @@ private def processCopyDiscardApprovals (crName ns : String) : IO Unit := do
 private def rebuildObservations (st : FlareClusterState) (ns : String) : IO (List (String × RebuildConcurrency.Obs)) := do
   -- FRESH at every decision (no cache across decisions: a reconstruction can
   -- start between two gates of one pass, and a stale idle would admit a second
-  -- assignment), the nodes of ONE decision read together (mon-prod: ~2.5 s a
+  -- assignment), the nodes of ONE decision read together (production: ~2.5 s a
   -- node under the fill, so one decision costs one delay, not the sum)
   let obs ← Parallel.readFresh (st.nodeMap.map (·.1)) fun key => do
     let pod := extractPodName key

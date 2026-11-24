@@ -5,7 +5,7 @@
   The lease lasts 15 s. The loop used to renew it once at the top of each
   pass, so a pass longer than 15 s let it lapse: the standby took it over
   (generation + 1) and this process saw another holder and exited
-  (`LOST LEASE -- exiting`, every 10-15 min under the mon-prod fill, passes of
+  (`LOST LEASE -- exiting`, every 10-15 min under a production bulk fill, passes of
   18-31 s). The keeper renews every `periodMs` (a third of the lease) while a
   pass runs.
 

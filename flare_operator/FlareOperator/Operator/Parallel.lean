@@ -4,7 +4,7 @@
 
   A reconcile pass reads each node (`kubectl get pod`, a stats query). Done
   one node after the other, a pass pays the SUM of the node latencies; under
-  write load (mon-prod, 2.5 s a read) that was 12 s for one gate decision, and
+  write load (a production cluster, 2.5 s a read) that was 12 s for one gate decision, and
   the gate was decided again at every commit of the pass (5 times).
 
   `parMapIO` runs the reads of one batch at once. Each read is a `kubectl`

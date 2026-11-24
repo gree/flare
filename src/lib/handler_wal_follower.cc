@@ -24,6 +24,10 @@
  */
 #include "handler_wal_follower.h"
 
+#include <stdlib.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include "app.h"
 #include "connection_tcp.h"
 #include "op_repl_sync_wal.h"
@@ -124,6 +128,15 @@ const char* handler_wal_follower::reason_for(int client_result) {
 	}
 }
 
+bool handler_wal_follower::test_pause_requested() {
+	const char* f = getenv("FLARE_TEST_FOLLOW_PAUSE_FILE");
+	if (f == NULL || f[0] == '\0') {
+		return false;
+	}
+	struct stat st;
+	return stat(f, &st) == 0;
+}
+
 int handler_wal_follower::run() {
 #ifdef HAVE_LIBROCKSDB
 	this->_thread->set_peer(this->_source_name, this->_source_port);
@@ -144,6 +157,10 @@ int handler_wal_follower::run() {
 
 	int backoff = 1;
 	while (!this->_thread->is_shutdown_request()) {
+		if (test_pause_requested()) {
+			usleep(50000);
+			continue;
+		}
 		bool more = false;
 		const int r = this->_follow_once(more);
 

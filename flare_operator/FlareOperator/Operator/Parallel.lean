@@ -1,6 +1,6 @@
 /-
-  Operator/Parallel.lean - concurrent per-node reads, and a per-pass read
-  cache (flare-operator-slow-reconcile).
+  Operator/Parallel.lean - concurrent per-node reads for one decision
+  (flare-operator-slow-reconcile).
 
   A reconcile pass reads each node (`kubectl get pod`, a stats query). Done
   one node after the other, a pass pays the SUM of the node latencies; under
@@ -10,8 +10,9 @@
   `parMapIO` runs the reads of one batch at once. Each read is a `kubectl`
   call already bounded by `Kubectl.kubectl`'s own wall (30 s + 5 s kill), so
   the batch takes at most the slowest read, and a `chunk` caps how many run at
-  the same time. `PassCache` remembers what one pass has read so a second
-  decision of the same pass reuses it.
+  the same time. Nothing is cached across decisions: an observation that
+  admits a new assignment must be read at that decision (a reconstruction can
+  start between two gates of one pass), so `readFresh` reads every key again.
 -/
 
 namespace FlareOperator.Parallel
@@ -43,28 +44,14 @@ def parMapIO {α β : Type} (xs : List α) (f : α → IO β) (chunk : Nat := 16
     out := out ++ (← awaitAll tasks).toArray
   pure out.toList
 
-/-- What one pass has read, per key. Cleared at the start of every pass. -/
-abbrev PassCache (κ β : Type) := IO.Ref (List (κ × β))
-
-/-- The values of `keys` (in order): a key already read this pass is answered
-    from the cache; the others are read now, together, and remembered. A
-    reading is one observation of the pass — the caller drops a key
-    (`forget`) when it has itself changed what the read would answer. -/
-def readOnce {κ β : Type} [BEq κ] (cache : PassCache κ β) (keys : List κ)
+/-- The values of `keys` (in order), every key read NOW, together. Nothing is
+    remembered: a caller that decides on the answer (admitting a new
+    assignment, resuming a parked rebuild) shares one call between the nodes
+    of THAT decision only, and reads again for the next decision. -/
+def readFresh {κ β : Type} [BEq κ] (keys : List κ)
     (read : κ → IO β) (chunk : Nat := 16) : IO (List (κ × β)) := do
-  let have0 ← cache.get
-  let missing := (keys.filter fun k => !(have0.any (·.1 == k))).eraseDups
-  if !missing.isEmpty then
-    let got ← parMapIO missing read chunk
-    cache.modify fun l => l ++ (missing.zip got)
-  let now ← cache.get
-  pure (keys.filterMap fun k => (now.find? (·.1 == k)).map fun kv => (k, kv.2))
-
-/-- Start of a pass: nothing has been read yet. -/
-def PassCache.reset {κ β : Type} (cache : PassCache κ β) : IO Unit := cache.set []
-
-/-- Drop one key: the next `readOnce` reads it again. -/
-def PassCache.forget {κ β : Type} [BEq κ] (cache : PassCache κ β) (k : κ) : IO Unit :=
-  cache.modify (·.filter (·.1 != k))
+  let ks := keys.eraseDups
+  let got ← parMapIO ks read chunk
+  pure (ks.zip got)
 
 end FlareOperator.Parallel

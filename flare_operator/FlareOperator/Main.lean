@@ -815,11 +815,11 @@ private def processCopyDiscardApprovals (crName ns : String) : IO Unit := do
     be ruled out). Read only when a decision needs it (a new assignment, a
     resume). -/
 private def rebuildObservations (st : FlareClusterState) (ns : String) : IO (List (String × RebuildConcurrency.Obs)) := do
-  -- ONE read per node per pass (`passObsCache`, cleared at the top of the
-  -- pass), the nodes read together: the gate is decided at every commit of a
-  -- pass and a pass committed 5-7 times, each time reading the nodes one
-  -- after the other (mon-prod: ~2.5 s a node under the fill, 12 s a pass)
-  let obs ← Parallel.readOnce passObsCache (st.nodeMap.map (·.1)) fun key => do
+  -- FRESH at every decision (no cache across decisions: a reconstruction can
+  -- start between two gates of one pass, and a stale idle would admit a second
+  -- assignment), the nodes of ONE decision read together (mon-prod: ~2.5 s a
+  -- node under the fill, so one decision costs one delay, not the sum)
+  let obs ← Parallel.readFresh (st.nodeMap.map (·.1)) fun key => do
     let pod := extractPodName key
     -- TEST SEAM (FLARE_TEST_NODE_READ_DELAY_FILE, unset in production): while
     -- the named file exists, each per-node read waits the ms it holds first
@@ -1030,8 +1030,6 @@ private def refreshParkedRebuilds (stateRef : IO.Ref FlareClusterState) (crName 
       if statNat out "rebuild_resumed" == some 1 then
         IO.eprintln s!"[flare-operator] REBUILD RESUMED: {k} takes the rebuild slot again (it re-checks capacity, source and copy identity)"
         parkedIdleRef.set (parked.filter (· != k))
-        -- the node is running again: this pass's earlier reading of it is stale
-        Parallel.PassCache.forget passObsCache k
     | .error e => IO.eprintln s!"[flare-operator] {cmd} to {k} failed ({e}); it stays parked"
 
 initialize historyRvRef : IO.Ref String ← IO.mkRef ""
@@ -2733,12 +2731,11 @@ private def commitChecked (stateRef : IO.Ref FlareClusterState) (ver : Nat) (ucs
   -- R7: count what the nodes' own stats report running too (map=Active
   -- members catching up, reconstructions the map does not show) — read only
   -- when this pass makes a new assignment
-  let needsGate := ucs.nodeMap.any fun (k, a) => RebuildConcurrency.newAssignment (cur.lookupNode k) a
-  let (running, parkedNow) ← if needsGate then pure (RebuildConcurrency.reconcile (← parkedIdleRef.get) (← rebuildObservations cur ns))
-    else pure ([], ← parkedIdleRef.get)
-  if needsGate && !running.isEmpty then
+  let verdict ← FreshGate.decide (rebuildObservations cur ns) (← parkedIdleRef.get) cur ucs 1 1
+  let (running, parkedNow) := (verdict.running, verdict.parked)
+  if verdict.read && !running.isEmpty then
     IO.eprintln s!"[flare-operator] rebuild concurrency: running (or unreadable) by a fresh read: {running}; parked: {parkedNow}"
-  let gated := RebuildConcurrency.gate cur ucs 1 1 running parkedNow
+  let gated := verdict.decision
   let heldKeys := gated.held.map Prod.fst
   if heldKeys != (← rebuildHeldRef.get) then
     rebuildHeldRef.set heldKeys
@@ -3225,9 +3222,8 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
     (driftTickRef : IO.Ref Nat)
     (metrics : OperatorMetrics) (leaseName identity : String)
     (crName ns : String) : IO Unit := do
-  -- a new pass: nothing read yet, no version nudge taken (VersionNudge, passObsCache)
+  -- a new pass: no version nudge taken (VersionNudge)
   passVersionAdvancedRef.set false
-  passObsCache.reset
   -- 1. Fetch CRD (handled by FSM, but we need it early for partition reduction check)
   match ← getFlareClusterCRD crName ns with
   | .error e =>

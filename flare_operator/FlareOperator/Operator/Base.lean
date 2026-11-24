@@ -39,6 +39,7 @@ import FlareOperator.StateMachine.CopyDiscardApproval
 import FlareOperator.StateMachine.PromotionEvidence
 import FlareOperator.StateMachine.AuthoritativeHistory
 import FlareOperator.Operator.Parallel
+import FlareOperator.Operator.FreshGate
 import FlareOperator.Operator.LeaseKeeper
 import FlareOperator.StateMachine.VersionNudge
 
@@ -496,10 +497,6 @@ initialize handoverActiveRef : IO.Ref Bool ← IO.mkRef false
     (review of 262fde9: only the fast loop stopped) -/
 initialize passLeaseLostRef : IO.Ref Bool ← IO.mkRef false
 
-/-- Each mapped node's observation (stats + pod) as read in THIS pass: the
-    rebuild gate is decided at every commit and reads a node once per pass
-    (Operator/Parallel). Cleared at the top of every pass. -/
-initialize passObsCache : Parallel.PassCache String RebuildConcurrency.Obs ← IO.mkRef []
 /-- the node guard may judge: a full pass on the persisted map completed -/
 initialize nodeGuardInitRef : IO.Ref Bool ← IO.mkRef false
 /-- replicas with a replica repair pending, as of the last pass -/

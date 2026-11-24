@@ -1,9 +1,10 @@
 /-
   UnitTestsPass.lean - checks for flare-operator-slow-reconcile: the per-node
-  reads of a pass (one read per pass, concurrent), the version nudge, the
-  lease keeper and the Service selector patch.
+  reads of a gate decision (fresh every decision, concurrent within one), the
+  version nudge, the lease keeper and the Service selector patch.
 -/
 import FlareOperator.Operator.Parallel
+import FlareOperator.Operator.FreshGate
 import FlareOperator.Operator.LeaseKeeper
 import FlareOperator.StateMachine.VersionNudge
 import FlareOperator.StateMachine.ServiceSelector
@@ -12,20 +13,54 @@ namespace FlareOperator.UnitTestsPass
 
 open FlareOperator.Parallel
 open FlareOperator.LeaseKeeper
+open FlareOperator.K8s
+open FlareOperator.RebuildConcurrency
 
 private def has (h n : String) : Bool := (h.splitOn n).length > 1
 
-/-- One pass's gate decisions: `decisions` commits, each reading all `keys`
-    through the pass cache; returns (reads made, answers equal). -/
-private def gateReads (keys : List String) (decisions : Nat) : IO (Nat × Bool) := do
-  let cache : PassCache String Nat ← IO.mkRef []
+private def node (r : FlareRole) (st : FlareState) (p : Int) (nm : String) : FlareNode :=
+  { serverName := nm, serverPort := 12121, role := r, state := st, partition := p, lastMasterOf := -1 }
+
+private def stateOf (l : List (String × FlareNode)) : FlareClusterState :=
+  ({ nodeMap := l } : FlareClusterState).rebuildPartitionMap
+
+/-- Two gate decisions of ONE pass (the FSM commits twice), each admitting a
+    new assignment. `x` is an Active member catching up at boot whose stats the
+    map does not show: idle at the first read, a running reconstruction at the
+    second. Returns (nodes admitted at gate 1, at gate 2, reads made). -/
+private def twoGates : IO (List String × List String × Nat) := do
+  let m0 := ("m0", node .Master .Active 0 "m0")
+  let x := ("x", node .Slave .Active 0 "x")
+  let before1 := stateOf [m0, x, ("a", node .Proxy .Active (-1) "a")]
+  let after1 := stateOf [m0, x, ("a", node .Slave .Prepare 0 "a")]
+  let before2 := stateOf [m0, x, ("a", node .Proxy .Active (-1) "a"), ("b", node .Proxy .Active (-1) "b")]
+  let after2 := stateOf [m0, x, ("a", node .Proxy .Active (-1) "a"), ("b", node .Slave .Prepare 0 "b")]
+  let started ← IO.mkRef false
   let reads ← IO.mkRef (0 : Nat)
-  let mut same := true
-  let mut first : List (String × Nat) := []
-  for i in [0:decisions] do
-    let got ← readOnce cache keys fun _ => do reads.modify (· + 1); pure 7
-    if i == 0 then first := got else same := same && got == first
-  pure (← reads.get, same)
+  -- the observation function: x idle until its reconstruction starts
+  let observe (st : FlareClusterState) : IO (List (String × Obs)) := do
+    let obs ← Parallel.readFresh (st.nodeMap.map (·.1)) fun k => do
+      reads.modify (· + 1)
+      pure (if k == "x" && (← started.get) then Obs.running else Obs.idle)
+    pure obs
+  let admitted := fun (v : FreshGate.Verdict) (k : String) =>
+    ((v.decision.state.lookupNode k).map (·.role)) == some FlareRole.Slave
+  let v1 ← FreshGate.decide (observe before1) [] before1 after1 1 1
+  -- flared starts x's reconstruction between the two gates of the pass
+  started.set true
+  let v2 ← FreshGate.decide (observe before2) [] before2 after2 1 1
+  pure ((if admitted v1 "a" then ["a"] else []), (if admitted v2 "b" then ["b"] else []), ← reads.get)
+
+/-- Read `keys` for `decisions` gate decisions, each reading them together;
+    returns (reads made, longest single decision in ms). -/
+private def gateReads (keys : List String) (decisions : Nat) (delayMs : UInt32) : IO (Nat × Nat) := do
+  let reads ← IO.mkRef (0 : Nat)
+  let mut worst := 0
+  for _ in [0:decisions] do
+    let t0 ← IO.monoMsNow
+    let _ ← Parallel.readFresh keys fun _ => do reads.modify (· + 1); IO.sleep delayMs; pure 7
+    worst := max worst ((← IO.monoMsNow) - t0)
+  pure (← reads.get, worst)
 
 /-- A keeper run on a fake clock: a pass of `passMs` with `periodMs` between
     renews, the API answering `answer t`. Returns (lost reason, the longest
@@ -51,24 +86,18 @@ private def simulate (passMs periodMs leaseMs deadlineMs : Nat) (answer : Nat �
 
 def results : IO (List (String × Bool)) := do
   let mut r : List (String × Bool) := []
-  -- one observation read per pass
+  -- every gate decision reads the nodes fresh, each node once, together
   let keys := ["n0", "n1", "n2", "n3", "n4", "n5"]
-  let (reads5, same5) ← gateReads keys 5
-  r := r ++ [("pass reads: six nodes decided five times in a pass are read once each (6 reads, not 30), the same answer every time",
-              reads5 == 6 && same5)]
-  let cache : PassCache String Nat ← IO.mkRef []
-  let n ← IO.mkRef (0 : Nat)
-  let rd := fun (_ : String) => do n.modify (· + 1); pure 1
-  let _ ← readOnce cache ["a", "b"] rd
-  let _ ← readOnce cache ["a", "b", "c"] rd
-  let afterNew ← n.get
-  PassCache.forget cache "a"
-  let _ ← readOnce cache ["a", "b", "c"] rd
-  let afterForget ← n.get
-  PassCache.reset cache
-  let _ ← readOnce cache ["a", "b", "c"] rd
-  r := r ++ [("pass reads: a node new to the pass is read alone (3 reads); a forgotten one is read again (4); a new pass reads all again (7)",
-              afterNew == 3 && afterForget == 4 && (← n.get) == 7)]
+  let (reads5, worst5) ← gateReads keys 5 200
+  r := r ++ [(s!"fresh gate reads: six nodes decided five times are read once per decision (30 reads), each decision about one delay (worst {worst5} ms of 200 ms reads, not 1200)",
+              reads5 == 30 && worst5 < 600)]
+  let (g1, g2, nreads) ← twoGates
+  r := r ++ [("fresh gate: a reconstruction that starts between two assignment gates of one pass HOLDS the second assignment (gate 1 admitted a, gate 2 held b)",
+              g1 == ["a"] && g2 == [] && nreads == 7)]
+  let m0 := ("m0", node .Master .Active 0 "m0")
+  let calm := stateOf [m0, ("a", node .Proxy .Active (-1) "a")]
+  let noNew ← FreshGate.decide (do throw (IO.userError "must not read")) [] calm calm 1 1
+  r := r ++ [("fresh gate: a decision with no new assignment reads no node", !noNew.read && noNew.running.isEmpty)]
   -- concurrent: 6 reads of 200 ms take about 200 ms, not 1200 ms; order kept
   let t0 ← IO.monoMsNow
   let out ← parMapIO [0, 1, 2, 3, 4, 5] fun i => do IO.sleep 200; pure (i * 10)

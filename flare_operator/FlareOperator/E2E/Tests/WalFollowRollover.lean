@@ -2,7 +2,7 @@
   E2E/Tests/WalFollowRollover.lean — the WAL follower keeps up with a sustained write load
   while the master's WAL archive is small (issue flare-wal-follow-slow, PR #189).
 
-  mon-prod: a partition took ~4,400 writes/s, the follower applied ~3,200 positions/s, the
+  In production a partition took ~4,400 writes/s, the follower applied ~3,200 positions/s, the
   lag grew until the master's archived WAL no longer held the follower's position
   (`GetUpdatesSince` / LSN purged), the follower declared needs_rebuild and the operator
   reseated the replica although forwarding had kept its copy equal. The follower now applies
@@ -10,7 +10,7 @@
   count and asks for up to 4096 batches a request (~33,000 positions/s in the loop
   measurement, ~3,000 before).
 
-  Cluster: 1 partition x 2 replicas, rocksdb on a PVC, the mon-prod replication settings
+  Cluster: 1 partition x 2 replicas, rocksdb on a PVC, production-like replication settings
   (repl-identity-forward, repl-follow-enabled: Setup's `walFollow` default, the same lines
   as `replIdentityForward` / `replFollowEnabled` in the CR) and a SMALL archive:
   2 MB write buffer, `rocksdb-wal-size-limit-mb` (default 4) and a 60 s TTL (the TTL makes

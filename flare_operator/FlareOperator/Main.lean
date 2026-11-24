@@ -821,6 +821,15 @@ private def rebuildObservations (st : FlareClusterState) (ns : String) : IO (Lis
   -- after the other (mon-prod: ~2.5 s a node under the fill, 12 s a pass)
   let obs ← Parallel.readOnce passObsCache (st.nodeMap.map (·.1)) fun key => do
     let pod := extractPodName key
+    -- TEST SEAM (FLARE_TEST_NODE_READ_DELAY_FILE, unset in production): while
+    -- the named file exists, each per-node read waits the ms it holds first
+    -- (a slow node or a loaded API); the reads of a pass run together, so a
+    -- pass takes about one delay, not their sum
+    if let some f ← IO.getEnv "FLARE_TEST_NODE_READ_DELAY_FILE" then
+      if ← System.FilePath.pathExists f then
+        let ms := ((← IO.FS.readFile f).trim.toNat?).getD 0
+        IO.eprintln s!"[flare-operator] TEST SEAM: read of {key} delayed {ms}ms (FLARE_TEST_NODE_READ_DELAY_FILE)"
+        IO.sleep ms.toUInt32
     -- absent ONLY on an empty --ignore-not-found answer; any failure
     -- (forbidden, timeout) is unknown
     let found : Option Bool ← match ← kubectl ["get", "pod", pod, "-n", ns, "--ignore-not-found=true", "-o", "jsonpath={.metadata.uid}"] with

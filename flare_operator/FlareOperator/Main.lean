@@ -815,8 +815,11 @@ private def processCopyDiscardApprovals (crName ns : String) : IO Unit := do
     be ruled out). Read only when a decision needs it (a new assignment, a
     resume). -/
 private def rebuildObservations (st : FlareClusterState) (ns : String) : IO (List (String × RebuildConcurrency.Obs)) := do
-  let mut obs : List (String × RebuildConcurrency.Obs) := []
-  for (key, _) in st.nodeMap do
+  -- ONE read per node per pass (`passObsCache`, cleared at the top of the
+  -- pass), the nodes read together: the gate is decided at every commit of a
+  -- pass and a pass committed 5-7 times, each time reading the nodes one
+  -- after the other (mon-prod: ~2.5 s a node under the fill, 12 s a pass)
+  let obs ← Parallel.readOnce passObsCache (st.nodeMap.map (·.1)) fun key => do
     let pod := extractPodName key
     -- absent ONLY on an empty --ignore-not-found answer; any failure
     -- (forbidden, timeout) is unknown
@@ -828,8 +831,7 @@ private def rebuildObservations (st : FlareClusterState) (ns : String) : IO (Lis
         | .ok out => pure (some out)
         | .error _ => pure none
       else pure none
-    let o := RebuildConcurrency.obsOfReply found reply
-    obs := obs ++ [(key, o)]
+    pure (RebuildConcurrency.obsOfReply found reply)
   let unk := obs.filterMap fun (k, o) => if o == .unknown then some k else none
   if !unk.isEmpty then
     IO.eprintln s!"[flare-operator] rebuild concurrency: {unk} could not be read — counted as running (a rebuild there cannot be ruled out)"
@@ -938,16 +940,19 @@ private def gatherRedundantFacts (st : FlareClusterState) (pods : List Bridge.Po
 private def refreshParkedRebuilds (stateRef : IO.Ref FlareClusterState) (crName ns : String)
     (repairKeys : Option (List String)) : IO Unit := do
   let st ← stateRef.get
+  -- the rebuilding nodes' stats are read together
+  let rebuildingKeys := (st.nodeMap.filter fun (_, n) => RebuildConcurrency.rebuilding n).map (·.1)
+  let parkReads ← Parallel.parMapIO rebuildingKeys fun key => do
+    pure (key, ← Bridge.queryPodStats (extractPodName key) ns "stats")
   let mut parked : List String := []
-  for (key, n) in st.nodeMap do
-    if RebuildConcurrency.rebuilding n then
-      match ← Bridge.queryPodStats (extractPodName key) ns "stats" with
-      | .ok out =>
-        let complete := (out.splitOn "\n").any fun l => l.trim == "END"
-        if complete && statNat out "rebuild_parked" == some 1 && statNat out "rebuild_in_flight" == some 0
-            && statNat out "rocksdb_snapshot_serving" == some 0 then
-          parked := parked ++ [key]
-      | .error _ => pure ()
+  for (key, r) in parkReads do
+    match r with
+    | .ok out =>
+      let complete := (out.splitOn "\n").any fun l => l.trim == "END"
+      if complete && statNat out "rebuild_parked" == some 1 && statNat out "rebuild_in_flight" == some 0
+          && statNat out "rocksdb_snapshot_serving" == some 0 then
+        parked := parked ++ [key]
+    | .error _ => pure ()
   let prev ← parkedIdleRef.get
   if parked != prev then
     IO.eprintln s!"[flare-operator] parked rebuilds (blocked, nothing in flight; their cluster and partition slots are free): {parked}"
@@ -1016,6 +1021,8 @@ private def refreshParkedRebuilds (stateRef : IO.Ref FlareClusterState) (crName 
       if statNat out "rebuild_resumed" == some 1 then
         IO.eprintln s!"[flare-operator] REBUILD RESUMED: {k} takes the rebuild slot again (it re-checks capacity, source and copy identity)"
         parkedIdleRef.set (parked.filter (· != k))
+        -- the node is running again: this pass's earlier reading of it is stale
+        Parallel.PassCache.forget passObsCache k
     | .error e => IO.eprintln s!"[flare-operator] {cmd} to {k} failed ({e}); it stays parked"
 
 initialize historyRvRef : IO.Ref String ← IO.mkRef ""
@@ -1313,9 +1320,9 @@ private def observeHistory (stateRef : IO.Ref FlareClusterState) (crName ns : St
     | .copies => acc ++ copiesOf p
     | .target k | .holder k => acc ++ [k]
     | .nothing => acc) ([] : List String)
-  let mut seen : List (String × AuthoritativeHistory.Seen) := []
-  for key in wanted.eraseDups do
-    seen := seen ++ [(key, ← seeFresh key ns)]
+  -- each copy at most once, the copies read together
+  let seen : List (String × AuthoritativeHistory.Seen) ←
+    Parallel.parMapIO wanted.eraseDups fun key => do pure (key, ← seeFresh key ns)
   let persisted ← if parts.any (fun p => (st0.intentFor p).isSome) then persistedNodeMap crName ns else pure none
   let mut store := st0
   let mut changes : List String := []
@@ -2055,19 +2062,20 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       if !movedNow.isEmpty then
         IO.eprintln s!"[flare-operator] master changed on partition(s) {movedNow}: their slaves are read every pass for 5 passes (a promotion's surviving slave declares needs_rebuild)"
       let masterMoved := fun (part : Int) => forced.any (·.1 == part)
-      let mut slaveReadings : List (String × Int × Option FollowEvidence.Reading) := []
-      for (key, n) in cs.nodeMap do
-        if n.role == FlareRole.Slave && n.state != FlareState.Down then
-          match readyPods.find? (fun p => Bridge.PodInfo.toNodeKey p == key) with
-          | none => slaveReadings := slaveReadings ++ [(key, n.partition, none)]
-          | some p =>
-            if FollowEvidence.shouldProbeWith confirm0 tr.mem key tr.tick probeInterval || masterMoved n.partition then
-              let r ← match ← Bridge.queryPodStats p.name ns "stats" with
-                | .ok out => pure (followReadingFrom out)
-                | .error _ => pure ({} : FollowEvidence.Reading)
-              slaveReadings := slaveReadings ++ [(key, n.partition, some r)]
-            else
-              slaveReadings := slaveReadings ++ [(key, n.partition, none)]
+      -- the slaves chosen for a read this pass are read together
+      let slaveReadings : List (String × Int × Option FollowEvidence.Reading) ←
+        Parallel.parMapIO (cs.nodeMap.filter fun (_, n) => n.role == FlareRole.Slave && n.state != FlareState.Down)
+          fun (key, n) => do
+            match readyPods.find? (fun p => Bridge.PodInfo.toNodeKey p == key) with
+            | none => pure (key, n.partition, none)
+            | some p =>
+              if FollowEvidence.shouldProbeWith confirm0 tr.mem key tr.tick probeInterval || masterMoved n.partition then
+                let r ← match ← Bridge.queryPodStats p.name ns "stats" with
+                  | .ok out => pure (followReadingFrom out)
+                  | .error _ => pure ({} : FollowEvidence.Reading)
+                pure (key, n.partition, some r)
+              else
+                pure (key, n.partition, none)
       let inModeParts : List Int := slaveReadings.filterMap fun (k, part, r?) =>
         if (r?.bind (·.mode)) == some true || FollowEvidence.knownInMode tr.mem k then some part else none
       -- The master's head is read from any READY pod, Terminating included.
@@ -2080,16 +2088,18 @@ private def executeK8sRequest (req : K8sReconciler.K8sRequest) (crName ns : Stri
       -- (CI 36841064685). A Terminating SLAVE is still not read: it is not a
       -- promotion candidate.
       let masterPods := pods.filter (fun p => p.ready)
-      let mut masterReadings : List (Int × FollowEvidence.MasterReading) := []
-      for (key, n) in cs.nodeMap do
-        if n.role == FlareRole.Master && n.state != FlareState.Down && inModeParts.contains n.partition then
-          match masterPods.find? (fun p => Bridge.PodInfo.toNodeKey p == key) with
-          | none => pure ()
-          | some p =>
-            let m ← match ← Bridge.queryPodStats p.name ns "stats" with
-              | .ok out => pure (masterReadingFrom out)
-              | .error _ => pure ({} : FollowEvidence.MasterReading)
-            masterReadings := masterReadings ++ [(n.partition, m)]
+      let masterReads : List (Option (Int × FollowEvidence.MasterReading)) ←
+        Parallel.parMapIO (cs.nodeMap.filter fun (_, n) =>
+            n.role == FlareRole.Master && n.state != FlareState.Down && inModeParts.contains n.partition)
+          fun (key, n) => do
+            match masterPods.find? (fun p => Bridge.PodInfo.toNodeKey p == key) with
+            | none => pure none
+            | some p =>
+              let m ← match ← Bridge.queryPodStats p.name ns "stats" with
+                | .ok out => pure (masterReadingFrom out)
+                | .error _ => pure ({} : FollowEvidence.MasterReading)
+              pure (some (n.partition, m))
+      let masterReadings := masterReads.filterMap id
       let probed := (slaveReadings.filter (fun (_, _, r?) => r?.isSome)).length + masterReadings.length
       let probeMs := (← IO.monoMsNow) - probeT0
       if probed > 0 || probeMs > 1000 then
@@ -2310,6 +2320,10 @@ private def mergeClusterState (current ucs : FlareClusterState)
     (rb : ReadBalanceSpec) (standbyKeys : List String) : FlareClusterState :=
   K8sReconciler.mergeClusterState current ucs rb.master rb.slave standbyKeys
 
+/-- Has a commit of THIS pass already advanced the node map version? (reset at
+    the start of every pass; see StateMachine/VersionNudge) -/
+initialize passVersionAdvancedRef : IO.Ref Bool ← IO.mkRef false
+
 /-- Commit the FSM's computed cluster state by MERGING it onto the live ref inside
     a single atomic `modifyGet` (see `mergeClusterState`). The merge — not a version
     compare-and-set — is what makes the write safe: a Prepare→Active transition the
@@ -2346,7 +2360,8 @@ private def commitClusterState (stateRef : IO.Ref FlareClusterState)
     (_expectedVersion : Nat) (newState : FlareClusterState)
     (rb : ReadBalanceSpec := {}) (standbyKeys : List String := [])
     (readWithheld : List String := []) : IO Bool := do
-  stateRef.modifyGet fun current =>
+  let nudged ← passVersionAdvancedRef.get
+  let advanced ← stateRef.modifyGet fun current =>
     let merged0 := mergeClusterState current newState rb standbyKeys
     -- SAF-10c: WAL-mode followers not proven eligible for reads are out of
     -- the read set (balance 0) whatever spec.readBalance.slave says.
@@ -2357,10 +2372,12 @@ private def commitClusterState (stateRef : IO.Ref FlareClusterState)
     -- Fully at rest only when every node is Active. Any Prepare/Ready/Down node
     -- means convergence is still in progress and needs the periodic rebroadcast.
     let allActive := merged.getNodes.all (fun n => n.state == FlareState.Active)
-    if changed || !allActive then
+    if VersionNudge.advance changed allActive nudged then
       (true, merged)
     else
       (false, { merged with nodeMapVersion := current.nodeMapVersion })
+  if advanced then passVersionAdvancedRef.set true
+  return advanced
 
 /-- Test seam used by the topology-authority E2E suite to stop a reconcile
     at one exact point: after the topology change is committed and the
@@ -3199,6 +3216,9 @@ private def reconcileOnceFSM (stateRef : IO.Ref FlareClusterState) (crdRef : IO.
     (driftTickRef : IO.Ref Nat)
     (metrics : OperatorMetrics) (leaseName identity : String)
     (crName ns : String) : IO Unit := do
+  -- a new pass: nothing read yet, no version nudge taken (VersionNudge, passObsCache)
+  passVersionAdvancedRef.set false
+  passObsCache.reset
   -- 1. Fetch CRD (handled by FSM, but we need it early for partition reduction check)
   match ← getFlareClusterCRD crName ns with
   | .error e =>
@@ -4511,6 +4531,17 @@ private def tryAcquireOrRenew (leaseName ns identity : String) : IO Bool := do
     else
       return false  -- another pod holds a valid lease
 
+/-- One renew attempt as the keeper sees it (LeaseKeeper.Renewal): renew only
+    while this identity is the holder; never acquire. -/
+private def renewOutcome (leaseName ns identity : String) : IO LeaseKeeper.Renewal := do
+  match ← getLease leaseName ns with
+  | .error _ => return .failed
+  | .ok lease =>
+    if lease.holderIdentity != identity then return .otherHolder
+    match ← renewLease leaseName ns identity with
+    | .ok () => return .renewed
+    | .error _ => return .failed
+
 -- ===========================================================================
 -- Entry Point
 -- ===========================================================================
@@ -4883,41 +4914,67 @@ def main (args : List String) : IO Unit := do
   healthStatus.setTcpServerReady true
   IO.eprintln s!"[flare-operator] TCP server marked ready for health checks"
 
-  -- Reconcile loop with lease renewal
+  -- Lease: renewed on its own clock by the keeper (a task of its own), not
+  -- once per pass — a pass of 18-31 s under write load outlasted the 15 s
+  -- lease and the standby took it (LeaseKeeper). The loop below still checks
+  -- it at the top of every pass.
+  let lastRenewOkRef ← IO.mkRef (← IO.monoMsNow)
+  let passStartRef ← IO.mkRef (none : Option Nat)
+  let leaseMs := leaseDurationSeconds * 1000
+  let stepDownAndExit : String → IO Unit := fun why => do
+    IO.eprintln s!"[flare-operator] LOST LEASE -- exiting ({why})"
+    healthStatus.setLeader false  -- Update health status before exit
+    -- Best-effort step-down: stop attracting index traffic before the
+    -- replacement leader labels itself. If the API is unreachable this
+    -- fails too — the pod exits and the boot-time reset covers it.
+    let _ ← setRoleLabel identity ns "standby"
+    -- This has to END THE PROCESS, and `throw` did not. The generated C
+    -- `main` runs `lean_finalize_task_manager()` before it reports an
+    -- uncaught error, and that call waits for every outstanding task —
+    -- the TCP, health and metrics servers here, none of which return. The
+    -- result was a pod that logged "exiting", kept passing /healthz
+    -- (process-alive only) and /readyz (a non-leader is "ready"), owned no
+    -- lease and ran no reconcile loop, for ever: with one replica a
+    -- leaderless cluster, with two a silent loss of the standby. Found by
+    -- the SAF-01 takeover test (CHECK-01), which forces exactly this path
+    -- and then requires recovery. `exit` terminates regardless of threads.
+    (← IO.getStderr).flush
+    IO.Process.exit 1
+  let keeperRenew : IO LeaseKeeper.Renewal := do
+    let r ← renewOutcome leaseName ns identity
+    if r == .renewed then lastRenewOkRef.set (← IO.monoMsNow)
+    pure r
+  let _ ← IO.asTask (prio := .dedicated) do
+    try
+      LeaseKeeper.run keeperRenew IO.monoMsNow passStartRef.get (fun ms => IO.sleep ms.toUInt32)
+        (pure false) stepDownAndExit leaseMs (leaseMs / 3) passDeadlineMs (← lastRenewOkRef.get)
+    catch e =>
+      IO.eprintln s!"[flare-operator] lease keeper error: {e}"
+      stepDownAndExit "the lease keeper stopped"
+
+  -- Reconcile loop
   while true do
-    -- Renew lease each iteration
-    let renewed ← tryAcquireOrRenew leaseName ns identity
-    if !renewed then
-      IO.eprintln s!"[flare-operator] LOST LEASE -- exiting"
-      healthStatus.setLeader false  -- Update health status before exit
-      -- Best-effort step-down: stop attracting index traffic before the
-      -- replacement leader labels itself. If the API is unreachable this
-      -- fails too — the pod exits and the boot-time reset covers it.
-      let _ ← setRoleLabel identity ns "standby"
-      -- This has to END THE PROCESS, and `throw` did not. The generated C
-      -- `main` runs `lean_finalize_task_manager()` before it reports an
-      -- uncaught error, and that call waits for every outstanding task —
-      -- the TCP, health and metrics servers here, none of which return. The
-      -- result was a pod that logged "exiting", kept passing /healthz
-      -- (process-alive only) and /readyz (a non-leader is "ready"), owned no
-      -- lease and ran no reconcile loop, for ever: with one replica a
-      -- leaderless cluster, with two a silent loss of the standby. Found by
-      -- the SAF-01 takeover test (CHECK-01), which forces exactly this path
-      -- and then requires recovery. `exit` terminates regardless of threads.
-      (← IO.getStderr).flush
-      IO.Process.exit 1
+    -- Renew lease each iteration; a failed renew is not a loss while the last
+    -- accepted one is younger than the lease (the keeper renews between)
+    let r ← keeperRenew
+    let nowMs ← IO.monoMsNow
+    match LeaseKeeper.decide r (nowMs - (← lastRenewOkRef.get)) leaseMs 0 passDeadlineMs with
+    | .lost why => stepDownAndExit why
+    | .keep => pure ()
     -- Self-healing label assert: a leader whose label patch failed (or was
     -- stripped externally) reclaims the index Service every tick.
     let _ ← setRoleLabel identity ns "leader"
 
     -- Time the reconcile loop
     let startTime ← IO.monoMsNow
+    passStartRef.set (some startTime)
     try
       -- Use FSM-driven reconcile (complete implementation with all 5 requirements)
       reconcileOnceFSM stateRef crdRef migrationRef graceCyclesRef trippedRef prepareCyclesRef unreadyCyclesRef podKeysRef podAddrsRef unreachCyclesRef reachSlotRef ledgerRef ledgerAvailableRef ledgerDirtyRef episodesRef pendingBroadcastRef topologyAuditRef downCyclesRef emptyMasterStreakRef probeSlotRef pendingConfRef masterSnapshotRef driftTickRef metrics leaseName identity crName ns
     catch e =>
       IO.eprintln s!"[flare-operator] reconcile error: {e}"
     let endTime ← IO.monoMsNow
+    passStartRef.set none
     let durationMs := endTime - startTime
     let durationSeconds := durationMs.toFloat / 1000.0
     recordReconcileDuration metrics durationSeconds

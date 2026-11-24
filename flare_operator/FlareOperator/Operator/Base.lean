@@ -38,6 +38,9 @@ import FlareOperator.StateMachine.RebuildConcurrency
 import FlareOperator.StateMachine.CopyDiscardApproval
 import FlareOperator.StateMachine.PromotionEvidence
 import FlareOperator.StateMachine.AuthoritativeHistory
+import FlareOperator.Operator.Parallel
+import FlareOperator.Operator.LeaseKeeper
+import FlareOperator.StateMachine.VersionNudge
 
 namespace FlareOperator
 
@@ -53,6 +56,11 @@ open FlareOperator.Health.HealthCheck
 
 /-- The leader lease duration (seconds). -/
 def leaseDurationSeconds : Nat := 15
+
+/-- A pass that has run this long (ms) no longer keeps the lease renewed: the
+    keeper reports the lease lost and the process exits (LeaseKeeper). Normal
+    passes take seconds; the slowest observed under load was 31 s. -/
+def passDeadlineMs : Nat := 180000
 
 
 -- ===========================================================================
@@ -487,6 +495,11 @@ initialize handoverActiveRef : IO.Ref Bool ← IO.mkRef false
     pass (FSM, rolling, the send) is skipped and the leader loop decides
     (review of 262fde9: only the fast loop stopped) -/
 initialize passLeaseLostRef : IO.Ref Bool ← IO.mkRef false
+
+/-- Each mapped node's observation (stats + pod) as read in THIS pass: the
+    rebuild gate is decided at every commit and reads a node once per pass
+    (Operator/Parallel). Cleared at the top of every pass. -/
+initialize passObsCache : Parallel.PassCache String RebuildConcurrency.Obs ← IO.mkRef []
 /-- the node guard may judge: a full pass on the persisted map completed -/
 initialize nodeGuardInitRef : IO.Ref Bool ← IO.mkRef false
 /-- replicas with a replica repair pending, as of the last pass -/

@@ -7464,6 +7464,152 @@ void test_reseed_serve_to_a_slow_reader_completes_past_several_windows() {
 		cut_assert_true(r.batches / r.seconds > 8800.0);
 	}
 
+	// What a response that goes wrong part-way leaves behind, now that the
+	// follower applies its batches in groups. A fixture: a source with `n`
+	// single-key writes, a staged copy following it, and the served reply.
+	struct group_fixture {
+		storage_rocksdb* src;
+		storage_rocksdb* live;
+		storage_rocksdb* stg;
+		string epoch, mid, inc, reply;
+		uint64_t l0;
+		vector<size_t> lsn_pos;		// offset of every "LSN " line in reply
+	};
+
+	void group_fixture_open(group_fixture& f, int n) {
+		f.src = make_rocksdb(wal_master_dir);
+		f.live = make_rocksdb(wal_slave_dir);
+		storage_set_string(f.src, "seed", "x");
+		f.l0 = f.src->get_latest_sequence_number();
+		f.epoch = f.src->get_source_epoch();
+		f.mid = f.src->get_master_id();
+		static int attempt = 0;
+		char attempt_name[32];
+		snprintf(attempt_name, sizeof(attempt_name), "grp%d", ++attempt);
+		f.stg = f.live->open_staging(attempt_name, false);
+		cut_assert_not_null(f.stg);
+		cut_assert_equal_int(0, f.stg->adopt_history(f.mid, f.epoch, f.l0));
+		f.inc = f.stg->get_incarnation();
+		for (int i = 0; i < n; i++) {
+			cut_assert_equal_int(0, storage_set_string(f.src, "g" + boost::lexical_cast<string>(i), "v" + boost::lexical_cast<string>(i)));
+		}
+		char request[BUFSIZ];
+		snprintf(request, sizeof(request), " %llu %s %s 0 0\r\n", (unsigned long long)f.l0, f.mid.c_str(), f.epoch.c_str());
+		shared_connection sc(new connection_sstream(request));
+		serving_sync_wal srv(sc, f.src);
+		cut_assert_equal_int(0, srv._parse_text_server_parameters());
+		srv._run_server();
+		f.reply = static_cast<connection_sstream*>(sc.get())->get_output();
+		size_t pos = 0;
+		while ((pos = f.reply.find("LSN ", pos)) != string::npos) {
+			if (pos == 0 || f.reply[pos - 1] == '\n') f.lsn_pos.push_back(pos);
+			pos += 4;
+		}
+		cut_assert_equal_int(n, static_cast<int>(f.lsn_pos.size()));
+	}
+
+	int group_fixture_follow(group_fixture& f, const string& reply, op_repl_sync_wal::client_result& result) {
+		shared_connection cc(new connection_sstream(reply));
+		op_repl_sync_wal cli(cc, f.stg);
+		const int rc = cli.run_client_follow(f.l0, f.mid, f.epoch, f.inc, 0, 0);
+		result = cli.get_client_result();
+		return rc;
+	}
+
+	void group_fixture_close(group_fixture& f) {
+		drop_rocksdb(f.src, wal_master_dir);
+		drop_rocksdb(f.live, wal_slave_dir);
+	}
+
+	// The reply is intact: every batch lands, the position is the source's,
+	// nothing is skipped, and it holds across more than one apply group.
+	void test_follow_response_applies_in_groups_and_every_key_lands() {
+		group_fixture f;
+		const int n = static_cast<int>(op_repl_sync_wal::kApplyGroupBatches) * 2 + 5;
+		group_fixture_open(f, n);
+		op_repl_sync_wal::client_result result;
+		cut_assert_equal_int(0, group_fixture_follow(f, f.reply, result));
+		cppcut_assert_equal(static_cast<int>(op_repl_sync_wal::client_success), static_cast<int>(result));
+		cppcut_assert_equal(f.src->get_latest_sequence_number(), f.stg->get_repl_last_lsn());
+		for (int i = 0; i < n; i++) {
+			string v;
+			cut_assert_equal_int(0, storage_get_string(f.stg, "g" + boost::lexical_cast<string>(i), v));
+			cut_assert_equal_string(("v" + boost::lexical_cast<string>(i)).c_str(), v.c_str());
+		}
+		group_fixture_close(f);
+	}
+
+	// A batch whose CRC does not match is never applied, and what was verified
+	// before it IS applied (the connection did not lose that progress): the
+	// position stops exactly before the bad batch, and a re-request from
+	// there completes the copy.
+	void test_follow_response_crc_mismatch_keeps_the_verified_batches_only() {
+		group_fixture f;
+		const int n = 10;
+		group_fixture_open(f, n);
+		string bad = f.reply;
+		const size_t bad_idx = 6;			// the 7th batch
+		const size_t batch_line = bad.find("BATCH ", f.lsn_pos[bad_idx]);
+		const size_t data = bad.find("\r\n", batch_line) + 2;
+		bad[data + 13] ^= 0x55;				// inside the payload, past the 12-byte header
+		op_repl_sync_wal::client_result result;
+		cut_assert_equal_int(-1, group_fixture_follow(f, bad, result));
+		cppcut_assert_equal(static_cast<int>(op_repl_sync_wal::client_protocol_error), static_cast<int>(result));
+		cppcut_assert_equal(f.l0 + bad_idx, f.stg->get_repl_last_lsn());
+		string v;
+		cut_assert_equal_int(0, storage_get_string(f.stg, "g5", v));
+		cut_assert_equal_int(-1, storage_get_string(f.stg, "g6", v));
+		// nothing lost: the intact reply completes it (batches at or below the
+		// position are re-delivered by design and not applied twice)
+		f.l0 = f.stg->get_repl_last_lsn();
+		op_repl_sync_wal::client_result again;
+		shared_connection cc(new connection_sstream(f.reply));
+		op_repl_sync_wal cli(cc, f.stg);
+		cut_assert_equal_int(0, cli.run_client_follow(f.l0, f.mid, f.epoch, f.inc, 0, 0));
+		cppcut_assert_equal(f.src->get_latest_sequence_number(), f.stg->get_repl_last_lsn());
+		cut_assert_equal_int(0, storage_get_string(f.stg, "g9", v));
+		(void)again;
+		group_fixture_close(f);
+	}
+
+	// A hole in the stream is history loss: the response is refused as
+	// lsn_purged (the follower rebuilds), the position does not move over the
+	// hole, and nothing past it is applied.
+	void test_follow_response_with_a_hole_is_refused_and_does_not_pass_it() {
+		group_fixture f;
+		group_fixture_open(f, 10);
+		// drop the 4th batch (LSN .. BATCH .. data .. \r\n) from the reply
+		string holed = f.reply.substr(0, f.lsn_pos[3]) + f.reply.substr(f.lsn_pos[4]);
+		op_repl_sync_wal::client_result result;
+		cut_assert_equal_int(-1, group_fixture_follow(f, holed, result));
+		cppcut_assert_equal(static_cast<int>(op_repl_sync_wal::client_lsn_purged), static_cast<int>(result));
+		cut_assert_true(f.stg->get_repl_last_lsn() <= f.l0 + 3);
+		string v;
+		cut_assert_equal_int(-1, storage_get_string(f.stg, "g4", v));
+		cut_assert_equal_int(-1, storage_get_string(f.stg, "g9", v));
+		group_fixture_close(f);
+	}
+
+	// All or nothing inside one apply call: a refusal of a later batch of the
+	// group (here a hole) leaves the copy and its position untouched.
+	void test_apply_wal_batches_refusal_writes_nothing() {
+		group_fixture f;
+		group_fixture_open(f, 6);
+		vector<pair<uint64_t, rocksdb::WriteBatch> > updates;
+		cut_assert_equal_int(0, f.src->get_updates_since(f.l0, updates, 0, 0, NULL, f.l0));
+		cut_assert_equal_int(6, static_cast<int>(updates.size()));
+		updates.erase(updates.begin() + 3);
+		uint64_t ap = 0, sk = 0;
+		storage_rocksdb::apply_outcome why = storage_rocksdb::apply_applied;
+		cut_assert_equal_int(-1, f.stg->apply_wal_batches(f.epoch, f.inc, updates, ap, sk, why));
+		cppcut_assert_equal(static_cast<int>(storage_rocksdb::apply_refused_gap), static_cast<int>(why));
+		cppcut_assert_equal(f.l0, f.stg->get_repl_last_lsn());
+		string v;
+		cut_assert_equal_int(-1, storage_get_string(f.stg, "g0", v));
+		cppcut_assert_equal(static_cast<uint32_t>(0), f.stg->count());
+		group_fixture_close(f);
+	}
+
 	// Same data, same safety checks, nothing skipped: a grouped apply of a
 	// history with overwrites and deletes ends with the copy a per-batch apply
 	// gives (items, every key, position).

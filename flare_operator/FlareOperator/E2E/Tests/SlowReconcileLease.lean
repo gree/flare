@@ -198,7 +198,10 @@ def suite : TestSuite := {
         let versions := (lines leaderLog "Broadcasting node sync v").filterMap (natAfter · "Broadcasting node sync v")
         let vDelta := (versions.foldl max 0) - (versions.foldl min (versions.headD 0))
         let longest := slow.foldl max 0
-        let shortest := slow.foldl min (slow.headD 0)
+        -- the first pass logged in the window may have started before it (and
+        -- before the delayed reads applied): only the passes after it must be slow
+        let gated := slow.drop 1
+        let shortest := gated.foldl min (gated.headD 0)
         IO.eprintln s!"# window {t0} .. {t1}: reconcile slow {slow} ms; delayed reads {delayed}; LOST LEASE {lost}; versions {versions.length} broadcasts, v{versions.foldl min (versions.headD 0)}..v{versions.foldl max 0} (+{vDelta}); nodes not Active at the end {notActive}; drift {drift}"
         if let some d := drift then return .fail s!"the leader did not keep the lease for the whole window: {d}"
         if lost != 0 then return .fail s!"{lost} LOST LEASE line(s) in an operator log during the window"

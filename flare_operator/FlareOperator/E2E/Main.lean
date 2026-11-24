@@ -56,6 +56,7 @@ import FlareOperator.E2E.Tests.WebhookTls
 import FlareOperator.E2E.Tests.WalArchive
 import FlareOperator.E2E.Tests.WalFollowRollover
 import FlareOperator.E2E.Tests.WalFollowDrain
+import FlareOperator.E2E.Tests.SlowReconcileLease
 
 open FlareOperator.E2E
 
@@ -66,6 +67,7 @@ def main (args : List String) : IO UInt32 :=
     Tests.FirstBuildBusyPool.suite,
     Tests.FirstBuildBusyPool.suiteDroppedAdd,
     Tests.FirstBuildBusyPool.suiteStaleEvidence,
+    Tests.SlowReconcileLease.suite,
     Tests.ReadBalance.suite,
     Tests.ScaleOutMaster.suite,
     Tests.ScaleOutSlave.suite,

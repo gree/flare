@@ -7,18 +7,25 @@
   min. A pass also read every node one after the other (the sum of the node
   latencies) and advanced the topology version at every commit (+7 a pass).
 
+  The rebuild gate reads the nodes FRESH at every decision that may admit a
+  new assignment (a reconstruction can start between two gates of a pass, so
+  nothing is reused across decisions; review of PR #188). A pass therefore
+  takes about N x one delay for its N gate decisions (not the sum of the
+  nodes), and the lease keeper keeps the lease whatever the pass length.
+
   Two operator replicas (a standby is what takes a lapsed lease), 2 partitions
   x 2 replicas. A held rebuild (flared's activation held on both replicas, both
   masters rewritten: one rebuild stays in Prepare, the other is HELD as a
   Proxy) makes the rebuild gate read every node at every pass, and the seam
   FLARE_TEST_NODE_READ_DELAY_FILE delays each of those reads by 20 s (never
-  armed in production). Then, for 200 s:
+  armed in production). Then, for 360 s:
     1. passes are slow (`reconcile slow`, longer than the 15 s lease) but the
        leader keeps the lease: no LOST LEASE in either operator, the holder and
        leaseTransitions are unchanged at every 10 s sample, no operator
        container restarts;
-    2. the 4 reads of a pass run together: a pass takes about one delay (20 s),
-       far less than their sum (80 s);
+    2. the 4 reads of ONE gate decision run together: each decision takes about
+       one delay (20 s), not their sum (80 s); a pass of N decisions takes about
+       N x 20 s, inside the 180 s pass deadline;
     3. while a node is not Active the topology version advances at most once
        per pass.
   Then the lease is really taken (another holder): the old leader still stops —
@@ -96,6 +103,35 @@ private def podLogSince (pod since : String) (previous : Bool := false) : IO Str
   | .ok o => return o
   | .error _ => return ""
 
+/-- seconds of the day of a `--timestamps` line (HH:MM:SS after the `T`) -/
+private def secOf (l : String) : Option Nat :=
+  match l.splitOn "T" with
+  | _ :: t :: _ =>
+    match (t.take 8).splitOn ":" with
+    | [h, m, sec] => do pure ((← h.toNat?) * 3600 + (← m.toNat?) * 60 + (← sec.toNat?))
+    | _ => none
+  | _ => none
+
+/-- Group the delayed-read lines into gate decisions: the reads of one decision
+    start together (they run in parallel), the next decision starts only after
+    the previous one's reads have finished (>= delay later). Returns, per
+    decision, the spread (s) between its first and last read start and its
+    number of reads. -/
+private def decisions (reads : List String) (delayS : Nat) : List (Nat × Nat) := Id.run do
+  let secs := reads.filterMap secOf
+  let mut out : List (Nat × Nat) := []
+  let mut cur : List Nat := []
+  for t in secs do
+    match cur.getLast? with
+    | some last =>
+      if (t + 86400 - last) % 86400 < delayS / 2 then cur := cur ++ [t]
+      else
+        out := out ++ [((cur.foldl max 0) - (cur.foldl min (cur.headD 0)), cur.length)]
+        cur := [t]
+    | none => cur := [t]
+  if !cur.isEmpty then out := out ++ [((cur.foldl max 0) - (cur.foldl min (cur.headD 0)), cur.length)]
+  return out
+
 private def lines (s : String) (needle : String) : List String :=
   (s.splitOn "\n").filter (containsSubstr · needle)
 
@@ -142,7 +178,7 @@ def suite : TestSuite := {
   teardown := cleanupCluster cfg
   onFailure := dumpClusterDiagnostics ns s!"app={cfg.operatorName}"
   tests := [
-    { name := "slow passes (held rebuild gate, every per-node read delayed 20 s) for 200 s: passes outlast the 15 s lease (reconcile slow) but the leader keeps it (no LOST LEASE, holder and leaseTransitions unchanged, no restart), the node reads of a pass run together (a pass ≈ one delay, not their sum), and the topology version advances at most once per pass while a node is not Active"
+    { name := "slow passes (held rebuild gate, every per-node read delayed 20 s) for 360 s: passes outlast the 15 s lease (reconcile slow) but the leader keeps it (no LOST LEASE, holder and leaseTransitions unchanged, no restart), the node reads of each gate decision run together (a decision ≈ one delay, not the sum of the nodes; a pass ≈ N decisions × one delay), and the topology version advances at most once per pass while a node is not Active"
       run := do
         let grace ← waitForCondition "an operator past its startup grace period" 300 do
           return containsSubstr (← kubectlLogsLabel s!"app={cfg.operatorName}" ns 400000) "grace period over"
@@ -178,7 +214,7 @@ def suite : TestSuite := {
         let t0 ← utcStamp
         IO.eprintln s!"# window start {t0}: leader {leader}, leaseTransitions {transBefore}, restarts {restarts0}"
         let mut drift : Option String := none
-        for i in [0:20] do
+        for i in [0:36] do
           IO.sleep 10000
           let (h, t) ← leaseNow
           let rs ← restartsOfAll pods
@@ -194,7 +230,9 @@ def suite : TestSuite := {
         for p in pods do lost := lost + (lines (← podLogSince p t0) "LOST LEASE").length
         let leaderLog ← podLogSince leader t0
         let slow := (lines leaderLog "reconcile slow: ").filterMap (natAfter · "reconcile slow: ")
-        let delayed := (lines leaderLog "TEST SEAM: read of ").length
+        let delayedLines := lines leaderLog "TEST SEAM: read of "
+        let delayed := delayedLines.length
+        let gateDecisions := decisions delayedLines (readDelayMs / 1000)
         let versions := (lines leaderLog "Broadcasting node sync v").filterMap (natAfter · "Broadcasting node sync v")
         let vDelta := (versions.foldl max 0) - (versions.foldl min (versions.headD 0))
         let longest := slow.foldl max 0
@@ -202,16 +240,23 @@ def suite : TestSuite := {
         -- before the delayed reads applied): only the passes after it must be slow
         let gated := slow.drop 1
         let shortest := gated.foldl min (gated.headD 0)
-        IO.eprintln s!"# window {t0} .. {t1}: reconcile slow {slow} ms; delayed reads {delayed}; LOST LEASE {lost}; versions {versions.length} broadcasts, v{versions.foldl min (versions.headD 0)}..v{versions.foldl max 0} (+{vDelta}); nodes not Active at the end {notActive}; drift {drift}"
+        IO.eprintln s!"# window {t0} .. {t1}: reconcile slow {slow} ms; delayed reads {delayed}; LOST LEASE {lost}; versions {versions.length} broadcasts, v{versions.foldl min (versions.headD 0)}..v{versions.foldl max 0} (+{vDelta}); nodes not Active at the end {notActive}; gate decisions (spread s, reads) {gateDecisions}; drift {drift}"
         if let some d := drift then return .fail s!"the leader did not keep the lease for the whole window: {d}"
         if lost != 0 then return .fail s!"{lost} LOST LEASE line(s) in an operator log during the window"
-        if slow.length < 3 then return .fail s!"only {slow.length} slow pass(es) logged in 200 s (a delayed gate makes every pass slow): the seam did not take effect"
+        if slow.length < 2 then return .fail s!"only {slow.length} slow pass(es) logged in 360 s (a delayed gate makes every pass slow): the seam did not take effect"
         if longest < 15000 then return .fail s!"the longest pass took {longest} ms, not longer than the 15 s lease: the window did not outlast the lease"
-        -- concurrency: 4 nodes read with 20 s each = 80 s one after the other
-        if longest > 3 * readDelayMs then
-          return .fail s!"a pass took {longest} ms; with the reads run together it is about one delay ({readDelayMs} ms), the sequential sum is {4 * readDelayMs} ms"
+        -- every gate decision reads the nodes fresh (N decisions a pass, one delay
+        -- each, so a pass is about N x 20 s: at most 8 decisions, inside the
+        -- 180 s pass deadline); the 4 reads of ONE decision run together: their
+        -- starts are within a few seconds, not 20 s apart (the sequential sum is 80 s)
+        if longest > 8 * readDelayMs then
+          return .fail s!"a pass took {longest} ms; with N <= 8 gate decisions of one delay ({readDelayMs} ms) each it is at most {8 * readDelayMs} ms"
         if shortest + 5000 < readDelayMs then
           return .fail s!"a pass took only {shortest} ms although every read waits {readDelayMs} ms: the gate did not read the nodes in that pass"
+        if gateDecisions.length < 2 then return .fail s!"only {gateDecisions.length} gate decision(s) read the nodes in the window"
+        match gateDecisions.find? (fun (spread, _) => spread > 5) with
+        | some (spread, n) => return .fail s!"a gate decision's {n} reads started {spread} s apart: the nodes of one decision were not read together (sequential reads would be {readDelayMs / 1000} s apart)"
+        | none => pure ()
         if delayed < 4 then return .fail s!"only {delayed} delayed node read(s) in the window"
         -- the version: at most once per pass (a pass before the window edge may
         -- still be counted: one extra), and it does move while a node is not Active

@@ -353,6 +353,10 @@ protected:
 	// history. Off until the cluster says this node is a master.
 	volatile bool _lazy_expiry_delete;
 	uint64_t _follow_generation;
+	// History continuation (replica commit): the epoch the copy left, and
+	// when (wall clock ms) — under _mutex_generations
+	string _superseded_epoch;
+	uint64_t _continued_at_ms;
 	// Expired entries hidden from a read but NOT deleted (replica side).
 	AtomicCounter _expire_filtered;
 
@@ -570,6 +574,15 @@ public:
 	// expected (the copy read at the barrier)
 	int history_replica_prepare(const pending_history& in, const string& expected_incarnation, string& result);
 	int history_commit(const string& hid, string& result);
+	virtual bool history_replica_pending();
+	// After a replica committed a continued history (and for a bounded time):
+	// is a refusal by the source `server_epoch` ("" = not known, the
+	// master_id answer) the new master not having committed it yet? Then the
+	// follower retries; it is not a history that differs.
+	bool continuation_source_behind(const string& server_epoch);
+	// The epoch this copy left by a continued history ("" = none): a batch
+	// of that epoch can never be applied any more
+	string get_superseded_epoch();
 	int history_discard(const string& hid, const string& why, string& result);
 	// arm: bind the pending record of `hid` to the V2 map version (sent by
 	// the operator BEFORE that map; idempotent for the same version)

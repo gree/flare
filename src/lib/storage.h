@@ -357,6 +357,11 @@ public:
 	virtual int history_on_promotion(int partition, const string& own_key, uint64_t map_version) {
 		(void)partition; (void)own_key; (void)map_version; return 0;
 	}
+	// true while this copy holds a prepared history continuation as a
+	// replica (prepared, not yet committed or discarded): its follower must
+	// not be started toward another source meanwhile (the commit decides the
+	// epoch, master_id and cursor the new follower starts from)
+	virtual bool history_replica_pending() { return false; }
 	virtual int advance_incarnation() { return 0; }
 	virtual int regenerate_master_id() { return 0; }
 	// decision 2026-10-08 (flared's own refusal): true when this copy must not

@@ -1480,7 +1480,18 @@ int cluster::_reconstruct_node(vector<node> v, uint64_t node_map_version) {
 					master_key = it->first;
 				}
 			}
-			this->_storage->history_on_map(me->second.node_partition, master_key, this->_node_key, node_map_version);
+			const int hc = this->_storage->history_on_map(me->second.node_partition, master_key, this->_node_key, node_map_version);
+			if (hc == 1) {
+				// Committed as a replica: the follower started from the
+				// previous history (the old master's, or one already
+				// pointed at the new master from the old position) is
+				// stopped; the reconcile below starts one from the
+				// committed epoch and cursor.
+				this->stop_wal_follower();
+			}
+			// a pending history held the followers where they were (see
+			// _reconcile_wal_follower_locked); it is decided now
+			this->_reconcile_wal_follower_locked();
 		}
 	}
 
@@ -2550,6 +2561,16 @@ int cluster::_reconcile_wal_follower_locked() {
 	}
 	if (this->_wal_follower_thread && this->_wal_follower_source == source_key && stats_object != NULL
 			&& stats_object->get_follow_record().state == "needs_rebuild") {
+		return 0;
+	}
+
+	if (this->_storage->history_replica_pending()) {
+		// A prepared history continuation of this replica is undecided: the
+		// epoch, master_id and cursor a follower of the new master must
+		// start from are the COMMIT's. One started now would ask the new
+		// master with the old position (another sequence space) and its
+		// first group would land on the continued history. The map that
+		// commits or discards the pending history reconciles again.
 		return 0;
 	}
 

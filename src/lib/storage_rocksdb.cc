@@ -173,6 +173,7 @@ storage_rocksdb::storage_rocksdb(
 	_blob_gc_ioerror_for_test(false),
 	_lazy_expiry_delete(false),
 	_follow_generation(0),
+	_continued_at_ms(0),
 	_expire_filtered(0),
 	_snapshot_bootstrap(0),
 	_corruption_detected(0),
@@ -3234,6 +3235,16 @@ int storage_rocksdb::history_commit(const string& hid, string& result) {
 		if (p.role == "replica") {
 			this->_rebuilt_from_master_id = p.master_id;
 			this->_rebuilt_from_epoch = p.to_epoch;
+			// The follower of the OLD master (and one already started
+			// toward the new one from the old position) belongs to the
+			// history just left. This runs under the whole-lock in write
+			// mode, the same lock an apply takes in read mode after the
+			// generation check: a group of the old stream is either
+			// applied before this commit or refused as a stale follower
+			// after it, never applied on top of the continued history.
+			this->_superseded_epoch = p.from_epoch;
+			this->_continued_at_ms = wal_pin::now_ms();
+			this->bump_follow_generation();
 		} else {
 			this->_rebuilt_from_master_id.clear();
 			this->_rebuilt_from_epoch.clear();
@@ -3257,6 +3268,32 @@ int storage_rocksdb::history_commit(const string& hid, string& result) {
 		this->wal_pin_release(hid, pr);
 	}
 	return r;
+}
+
+bool storage_rocksdb::history_replica_pending() {
+	pending_history p;
+	return this->get_pending_history(p) && p.role == "replica";
+}
+
+string storage_rocksdb::get_superseded_epoch() {
+	pthread_rwlock_rdlock(&this->_mutex_generations);
+	const string e = this->_superseded_epoch;
+	pthread_rwlock_unlock(&this->_mutex_generations);
+	return e;
+}
+
+bool storage_rocksdb::continuation_source_behind(const string& server_epoch) {
+	static const uint64_t kGraceMs = 120000;
+	pthread_rwlock_rdlock(&this->_mutex_generations);
+	const bool continued = !this->_superseded_epoch.empty() && this->_continued_at_ms != 0;
+	const uint64_t at = this->_continued_at_ms;
+	const bool same_epoch = !server_epoch.empty() && server_epoch == this->_superseded_epoch;
+	pthread_rwlock_unlock(&this->_mutex_generations);
+	if (!continued || (!server_epoch.empty() && !same_epoch)) {
+		return false;
+	}
+	const uint64_t now = wal_pin::now_ms();
+	return now != 0 && now >= at && now - at < kGraceMs;
 }
 
 int storage_rocksdb::history_arm(const string& hid, uint64_t map_version, string& result) {
@@ -6382,6 +6419,16 @@ int storage_rocksdb::apply_wal_batches(const string& source_epoch, const string&
 		// D7: a follower stopped asynchronously may still be finishing a
 		// slice after its successor started; checked under the apply lock.
 		if (follow_generation != 0 && follow_generation != this->get_follow_generation()) {
+			refusal = apply_refused_stale_follower;
+			break;
+		}
+		// A batch of the history this copy left by a continuation (its
+		// follower of the old master, or one started toward the new master
+		// before the commit): refused as a stale follower whatever generation
+		// it carries. It is not a history that differs, the copy IS on the
+		// continued one, so it must not make the copy rebuild.
+		if (!source_epoch.empty() && source_epoch != this->get_source_epoch()
+				&& source_epoch == this->get_superseded_epoch()) {
 			refusal = apply_refused_stale_follower;
 			break;
 		}

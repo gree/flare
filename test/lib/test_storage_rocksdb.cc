@@ -5124,6 +5124,90 @@ void test_apply_refuses_a_stopped_followers_generation() {
 	drop_rocksdb(s, wal_master_dir);
 }
 
+// History continuation under write load (a dev cluster, 200 writes/s): a replica that
+// COMMITS a continued history must make every later group of the follower it
+// had before harmless. The commit moves the follow generation under the same
+// lock an apply decides under, and the epoch it left is refused as a stale
+// follower (never as "another history", which makes the copy rebuild).
+void test_history_commit_as_replica_makes_the_old_follower_stale() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	const string e0 = s->get_source_epoch();
+	const string inc = s->get_incarnation();
+	cut_assert_equal_int(0, s->set_repl_last_lsn(9));
+	storage_rocksdb* scratch = make_rocksdb(wal_slave_dir);
+	rocksdb::WriteBatch b;
+	b.Put(rocksdb::Slice("late"), rocksdb::Slice(serialized_entry(scratch, "late", "v")));
+	const uint64_t gen0 = s->bump_follow_generation();   // the old follower
+	storage_rocksdb::pending_history in;
+	in.hid = "p0-a1-load";
+	in.partition = 0;
+	in.successor = "succ:12121";
+	in.from_epoch = e0;
+	in.to_epoch = "99:load";
+	in.seq = 500;
+	in.master_id = "new-master-id";
+	in.deadline_ms = wal_pin::now_ms() + 60000;
+	string res;
+	cut_assert_equal_int(0, s->history_replica_prepare(in, inc, res));
+	cut_assert_true(s->history_replica_pending());
+	cut_assert_equal_int(0, s->history_arm("p0-a1-load", 5, res));
+	// before the commit the old follower's group applies (same history)
+	uint64_t applied = 0, skipped = 0;
+	storage_rocksdb::apply_outcome refusal;
+	cut_assert_equal_int(0, s->apply_wal_batch(e0, inc, 10, b, applied, skipped, refusal, gen0));
+	cut_assert_false(s->continuation_source_behind(""));
+	cut_assert_equal_int(1, s->history_on_map(0, "succ:12121", "me:12121", 5));
+	cut_assert_false(s->history_replica_pending());
+	cut_assert_true(s->get_follow_generation() > gen0);
+	cut_assert_equal_string(e0.c_str(), s->get_superseded_epoch().c_str());
+	// after it: the old follower (its generation) and any follower still
+	// carrying the old epoch are refused as STALE, nothing is written
+	rocksdb::WriteBatch late;
+	late.Put(rocksdb::Slice("late2"), rocksdb::Slice(serialized_entry(scratch, "late2", "v")));
+	cut_assert_equal_int(-1, s->apply_wal_batch(e0, inc, 501, late, applied, skipped, refusal, gen0));
+	cppcut_assert_equal(storage_rocksdb::apply_refused_stale_follower, refusal);
+	cut_assert_equal_int(-1, s->apply_wal_batch(e0, inc, 501, late, applied, skipped, refusal, s->get_follow_generation()));
+	cppcut_assert_equal(storage_rocksdb::apply_refused_stale_follower, refusal);
+	cut_assert_equal_int(-1, s->apply_wal_batch(e0, inc, 501, late, applied, skipped, refusal, 0));
+	cppcut_assert_equal(storage_rocksdb::apply_refused_stale_follower, refusal);
+	cppcut_assert_equal(static_cast<uint64_t>(500), s->get_repl_last_lsn());
+	string out;
+	cut_assert_equal_int(-1, storage_get_string(s, "late2", out));
+	// a follower of the continued history (new epoch, current generation)
+	// continues from the committed cursor
+	cut_assert_equal_int(0, s->apply_wal_batch("99:load", inc, 501, late, applied, skipped, refusal, s->get_follow_generation()));
+	cut_assert_equal_int(0, storage_get_string(s, "late2", out));
+	// the new master that has not committed yet still serves the epoch left
+	cut_assert_true(s->continuation_source_behind(e0));
+	cut_assert_true(s->continuation_source_behind(""));
+	cut_assert_false(s->continuation_source_behind("98:another"));
+	drop_rocksdb(scratch, wal_slave_dir);
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// The same group on a copy that did NOT continue: a real epoch mismatch is
+// still "another history" (apply_refused_session -> the copy rebuilds), and
+// a source answering another epoch is not "behind".
+void test_a_real_epoch_mismatch_is_still_refused_as_another_history() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	const string inc = s->get_incarnation();
+	cut_assert_equal_int(0, s->set_repl_last_lsn(9));
+	storage_rocksdb* scratch = make_rocksdb(wal_slave_dir);
+	rocksdb::WriteBatch b;
+	b.Put(rocksdb::Slice("k"), rocksdb::Slice(serialized_entry(scratch, "k", "v")));
+	const uint64_t gen = s->bump_follow_generation();
+	uint64_t applied = 0, skipped = 0;
+	storage_rocksdb::apply_outcome refusal;
+	cut_assert_equal_int(-1, s->apply_wal_batch("77:other", inc, 10, b, applied, skipped, refusal, gen));
+	cppcut_assert_equal(storage_rocksdb::apply_refused_session, refusal);
+	cut_assert_true(s->get_superseded_epoch().empty());
+	cut_assert_false(s->continuation_source_behind(s->get_source_epoch()));
+	cut_assert_false(s->continuation_source_behind(""));
+	cppcut_assert_equal(static_cast<uint64_t>(9), s->get_repl_last_lsn());
+	drop_rocksdb(scratch, wal_slave_dir);
+	drop_rocksdb(s, wal_master_dir);
+}
+
 // A newer value arrives by forwarding; the WAL then delivers an older change
 // for the same key. The newer value must stand.
 void test_apply_rule_forwarded_newer_survives_older_wal() {

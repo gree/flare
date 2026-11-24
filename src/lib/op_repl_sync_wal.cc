@@ -510,6 +510,14 @@ int op_repl_sync_wal::_flush_pending() {
 	this->_applied += applied;
 	this->_skipped += skipped;
 	if (result < 0) {
+		if (refusal == storage_rocksdb::apply_refused_stale_follower) {
+			// a follower of a history this copy has left (stopped, or the
+			// history continued): its late group is dropped, nothing about
+			// the copy is wrong
+			log_notice("follow group at LSN %llu dropped: the follower is stale (stopped, or its history was continued)", (unsigned long long)first_lsn);
+			this->_client_result = client_apply_error;
+			return -1;
+		}
 		log_err("follow apply refused at LSN %llu (outcome=%d)", (unsigned long long)first_lsn, static_cast<int>(refusal));
 		// A gap is history loss, not a transient apply failure: the
 		// follower must declare needs_rebuild (lsn_purged), never retry.
@@ -576,9 +584,16 @@ int op_repl_sync_wal::_parse_text_client_stream() {
 					server_id.erase(server_id.size() - 1);
 				}
 				this->_server_master_id = server_id;
-				this->_client_result = client_master_id_mismatch;
-				rocksdb->incr_wal_sync_master_id_mismatch();
-				log_warning("master_id mismatch (server reports %s)", server_id.c_str());
+				if (rocksdb->continuation_source_behind("")) {
+					// just continued a history, and the new master has not
+					// committed it yet: ask again, do not rebuild
+					this->_client_result = client_server_error;
+					log_notice("master_id mismatch (server reports %s): the new master has not committed the continued history yet -> retry", server_id.c_str());
+				} else {
+					this->_client_result = client_master_id_mismatch;
+					rocksdb->incr_wal_sync_master_id_mismatch();
+					log_warning("master_id mismatch (server reports %s)", server_id.c_str());
+				}
 			} else if (strncmp(body, "lsn_ahead", 9) == 0) {
 				this->_client_result = client_lsn_ahead;
 				rocksdb->incr_wal_sync_lsn_ahead();
@@ -587,8 +602,22 @@ int op_repl_sync_wal::_parse_text_client_stream() {
 				// The source is serving a different history: our position is not
 				// comparable to its sequence space, so this is a rebuild, not a
 				// retry.
-				this->_client_result = client_epoch_mismatch;
-				log_warning("source is serving a different history (%s)", body);
+				string behind = body + 14;
+				while (!behind.empty() && (behind[0] == ' ')) {
+					behind.erase(0, 1);
+				}
+				while (!behind.empty() && (behind[behind.size() - 1] == '\n' || behind[behind.size() - 1] == '\r')) {
+					behind.erase(behind.size() - 1);
+				}
+				if (!behind.empty() && rocksdb->continuation_source_behind(behind)) {
+					// the source still serves the epoch this copy just left by
+					// a continuation: it has not committed the new one yet
+					this->_client_result = client_server_error;
+					log_notice("source still serves the history this copy continued from (%s) -> retry", behind.c_str());
+				} else {
+					this->_client_result = client_epoch_mismatch;
+					log_warning("source is serving a different history (%s)", body);
+				}
 			} else if (strncmp(body, "generations_unavailable", 23) == 0) {
 				this->_client_result = client_no_epoch;
 				log_warning("source cannot identify its replication history -> refusing to follow it", 0);

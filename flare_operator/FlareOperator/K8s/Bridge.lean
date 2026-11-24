@@ -21,6 +21,7 @@ import FlareOperator.StateMachine.Handover
 import FlareOperator.StateMachine.HandoverDrive
 import FlareOperator.StateMachine.NodeMove
 import FlareOperator.StateMachine.LeaseFence
+import FlareOperator.StateMachine.ServiceSelector
 
 namespace FlareOperator.K8s.Bridge
 
@@ -144,13 +145,48 @@ def listFlaredPods (crName ns : String) : IO (List PodInfo) := do
   match ← listFlaredPodsE crName ns with
   | .error _ => return []
   | .ok pods => return pods
+
+/-- (service, pod) whose update was refused, with the time (mono ms): not
+    tried again for `serviceRefusalBackoffMs`. -/
+initialize serviceRefusedRef : IO.Ref (List (String × String × Nat)) ← IO.mkRef []
+
+def serviceRefusalBackoffMs : Nat := 30000
+
 /-- Patch a K8s Service selector to route traffic to a specific pod.
     Uses retry logic for resilience.
 
     kubectl patch svc <svcName> -n <ns> -p '{"spec":{"selector":{"statefulset.kubernetes.io/pod-name":"<podName>"}}}' -/
 def patchClientServiceSelector (svcName ns podName : String) : IO (Except String Unit) := do
-  retry s!"patch service {svcName}" do
-    patchServiceSelector svcName ns podName
+  -- see StateMachine/ServiceSelector: no patch when the selector is already
+  -- right; the patch is selector-only; only a dual-stack refusal is retried,
+  -- with the Service's own first IP family
+  let shape ← match ← kubectl ["get", "svc", svcName, "-n", ns, "-o", FlareOperator.ServiceSelector.shapeJsonpath] with
+    | .ok out => pure (FlareOperator.ServiceSelector.parseShape out)
+    | .error _ => pure none
+  if !FlareOperator.ServiceSelector.needsPatch shape podName then return .ok ()
+  let now ← IO.monoMsNow
+  if let some (_, _, t) := (← serviceRefusedRef.get).find? (fun (s, p, _) => s == svcName && p == podName) then
+    if FlareOperator.ServiceSelector.inBackoff (now - t) serviceRefusalBackoffMs then
+      return .error s!"service {svcName} was refused an update to {podName} {now - t}ms ago; not tried again for {serviceRefusalBackoffMs}ms"
+  let patchWith (patch : String) : IO (Except String Unit) := do
+    match ← kubectl ["patch", "svc", svcName, "-n", ns, "-p", patch] with
+    | .error e => return .error e
+    | .ok _ => return .ok ()
+  let r ← retry s!"patch service {svcName}" (patchWith (FlareOperator.ServiceSelector.selectorPatch podName))
+  let r ← match r with
+    | .error e =>
+      if FlareOperator.ServiceSelector.dualStackUnsupported e then
+        match FlareOperator.ServiceSelector.singleStackPatch shape podName with
+        | some p => retry s!"patch service {svcName} (single-stack)" (patchWith p)
+        | none => pure (.error e)
+      else pure (.error e)
+    | .ok () => pure (.ok ())
+  match r with
+  | .ok () =>
+    serviceRefusedRef.modify (·.filter fun (s, _, _) => s != svcName)
+  | .error _ =>
+    serviceRefusedRef.modify fun l => (svcName, podName, now) :: l.filter fun (s, _, _) => s != svcName
+  return r
 
 /-- GRACEFUL pod deletion (no force, full grace period): the pod goes
     Terminating with its full preStop window, so the operator's drain path

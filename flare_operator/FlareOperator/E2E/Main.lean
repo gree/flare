@@ -54,6 +54,7 @@ import FlareOperator.E2E.Tests.FailoverOrder
 import FlareOperator.E2E.Tests.FirstBuildBusyPool
 import FlareOperator.E2E.Tests.WebhookTls
 import FlareOperator.E2E.Tests.WalArchive
+import FlareOperator.E2E.Tests.WalFollowRollover
 
 open FlareOperator.E2E
 
@@ -155,4 +156,4 @@ def main (args : List String) : IO UInt32 :=
     Tests.BlueGreenMigration.suite,
     Tests.SnapshotPushSeed.suite,
     Tests.WebhookTls.suite
-  ] ++ Tests.NodeOpsSwitch.switchSuites ++ [Tests.ApiserverOutage.suite, Tests.WalArchive.suite]) args
+  ] ++ Tests.NodeOpsSwitch.switchSuites ++ [Tests.ApiserverOutage.suite, Tests.WalArchive.suite, Tests.WalFollowRollover.suite]) args

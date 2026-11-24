@@ -122,6 +122,7 @@ jobs:
             {"group":"node-ops-apiserver-outage","suites":"node-ops-apiserver-outage"},
             {"group":"stats-cost","suites":"stats-cost"},
             {"group":"wal-archive","suites":"wal-archive"},
+            {"group":"wal-follow","suites":"wal-follow-rollover"},
             {"group":"continuous-replication","suites":"copy-retention-measure,continuous-replication,continuous-replication-scale,continuous-replication-sustained,continuous-replication-outage,continuous-replication-outage-tmpfs,visibility-bench"}
           ]'
           all=$(echo "$default" | jq -r '[.[].suites] | join(",")')

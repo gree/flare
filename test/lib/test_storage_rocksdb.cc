@@ -7376,6 +7376,94 @@ void test_reseed_serve_to_a_slow_reader_completes_past_several_windows() {
 		cut_assert_true(grp.batches / (grp.read_s + grp.apply_s) > 8800.0);
 	}
 
+	// The whole follow loop, as the follower thread runs it, minus the socket:
+	// every slice is a fresh request answered by op_repl_sync_wal's server side
+	// (a new WAL iterator, CRC, framing) and consumed by run_client_follow
+	// (parse, CRC, apply). The source has the production WAL geometry (64 MB
+	// write buffers, one WAL file holds tens of MB), which is what makes the
+	// per-request seek visible. Uses only calls the base tree has too.
+	struct follow_loop_result {
+		double seconds;
+		uint64_t batches;
+		int slices;
+		uint64_t cursor;
+		uint32_t items;
+	};
+
+	follow_loop_result follow_loop(int n, uint64_t max_batches, uint64_t max_bytes, size_t group = 0) {
+		follow_loop_result res = {0, 0, 0, 0, 0};
+		mkdir(wal_master_dir, 0700);
+		storage_rocksdb* src = new storage_rocksdb(wal_master_dir, 32, 4, 16, 64, 3, 86400, 4096);
+		src->open();
+		storage_rocksdb* live = make_rocksdb(wal_slave_dir);
+		storage_set_string(src, "seed", "x");
+		const uint64_t l0 = src->get_latest_sequence_number();
+		const string epoch = src->get_source_epoch();
+		const string mid = src->get_master_id();
+		static int attempt = 0;
+		char attempt_name[32];
+		snprintf(attempt_name, sizeof(attempt_name), "loop%d", ++attempt);
+		storage_rocksdb* stg = live->open_staging(attempt_name, false);
+		cut_assert_not_null(stg);
+		cut_assert_equal_int(0, stg->adopt_history(mid, epoch, l0));
+		const string inc = stg->get_incarnation();
+
+		const string value(512, 'v');
+		for (int i = 0; i < n; i++) {
+			char k[32];
+			snprintf(k, sizeof(k), "bench-%08d", i);
+			cut_assert_equal_int(0, storage_set_string(src, k, value));
+		}
+
+		const double t0 = bench_now();
+		for (;;) {
+			const uint64_t cursor = stg->get_repl_last_lsn();
+			char request[BUFSIZ];
+			snprintf(request, sizeof(request), " %llu %s %s %llu %llu\r\n", (unsigned long long)cursor,
+				mid.c_str(), epoch.c_str(), (unsigned long long)max_batches, (unsigned long long)max_bytes);
+			shared_connection sc(new connection_sstream(request));
+			serving_sync_wal srv(sc, src);
+			cut_assert_equal_int(0, srv._parse_text_server_parameters());
+			srv._run_server();
+			const string reply = static_cast<connection_sstream*>(sc.get())->get_output();
+			shared_connection cc(new connection_sstream(reply));
+			op_repl_sync_wal cli(cc, stg);
+			if (group > 0) cli.set_apply_group(group, 1 << 30);
+			cut_assert_equal_int(0, cli.run_client_follow(cursor, mid, epoch, inc, max_batches, max_bytes));
+			res.slices++;
+			if (stg->get_repl_last_lsn() == cursor || !cli.get_more_available()) break;
+		}
+		res.seconds = bench_now() - t0;
+		res.batches = stg->get_repl_last_lsn() - l0;
+		res.cursor = stg->get_repl_last_lsn();
+		res.items = stg->count();
+		cppcut_assert_equal(src->count() - 1, res.items);
+		cppcut_assert_equal(src->get_latest_sequence_number(), res.cursor);
+		drop_rocksdb(src, wal_master_dir);
+		drop_rocksdb(live, wal_slave_dir);
+		return res;
+	}
+
+	void test_follow_loop_throughput_measurement() {
+		const int n = getenv("FLARE_BENCH_N") ? atoi(getenv("FLARE_BENCH_N")) : 100000;
+		const uint64_t b0 = getenv("FLARE_BENCH_BATCHES") ? atoll(getenv("FLARE_BENCH_BATCHES")) : 4096;
+		const uint64_t by0 = getenv("FLARE_BENCH_BYTES") ? atoll(getenv("FLARE_BENCH_BYTES")) : 4 * 1024 * 1024;
+		const size_t group = getenv("FLARE_BENCH_GROUP") ? atoll(getenv("FLARE_BENCH_GROUP")) : 0;
+		// the slice the follower asked for before (256 batches), then the default now
+		const follow_loop_result old_slice = follow_loop(n, 256, by0, group);
+		const follow_loop_result r = follow_loop(n, b0, by0, group);
+		cut_notify("follow loop bench: %d writes, %zu batches per apply, slices of <=256 batches: %d slices %.2fs %.0f positions/s (%.1f ms/slice); slices of <=%llu batches / %llu bytes: %d slices %.2fs %.0f positions/s (%.1f ms/slice)",
+			n, group ? group : op_repl_sync_wal::kApplyGroupBatches,
+			old_slice.slices, old_slice.seconds, old_slice.batches / old_slice.seconds, 1000 * old_slice.seconds / old_slice.slices,
+			(unsigned long long)b0, (unsigned long long)by0, r.slices, r.seconds, r.batches / r.seconds, 1000 * r.seconds / r.slices);
+		cppcut_assert_equal(old_slice.cursor, r.cursor);
+		cppcut_assert_equal(old_slice.items, r.items);
+		// well above the ~4,400 writes/s a partition takes in a bulk fill (the
+		// production rate before the change was ~3,200/s; the same loop on the
+		// base tree measured 2,900-3,100/s)
+		cut_assert_true(r.batches / r.seconds > 8800.0);
+	}
+
 	// Same data, same safety checks, nothing skipped: a grouped apply of a
 	// history with overwrites and deletes ends with the copy a per-batch apply
 	// gives (items, every key, position).

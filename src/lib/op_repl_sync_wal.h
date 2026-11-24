@@ -99,11 +99,18 @@ protected:
 	// one group (see _parse_text_client_parameters).
 	vector<pair<uint64_t, rocksdb::WriteBatch> >	_pending;
 	size_t		_pending_bytes;
+	size_t		_group_batches;
+	size_t		_group_bytes;
 	int _flush_pending();
 #endif
 
 public:
 	void set_follow_generation(uint64_t g) { this->_follow_generation = g; }
+#ifdef HAVE_LIBROCKSDB
+	// How many verified batches / bytes one apply call takes (follow mode).
+	// A group is one exclusive window of the apply lock.
+	void set_apply_group(size_t batches, size_t bytes) { this->_group_batches = batches; this->_group_bytes = bytes; }
+#endif
 	static const size_t kMinWireBatchBytes;
 	static const size_t kMaxWireBatchBytes;
 	static const size_t kApplyGroupBatches;

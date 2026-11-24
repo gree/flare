@@ -59,6 +59,8 @@ op_repl_sync_wal::op_repl_sync_wal(shared_connection c, storage* st):
 		_follow_generation(0)
 #ifdef HAVE_LIBROCKSDB
 		, _pending_bytes(0)
+		, _group_batches(kApplyGroupBatches)
+		, _group_bytes(kApplyGroupBytes)
 #endif
 		{
 }
@@ -480,8 +482,8 @@ int op_repl_sync_wal::_parse_text_client_parameters() {
 }
 
 #ifdef HAVE_LIBROCKSDB
-const size_t op_repl_sync_wal::kApplyGroupBatches = 512;
-const size_t op_repl_sync_wal::kApplyGroupBytes = 4 * 1024 * 1024;
+const size_t op_repl_sync_wal::kApplyGroupBatches = 128;
+const size_t op_repl_sync_wal::kApplyGroupBytes = 1024 * 1024;
 
 /**
  *	Applies the verified batches collected so far (follow mode) through the
@@ -776,7 +778,7 @@ int op_repl_sync_wal::_parse_text_client_stream() {
 			if (!this->_server_epoch.empty()) {
 				this->_pending.push_back(std::make_pair(lsn, batch));
 				this->_pending_bytes += batch_size;
-				if (this->_pending.size() >= kApplyGroupBatches || this->_pending_bytes >= kApplyGroupBytes) {
+				if (this->_pending.size() >= this->_group_batches || this->_pending_bytes >= this->_group_bytes) {
 					if (this->_flush_pending() < 0) {
 						return -1;
 					}

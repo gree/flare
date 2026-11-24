@@ -43,6 +43,7 @@ import FlareOperatorTests.UnitTestsNodeGuard
 import FlareOperatorTests.UnitTestsFailover
 import FlareOperatorTests.UnitTestsNodeMove
 import FlareOperatorTests.UnitTestsFence
+import FlareOperatorTests.UnitTestsPass
 
 open FlareOperator.K8s
 open FlareOperator.ReplicaRepair
@@ -3535,6 +3536,8 @@ def run : IO UInt32 := do
   for (name, ok) in FlareOperator.UnitTestsNodeMove.results do
     check ctx name ok
   for (name, ok) in FlareOperator.UnitTestsFence.results do
+    check ctx name ok
+  for (name, ok) in (← FlareOperator.UnitTestsPass.results) do
     check ctx name ok
   checkObserve ctx
   checkRequestResolve ctx

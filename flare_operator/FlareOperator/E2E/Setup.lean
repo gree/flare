@@ -26,6 +26,9 @@ structure ClusterConfig where
   «namespace» : String := "flare-system"
   partitions : Nat := 2
   replicas : Nat := 2
+  /-- Operator Deployment replicas: more than one leaves standbys that take
+      the lease when the leader's lapses (the lease suites). -/
+  operatorReplicas : Nat := 1
   operatorName : String := "flare-operator"
   debugPod : String := "debug-e2e"
   flarePort : Nat := 12121
@@ -336,7 +339,7 @@ metadata:
   labels:
     app: {name}
 spec:
-  replicas: 1
+  replicas: {cfg.operatorReplicas}
   selector:
     matchLabels:
       app: {name}

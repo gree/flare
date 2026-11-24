@@ -56,7 +56,13 @@ op_repl_sync_wal::op_repl_sync_wal(shared_connection c, storage* st):
 		_skipped(0),
 		_server_latest_lsn(0),
 		_follow_mode(false),
-		_follow_generation(0) {
+		_follow_generation(0)
+#ifdef HAVE_LIBROCKSDB
+		, _pending_bytes(0)
+		, _group_batches(kApplyGroupBatches)
+		, _group_bytes(kApplyGroupBytes)
+#endif
+		{
 }
 
 /**
@@ -449,7 +455,79 @@ int op_repl_sync_wal::run_client_follow(uint64_t lsn, const string& master_id,
 	return this->_parse_text_client_parameters();
 }
 
+/**
+ *	Reads one response and applies it in groups: consecutive batches that have
+ *	passed their CRC are handed to storage_rocksdb::apply_wal_batches() in one
+ *	call (one exclusive window, one commit), up to kApplyGroupBatches batches
+ *	or kApplyGroupBytes bytes. Whatever was verified before the stream ended —
+ *	cleanly or not — is applied before this returns, as it was when each batch
+ *	was applied on arrival, so a broken connection loses no progress.
+ */
 int op_repl_sync_wal::_parse_text_client_parameters() {
+#ifdef HAVE_LIBROCKSDB
+	this->_pending.clear();
+	this->_pending_bytes = 0;
+	const int r = this->_parse_text_client_stream();
+	if (!this->_pending.empty()) {
+		// Only reached on a failed stream (a clean END flushes first): keep the
+		// verified progress, keep the failure that ended the stream.
+		const client_result keep = this->_client_result;
+		(void)this->_flush_pending();
+		this->_client_result = keep;
+	}
+	return r;
+#else
+	return this->_parse_text_client_stream();
+#endif
+}
+
+#ifdef HAVE_LIBROCKSDB
+const size_t op_repl_sync_wal::kApplyGroupBatches = 128;
+const size_t op_repl_sync_wal::kApplyGroupBytes = 1024 * 1024;
+
+/**
+ *	Applies the verified batches collected so far (follow mode) through the
+ *	common apply rule. 0 on success; -1 with _client_result set otherwise.
+ */
+int op_repl_sync_wal::_flush_pending() {
+	storage_rocksdb* rocksdb = dynamic_cast<storage_rocksdb*>(this->_storage);
+	if (this->_pending.empty()) {
+		return 0;
+	}
+	if (rocksdb == NULL) {
+		this->_pending.clear();
+		this->_pending_bytes = 0;
+		this->_client_result = client_server_error;
+		return -1;
+	}
+	uint64_t applied = 0, skipped = 0;
+	storage_rocksdb::apply_outcome refusal = storage_rocksdb::apply_applied;
+	const uint64_t first_lsn = this->_pending.front().first;
+	const int result = rocksdb->apply_wal_batches(this->_server_epoch, this->_incarnation,
+		this->_pending, applied, skipped, refusal, this->_follow_generation);
+	this->_pending.clear();
+	this->_pending_bytes = 0;
+	this->_applied += applied;
+	this->_skipped += skipped;
+	if (result < 0) {
+		log_err("follow apply refused at LSN %llu (outcome=%d)", (unsigned long long)first_lsn, static_cast<int>(refusal));
+		// A gap is history loss, not a transient apply failure: the
+		// follower must declare needs_rebuild (lsn_purged), never retry.
+		this->_client_result = (refusal == storage_rocksdb::apply_refused_session
+			|| refusal == storage_rocksdb::apply_refused_incarnation)
+			? client_epoch_mismatch
+			: (refusal == storage_rocksdb::apply_refused_gap ? client_lsn_purged : client_apply_error);
+		if (refusal == storage_rocksdb::apply_refused_gap) {
+			rocksdb->incr_wal_sync_lsn_purged();
+		}
+		rocksdb->incr_wal_sync_apply_failure();
+		return -1;
+	}
+	return 0;
+}
+#endif
+
+int op_repl_sync_wal::_parse_text_client_stream() {
 #ifdef HAVE_LIBROCKSDB
 	if (this->_storage->get_type() != storage::type_rocksdb) {
 		log_err("slave storage is not RocksDB, cannot apply WAL", 0);
@@ -698,25 +776,12 @@ int op_repl_sync_wal::_parse_text_client_parameters() {
 
 			int result = 0;
 			if (!this->_server_epoch.empty()) {
-				uint64_t applied = 0, skipped = 0;
-				storage_rocksdb::apply_outcome refusal = storage_rocksdb::apply_applied;
-				result = rocksdb->apply_wal_batch(this->_server_epoch, this->_incarnation,
-					lsn, batch, applied, skipped, refusal, this->_follow_generation);
-				this->_applied += applied;
-				this->_skipped += skipped;
-				if (result < 0) {
-					log_err("follow apply refused at LSN %llu (outcome=%d)", (unsigned long long)lsn, static_cast<int>(refusal));
-					// A gap is history loss, not a transient apply failure: the
-					// follower must declare needs_rebuild (lsn_purged), never retry.
-					this->_client_result = (refusal == storage_rocksdb::apply_refused_session
-						|| refusal == storage_rocksdb::apply_refused_incarnation)
-						? client_epoch_mismatch
-						: (refusal == storage_rocksdb::apply_refused_gap ? client_lsn_purged : client_apply_error);
-					if (refusal == storage_rocksdb::apply_refused_gap) {
-						rocksdb->incr_wal_sync_lsn_purged();
+				this->_pending.push_back(std::make_pair(lsn, batch));
+				this->_pending_bytes += batch_size;
+				if (this->_pending.size() >= this->_group_batches || this->_pending_bytes >= this->_group_bytes) {
+					if (this->_flush_pending() < 0) {
+						return -1;
 					}
-					rocksdb->incr_wal_sync_apply_failure();
-					return -1;
 				}
 			} else {
 				result = rocksdb->apply_batch_with_lsn(batch, lsn);
@@ -735,6 +800,9 @@ int op_repl_sync_wal::_parse_text_client_parameters() {
 		}
 	}
 
+	if (this->_flush_pending() < 0) {
+		return -1;
+	}
 	log_notice("WAL sync completed successfully (last_applied_lsn=%llu, master_id=%s)",
 		(unsigned long long)rocksdb->get_repl_last_lsn(),
 		rocksdb->get_master_id().c_str());

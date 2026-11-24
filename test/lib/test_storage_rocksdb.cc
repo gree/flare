@@ -7266,6 +7266,364 @@ void test_reseed_serve_to_a_slow_reader_completes_past_several_windows() {
 	}
 	// }}}
 
+
+	// {{{ follow throughput measurement
+	// Where a follower's time goes: reading a slice from the source
+	// (get_updates_since, one WAL iterator per call) versus applying it
+	// (apply_wal_batch per source batch, or apply_wal_batches per group).
+	// Prints the numbers; asserts that both ways end with the same copy.
+	double bench_now() {
+		struct timespec ts;
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		return ts.tv_sec + ts.tv_nsec / 1e9;
+	}
+
+	struct follow_bench_result {
+		double read_s, apply_s;
+		uint64_t batches;
+		uint32_t items;
+		uint64_t cursor;
+		int slices;
+	};
+
+	// n writes of 512-byte values into a source (single-key batches, as the
+	// forwarded/ordinary write path produces), then a staged copy that follows
+	// it in slices of at most max_batches, applying `group` batches per call.
+	follow_bench_result follow_bench(int n, uint64_t max_batches, size_t group, bool with_deletes) {
+		follow_bench_result res = {0, 0, 0, 0, 0, 0};
+		storage_rocksdb* src = make_rocksdb(wal_master_dir);
+		storage_rocksdb* live = make_rocksdb(wal_slave_dir);
+		storage_set_string(src, "seed", "x");
+		const uint64_t l0 = src->get_latest_sequence_number();
+		const string epoch = src->get_source_epoch();
+		const string mid = src->get_master_id();
+		static int attempt = 0;
+		char attempt_name[32];
+		snprintf(attempt_name, sizeof(attempt_name), "bench%d", ++attempt);
+		storage_rocksdb* stg = live->open_staging(attempt_name, false);
+		cut_assert_not_null(stg);
+		cut_assert_equal_int(0, stg->adopt_history(mid, epoch, l0));
+
+		const string value(512, 'v');
+		for (int i = 0; i < n; i++) {
+			char k[32];
+			snprintf(k, sizeof(k), "bench-%08d", i);
+			cut_assert_equal_int(0, storage_set_string(src, k, value));
+			if (with_deletes && i % 7 == 3) {
+				snprintf(k, sizeof(k), "bench-%08d", i - 2);
+				cut_assert_equal_int(0, storage_remove_key(src, k));
+			}
+			if (with_deletes && i % 11 == 5) {
+				snprintf(k, sizeof(k), "bench-%08d", i - 4);
+				cut_assert_equal_int(0, storage_set_string(src, k, "again"));
+			}
+		}
+
+		uint64_t cursor = l0;
+		for (;;) {
+			vector<pair<uint64_t, rocksdb::WriteBatch> > updates;
+			bool more = false;
+			double a = bench_now();
+			cut_assert_equal_int(0, src->get_updates_since(cursor, updates, max_batches, 4 * 1024 * 1024, &more, cursor));
+			res.read_s += bench_now() - a;
+			if (updates.empty()) break;
+			a = bench_now();
+			for (size_t i = 0; i < updates.size(); i += group) {
+				vector<pair<uint64_t, rocksdb::WriteBatch> > g(updates.begin() + i,
+					updates.begin() + std::min(updates.size(), i + group));
+				uint64_t ap = 0, sk = 0;
+				storage_rocksdb::apply_outcome why = storage_rocksdb::apply_applied;
+				cut_assert_equal_int(0, stg->apply_wal_batches(epoch, "", g, ap, sk, why));
+			}
+			res.apply_s += bench_now() - a;
+			res.batches += updates.size();
+			cursor = stg->get_repl_last_lsn();
+			res.slices++;
+			if (!more) break;
+		}
+		res.cursor = cursor;
+		res.items = stg->count();
+		cppcut_assert_equal(src->count() - 1, res.items);
+		// same keys, same values
+		for (int i = 0; i < n; i += (with_deletes ? 1 : 97)) {
+			char k[32];
+			snprintf(k, sizeof(k), "bench-%08d", i);
+			string a, b;
+			const int ra = storage_get_string(src, k, a);
+			const int rb = storage_get_string(stg, k, b);
+			cppcut_assert_equal(ra, rb);
+			cppcut_assert_equal(a, b);
+		}
+		drop_rocksdb(src, wal_master_dir);
+		drop_rocksdb(live, wal_slave_dir);
+		return res;
+	}
+
+	void test_follow_throughput_measurement() {
+		const int n = getenv("FLARE_BENCH_N") ? atoi(getenv("FLARE_BENCH_N")) : 20000;
+		const uint64_t max_batches = getenv("FLARE_BENCH_BATCHES") ? atoll(getenv("FLARE_BENCH_BATCHES")) : 256;
+		const follow_bench_result one = follow_bench(n, max_batches, 1, false);
+		const follow_bench_result grp = follow_bench(n, max_batches, op_repl_sync_wal::kApplyGroupBatches, false);
+		cut_notify("follow bench: %d writes, slices of <=%llu batches. one batch per apply: read %.0f/s apply %.0f/s combined %.0f/s | %zu batches per apply: read %.0f/s apply %.0f/s combined %.0f/s",
+			n, (unsigned long long)max_batches,
+			one.batches / one.read_s, one.batches / one.apply_s, one.batches / (one.read_s + one.apply_s),
+			op_repl_sync_wal::kApplyGroupBatches,
+			grp.batches / grp.read_s, grp.batches / grp.apply_s, grp.batches / (grp.read_s + grp.apply_s));
+		cppcut_assert_equal(one.cursor, grp.cursor);
+		cppcut_assert_equal(one.items, grp.items);
+		// the follower must keep up with the ~4,400 writes/s a partition takes
+		// in a bulk fill, with headroom
+		cut_assert_true(grp.batches / (grp.read_s + grp.apply_s) > 8800.0);
+	}
+
+	// The whole follow loop, as the follower thread runs it, minus the socket:
+	// every slice is a fresh request answered by op_repl_sync_wal's server side
+	// (a new WAL iterator, CRC, framing) and consumed by run_client_follow
+	// (parse, CRC, apply). The source has the production WAL geometry (64 MB
+	// write buffers, one WAL file holds tens of MB), which is what makes the
+	// per-request seek visible. Uses only calls the base tree has too.
+	struct follow_loop_result {
+		double seconds;
+		uint64_t batches;
+		int slices;
+		uint64_t cursor;
+		uint32_t items;
+	};
+
+	follow_loop_result follow_loop(int n, uint64_t max_batches, uint64_t max_bytes, size_t group = 0) {
+		follow_loop_result res = {0, 0, 0, 0, 0};
+		mkdir(wal_master_dir, 0700);
+		storage_rocksdb* src = new storage_rocksdb(wal_master_dir, 32, 4, 16, 64, 3, 86400, 4096);
+		src->open();
+		storage_rocksdb* live = make_rocksdb(wal_slave_dir);
+		storage_set_string(src, "seed", "x");
+		const uint64_t l0 = src->get_latest_sequence_number();
+		const string epoch = src->get_source_epoch();
+		const string mid = src->get_master_id();
+		static int attempt = 0;
+		char attempt_name[32];
+		snprintf(attempt_name, sizeof(attempt_name), "loop%d", ++attempt);
+		storage_rocksdb* stg = live->open_staging(attempt_name, false);
+		cut_assert_not_null(stg);
+		cut_assert_equal_int(0, stg->adopt_history(mid, epoch, l0));
+		const string inc = stg->get_incarnation();
+
+		const string value(512, 'v');
+		for (int i = 0; i < n; i++) {
+			char k[32];
+			snprintf(k, sizeof(k), "bench-%08d", i);
+			cut_assert_equal_int(0, storage_set_string(src, k, value));
+		}
+
+		const double t0 = bench_now();
+		for (;;) {
+			const uint64_t cursor = stg->get_repl_last_lsn();
+			char request[BUFSIZ];
+			snprintf(request, sizeof(request), " %llu %s %s %llu %llu\r\n", (unsigned long long)cursor,
+				mid.c_str(), epoch.c_str(), (unsigned long long)max_batches, (unsigned long long)max_bytes);
+			shared_connection sc(new connection_sstream(request));
+			serving_sync_wal srv(sc, src);
+			cut_assert_equal_int(0, srv._parse_text_server_parameters());
+			srv._run_server();
+			const string reply = static_cast<connection_sstream*>(sc.get())->get_output();
+			shared_connection cc(new connection_sstream(reply));
+			op_repl_sync_wal cli(cc, stg);
+			if (group > 0) cli.set_apply_group(group, 1 << 30);
+			cut_assert_equal_int(0, cli.run_client_follow(cursor, mid, epoch, inc, max_batches, max_bytes));
+			res.slices++;
+			if (stg->get_repl_last_lsn() == cursor || !cli.get_more_available()) break;
+		}
+		res.seconds = bench_now() - t0;
+		res.batches = stg->get_repl_last_lsn() - l0;
+		res.cursor = stg->get_repl_last_lsn();
+		res.items = stg->count();
+		cppcut_assert_equal(src->count() - 1, res.items);
+		cppcut_assert_equal(src->get_latest_sequence_number(), res.cursor);
+		drop_rocksdb(src, wal_master_dir);
+		drop_rocksdb(live, wal_slave_dir);
+		return res;
+	}
+
+	void test_follow_loop_throughput_measurement() {
+		const int n = getenv("FLARE_BENCH_N") ? atoi(getenv("FLARE_BENCH_N")) : 100000;
+		const uint64_t b0 = getenv("FLARE_BENCH_BATCHES") ? atoll(getenv("FLARE_BENCH_BATCHES")) : 4096;
+		const uint64_t by0 = getenv("FLARE_BENCH_BYTES") ? atoll(getenv("FLARE_BENCH_BYTES")) : 4 * 1024 * 1024;
+		const size_t group = getenv("FLARE_BENCH_GROUP") ? atoll(getenv("FLARE_BENCH_GROUP")) : 0;
+		// the slice the follower asked for before (256 batches), then the default now
+		const follow_loop_result old_slice = follow_loop(n, 256, by0, group);
+		const follow_loop_result r = follow_loop(n, b0, by0, group);
+		cut_notify("follow loop bench: %d writes, %zu batches per apply, slices of <=256 batches: %d slices %.2fs %.0f positions/s (%.1f ms/slice); slices of <=%llu batches / %llu bytes: %d slices %.2fs %.0f positions/s (%.1f ms/slice)",
+			n, group ? group : op_repl_sync_wal::kApplyGroupBatches,
+			old_slice.slices, old_slice.seconds, old_slice.batches / old_slice.seconds, 1000 * old_slice.seconds / old_slice.slices,
+			(unsigned long long)b0, (unsigned long long)by0, r.slices, r.seconds, r.batches / r.seconds, 1000 * r.seconds / r.slices);
+		cppcut_assert_equal(old_slice.cursor, r.cursor);
+		cppcut_assert_equal(old_slice.items, r.items);
+		// well above the ~4,400 writes/s a partition takes in a bulk fill (the
+		// production rate before the change was ~3,200/s; the same loop on the
+		// base tree measured 2,900-3,100/s)
+		cut_assert_true(r.batches / r.seconds > 8800.0);
+	}
+
+	// What a response that goes wrong part-way leaves behind, now that the
+	// follower applies its batches in groups. A fixture: a source with `n`
+	// single-key writes, a staged copy following it, and the served reply.
+	struct group_fixture {
+		storage_rocksdb* src;
+		storage_rocksdb* live;
+		storage_rocksdb* stg;
+		string epoch, mid, inc, reply;
+		uint64_t l0;
+		vector<size_t> lsn_pos;		// offset of every "LSN " line in reply
+	};
+
+	void group_fixture_open(group_fixture& f, int n) {
+		f.src = make_rocksdb(wal_master_dir);
+		f.live = make_rocksdb(wal_slave_dir);
+		storage_set_string(f.src, "seed", "x");
+		f.l0 = f.src->get_latest_sequence_number();
+		f.epoch = f.src->get_source_epoch();
+		f.mid = f.src->get_master_id();
+		static int attempt = 0;
+		char attempt_name[32];
+		snprintf(attempt_name, sizeof(attempt_name), "grp%d", ++attempt);
+		f.stg = f.live->open_staging(attempt_name, false);
+		cut_assert_not_null(f.stg);
+		cut_assert_equal_int(0, f.stg->adopt_history(f.mid, f.epoch, f.l0));
+		f.inc = f.stg->get_incarnation();
+		for (int i = 0; i < n; i++) {
+			cut_assert_equal_int(0, storage_set_string(f.src, "g" + boost::lexical_cast<string>(i), "v" + boost::lexical_cast<string>(i)));
+		}
+		char request[BUFSIZ];
+		snprintf(request, sizeof(request), " %llu %s %s 0 0\r\n", (unsigned long long)f.l0, f.mid.c_str(), f.epoch.c_str());
+		shared_connection sc(new connection_sstream(request));
+		serving_sync_wal srv(sc, f.src);
+		cut_assert_equal_int(0, srv._parse_text_server_parameters());
+		srv._run_server();
+		f.reply = static_cast<connection_sstream*>(sc.get())->get_output();
+		size_t pos = 0;
+		while ((pos = f.reply.find("LSN ", pos)) != string::npos) {
+			if (pos == 0 || f.reply[pos - 1] == '\n') f.lsn_pos.push_back(pos);
+			pos += 4;
+		}
+		cut_assert_equal_int(n, static_cast<int>(f.lsn_pos.size()));
+	}
+
+	int group_fixture_follow(group_fixture& f, const string& reply, op_repl_sync_wal::client_result& result) {
+		shared_connection cc(new connection_sstream(reply));
+		op_repl_sync_wal cli(cc, f.stg);
+		const int rc = cli.run_client_follow(f.l0, f.mid, f.epoch, f.inc, 0, 0);
+		result = cli.get_client_result();
+		return rc;
+	}
+
+	void group_fixture_close(group_fixture& f) {
+		drop_rocksdb(f.src, wal_master_dir);
+		drop_rocksdb(f.live, wal_slave_dir);
+	}
+
+	// The reply is intact: every batch lands, the position is the source's,
+	// nothing is skipped, and it holds across more than one apply group.
+	void test_follow_response_applies_in_groups_and_every_key_lands() {
+		group_fixture f;
+		const int n = static_cast<int>(op_repl_sync_wal::kApplyGroupBatches) * 2 + 5;
+		group_fixture_open(f, n);
+		op_repl_sync_wal::client_result result;
+		cut_assert_equal_int(0, group_fixture_follow(f, f.reply, result));
+		cppcut_assert_equal(static_cast<int>(op_repl_sync_wal::client_success), static_cast<int>(result));
+		cppcut_assert_equal(f.src->get_latest_sequence_number(), f.stg->get_repl_last_lsn());
+		for (int i = 0; i < n; i++) {
+			string v;
+			cut_assert_equal_int(0, storage_get_string(f.stg, "g" + boost::lexical_cast<string>(i), v));
+			cut_assert_equal_string(("v" + boost::lexical_cast<string>(i)).c_str(), v.c_str());
+		}
+		group_fixture_close(f);
+	}
+
+	// A batch whose CRC does not match is never applied, and what was verified
+	// before it IS applied (the connection did not lose that progress): the
+	// position stops exactly before the bad batch, and a re-request from
+	// there completes the copy.
+	void test_follow_response_crc_mismatch_keeps_the_verified_batches_only() {
+		group_fixture f;
+		const int n = 10;
+		group_fixture_open(f, n);
+		string bad = f.reply;
+		const size_t bad_idx = 6;			// the 7th batch
+		const size_t batch_line = bad.find("BATCH ", f.lsn_pos[bad_idx]);
+		const size_t data = bad.find("\r\n", batch_line) + 2;
+		bad[data + 13] ^= 0x55;				// inside the payload, past the 12-byte header
+		op_repl_sync_wal::client_result result;
+		cut_assert_equal_int(-1, group_fixture_follow(f, bad, result));
+		cppcut_assert_equal(static_cast<int>(op_repl_sync_wal::client_protocol_error), static_cast<int>(result));
+		cppcut_assert_equal(f.l0 + bad_idx, f.stg->get_repl_last_lsn());
+		string v;
+		cut_assert_equal_int(0, storage_get_string(f.stg, "g5", v));
+		cut_assert_equal_int(-1, storage_get_string(f.stg, "g6", v));
+		// nothing lost: the intact reply completes it (batches at or below the
+		// position are re-delivered by design and not applied twice)
+		f.l0 = f.stg->get_repl_last_lsn();
+		op_repl_sync_wal::client_result again;
+		shared_connection cc(new connection_sstream(f.reply));
+		op_repl_sync_wal cli(cc, f.stg);
+		cut_assert_equal_int(0, cli.run_client_follow(f.l0, f.mid, f.epoch, f.inc, 0, 0));
+		cppcut_assert_equal(f.src->get_latest_sequence_number(), f.stg->get_repl_last_lsn());
+		cut_assert_equal_int(0, storage_get_string(f.stg, "g9", v));
+		(void)again;
+		group_fixture_close(f);
+	}
+
+	// A hole in the stream is history loss: the response is refused as
+	// lsn_purged (the follower rebuilds), the position does not move over the
+	// hole, and nothing past it is applied.
+	void test_follow_response_with_a_hole_is_refused_and_does_not_pass_it() {
+		group_fixture f;
+		group_fixture_open(f, 10);
+		// drop the 4th batch (LSN .. BATCH .. data .. \r\n) from the reply
+		string holed = f.reply.substr(0, f.lsn_pos[3]) + f.reply.substr(f.lsn_pos[4]);
+		op_repl_sync_wal::client_result result;
+		cut_assert_equal_int(-1, group_fixture_follow(f, holed, result));
+		cppcut_assert_equal(static_cast<int>(op_repl_sync_wal::client_lsn_purged), static_cast<int>(result));
+		cut_assert_true(f.stg->get_repl_last_lsn() <= f.l0 + 3);
+		string v;
+		cut_assert_equal_int(-1, storage_get_string(f.stg, "g4", v));
+		cut_assert_equal_int(-1, storage_get_string(f.stg, "g9", v));
+		group_fixture_close(f);
+	}
+
+	// All or nothing inside one apply call: a refusal of a later batch of the
+	// group (here a hole) leaves the copy and its position untouched.
+	void test_apply_wal_batches_refusal_writes_nothing() {
+		group_fixture f;
+		group_fixture_open(f, 6);
+		vector<pair<uint64_t, rocksdb::WriteBatch> > updates;
+		cut_assert_equal_int(0, f.src->get_updates_since(f.l0, updates, 0, 0, NULL, f.l0));
+		cut_assert_equal_int(6, static_cast<int>(updates.size()));
+		updates.erase(updates.begin() + 3);
+		uint64_t ap = 0, sk = 0;
+		storage_rocksdb::apply_outcome why = storage_rocksdb::apply_applied;
+		cut_assert_equal_int(-1, f.stg->apply_wal_batches(f.epoch, f.inc, updates, ap, sk, why));
+		cppcut_assert_equal(static_cast<int>(storage_rocksdb::apply_refused_gap), static_cast<int>(why));
+		cppcut_assert_equal(f.l0, f.stg->get_repl_last_lsn());
+		string v;
+		cut_assert_equal_int(-1, storage_get_string(f.stg, "g0", v));
+		cppcut_assert_equal(static_cast<uint32_t>(0), f.stg->count());
+		group_fixture_close(f);
+	}
+
+	// Same data, same safety checks, nothing skipped: a grouped apply of a
+	// history with overwrites and deletes ends with the copy a per-batch apply
+	// gives (items, every key, position).
+	void test_follow_group_apply_equals_per_batch_apply() {
+		const follow_bench_result one = follow_bench(3000, 256, 1, true);
+		const follow_bench_result grp = follow_bench(3000, 256, 64, true);
+		const follow_bench_result all = follow_bench(3000, 4096, 100000, true);
+		cppcut_assert_equal(one.cursor, grp.cursor);
+		cppcut_assert_equal(one.items, grp.items);
+		cppcut_assert_equal(one.cursor, all.cursor);
+		cppcut_assert_equal(one.items, all.items);
+	}
+	// }}}
+
 	void teardown()
 	{
 		delete rocksdb_tester;

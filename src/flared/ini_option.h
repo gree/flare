@@ -218,7 +218,7 @@ public:
 	// SAF-10c. The follower only ever applies through the common rule, so it
 	// must not be enabled before repl-identity-forward is on cluster-wide.
 	static const bool     default_wal_follow_enabled               = false;
-	static const int      default_wal_follow_max_batches           = 256;
+	static const int      default_wal_follow_max_batches           = 4096;
 	static const int      default_wal_follow_max_bytes             = 4 * 1024 * 1024;
 	static const int      default_wal_follow_poll_interval_usec    = 200 * 1000;
 	static const bool     default_reap_expired                    = true;

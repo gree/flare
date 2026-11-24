@@ -80,6 +80,12 @@ public:
 		return position_after > position_before ? attempt_progress : attempt_idle;
 	}
 
+	// TEST SEAM (FLARE_TEST_FOLLOW_PAUSE_FILE, E2E only): true while the env
+	// names a file that exists. The follower asks no request while it is
+	// true, so a test can build a backlog on the source and then measure the
+	// drain. Inert (false) when the env is unset or empty.
+	static bool test_pause_requested();
+
 protected:
 	cluster*			_cluster;
 	storage*			_storage;

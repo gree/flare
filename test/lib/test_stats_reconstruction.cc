@@ -6,6 +6,7 @@
  */
 #include <cppcutter.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <stats.h>
 #include <handler_wal_follower.h>
 
@@ -30,6 +31,23 @@ namespace test_stats_reconstruction {
 		cut_assert_false(handler_wal_follower::retry_immediately(handler_wal_follower::attempt_idle, false));
 		cut_assert_false(handler_wal_follower::retry_immediately(handler_wal_follower::attempt_error, true));
 		cut_assert_false(handler_wal_follower::retry_immediately(handler_wal_follower::attempt_disconnected, true));
+	}
+
+	// the follow pause seam is inert without its env and follows the file
+	void test_follow_pause_seam_is_inert_without_its_env() {
+		unsetenv("FLARE_TEST_FOLLOW_PAUSE_FILE");
+		cut_assert_false(handler_wal_follower::test_pause_requested());
+		setenv("FLARE_TEST_FOLLOW_PAUSE_FILE", "", 1);
+		cut_assert_false(handler_wal_follower::test_pause_requested());
+		char path[] = "/tmp/flare_follow_pause_XXXXXX";
+		int fd = mkstemp(path);
+		cut_assert_operator(fd, >=, 0);
+		close(fd);
+		setenv("FLARE_TEST_FOLLOW_PAUSE_FILE", path, 1);
+		cut_assert_true(handler_wal_follower::test_pause_requested());
+		unlink(path);
+		cut_assert_false(handler_wal_follower::test_pause_requested());
+		unsetenv("FLARE_TEST_FOLLOW_PAUSE_FILE");
 	}
 
 	void test_local_read_guard_disconnect_lag_and_recovery() {

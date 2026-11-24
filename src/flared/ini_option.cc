@@ -1046,7 +1046,7 @@ int ini_option::_setup_config_option(program_options::options_description& optio
 		("flush-all-enabled",					program_options::value<bool>(),		"administrative gate for the flush_all op; false refuses it with SERVER_ERROR (default true, dynamic)")
 		("repl-identity-forward",			program_options::value<bool>(),		"carry the source's replication identity on forwarded writes so the destination orders them against the WAL stream (SAF-10b); enable only when every node understands it (default false, dynamic)")
 		("repl-follow-enabled",				program_options::value<bool>(),		"run a continuous WAL follower on an active RocksDB slave so a blip is recovered from the applied position without a rebuild (SAF-10c); requires repl-identity-forward cluster-wide (default false, dynamic)")
-		("repl-follow-max-batches",			program_options::value<int>(),		"bound on WAL batches per follow response (default 256, dynamic)")
+		("repl-follow-max-batches",			program_options::value<int>(),		"bound on WAL batches per follow response (default 4096, dynamic)")
 		("repl-follow-max-bytes",			program_options::value<int>(),		"bound on WAL bytes per follow response (default 4194304, dynamic)")
 		("repl-follow-poll-interval-usec",	program_options::value<int>(),		"how often an idle follower asks its source again (default 200000, dynamic)")
 		("repl-follow-batch-delay-usec",	program_options::value<int>(),		"pause after every follow response that applied changes, throttling catch-up (default 0 = none, dynamic)")

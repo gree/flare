@@ -1975,6 +1975,82 @@ def continuationSwitchSuite : TestSuite :=
     tests := [{ name := "(A4) kubectl delete pod of the MASTER with three copies and history continuation on, under a client-like load: 0 write errors, 0 acknowledged writes missing, and the replica that is not the successor keeps its copy (COMMITTED as replica, no staged rebuild after it)",
                 run := continuationSwitchTest c }] }
 
+/-- The replica that keeps its copy must keep FOLLOWING across the handover
+    under write load (a dev cluster, 200 writes/s of new keys: it committed the
+    continued history and was then rebuilt anyway, because a group of the
+    follower it had before the commit landed on the new epoch and was refused
+    as another history). The S1 verdict of `continuationSwitchTest` (0 write
+    errors, 0 acknowledged writes missing) plus, for the replica that
+    committed: nothing in its flared log after the commit says a follow apply
+    was refused or that it needs a rebuild, the operator opened no replica
+    repair for it, it ends `following` with the new master's position, and
+    all copies hold the same number of items. -/
+def continuationLoadTest (c : Ctx) : IO TestResult := do
+  let t0 := (← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%SZ"] }).stdout.trim
+  let r ← switchTest c .deleteMaster
+  match r with
+  | .pass =>
+    let ns := c.cfg.«namespace»
+    let pods := (← c.pods).getD []
+    let mut committer : Option PodRow := none
+    let mut afterCommit := ""
+    for p in pods do
+      let lg ← match ← kubectl ["logs", "-n", ns, p.name, "-c", "flared", "--since-time", t0] with
+        | .ok o => pure o | .error _ => pure ""
+      match lg.splitOn "COMMITTED as replica" with
+      | _ :: rest@(_ :: _) =>
+        committer := some p
+        afterCommit := "COMMITTED as replica".intercalate rest
+      | _ => pure ()
+    let some k := committer | return .fail "0 errors / 0 missing, but no replica committed the continued history (it rebuilt)"
+    let forbidden := ["follow apply refused", "needs_rebuild", "NEEDS REBUILD", "staged rebuild may start", "source is serving a different history"]
+    let hits := forbidden.filter (containsSubstr afterCommit ·)
+    c.art "continuation.txt" s!"committer {k.name}; after its commit its log contains {hits}"
+    if !hits.isEmpty then
+      return .fail s!"{k.name} committed the continued history and then logged {hits} (its follower of the old history was not harmless)"
+    let opLog ← match ← kubectl ["logs", "-n", ns, "-l", s!"app={c.cfg.operatorName}", "--since-time", t0, "--tail=-1"] with
+      | .ok o => pure o | .error _ => pure ""
+    let repairs := ((opLog.splitOn "\n").filter fun l => containsSubstr l "REPLICA REPAIR" && containsSubstr l k.name)
+    if !repairs.isEmpty then
+      return .fail s!"the operator opened a replica repair for {k.name} after it committed: {repairs.take 2}"
+    -- the copies settle on the same number of items, and the committer follows
+    let settled ← waitForCondition "every Active copy holds the same number of items and the committer follows" 180 do
+      let ps := ((← c.pods).getD []).filter (fun p => p.ready && !p.deleting && !p.ip.isEmpty)
+      let mut counts : List (Option String) := []
+      for p in ps do
+        counts := counts ++ [(← c.stats p.ip).bind (statOf · "curr_items")]
+      let fs := (← c.stats k.ip).bind (statOf · "repl_follow_state")
+      return ps.length == c.cfg.replicas && counts.all (·.isSome) && (counts.eraseDups.length == 1) && fs == some "following"
+    if !settled then
+      let ps := ((← c.pods).getD []).filter (fun p => !p.ip.isEmpty)
+      let mut seen : List (String × Option String × Option String) := []
+      for p in ps do
+        let st ← c.stats p.ip
+        seen := seen ++ [(p.name, st.bind (statOf · "curr_items"), st.bind (statOf · "repl_follow_state"))]
+      return .fail s!"the copies did not settle on the same item count with {k.name} following: {seen}"
+    return .pass
+  | other => return other
+
+/-- history-continuation-handover-load: 3 copies, continuation on, the load of
+    A4 (4 x 200/s through the client Service, 2 x 200/s through the all-pods
+    Service, a new connection per request) across a graceful delete of the
+    master; the remaining replica must keep its copy AND keep following. -/
+def continuationLoadSuite : TestSuite :=
+  let cfg := { cfgOf "node-hc-load" true false with
+    replicas := 3, operatorEnv := [("FLARE_OPERATOR_HISTORY_CONTINUATION", "on")] }
+  let c : Ctx := { cfg, suite := "history-continuation-handover-load", test := "hc-load-delete" }
+  { name := "history-continuation-handover-load"
+    setup := do
+      deployCluster cfg
+      discard <| waitClusterSettled cfg
+    teardown := do
+      for w in ← dataWorkers do uncordon w
+      cleanupCluster cfg
+    onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
+    afterEach := fun i => saveFullLogs cfg.«namespace» s!"after-test-{i}"
+    tests := [{ name := "kubectl delete pod of the MASTER with three copies and history continuation on, under a write load: 0 write errors, 0 acknowledged writes missing, equal item counts, and the replica that is not the successor commits AND keeps following (no follow refusal, no needs_rebuild, no replica repair)",
+                run := continuationLoadTest c }] }
+
 /-- node-ops-switch-tmpfs-continuation-cordon-master: C1 (cordon + drain of
     the master's worker, the node guard and the cordon move) with three
     copies and the continuation on: the C1 verdict and no rebuild of the
@@ -2009,6 +2085,6 @@ def switchSuites : List TestSuite :=
     ++ [Scenario.op .cordonMaster, .op .cordonReplica, .cordonBlocked, .cordonCancel, .cordonNoSuccessor, .cordonOperatorRestart, .cordonTwoNodes, .cordonNoOperator, .cordonRestartQuiet, .cordonStuck, .cordonMasterNoreply].map (fun sc => scenarioSuite sc .tmpfs)
     ++ [Scenario.op .cordonMaster, .op .cordonReplica].map (fun sc => scenarioSuite sc .pvcNfs)
     ++ [scenarioSuite .cordonPinned .pvcLocal]
-    ++ [continuationSwitchSuite, continuationCordonSuite]
+    ++ [continuationSwitchSuite, continuationCordonSuite, continuationLoadSuite]
 
 end FlareOperator.E2E.Tests.NodeOpsSwitch

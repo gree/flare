@@ -7266,6 +7266,130 @@ void test_reseed_serve_to_a_slow_reader_completes_past_several_windows() {
 	}
 	// }}}
 
+
+	// {{{ follow throughput measurement
+	// Where a follower's time goes: reading a slice from the source
+	// (get_updates_since, one WAL iterator per call) versus applying it
+	// (apply_wal_batch per source batch, or apply_wal_batches per group).
+	// Prints the numbers; asserts that both ways end with the same copy.
+	double bench_now() {
+		struct timespec ts;
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		return ts.tv_sec + ts.tv_nsec / 1e9;
+	}
+
+	struct follow_bench_result {
+		double read_s, apply_s;
+		uint64_t batches;
+		uint32_t items;
+		uint64_t cursor;
+		int slices;
+	};
+
+	// n writes of 512-byte values into a source (single-key batches, as the
+	// forwarded/ordinary write path produces), then a staged copy that follows
+	// it in slices of at most max_batches, applying `group` batches per call.
+	follow_bench_result follow_bench(int n, uint64_t max_batches, size_t group, bool with_deletes) {
+		follow_bench_result res = {0, 0, 0, 0, 0, 0};
+		storage_rocksdb* src = make_rocksdb(wal_master_dir);
+		storage_rocksdb* live = make_rocksdb(wal_slave_dir);
+		storage_set_string(src, "seed", "x");
+		const uint64_t l0 = src->get_latest_sequence_number();
+		const string epoch = src->get_source_epoch();
+		const string mid = src->get_master_id();
+		static int attempt = 0;
+		char attempt_name[32];
+		snprintf(attempt_name, sizeof(attempt_name), "bench%d", ++attempt);
+		storage_rocksdb* stg = live->open_staging(attempt_name, false);
+		cut_assert_not_null(stg);
+		cut_assert_equal_int(0, stg->adopt_history(mid, epoch, l0));
+
+		const string value(512, 'v');
+		for (int i = 0; i < n; i++) {
+			char k[32];
+			snprintf(k, sizeof(k), "bench-%08d", i);
+			cut_assert_equal_int(0, storage_set_string(src, k, value));
+			if (with_deletes && i % 7 == 3) {
+				snprintf(k, sizeof(k), "bench-%08d", i - 2);
+				cut_assert_equal_int(0, storage_remove_key(src, k));
+			}
+			if (with_deletes && i % 11 == 5) {
+				snprintf(k, sizeof(k), "bench-%08d", i - 4);
+				cut_assert_equal_int(0, storage_set_string(src, k, "again"));
+			}
+		}
+
+		uint64_t cursor = l0;
+		for (;;) {
+			vector<pair<uint64_t, rocksdb::WriteBatch> > updates;
+			bool more = false;
+			double a = bench_now();
+			cut_assert_equal_int(0, src->get_updates_since(cursor, updates, max_batches, 4 * 1024 * 1024, &more, cursor));
+			res.read_s += bench_now() - a;
+			if (updates.empty()) break;
+			a = bench_now();
+			for (size_t i = 0; i < updates.size(); i += group) {
+				vector<pair<uint64_t, rocksdb::WriteBatch> > g(updates.begin() + i,
+					updates.begin() + std::min(updates.size(), i + group));
+				uint64_t ap = 0, sk = 0;
+				storage_rocksdb::apply_outcome why = storage_rocksdb::apply_applied;
+				cut_assert_equal_int(0, stg->apply_wal_batches(epoch, "", g, ap, sk, why));
+			}
+			res.apply_s += bench_now() - a;
+			res.batches += updates.size();
+			cursor = stg->get_repl_last_lsn();
+			res.slices++;
+			if (!more) break;
+		}
+		res.cursor = cursor;
+		res.items = stg->count();
+		cppcut_assert_equal(src->count() - 1, res.items);
+		// same keys, same values
+		for (int i = 0; i < n; i += (with_deletes ? 1 : 97)) {
+			char k[32];
+			snprintf(k, sizeof(k), "bench-%08d", i);
+			string a, b;
+			const int ra = storage_get_string(src, k, a);
+			const int rb = storage_get_string(stg, k, b);
+			cppcut_assert_equal(ra, rb);
+			cppcut_assert_equal(a, b);
+		}
+		drop_rocksdb(src, wal_master_dir);
+		drop_rocksdb(live, wal_slave_dir);
+		return res;
+	}
+
+	void test_follow_throughput_measurement() {
+		const int n = getenv("FLARE_BENCH_N") ? atoi(getenv("FLARE_BENCH_N")) : 20000;
+		const uint64_t max_batches = getenv("FLARE_BENCH_BATCHES") ? atoll(getenv("FLARE_BENCH_BATCHES")) : 256;
+		const follow_bench_result one = follow_bench(n, max_batches, 1, false);
+		const follow_bench_result grp = follow_bench(n, max_batches, op_repl_sync_wal::kApplyGroupBatches, false);
+		cut_notify("follow bench: %d writes, slices of <=%llu batches. one batch per apply: read %.0f/s apply %.0f/s combined %.0f/s | %zu batches per apply: read %.0f/s apply %.0f/s combined %.0f/s",
+			n, (unsigned long long)max_batches,
+			one.batches / one.read_s, one.batches / one.apply_s, one.batches / (one.read_s + one.apply_s),
+			op_repl_sync_wal::kApplyGroupBatches,
+			grp.batches / grp.read_s, grp.batches / grp.apply_s, grp.batches / (grp.read_s + grp.apply_s));
+		cppcut_assert_equal(one.cursor, grp.cursor);
+		cppcut_assert_equal(one.items, grp.items);
+		// the follower must keep up with the ~4,400 writes/s a partition takes
+		// in a bulk fill, with headroom
+		cut_assert_true(grp.batches / (grp.read_s + grp.apply_s) > 8800.0);
+	}
+
+	// Same data, same safety checks, nothing skipped: a grouped apply of a
+	// history with overwrites and deletes ends with the copy a per-batch apply
+	// gives (items, every key, position).
+	void test_follow_group_apply_equals_per_batch_apply() {
+		const follow_bench_result one = follow_bench(3000, 256, 1, true);
+		const follow_bench_result grp = follow_bench(3000, 256, 64, true);
+		const follow_bench_result all = follow_bench(3000, 4096, 100000, true);
+		cppcut_assert_equal(one.cursor, grp.cursor);
+		cppcut_assert_equal(one.items, grp.items);
+		cppcut_assert_equal(one.cursor, all.cursor);
+		cppcut_assert_equal(one.items, all.items);
+	}
+	// }}}
+
 	void teardown()
 	{
 		delete rocksdb_tester;

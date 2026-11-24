@@ -757,6 +757,18 @@ public:
 		uint64_t base_seq, const rocksdb::WriteBatch& batch,
 		uint64_t& applied, uint64_t& skipped, apply_outcome& refusal,
 		uint64_t follow_generation = 0);
+	// The same, for a run of consecutive fetched batches in ONE exclusive
+	// window and ONE commit (one WriteBatch holding every surviving change,
+	// its metadata and the final position). Every batch is decoded, decided
+	// and contiguity-checked exactly as when applied one by one — each
+	// against the position the earlier ones reached — so the result is the
+	// same data, metadata, counts and position; only the per-batch lock,
+	// commit and tombstone sweep are paid once. All or nothing: a refusal of
+	// any batch writes nothing. `batches` is in source order.
+	int apply_wal_batches(const string& source_epoch, const string& incarnation,
+		const vector<pair<uint64_t, rocksdb::WriteBatch> >& batches,
+		uint64_t& applied, uint64_t& skipped, apply_outcome& refusal,
+		uint64_t follow_generation = 0);
 	// D7: every stop/start of the follower bumps the generation; a batch
 	// carrying an older non-zero generation is refused under the apply lock,
 	// so a stopped follower that is still finishing its slice writes nothing.
@@ -847,6 +859,7 @@ private:
 	int							_count_get_fail_for_test;
 	rocksdb::Status _count_batch(const rocksdb::WriteBatch& batch, rocksdb::WriteBatch::Handler& h, rocksdb::WriteBatch::Handler& th);
 	void _tomb_add(int64_t delta, const char* where);
+	bool _tomb_live_known_zero();
 	void _tomb_set(uint64_t n, bool valid, const char* why);
 	/** exact scan of the metadata family into the live counter (DB handle
 	    held by the caller) */

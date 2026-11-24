@@ -94,11 +94,20 @@ protected:
 	// (never applied verbatim) in follow mode (D2).
 	bool		_follow_mode;
 	uint64_t	_follow_generation;	// D7: 0 = not checked
+#ifdef HAVE_LIBROCKSDB
+	// Follow mode: batches that passed their CRC and wait to be applied as
+	// one group (see _parse_text_client_parameters).
+	vector<pair<uint64_t, rocksdb::WriteBatch> >	_pending;
+	size_t		_pending_bytes;
+	int _flush_pending();
+#endif
 
 public:
 	void set_follow_generation(uint64_t g) { this->_follow_generation = g; }
 	static const size_t kMinWireBatchBytes;
 	static const size_t kMaxWireBatchBytes;
+	static const size_t kApplyGroupBatches;
+	static const size_t kApplyGroupBytes;
 	op_repl_sync_wal(shared_connection c, storage* st);
 	virtual ~op_repl_sync_wal();
 
@@ -139,6 +148,7 @@ protected:
 	virtual int _run_server();
 	virtual int _run_client(uint64_t lsn, const string& master_id);
 	virtual int _parse_text_client_parameters();
+	int _parse_text_client_stream();
 };
 
 }	// namespace flare

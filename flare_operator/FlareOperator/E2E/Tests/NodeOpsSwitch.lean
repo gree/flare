@@ -1985,8 +1985,17 @@ def continuationSwitchSuite : TestSuite :=
     was refused or that it needs a rebuild, the operator opened no replica
     repair for it, it ends `following` with the new master's position, and
     all copies hold the same number of items. -/
-def continuationLoadTest (c : Ctx) : IO TestResult := do
+def historyCommitDelayFile : String := "/tmp/history-commit-delay"
+
+def continuationLoadTest (c : Ctx) (delaySecs : Nat := 0) : IO TestResult := do
   let t0 := (← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%SZ"] }).stdout.trim
+  -- delayed successor: the suite sets the seam env on every flared; the
+  -- file makes the successor's commit wait, so the replica commits first and
+  -- the validator (2 s) probes a successor still at the old master_id/epoch
+  if delaySecs > 0 then
+    for p in (← c.pods).getD [] do
+      discard <| kubectl ["exec", "-n", c.cfg.«namespace», p.name, "-c", "flared", "--", "sh", "-c",
+        s!"echo {delaySecs} > {historyCommitDelayFile}"]
   let r ← switchTest c .deleteMaster
   match r with
   | .pass =>
@@ -2004,7 +2013,16 @@ def continuationLoadTest (c : Ctx) : IO TestResult := do
       | _ => pure ()
     let some k := committer | return .fail "0 errors / 0 missing, but no replica committed the continued history (it rebuilt)"
     let forbidden := ["follow apply refused", "needs_rebuild", "NEEDS REBUILD", "staged rebuild may start", "source is serving a different history"]
+      ++ (if delaySecs > 0 then ["lineage differs", "history differs"] else [])
     let hits := forbidden.filter (containsSubstr afterCommit ·)
+    if delaySecs > 0 then
+      let mut delayed := false
+      for p in pods do
+        let lg ← match ← kubectl ["logs", "-n", ns, p.name, "-c", "flared", "--since-time", t0] with
+          | .ok o => pure o | .error _ => pure ""
+        delayed := delayed || containsSubstr lg "FLARE_TEST_HISTORY_COMMIT_DELAY_FILE"
+      if !delayed then
+        return .fail "no successor commit was delayed by the test seam: the window under test did not open"
     c.art "continuation.txt" s!"committer {k.name}; after its commit its log contains {hits}"
     if !hits.isEmpty then
       return .fail s!"{k.name} committed the continued history and then logged {hits} (its follower of the old history was not harmless)"
@@ -2051,6 +2069,31 @@ def continuationLoadSuite : TestSuite :=
     tests := [{ name := "kubectl delete pod of the MASTER with three copies and history continuation on, under a write load: 0 write errors, 0 acknowledged writes missing, equal item counts, and the replica that is not the successor commits AND keeps following (no follow refusal, no needs_rebuild, no replica repair)",
                 run := continuationLoadTest c }] }
 
+/-- history-continuation-handover-load-delayed: the same load and delete, but
+    the successor's continuation commit is delayed by 9 s (test seam
+    FLARE_TEST_HISTORY_COMMIT_DELAY_FILE), so the replica commits FIRST and
+    the read-source validator (every 2 s) probes a successor that still
+    reports the old master_id and the superseded epoch. Pass: the replica is
+    not rebuilt (no NEEDS REBUILD / lineage differs / history differs, no
+    replica repair), keeps following after the successor commits, 0 write
+    errors, 0 acknowledged writes missing, copies equal. -/
+def continuationLoadDelayedSuite : TestSuite :=
+  let cfg := { cfgOf "node-hc-loadd" true false with
+    replicas := 3, operatorEnv := [("FLARE_OPERATOR_HISTORY_CONTINUATION", "on")],
+    flaredEnv := [("FLARE_TEST_HISTORY_COMMIT_DELAY_FILE", historyCommitDelayFile)] }
+  let c : Ctx := { cfg, suite := "history-continuation-handover-load-delayed", test := "hc-load-delayed" }
+  { name := "history-continuation-handover-load-delayed"
+    setup := do
+      deployCluster cfg
+      discard <| waitClusterSettled cfg
+    teardown := do
+      for w in ← dataWorkers do uncordon w
+      cleanupCluster cfg
+    onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
+    afterEach := fun i => saveFullLogs cfg.«namespace» s!"after-test-{i}"
+    tests := [{ name := "kubectl delete pod of the MASTER under a write load with the successor's continuation commit delayed 9 s: the replica commits first, the validator probes the successor still at the old master_id/epoch, and it is not rebuilt, keeps following, 0 write errors, 0 acknowledged writes missing, equal item counts",
+                run := continuationLoadTest c 9 }] }
+
 /-- node-ops-switch-tmpfs-continuation-cordon-master: C1 (cordon + drain of
     the master's worker, the node guard and the cordon move) with three
     copies and the continuation on: the C1 verdict and no rebuild of the
@@ -2085,6 +2128,6 @@ def switchSuites : List TestSuite :=
     ++ [Scenario.op .cordonMaster, .op .cordonReplica, .cordonBlocked, .cordonCancel, .cordonNoSuccessor, .cordonOperatorRestart, .cordonTwoNodes, .cordonNoOperator, .cordonRestartQuiet, .cordonStuck, .cordonMasterNoreply].map (fun sc => scenarioSuite sc .tmpfs)
     ++ [Scenario.op .cordonMaster, .op .cordonReplica].map (fun sc => scenarioSuite sc .pvcNfs)
     ++ [scenarioSuite .cordonPinned .pvcLocal]
-    ++ [continuationSwitchSuite, continuationCordonSuite, continuationLoadSuite]
+    ++ [continuationSwitchSuite, continuationCordonSuite, continuationLoadSuite, continuationLoadDelayedSuite]
 
 end FlareOperator.E2E.Tests.NodeOpsSwitch

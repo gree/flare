@@ -109,4 +109,60 @@ namespace test_source_eligibility {
 		cut_assert_equal_int(decision_needs_rebuild, decide_source(bound(source_binding::eligible, "m2", "L2", "e3"), "m2", probe("L2", "e2")));
 		cut_assert_equal_int(decision_needs_rebuild, decide_source(bound(source_binding::revalidating, "m1", "L", "e1"), "m2", probe("L", "e2")));
 	}
+
+	// Decision table of the continued-copy exception. Binding: moved to the
+	// committed history (L2, e3); the copy left (L1, e2). The expected
+	// decision is computed from the intended cells only: keep is exactly
+	// {continued, same source, eligible, probe = left epoch + left master_id}
+	// for a master_id mismatch; every other cell is what it was before.
+	void test_decision_table_continued_master_id_exception() {
+		const char* ids[] = {"L2", "L1", "OTHER"};		// same / old (left) / unrelated
+		const char* epochs[] = {"e2", "e3", "ex"};		// left / committed / other
+		for (int continued = 0; continued < 2; continued++)
+		for (int same = 0; same < 2; same++)
+		for (int e = 0; e < 3; e++)
+		for (int m = 0; m < 3; m++)
+		for (int elig = 0; elig < 2; elig++) {
+			source_binding b = bound(elig ? source_binding::eligible : source_binding::revalidating, "m2", "L2", "e3");
+			const string current = same ? "m2" : "m9";
+			source_probe p = probe(ids[m], epochs[e]);
+			// what the storage reports for a copy that was continued: the
+			// grace window is open, the left epoch / master_id are matched
+			p.continued_source_behind = continued && e == 0;
+			p.continued_left_master_id = continued && m == 1;
+			source_decision expect;
+			if (m != 0) {
+				expect = (continued && same && elig && e == 0 && m == 1) ? decision_keep : decision_needs_rebuild;
+			} else if (e == 1) {
+				expect = (elig && same) ? decision_keep : decision_rebind;
+			} else if (continued && e == 0) {
+				expect = (elig && same) ? decision_keep : decision_wait_unknown;
+			} else {
+				expect = decision_needs_rebuild;
+			}
+			cut_assert_equal_int(expect, decide_source(b, current, p),
+				cut_message("continued=%d same=%d epoch=%s id=%s eligible=%d", continued, same, epochs[e], ids[m], elig));
+		}
+	}
+
+	// the flags alone are not enough: no epoch in the probe, or a copy
+	// validated without an epoch, never gets the master_id exception
+	void test_master_id_exception_needs_a_comparable_epoch() {
+		source_probe p = probe("L1", "", true);
+		p.continued_source_behind = true;
+		p.continued_left_master_id = true;
+		cut_assert_equal_int(decision_needs_rebuild, decide_source(bound(source_binding::eligible, "m2", "L2", "e3"), "m2", p));
+		p = probe("L1", "e2", false);
+		p.continued_source_behind = true;
+		p.continued_left_master_id = true;
+		cut_assert_equal_int(decision_needs_rebuild, decide_source(bound(source_binding::eligible, "m2", "L2", "e3"), "m2", p));
+		p = probe("L1", "e2");
+		p.continued_source_behind = true;
+		p.continued_left_master_id = true;
+		cut_assert_equal_int(decision_needs_rebuild, decide_source(bound(source_binding::eligible, "m2", "L2", ""), "m2", p));
+		// a left master_id without the left epoch
+		p = probe("L1", "e2");
+		p.continued_left_master_id = true;
+		cut_assert_equal_int(decision_needs_rebuild, decide_source(bound(source_binding::eligible, "m2", "L2", "e3"), "m2", p));
+	}
 }

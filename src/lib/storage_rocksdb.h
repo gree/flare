@@ -356,6 +356,7 @@ protected:
 	// History continuation (replica commit): the epoch the copy left, and
 	// when (wall clock ms) — under _mutex_generations
 	string _superseded_epoch;
+	string _superseded_master_id;	// the master_id the copy left ("" = none recorded)
 	uint64_t _continued_at_ms;
 	// Expired entries hidden from a read but NOT deleted (replica side).
 	AtomicCounter _expire_filtered;
@@ -580,6 +581,9 @@ public:
 	// master_id answer) the new master not having committed it yet? Then the
 	// follower retries; it is not a history that differs.
 	bool continuation_source_behind(const string& server_epoch);
+	// the probed master_id is the one the copy left at its continuation
+	// commit, inside the same grace window (false when none was recorded)
+	bool continuation_left_master_id(const string& server_master_id);
 	// The epoch this copy left by a continued history ("" = none): a batch
 	// of that epoch can never be applied any more
 	string get_superseded_epoch();

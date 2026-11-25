@@ -59,7 +59,13 @@ struct source_probe {
 	// committed (promoted) yet. Set by the caller from the storage; never for
 	// a copy that was not continued.
 	bool			continued_source_behind;
-	source_probe(): complete(false), epoch_token(false), continued_source_behind(false) {}
+	// The probed master_id is the one this copy LEFT at its continuation
+	// commit (recorded there), within the same grace window: the successor
+	// has not yet taken the new master_id either. Set by the caller from the
+	// storage; never for a copy that was not continued, or when none was
+	// recorded.
+	bool			continued_left_master_id;
+	source_probe(): complete(false), epoch_token(false), continued_source_behind(false), continued_left_master_id(false) {}
 };
 
 /**
@@ -83,7 +89,9 @@ enum source_decision {
  *	- Probe incomplete or no master: Unknown. An eligible binding to the SAME
  *	  source stays as it is (an unobservable master is not a history change);
  *	  anything else waits non-eligible, keeping the copy.
- *	- Lineage differs: needs_rebuild.
+ *	- Lineage differs: needs_rebuild, except for an eligible continued copy
+ *	  whose same source still reports the lineage AND history the copy left
+ *	  (within the grace window): keep.
  *	- Epochs both present: equal = same history (rebind to `current`),
  *	  different = needs_rebuild.
  *	- The binding has an epoch but the peer reports none: cannot confirm, wait.
@@ -104,6 +112,16 @@ inline source_decision decide_source(const source_binding& b, const std::string&
 		return (b.st == source_binding::eligible && same_source) ? decision_keep : decision_wait_unknown;
 	}
 	if (p.master_id != b.master_id) {
+		// Exception: a continued copy, still eligible for this very source,
+		// probing a successor that reports BOTH the master_id and the epoch
+		// the copy left (it commits after its replicas). Temporary: keep.
+		// Anything else is a different lineage.
+		if (b.st == source_binding::eligible && same_source
+			&& !b.source_epoch.empty()
+			&& p.epoch_token && !p.source_epoch.empty() && p.source_epoch != b.source_epoch
+			&& p.continued_source_behind && p.continued_left_master_id) {
+			return decision_keep;
+		}
 		return decision_needs_rebuild;
 	}
 	if (!b.source_epoch.empty()) {

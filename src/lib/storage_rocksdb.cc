@@ -3160,6 +3160,21 @@ int storage_rocksdb::history_commit(const string& hid, string& result) {
 	}
 	bool pinned_here = false;
 	if (p.role == "successor") {
+		// test seam: when FLARE_TEST_HISTORY_COMMIT_DELAY_FILE names a file
+		// holding a number of seconds, the successor's commit waits that long
+		// (its replicas commit first). Inert when the variable is unset.
+		const char* delay_file = getenv("FLARE_TEST_HISTORY_COMMIT_DELAY_FILE");
+		if (delay_file != NULL && delay_file[0] != '\0') {
+			FILE* df = fopen(delay_file, "r");
+			if (df != NULL) {
+				int secs = 0;
+				if (fscanf(df, "%d", &secs) == 1 && secs > 0 && secs <= 60) {
+					log_warning("history continuation: successor commit of %s delayed %d s by FLARE_TEST_HISTORY_COMMIT_DELAY_FILE (test seam)", p.hid.c_str(), secs);
+					sleep(secs);
+				}
+				fclose(df);
+			}
+		}
 		// the new master keeps every WAL file from S until the prepared
 		// replicas are past it (WAL_PIN), written BEFORE the history is
 		// committed so a crash in between still protects S+1 on
@@ -3229,6 +3244,9 @@ int storage_rocksdb::history_commit(const string& hid, string& result) {
 			result = "failed:write";
 			break;
 		}
+		pthread_rwlock_rdlock(&this->_mutex_master_id);
+		const string left_master_id = this->_master_id;
+		pthread_rwlock_unlock(&this->_mutex_master_id);
 		pthread_rwlock_wrlock(&this->_mutex_generations);
 		this->_source_epoch = p.to_epoch;
 		this->_source_epoch_reason = "continued";
@@ -3243,6 +3261,7 @@ int storage_rocksdb::history_commit(const string& hid, string& result) {
 			// applied before this commit or refused as a stale follower
 			// after it, never applied on top of the continued history.
 			this->_superseded_epoch = p.from_epoch;
+			this->_superseded_master_id = left_master_id;
 			this->_continued_at_ms = wal_pin::now_ms();
 			this->bump_follow_generation();
 		} else {
@@ -3290,6 +3309,20 @@ bool storage_rocksdb::continuation_source_behind(const string& server_epoch) {
 	const bool same_epoch = !server_epoch.empty() && server_epoch == this->_superseded_epoch;
 	pthread_rwlock_unlock(&this->_mutex_generations);
 	if (!continued || (!server_epoch.empty() && !same_epoch)) {
+		return false;
+	}
+	const uint64_t now = wal_pin::now_ms();
+	return now != 0 && now >= at && now - at < kGraceMs;
+}
+
+bool storage_rocksdb::continuation_left_master_id(const string& server_master_id) {
+	static const uint64_t kGraceMs = 120000;
+	pthread_rwlock_rdlock(&this->_mutex_generations);
+	const bool match = !server_master_id.empty() && !this->_superseded_epoch.empty()
+		&& !this->_superseded_master_id.empty() && server_master_id == this->_superseded_master_id;
+	const uint64_t at = this->_continued_at_ms;
+	pthread_rwlock_unlock(&this->_mutex_generations);
+	if (!match || at == 0) {
 		return false;
 	}
 	const uint64_t now = wal_pin::now_ms();

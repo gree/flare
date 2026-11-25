@@ -190,7 +190,7 @@ def results : IO (List (String × Bool)) := do
               hl1 == none && hg1 ≤ 5000)]
   let (_, hg0) ← simulateHandoff 40000 5000 lease false fun _ => .renewed
   r := r ++ [(s!"lease handoff: stopping the wait keeper when the wait ends (the old behaviour) leaves a gap past the lease ({hg0} ms), the case this prevents",
-              hg0 > lease)]
+              decide (hg0 > lease))]
   let (hl2, hg2) ← simulateHandoff 40000 5000 lease true fun t => if t < 50000 then .failed else .renewed
   r := r ++ [(s!"lease handoff: a loop renew that fails does not end the wait keeper (still renewing, longest gap {hg2} ms)",
               hl2 == none && hg2 ≤ 5000)]

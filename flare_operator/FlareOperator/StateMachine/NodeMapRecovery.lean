@@ -26,6 +26,7 @@
   Automatic reconstruction of a lost map is NOT done here (later work).
 -/
 import FlareOperator.K8s.FlareCluster
+import Lean.Data.Json
 
 namespace FlareOperator.NodeMapRecovery
 

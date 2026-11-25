@@ -594,7 +594,7 @@ spec:
               command:
                 - /bin/bash
                 - -c
-                - 'read -r t < /tmp/flared-waiting-first-index 2>/dev/null && [ $(( $(printf "%(%s)T" -1) - t )) -lt 60 ] || exec 3<>/dev/tcp/127.0.0.1/{cfg.flarePort}'
+                - 'read -r t < /tmp/flared-waiting-first-index 2>/dev/null && [ $(( EPOCHSECONDS - t )) -lt 60 ] || exec 3<>/dev/tcp/127.0.0.1/{cfg.flarePort}'
             initialDelaySeconds: 10
             periodSeconds: 5
             failureThreshold: 6

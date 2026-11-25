@@ -58,6 +58,7 @@ import FlareOperator.E2E.Tests.WalFollowRollover
 import FlareOperator.E2E.Tests.WalFollowDrain
 import FlareOperator.E2E.Tests.SlowReconcileLease
 import FlareOperator.E2E.Tests.FirstBuildWait
+import FlareOperator.E2E.Tests.FirstBuildExistingCluster
 
 open FlareOperator.E2E
 
@@ -70,6 +71,7 @@ def main (args : List String) : IO UInt32 :=
     Tests.FirstBuildBusyPool.suiteStaleEvidence,
     Tests.SlowReconcileLease.suite,
     Tests.FirstBuildWait.suite,
+    Tests.FirstBuildExistingCluster.suite,
     Tests.ReadBalance.suite,
     Tests.ScaleOutMaster.suite,
     Tests.ScaleOutSlave.suite,

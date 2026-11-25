@@ -5,9 +5,11 @@
   Before: with no node map, an unobservable past and no approval the operator
   retried 12 times and exited (CrashLoopBackOff), and every flared exited
   because the operator did not serve its index yet. Now the operator keeps
-  its Lease and waits (not Ready, no index, no map), and flared retries its
-  FIRST index connection. The approval can come any time after the
-  FlareCluster exists.
+  its Lease and waits (no index, no map), and while it waits its index port
+  answers every request with `SERVER_ERROR first_build_approval_pending`:
+  the explicit signal on which flared waits and retries (nothing else makes
+  it wait: see first-build-existing-cluster). The approval can come any time
+  after the FlareCluster exists.
 
   Order: the FlareCluster and its StatefulSet are created WITHOUT approval;
   minutes pass (restarts 0, no map, Lease held, waiting gauge 1); an
@@ -103,7 +105,7 @@ def suite : TestSuite := {
     cleanupCluster cfg
     deployCluster cfg
     -- the CR and the StatefulSet, deliberately WITHOUT the approval
-    deployDeferredCluster cfg false
+    deployDeferredCluster cfg false (afterOperatorWaits := true)
   teardown := cleanupCluster cfg
   onFailure := dumpClusterDiagnostics ns s!"app={cfg.operatorName}"
   tests := [
@@ -125,6 +127,12 @@ def suite : TestSuite := {
         let logs ← opLog 5000
         if containsSubstr logs "starting fresh" then return .fail "the operator started fresh without an approval"
         if (← nodeMapExists) then return .fail "a node map was written while waiting"
+        -- the index port answers the explicit signal to every request and serves nothing
+        for cmd in ["node sync", "node add flare-x 12121", "meta"] do
+          let raw := (← operatorTcpCmd cfg.debugPod ns cfg.operatorName cfg.operatorPort cmd).trim
+          IO.eprintln s!"# '{cmd}' while waiting: [{raw}]"
+          if raw != "SERVER_ERROR first_build_approval_pending" then
+            return .fail s!"'{cmd}' was not answered with exactly the pending signal: [{raw}]"
         let sync := parseNodeSync (← operatorTcpCmd cfg.debugPod ns cfg.operatorName cfg.operatorPort "node sync")
         if !sync.isEmpty then return .fail s!"the operator served an index while waiting: {sync.length} entries"
         -- the Lease is still held by the (only) operator pod and was renewed lately
@@ -145,10 +153,15 @@ def suite : TestSuite := {
         if cStatus != "Required" then return .fail s!"the FirstBuildApproval condition is not Required while waiting: [{cStatus}]"
         if uid.isEmpty || !containsSubstr cMsg uid || !containsSubstr cMsg "flare.gree.net/first-build-approved" then
           return .fail s!"the condition message does not name the annotation and the UID: {cMsg}"
-        -- readiness is false while waiting (a leader without an index server)
+        -- the operator is Ready while it waits: its port answers (the Service routes
+        -- only to Ready pods, so flared can receive the signal)
         let ready ← operatorReady
         IO.eprintln s!"# operator Ready: [{ready}]"
-        if ready != "False" then return .fail s!"the operator is Ready while it waits: [{ready}]"
+        if ready != "True" then return .fail s!"the operator is not Ready while it announces the wait: [{ready}]"
+        -- flared is waiting on the signal, not retrying blindly
+        let flog ← kubectlLogsLabel s!"cluster={cfg.name}" ns 200
+        if !containsSubstr flog "waits for the first-build approval" then
+          return .fail "flared does not report that the operator waits for the first-build approval"
         -- the Lease is renewed ON TIME, not merely named: a fresh renewTime that moves
         let age1 ← leaseRenewAge
         IO.sleep 9000

@@ -1104,9 +1104,18 @@ def deployCluster (cfg : ClusterConfig) : IO Unit := do
 
 /-- Create the FlareCluster (optionally approving its first build) and the
     StatefulSet of a cluster deployed with `deferClusterCr`. -/
-def deployDeferredCluster (cfg : ClusterConfig) (approve : Bool := true) : IO Unit := do
+def deployDeferredCluster (cfg : ClusterConfig) (approve : Bool := true)
+    (afterOperatorWaits : Bool := false) : IO Unit := do
   applyYaml (flareClusterCrdYaml cfg)
   if approve then approveFirstBuild cfg
+  -- A flared that starts before the operator announced the first-build wait
+  -- exits at its index connection and is restarted (as for any unreachable
+  -- operator); with `afterOperatorWaits` the StatefulSet follows the
+  -- announcement, so the wait itself can be asserted to cost no restart.
+  if afterOperatorWaits then
+    let waiting ← waitForCondition "the operator announces the first-build wait" 180 do
+      return containsSubstr (← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 3000) "WAITING for the first-build approval"
+    if !waiting then throw (IO.userError "the operator did not announce the first-build wait")
   applyYaml (statefulSetYaml cfg)
 
 /-- Deploy a second cluster for inter-cluster replication tests. -/

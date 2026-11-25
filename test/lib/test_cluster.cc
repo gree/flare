@@ -913,6 +913,7 @@ namespace test_cluster
 	void test_first_index_heartbeat_stays_fresh_while_attempts_return() {
 		clk k;
 		k.stall_sec = 10;	// the per-attempt deadline
+		k.last_beat = 1000;	// the beat after the first pending answer
 		cluster::run_first_index_wait(
 				boost::bind(&clk::attempt, &k), boost::bind(&clk::sleep, &k, _1),
 				&jit_hi, boost::bind(&clk::stop, &k), boost::bind(&clk::beat, &k));

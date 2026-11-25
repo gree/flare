@@ -764,8 +764,8 @@ namespace test_cluster
 	void test_first_index_backoff_bounds() {
 		for (unsigned a = 0; a < 40; a++) {
 			uint64_t ceiling = 500;
-			for (unsigned i = 0; i < a && ceiling < 30000; i++) { ceiling *= 2; }
-			if (ceiling > 30000) { ceiling = 30000; }
+			for (unsigned i = 0; i < a && ceiling < 3000; i++) { ceiling *= 2; }
+			if (ceiling > 3000) { ceiling = 3000; }
 			uint32_t lo = cluster::first_index_backoff_ms(a, 0);
 			uint32_t hi = cluster::first_index_backoff_ms(a, 1000);
 			cppcut_assert_equal((uint32_t)(ceiling / 2), lo);
@@ -775,8 +775,8 @@ namespace test_cluster
 				cut_assert_true(v >= lo && v <= hi);
 			}
 		}
-		cppcut_assert_equal((uint32_t)30000, cluster::first_index_backoff_ms(1000000, 1000));
-		cppcut_assert_equal((uint32_t)16000, cluster::first_index_backoff_ms(5, 5000)); // jitter clamped to the ceiling (500*2^5)
+		cppcut_assert_equal((uint32_t)3000, cluster::first_index_backoff_ms(1000000, 1000));
+		cppcut_assert_equal((uint32_t)2000, cluster::first_index_backoff_ms(2, 5000)); // jitter clamped to the ceiling (500*2^2)
 	}
 
 	void test_first_index_retry_unbounded_until_connected() {
@@ -789,10 +789,10 @@ namespace test_cluster
 		cppcut_assert_equal(500, f.opens);
 		cppcut_assert_equal((size_t)499, f.sleeps.size());
 		for (size_t i = 0; i < f.sleeps.size(); i++) {
-			cut_assert_true(f.sleeps[i] <= 30000);
+			cut_assert_true(f.sleeps[i] <= 3000);
 			cut_assert_true(f.sleeps[i] >= 250);
 		}
-		cppcut_assert_equal((uint32_t)30000, f.sleeps.back());
+		cppcut_assert_equal((uint32_t)3000, f.sleeps.back());
 		// grows from the base, never shrinks at max jitter
 		for (size_t i = 1; i < f.sleeps.size(); i++) {
 			cut_assert_true(f.sleeps[i] >= f.sleeps[i - 1]);

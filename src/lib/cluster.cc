@@ -451,8 +451,8 @@ shared_connection cluster::retry_first_index_open(const boost::function<shared_c
 			heartbeat();
 		}
 		uint32_t ms = first_index_backoff_ms(attempt, jitter_permille());
-		// log on the first attempt, then about once a minute at the cap
-		if (attempt == 0 || attempt % 4 == 0) {
+		// log on the first attempt, then about once a minute at the cap (3 s)
+		if (attempt == 0 || attempt % 20 == 0) {
 			log_warning("index server is not reachable yet (attempt %u); retrying in %u msec -- flared keeps waiting for its first index connection", attempt + 1, ms);
 		}
 		sleep_ms(ms);

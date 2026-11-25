@@ -303,7 +303,7 @@ public:
 	static bool first_index_marker_fresh(const char* path, time_t now, unsigned max_age_sec);
 	static const int first_index_connect_timeout_ms = 5000;	// deadline of each attempt
 	static const uint32_t first_index_backoff_base_ms = 500;
-	static const uint32_t first_index_backoff_cap_ms = 30000;
+	static const uint32_t first_index_backoff_cap_ms = 3000;	// short: flared does not listen while it waits, so a long sleep delays recovery after the index comes back
 	// exponential backoff with jitter: for attempt n (0-based) the ceiling is
 	// min(cap, base * 2^n) and the result lies in [ceiling/2, ceiling];
 	// jitter_permille (0..1000) picks the point

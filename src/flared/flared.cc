@@ -282,6 +282,7 @@ int flared::startup(int argc, char **argv) {
 		// Only that exact answer to the first registration makes flared wait and
 		// retry; a refused or timed-out connection and any other answer exit as
 		// before (an existing cluster, an operator that is merely unreachable).
+		this->_cluster->set_wait_first_index_connect(true);
 		// SIGTERM/SIGINT end the wait at once (the handler only sets the request)
 		this->_cluster->set_first_index_stop(boost::bind(&app::is_shutdown_requested, this));
 		if (this->_cluster->startup_node(k8s_index_servers,

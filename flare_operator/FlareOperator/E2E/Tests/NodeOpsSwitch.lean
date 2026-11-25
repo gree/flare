@@ -718,7 +718,8 @@ private def podIncarnations (c : Ctx) : IO (List (String × String × String × 
       | _ => none
   | .error _ => return []
 
-def switchTest (c : Ctx) (op : SwitchOp) (noreplyDeletes : Bool := false) : IO TestResult := do
+def switchTest (c : Ctx) (op : SwitchOp) (noreplyDeletes : Bool := false)
+    (injectedRestarts : Option (IO.Ref (List String)) := none) : IO TestResult := do
   -- a flared that restarts INSIDE its pod (same UID) during an operation
   -- that only replaces or keeps pods is no part of the operation
   -- (41278035134: a master's flared died with no log line): recorded before
@@ -730,11 +731,16 @@ def switchTest (c : Ctx) (op : SwitchOp) (noreplyDeletes : Bool := false) : IO T
   let run ← switchRun c op noreplyDeletes
   let inc1 ← podIncarnations c
   let mut unexpected : List String := []
+  -- a restart the test itself injected (history continuation: flared of the
+  -- continued replica restarted inside the delayed-successor window)
+  let injected ← match injectedRestarts with
+    | some ref => ref.get
+    | none => pure []
   for (n, u, r, cid, last) in inc1 do
     IO.eprintln s!"# [{c.test}] after: {n} uid {u} restarts {r} container {cid} lastState.terminated {last}"
     match inc0.find? (fun (n0, u0, _, _, _) => n0 == n && u0 == u) with
     | some (_, _, r0, cid0, _) =>
-      if r0 != r || cid0 != cid then
+      if (r0 != r || cid0 != cid) && !injected.contains n then
         unexpected := unexpected ++ [s!"{n} (restarts {r0} -> {r}, container {cid0} -> {cid}, lastState.terminated {last})"]
     | none => pure ()
   if !unexpected.isEmpty then
@@ -1987,7 +1993,37 @@ def continuationSwitchSuite : TestSuite :=
     all copies hold the same number of items. -/
 def historyCommitDelayFile : String := "/tmp/history-commit-delay"
 
-def continuationLoadTest (c : Ctx) (delaySecs : Nat := 0) : IO TestResult := do
+/-- The log of a pod's flared since `t0`: the previous container's (when it
+    was restarted) followed by the current one's. -/
+private def flaredLogSince (ns pod t0 : String) : IO String := do
+  let prev ← match ← kubectl ["logs", "-n", ns, pod, "-c", "flared", "--previous", "--since-time", t0] with
+    | .ok o => pure o | .error _ => pure ""
+  let cur ← match ← kubectl ["logs", "-n", ns, pod, "-c", "flared", "--since-time", t0] with
+    | .ok o => pure o | .error _ => pure ""
+  return prev ++ "\n" ++ cur
+
+/-- Restart flared (container restart, the pod and its data directory stay)
+    of the first pod whose log says it COMMITTED the continued history as a
+    replica — i.e. inside the window in which the delayed successor has not
+    committed yet. Returns the pod, or none when `stop` was set first. -/
+private partial def restartCommitter (c : Ctx) (t0 : String) (stop : IO.Ref Bool)
+    (restarted : IO.Ref (List String)) : IO (Option String) := do
+  if ← stop.get then return none
+  let ns := c.cfg.«namespace»
+  for p in (← c.pods).getD [] do
+    let lg ← match ← kubectl ["logs", "-n", ns, p.name, "-c", "flared", "--since-time", t0] with
+      | .ok o => pure o | .error _ => pure ""
+    if containsSubstr lg "COMMITTED as replica" then
+      -- recorded first: the precondition check of switchTest must expect it
+      restarted.set [p.name]
+      c.event s!"{p.name} committed the continued history as a replica; restarting its flared inside the successor's delay window"
+      match ← kubectl ["exec", "-n", ns, p.name, "-c", "flared", "--", "sh", "-c", "kill -TERM 1"] with
+      | .ok _ => return some p.name
+      | .error e => c.event s!"restart of flared in {p.name} failed: {e.take 200}"; return none
+  IO.sleep 500
+  restartCommitter c t0 stop restarted
+
+def continuationLoadTest (c : Ctx) (delaySecs : Nat := 0) (restartInWindow : Bool := false) : IO TestResult := do
   let t0 := (← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%SZ"] }).stdout.trim
   -- delayed successor: the suite sets the seam env on every flared; the
   -- file makes the successor's commit wait, so the replica commits first and
@@ -1996,7 +2032,20 @@ def continuationLoadTest (c : Ctx) (delaySecs : Nat := 0) : IO TestResult := do
     for p in (← c.pods).getD [] do
       discard <| kubectl ["exec", "-n", c.cfg.«namespace», p.name, "-c", "flared", "--", "sh", "-c",
         s!"echo {delaySecs} > {historyCommitDelayFile}"]
-  let r ← switchTest c .deleteMaster
+  let stop ← IO.mkRef false
+  let restarted ← IO.mkRef ([] : List String)
+  let restarter ← if restartInWindow then
+      some <$> IO.asTask (restartCommitter c t0 stop restarted)
+    else pure none
+  let r ← switchTest c .deleteMaster (injectedRestarts := some restarted)
+  stop.set true
+  let restartedPod : Option String ← match restarter with
+    | some t => match ← IO.wait t with
+      | .ok o => pure o
+      | .error _ => pure none
+    | none => pure none
+  if restartInWindow && restartedPod.isNone then
+    return .fail "the continued replica's flared was not restarted inside the delayed-successor window: the restart case was not exercised"
   match r with
   | .pass =>
     let ns := c.cfg.«namespace»
@@ -2004,8 +2053,7 @@ def continuationLoadTest (c : Ctx) (delaySecs : Nat := 0) : IO TestResult := do
     let mut committer : Option PodRow := none
     let mut afterCommit := ""
     for p in pods do
-      let lg ← match ← kubectl ["logs", "-n", ns, p.name, "-c", "flared", "--since-time", t0] with
-        | .ok o => pure o | .error _ => pure ""
+      let lg ← flaredLogSince ns p.name t0
       match lg.splitOn "COMMITTED as replica" with
       | _ :: rest@(_ :: _) =>
         committer := some p
@@ -2018,12 +2066,19 @@ def continuationLoadTest (c : Ctx) (delaySecs : Nat := 0) : IO TestResult := do
     if delaySecs > 0 then
       let mut delayed := false
       for p in pods do
-        let lg ← match ← kubectl ["logs", "-n", ns, p.name, "-c", "flared", "--since-time", t0] with
-          | .ok o => pure o | .error _ => pure ""
+        let lg ← flaredLogSince ns p.name t0
         delayed := delayed || containsSubstr lg "FLARE_TEST_HISTORY_COMMIT_DELAY_FILE"
       if !delayed then
         return .fail "no successor commit was delayed by the test seam: the window under test did not open"
     c.art "continuation.txt" s!"committer {k.name}; after its commit its log contains {hits}"
+    if restartInWindow then
+      -- the restarted process found the durable evidence (the window was
+      -- still open when it opened the database) and the successor committed
+      -- after it; the copy was neither rebuilt nor repaired
+      if restartedPod != some k.name then
+        return .fail s!"the restarted pod {restartedPod} is not the committer {k.name}"
+      if !containsSubstr afterCommit "continuation evidence restored" then
+        return .fail s!"{k.name} restarted but its new process did not restore the continuation evidence (the window had closed, or the evidence was lost): the case was not exercised or the evidence is not durable"
     if !hits.isEmpty then
       return .fail s!"{k.name} committed the continued history and then logged {hits} (its follower of the old history was not harmless)"
     let opLog ← match ← kubectl ["logs", "-n", ns, "-l", s!"app={c.cfg.operatorName}", "--since-time", t0, "--tail=-1"] with
@@ -2094,6 +2149,31 @@ def continuationLoadDelayedSuite : TestSuite :=
     tests := [{ name := "kubectl delete pod of the MASTER under a write load with the successor's continuation commit delayed 9 s: the replica commits first, the validator probes the successor still at the old master_id/epoch, and it is not rebuilt, keeps following, 0 write errors, 0 acknowledged writes missing, equal item counts",
                 run := continuationLoadTest c 9 }] }
 
+/-- history-continuation-handover-load-restart: the delayed-successor case
+    (the successor's continuation commit is held 30 s) plus a container
+    restart of the continued replica's flared inside that window (the pod and
+    its data directory stay). The new process must restore the durable
+    continuation evidence and not treat the successor still at the old
+    master_id/epoch as another history: no rebuild, no replica repair, it keeps
+    following after the successor commits, 0 write errors, 0 acknowledged
+    writes missing, copies equal. -/
+def continuationLoadRestartSuite : TestSuite :=
+  let cfg := { cfgOf "node-hc-loadr" true false with
+    replicas := 3, operatorEnv := [("FLARE_OPERATOR_HISTORY_CONTINUATION", "on")],
+    flaredEnv := [("FLARE_TEST_HISTORY_COMMIT_DELAY_FILE", historyCommitDelayFile)] }
+  let c : Ctx := { cfg, suite := "history-continuation-handover-load-restart", test := "hc-load-restart" }
+  { name := "history-continuation-handover-load-restart"
+    setup := do
+      deployCluster cfg
+      discard <| waitClusterSettled cfg
+    teardown := do
+      for w in ← dataWorkers do uncordon w
+      cleanupCluster cfg
+    onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
+    afterEach := fun i => saveFullLogs cfg.«namespace» s!"after-test-{i}"
+    tests := [{ name := "kubectl delete pod of the MASTER under a write load with the successor's continuation commit delayed 30 s and flared of the continued replica restarted (container restart, data dir kept) inside that window: the new process restores the durable continuation evidence, is not rebuilt or repaired, keeps following after the successor commits, 0 write errors, 0 acknowledged writes missing, equal item counts",
+                run := continuationLoadTest c 30 (restartInWindow := true) }] }
+
 /-- node-ops-switch-tmpfs-continuation-cordon-master: C1 (cordon + drain of
     the master's worker, the node guard and the cordon move) with three
     copies and the continuation on: the C1 verdict and no rebuild of the
@@ -2128,6 +2208,6 @@ def switchSuites : List TestSuite :=
     ++ [Scenario.op .cordonMaster, .op .cordonReplica, .cordonBlocked, .cordonCancel, .cordonNoSuccessor, .cordonOperatorRestart, .cordonTwoNodes, .cordonNoOperator, .cordonRestartQuiet, .cordonStuck, .cordonMasterNoreply].map (fun sc => scenarioSuite sc .tmpfs)
     ++ [Scenario.op .cordonMaster, .op .cordonReplica].map (fun sc => scenarioSuite sc .pvcNfs)
     ++ [scenarioSuite .cordonPinned .pvcLocal]
-    ++ [continuationSwitchSuite, continuationCordonSuite, continuationLoadSuite, continuationLoadDelayedSuite]
+    ++ [continuationSwitchSuite, continuationCordonSuite, continuationLoadSuite, continuationLoadDelayedSuite, continuationLoadRestartSuite]
 
 end FlareOperator.E2E.Tests.NodeOpsSwitch

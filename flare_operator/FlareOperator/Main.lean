@@ -4726,6 +4726,8 @@ def main (args : List String) : IO Unit := do
   -- the leader loop (LeaseKeeper.decide), readiness stays false (leader, no
   -- TCP server) and no index server is started.
   let mut awaiting := false
+  let mut conditionSet := false
+  let mut waitUid := ""
   let mut awaitTicks := 0
   let awaitDone ← IO.mkRef false
   let awaitLeaseExit : String → IO Unit := fun why => do
@@ -4745,14 +4747,24 @@ def main (args : List String) : IO Unit := do
     let (hist, approved) ← if needsHistory then nodeMapHistory crName ns s!"{crName}-operator-lease"
       else pure (NodeMapRecovery.History.unknown "not needed: the map is valid", false)
     let decision := NodeMapRecovery.decide read hist reset approved
-    -- leaving the wait (to anything but another wait): stop the keeper,
-    -- clear the gauge, one Event for the transition
+    -- leaving the wait (to anything but another wait): clear the gauge and
+    -- the status condition, one Event for the transition. The wait keeper is
+    -- NOT stopped here: it keeps renewing the Lease until the normal loop's
+    -- first accepted renew (`awaitDone`, set in the leader loop below), so
+    -- initialisation after the wait leaves no gap in the 15 s Lease.
+    let wasAwaiting := awaiting
     if awaiting && decision.kind != "await" then
       awaiting := false
-      awaitDone.set true
+      conditionSet := false
       metrics.firstBuildWaiting.set 0.0
+      Bridge.clearFirstBuildCondition crName ns
       IO.eprintln s!"[flare-operator] first-build wait ended after ~{awaitTicks * 5} s: decision is {decision.kind}"
       Bridge.emitEvent crName ns "FlareFirstBuildWaitEnded" s!"the node map decision for {crName} is no longer waiting for the first-build approval ({decision.kind})" false
+    -- a predecessor killed while waiting may have left the condition behind
+    -- and the approval came before this process looked: remove it (a read,
+    -- written only when it is there; only a first build takes this branch)
+    if !wasAwaiting && decision.kind == "fresh" then
+      Bridge.clearFirstBuildCondition crName ns
     match decision with
     | .await why =>
       nmAttempt := 0   -- a wait does not use up the bounded retries of a failed read
@@ -4761,7 +4773,12 @@ def main (args : List String) : IO Unit := do
         awaitTicks := 0
         metrics.firstBuildWaiting.set 1.0
         IO.eprintln s!"[flare-operator] WAITING for the first-build approval: {why}. The operator keeps its Lease, stays not Ready, serves no index and distributes no map until the approval is set"
-        Bridge.emitEvent crName ns "FlareFirstBuildWaiting" s!"waiting for the first-build approval of {crName}: kubectl annotate flarecluster {crName} flare.gree.net/first-build-approved=<its metadata.uid> (the operator does not restart while it waits)" true
+        let crUid := match ← kubectl ["get", "flarecluster", crName, "-n", ns, "-o", "jsonpath={.metadata.uid}"] with
+          | .ok u => u.trim
+          | .error _ => "<its metadata.uid>"
+        waitUid := crUid
+        Bridge.emitEvent crName ns "FlareFirstBuildWaiting" (NodeMapRecovery.approvalMessage crName crUid) true
+        conditionSet ← Bridge.setFirstBuildCondition crName ns crUid
         let lastOkRef ← IO.mkRef (← IO.monoMsNow)
         let leaseMs := leaseDurationSeconds * 1000
         -- the first renew is checked at once; the keeper then runs on its own clock
@@ -4783,6 +4800,9 @@ def main (args : List String) : IO Unit := do
             awaitLeaseExit "the lease keeper stopped"
       else
         awaitTicks := awaitTicks + 1
+        -- a condition that could not be written is retried each tick
+        if !conditionSet then
+          conditionSet ← Bridge.setFirstBuildCondition crName ns waitUid
         -- logs are rate-limited: one line a minute
         if awaitTicks % 12 == 0 then
           IO.eprintln s!"[flare-operator] still waiting for the first-build approval ({awaitTicks * 5} s): {why}"
@@ -5022,6 +5042,9 @@ def main (args : List String) : IO Unit := do
     match LeaseKeeper.decide r (nowMs - (← lastRenewOkRef.get)) leaseMs 0 passDeadlineMs with
     | .lost why => stepDownAndExit why
     | .keep => pure ()
+    -- handoff: the first-build wait's keeper (if there was a wait) ends only
+    -- now that the normal loop's own renew was accepted
+    if LeaseKeeper.handsOver r then awaitDone.set true
     -- Self-healing label assert: a leader whose label patch failed (or was
     -- stripped externally) reclaims the index Service every tick.
     let _ ← setRoleLabel identity ns "leader"

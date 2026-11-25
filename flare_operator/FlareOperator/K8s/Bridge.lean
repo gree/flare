@@ -22,6 +22,7 @@ import FlareOperator.StateMachine.HandoverDrive
 import FlareOperator.StateMachine.NodeMove
 import FlareOperator.StateMachine.LeaseFence
 import FlareOperator.StateMachine.ServiceSelector
+import FlareOperator.StateMachine.NodeMapRecovery
 
 namespace FlareOperator.K8s.Bridge
 
@@ -903,6 +904,30 @@ def emitEvent (crName ns reason message : String) (warning : Bool := false) : IO
   match ← kubectlApplyManifest ev.compress "create" with
   | .ok _ => pure ()
   | .error e => IO.eprintln s!"[flare-operator] warning: Event {reason} not recorded: {e}"
+
+/-- Set the FirstBuildApproval=Required condition (merge patch on the status
+    subresource). Best-effort: the caller retries on its next tick. -/
+def setFirstBuildCondition (crName ns uid : String) : IO Bool := do
+  let now := (← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%SZ"] }).stdout.trim
+  let patch := (NodeMapRecovery.approvalConditionPatch crName uid now).compress
+  match ← kubectl ["patch", "flarecluster", crName, "-n", ns, "--subresource=status", "--type=merge", "-p", patch] with
+  | .ok _ => return true
+  | .error e =>
+    IO.eprintln s!"[flare-operator] warning: the FirstBuildApproval condition is not set: {e}"
+    return false
+
+/-- Remove the FirstBuildApproval condition when there is one (read first: a
+    cluster without it is not written to). -/
+def clearFirstBuildCondition (crName ns : String) : IO Unit := do
+  match ← kubectl ["get", "flarecluster", crName, "-n", ns, "-o",
+      s!"jsonpath=\{.status.conditions[?(@.type==\"{NodeMapRecovery.approvalConditionType}\")].status}"] with
+  | .ok out =>
+    if out.trim.isEmpty then return
+    match ← kubectl ["patch", "flarecluster", crName, "-n", ns, "--subresource=status", "--type=merge", "-p",
+        NodeMapRecovery.approvalConditionClearPatch.compress] with
+    | .ok _ => pure ()
+    | .error e => IO.eprintln s!"[flare-operator] warning: the FirstBuildApproval condition is not removed: {e}"
+  | .error e => IO.eprintln s!"[flare-operator] warning: the FirstBuildApproval condition is not read: {e}"
 
 /-- Read the nodeMap data from a ConfigMap.
     kubectl get configmap <name> -n <ns> -o jsonpath='{.data.nodeMap}' -/

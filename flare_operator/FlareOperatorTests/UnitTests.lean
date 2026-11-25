@@ -1662,6 +1662,15 @@ def checkNodeMapRecovery (ctx : Ctx) : IO Unit := do
       && NodeMapRecovery.classifyRead (.error "configmaps \"x\" not found") == .failed "configmaps \"x\" not found"
       && NodeMapRecovery.classifyRead (.ok "x") == .present "x")
   -- history: only positive proof is "new"; any gap is unknown
+  -- the FirstBuildApproval status condition (set while waiting, removed after)
+  let uid := "9f1c2d3e-0000-4000-8000-123456789abc"
+  let patch := (NodeMapRecovery.approvalConditionPatch "flare-x" uid "2026-01-01T00:00:00Z").compress
+  check ctx "SAF-09: the FirstBuildApproval condition is Required and its message names the annotation and the UID"
+    ((patch.splitOn "\"type\":\"FirstBuildApproval\"").length > 1 && (patch.splitOn "\"status\":\"Required\"").length > 1
+      && (patch.splitOn "flare.gree.net/first-build-approved=").length > 1 && (patch.splitOn uid).length > 1
+      && ((NodeMapRecovery.approvalMessage "flare-x" uid).splitOn uid).length > 1)
+  check ctx "SAF-09: clearing the condition is a merge patch that nulls the conditions (nothing else is written)"
+    (NodeMapRecovery.approvalConditionClearPatch.compress == "{\"status\":{\"conditions\":null}}")
   let p (n : String) (r : Bool) (v i : Option Nat) : NodeMapRecovery.PodEvidence := { name := n, ready := r, nodeMapVersion := v, currItems := i }
   let isSeen := fun (h : NodeMapRecovery.History) => match h with | .seen _ => true | _ => false
   let isUnk := fun (h : NodeMapRecovery.History) => match h with | .unknown _ => true | _ => false

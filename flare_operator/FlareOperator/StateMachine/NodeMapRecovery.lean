@@ -173,4 +173,28 @@ def history (leaseMarker : Except String (Option String)) (podsListed : Bool)
           | some p => .unknown s!"pod {p.name} did not report its node map version and item count{if p.ready then "" else " (not Ready)"}"
           | none => .provenEmpty s!"no Lease marker; all {pods.length} pods report node map version 0 and 0 items"
 
+/-! ### The `FirstBuildApproval` status condition
+
+While the operator waits (`await`) the FlareCluster carries
+`status.conditions[type=FirstBuildApproval]` with status `Required`; it is
+removed when the wait ends. The message names the annotation and the UID of
+THIS FlareCluster, the one value that approves it. -/
+
+def approvalConditionType : String := "FirstBuildApproval"
+
+def approvalMessage (crName uid : String) : String :=
+  s!"waiting for the first-build approval of {crName}: kubectl annotate flarecluster {crName} flare.gree.net/first-build-approved={uid} (the annotation value must be this FlareCluster's metadata.uid, {uid}); the operator does not restart while it waits"
+
+/-- Merge patch (status subresource) that sets the condition. -/
+def approvalConditionPatch (crName uid transitionTime : String) : Lean.Json :=
+  Lean.Json.mkObj [("status", Lean.Json.mkObj [("conditions", Lean.Json.arr #[
+    Lean.Json.mkObj [("type", approvalConditionType), ("status", "Required"),
+      ("reason", "FirstBuildApprovalRequired"), ("message", approvalMessage crName uid),
+      ("lastTransitionTime", transitionTime)]])])]
+
+/-- Merge patch (status subresource) that removes the conditions (this
+    condition is the only one the operator writes). -/
+def approvalConditionClearPatch : Lean.Json :=
+  Lean.Json.mkObj [("status", Lean.Json.mkObj [("conditions", Lean.Json.null)])]
+
 end FlareOperator.NodeMapRecovery

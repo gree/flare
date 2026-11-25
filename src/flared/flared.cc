@@ -278,8 +278,10 @@ int flared::startup(int argc, char **argv) {
 				op_host, atoi(op_port));
 		}
 		// the operator may wait for the first-build approval of a new cluster
-		// without serving its index: retry the first connection, do not exit
-		this->_cluster->set_wait_first_index_connect(op_host != NULL && op_port != NULL);
+		// without serving its index: retry the first connection, do not exit.
+		// Every K8s operator build, whether the index server comes from these
+		// variables or from the config (the chart passes it in the config).
+		this->_cluster->set_wait_first_index_connect(true);
 		if (this->_cluster->startup_node(k8s_index_servers,
 																		 ini_option_object().get_proxy_prior_netmask()) < 0) {
 			return -1;

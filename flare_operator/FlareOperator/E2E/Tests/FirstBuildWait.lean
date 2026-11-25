@@ -90,7 +90,9 @@ def suite : TestSuite := {
         let flared ← restartsOf s!"cluster={cfg.name}"
         IO.eprintln s!"# restarts: operator {ops}, flared {flared}"
         if ops.isEmpty || ops.any (·.2 > 0) then return .fail s!"the operator restarted (or is missing) while waiting: {ops}"
-        if flared.length != cfg.partitions * cfg.replicas then return .fail s!"precondition: expected {cfg.partitions * cfg.replicas} flared pods, saw {flared}"
+        -- the StatefulSet creates its pods in order, the next one only once the
+        -- previous is Ready: while the first build waits, only the first pod exists
+        if flared.isEmpty then return .fail s!"precondition: expected at least one flared pod, saw none"
         if flared.any (·.2 > 0) then return .fail s!"a flared pod restarted while the operator waited: {flared}"
         let logs ← opLog 5000
         if containsSubstr logs "starting fresh" then return .fail "the operator started fresh without an approval"

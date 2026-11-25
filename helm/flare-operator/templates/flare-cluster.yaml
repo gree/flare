@@ -542,13 +542,16 @@ spec:
           # Liveness: the port answers, OR flared is waiting for its first
           # index connection (a new cluster's operator may wait for the
           # first-build approval without serving its index; flared listens only
-          # after it registered). The marker exists only during that wait.
+          # after it registered). The marker exists only during that wait and
+          # holds the time of flared's last attempt step: the probe accepts it
+          # only while younger than 60 s, so a stalled attempt (a resolver
+          # that does not answer) does not pass liveness forever.
           livenessProbe:
             exec:
               command:
                 - /bin/bash
                 - -c
-                - '[ -e /tmp/flared-waiting-first-index ] || exec 3<>/dev/tcp/127.0.0.1/{{ $c.flarePort }}'
+                - 'read -r t < /tmp/flared-waiting-first-index 2>/dev/null && [ $(( $(printf "%(%s)T" -1) - t )) -lt 60 ] || exec 3<>/dev/tcp/127.0.0.1/{{ $c.flarePort }}'
             initialDelaySeconds: {{ $probes.liveness.initialDelaySeconds }}
             periodSeconds: {{ $probes.liveness.periodSeconds }}
             failureThreshold: {{ $probes.liveness.failureThreshold }}

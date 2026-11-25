@@ -582,13 +582,14 @@ spec:
             - name: flared-config
               mountPath: /etc/flared{pvcMount}
           # mirrors the helm chart: the port answers, or flared waits for its
-          # first index connection (marker present only during that wait)
+          # first index connection (marker present only during that wait, holding the
+          # time of the last attempt step; accepted while younger than 60 s)
           livenessProbe:
             exec:
               command:
                 - /bin/bash
                 - -c
-                - '[ -e /tmp/flared-waiting-first-index ] || exec 3<>/dev/tcp/127.0.0.1/{cfg.flarePort}'
+                - 'read -r t < /tmp/flared-waiting-first-index 2>/dev/null && [ $(( $(printf "%(%s)T" -1) - t )) -lt 60 ] || exec 3<>/dev/tcp/127.0.0.1/{cfg.flarePort}'
             initialDelaySeconds: 10
             periodSeconds: 5
             failureThreshold: 6

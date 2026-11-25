@@ -288,6 +288,8 @@ public:
 	// Only the connection attempts BEFORE the first connection is established
 	// are covered: node-add, its reply and index loss afterwards are unchanged.
 	void set_wait_first_index_connect(bool b) { this->_wait_first_index_connect = b; };
+	// exists only while startup_node waits for the first index connection
+	static const char* const first_index_wait_marker;
 	static const int first_index_connect_timeout_ms = 5000;	// deadline of each attempt
 	static const uint32_t first_index_backoff_base_ms = 500;
 	static const uint32_t first_index_backoff_cap_ms = 30000;

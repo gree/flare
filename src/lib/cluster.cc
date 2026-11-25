@@ -55,9 +55,14 @@
 
 #include <functional>
 #include <boost/bind.hpp>
+#include <cerrno>
+#include <cstdio>
+#include <cstring>
 
 namespace gree {
 namespace flare {
+
+const char* const cluster::first_index_wait_marker = "/tmp/flared-waiting-first-index";
 
 // {{{ global functions
 // }}}
@@ -320,12 +325,24 @@ int cluster::startup_node(const vector<index_server>& index_servers, uint32_t pr
 	shared_connection c;
 	if (this->_wait_first_index_connect) {
 		// only up to the first established connection; everything after it
-		// (node-add, reply unknown, index loss) behaves as before
+		// (node-add, reply unknown, index loss) behaves as before.
+		// flared listens only after its registration, so the liveness probe
+		// cannot reach its port while it waits here: this marker tells the
+		// probe that the process is alive and waiting (the chart's liveness
+		// accepts it). It exists only during this wait, never afterwards.
+		const char* marker = cluster::first_index_wait_marker;
+		FILE* mf = fopen(marker, "w");
+		if (mf != NULL) {
+			fclose(mf);
+		} else {
+			log_warning("could not create %s (%s): the liveness probe may restart this process while it waits for the index server", marker, strerror(errno));
+		}
 		c = retry_first_index_open(
 				boost::bind(&cluster::_open_index, this),
 				boost::bind(&cluster::_sleep_ms, _1),
 				boost::bind(&cluster::_jitter_permille),
 				boost::function<bool()>());
+		unlink(marker);
 	} else {
 		c = this->_open_index();
 	}

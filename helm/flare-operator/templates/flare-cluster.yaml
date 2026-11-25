@@ -539,9 +539,16 @@ spec:
             - name: data
               mountPath: /data
             {{- end }}
+          # Liveness: the port answers, OR flared is waiting for its first
+          # index connection (a new cluster's operator may wait for the
+          # first-build approval without serving its index; flared listens only
+          # after it registered). The marker exists only during that wait.
           livenessProbe:
-            tcpSocket:
-              port: {{ $c.flarePort }}
+            exec:
+              command:
+                - /bin/bash
+                - -c
+                - '[ -e /tmp/flared-waiting-first-index ] || exec 3<>/dev/tcp/127.0.0.1/{{ $c.flarePort }}'
             initialDelaySeconds: {{ $probes.liveness.initialDelaySeconds }}
             periodSeconds: {{ $probes.liveness.periodSeconds }}
             failureThreshold: {{ $probes.liveness.failureThreshold }}

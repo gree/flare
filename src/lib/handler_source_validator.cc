@@ -95,6 +95,13 @@ void handler_source_validator::_check_once() {
 	source_probe p;
 	if (!current.empty() && !b.master_id.empty()) {
 		handler_source_validator::probe(current, this->_cluster, p);
+#ifdef HAVE_LIBROCKSDB
+		storage_rocksdb* rdb = dynamic_cast<storage_rocksdb*>(this->_cluster->get_storage());
+		if (rdb != NULL && p.complete && p.source_epoch != b.source_epoch) {
+			p.continued_source_behind = rdb->continuation_source_behind(p.source_epoch);
+			p.continued_left_master_id = p.master_id != b.master_id && rdb->continuation_left_master_id(p.master_id);
+		}
+#endif
 	}
 	const source_decision d = decide_source(b, current, p);
 	if (d == decision_keep) {

@@ -5124,6 +5124,301 @@ void test_apply_refuses_a_stopped_followers_generation() {
 	drop_rocksdb(s, wal_master_dir);
 }
 
+// History continuation under write load (a dev cluster, 200 writes/s): a replica that
+// COMMITS a continued history must make every later group of the follower it
+// had before harmless. The commit moves the follow generation under the same
+// lock an apply decides under, and the epoch it left is refused as a stale
+// follower (never as "another history", which makes the copy rebuild).
+void test_history_commit_as_replica_makes_the_old_follower_stale() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	const string e0 = s->get_source_epoch();
+	const string inc = s->get_incarnation();
+	cut_assert_equal_int(0, s->set_repl_last_lsn(9));
+	storage_rocksdb* scratch = make_rocksdb(wal_slave_dir);
+	rocksdb::WriteBatch b;
+	b.Put(rocksdb::Slice("late"), rocksdb::Slice(serialized_entry(scratch, "late", "v")));
+	const uint64_t gen0 = s->bump_follow_generation();   // the old follower
+	storage_rocksdb::pending_history in;
+	in.hid = "p0-a1-load";
+	in.partition = 0;
+	in.successor = "succ:12121";
+	in.from_epoch = e0;
+	in.to_epoch = "99:load";
+	in.seq = 500;
+	in.master_id = "new-master-id";
+	in.deadline_ms = wal_pin::now_ms() + 60000;
+	string res;
+	cut_assert_equal_int(0, s->history_replica_prepare(in, inc, res));
+	cut_assert_true(s->history_replica_pending());
+	cut_assert_equal_int(0, s->history_arm("p0-a1-load", 5, res));
+	// before the commit the old follower's group applies (same history)
+	uint64_t applied = 0, skipped = 0;
+	storage_rocksdb::apply_outcome refusal;
+	cut_assert_equal_int(0, s->apply_wal_batch(e0, inc, 10, b, applied, skipped, refusal, gen0));
+	cut_assert_false(s->continuation_source_behind(""));
+	cut_assert_equal_int(1, s->history_on_map(0, "succ:12121", "me:12121", 5));
+	cut_assert_false(s->history_replica_pending());
+	cut_assert_true(s->get_follow_generation() > gen0);
+	cut_assert_equal_string(e0.c_str(), s->get_superseded_epoch().c_str());
+	// after it: the old follower (its generation) and any follower still
+	// carrying the old epoch are refused as STALE, nothing is written
+	rocksdb::WriteBatch late;
+	late.Put(rocksdb::Slice("late2"), rocksdb::Slice(serialized_entry(scratch, "late2", "v")));
+	cut_assert_equal_int(-1, s->apply_wal_batch(e0, inc, 501, late, applied, skipped, refusal, gen0));
+	cppcut_assert_equal(storage_rocksdb::apply_refused_stale_follower, refusal);
+	cut_assert_equal_int(-1, s->apply_wal_batch(e0, inc, 501, late, applied, skipped, refusal, s->get_follow_generation()));
+	cppcut_assert_equal(storage_rocksdb::apply_refused_stale_follower, refusal);
+	cut_assert_equal_int(-1, s->apply_wal_batch(e0, inc, 501, late, applied, skipped, refusal, 0));
+	cppcut_assert_equal(storage_rocksdb::apply_refused_stale_follower, refusal);
+	cppcut_assert_equal(static_cast<uint64_t>(500), s->get_repl_last_lsn());
+	string out;
+	cut_assert_equal_int(-1, storage_get_string(s, "late2", out));
+	// a follower of the continued history (new epoch, current generation)
+	// continues from the committed cursor
+	cut_assert_equal_int(0, s->apply_wal_batch("99:load", inc, 501, late, applied, skipped, refusal, s->get_follow_generation()));
+	cut_assert_equal_int(0, storage_get_string(s, "late2", out));
+	// the new master that has not committed yet still serves the epoch left
+	cut_assert_true(s->continuation_source_behind(e0));
+	cut_assert_true(s->continuation_source_behind(""));
+	cut_assert_false(s->continuation_source_behind("98:another"));
+	drop_rocksdb(scratch, wal_slave_dir);
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// The same group on a copy that did NOT continue: a real epoch mismatch is
+// still "another history" (apply_refused_session -> the copy rebuilds), and
+// a source answering another epoch is not "behind".
+void test_a_real_epoch_mismatch_is_still_refused_as_another_history() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	const string inc = s->get_incarnation();
+	cut_assert_equal_int(0, s->set_repl_last_lsn(9));
+	storage_rocksdb* scratch = make_rocksdb(wal_slave_dir);
+	rocksdb::WriteBatch b;
+	b.Put(rocksdb::Slice("k"), rocksdb::Slice(serialized_entry(scratch, "k", "v")));
+	const uint64_t gen = s->bump_follow_generation();
+	uint64_t applied = 0, skipped = 0;
+	storage_rocksdb::apply_outcome refusal;
+	cut_assert_equal_int(-1, s->apply_wal_batch("77:other", inc, 10, b, applied, skipped, refusal, gen));
+	cppcut_assert_equal(storage_rocksdb::apply_refused_session, refusal);
+	cut_assert_true(s->get_superseded_epoch().empty());
+	cut_assert_false(s->continuation_source_behind(s->get_source_epoch()));
+	cut_assert_false(s->continuation_source_behind(""));
+	cppcut_assert_equal(static_cast<uint64_t>(9), s->get_repl_last_lsn());
+	drop_rocksdb(scratch, wal_slave_dir);
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// Commit a replica continuation on `s` (it left master_id "old-master-id" and
+// its current epoch); returns the epoch it left.
+static string continue_replica_for_test(storage_rocksdb* s, const char* hid) {
+	const string e0 = s->get_source_epoch();
+	const string inc = s->get_incarnation();
+	cut_assert_equal_int(0, s->set_master_id("old-master-id"));
+	cut_assert_equal_int(0, s->set_repl_last_lsn(9));
+	storage_rocksdb::pending_history in;
+	in.hid = hid;
+	in.partition = 0;
+	in.successor = "succ:12121";
+	in.from_epoch = e0;
+	in.to_epoch = "99:load";
+	in.seq = 500;
+	in.master_id = "new-master-id";
+	in.deadline_ms = wal_pin::now_ms() + 60000;
+	string res;
+	cut_assert_equal_int(0, s->history_replica_prepare(in, inc, res));
+	cut_assert_equal_int(0, s->history_arm(hid, 5, res));
+	cut_assert_equal_int(1, s->history_on_map(0, "succ:12121", "me:12121", 5));
+	return e0;
+}
+
+// P1: the grace of a continued replica survives a restart of flared, bound to
+// the epoch/master_id it left, and is not extended by the restart.
+void test_continuation_evidence_survives_restart_and_expires_by_its_deadline() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	s->set_continuation_grace_ms(1500);
+	const string e0 = continue_replica_for_test(s, "p0-a1-dur");
+	cut_assert_true(s->continuation_source_behind(e0));
+	drop_rocksdb_noremove(s);
+	// restart inside the window: the evidence is back, bound to the old lineage
+	s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_string("99:load", s->get_source_epoch().c_str());
+	cut_assert_equal_string(e0.c_str(), s->get_superseded_epoch().c_str());
+	cut_assert_true(s->continuation_source_behind(e0));
+	cut_assert_true(s->continuation_source_behind(""));
+	cut_assert_false(s->continuation_source_behind("98:another"));
+	cut_assert_true(s->continuation_left_master_id("old-master-id"));
+	cut_assert_false(s->continuation_left_master_id("unrelated-master-id"));
+	cut_assert_false(s->continuation_left_master_id(""));
+	// a restart does not restart the window: the persisted deadline stands
+	drop_rocksdb_noremove(s);
+	usleep(1700 * 1000);
+	s = make_rocksdb(wal_master_dir);
+	cut_assert_false(s->continuation_source_behind(e0));
+	cut_assert_false(s->continuation_left_master_id("old-master-id"));
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// The successor reporting the committed epoch ends the exception, durably.
+void test_continuation_evidence_is_cleared_when_the_successor_commits() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	const string e0 = continue_replica_for_test(s, "p0-a1-clr");
+	// another epoch is not the successor's commit
+	s->continuation_observe_source_epoch(e0);
+	cut_assert_true(s->continuation_source_behind(e0));
+	s->continuation_observe_source_epoch("99:load");
+	cut_assert_false(s->continuation_source_behind(e0));
+	cut_assert_false(s->continuation_left_master_id("old-master-id"));
+	drop_rocksdb_noremove(s);
+	s = make_rocksdb(wal_master_dir);
+	cut_assert_false(s->continuation_source_behind(e0));
+	cut_assert_false(s->continuation_left_master_id("old-master-id"));
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// P1 (review of f861c0b4): clearing the continuation evidence deletes from the
+// DB, which a copy switch closes and replaces under the whole-lock for write.
+// Deterministic form: the observer is held (hook) between taking its locks and
+// its delete for 300 ms while the switch runs; the switch must wait for it, and
+// the state after it is the switched copy's, with no evidence left.
+static int cont_hook_inside = 0;	// __atomic
+static struct timespec cont_observer_end;	// written by the observer, read after join
+
+static void cont_before_delete_hook() {
+	if (__atomic_exchange_n(&cont_hook_inside, 1, __ATOMIC_ACQ_REL)) {
+		return;
+	}
+	usleep(300 * 1000);
+}
+
+static void* cont_observer_main(void* p) {
+	static_cast<storage_rocksdb*>(p)->continuation_observe_source_epoch("99:load");
+	clock_gettime(CLOCK_MONOTONIC, &cont_observer_end);
+	return NULL;
+}
+
+void test_continuation_evidence_delete_waits_for_a_copy_switch() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	continue_replica_for_test(s, "p0-a1-sw");
+	const string new_id = make_staging_copy(wal_master_dir, "contsw", "k", "new");
+	__atomic_store_n(&cont_hook_inside, 0, __ATOMIC_RELEASE);
+	storage_rocksdb::_test_hook_continuation_before_delete = cont_before_delete_hook;
+	pthread_t th;
+	pthread_create(&th, NULL, cont_observer_main, s);
+	for (int i = 0; i < 5000 && !__atomic_load_n(&cont_hook_inside, __ATOMIC_ACQUIRE); i++) {
+		usleep(1000);
+	}
+	const int inside = __atomic_load_n(&cont_hook_inside, __ATOMIC_ACQUIRE);
+	const int r = s->switch_to_staging("contsw", new_id);
+	struct timespec switched;
+	clock_gettime(CLOCK_MONOTONIC, &switched);
+	pthread_join(th, NULL);
+	storage_rocksdb::_test_hook_continuation_before_delete = NULL;
+	const string copy_id = s->get_copy_id();
+	const bool behind = s->continuation_source_behind("");
+	const string after = get_value(s, "k");
+	drop_rocksdb(s, wal_master_dir);
+
+	cut_assert_equal_int(1, inside);
+	cut_assert_equal_int(0, r);
+	cut_assert_operator_double(ts_ms(switched), >=, ts_ms(cont_observer_end));
+	cut_assert_equal_string(new_id.c_str(), copy_id.c_str());
+	cut_assert_false(behind);
+	cut_assert_equal_string("new", after.c_str());
+}
+
+// The same race without a hook, many iterations: observers hammer the delete
+// while every iteration re-arms the evidence and switches the copy. Must not
+// crash; afterwards the live copy is the switched one and carries no evidence.
+struct cont_race_arg {
+	storage_rocksdb* s;
+	int stop;			// __atomic
+};
+
+static void* cont_race_observer_main(void* p) {
+	cont_race_arg* a = static_cast<cont_race_arg*>(p);
+	while (!__atomic_load_n(&a->stop, __ATOMIC_ACQUIRE)) {
+		a->s->continuation_observe_source_epoch("99:load");
+	}
+	return NULL;
+}
+
+void test_continuation_evidence_delete_races_copy_switches_without_crashing() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	cont_race_arg a;
+	a.s = s;
+	__atomic_store_n(&a.stop, 0, __ATOMIC_RELEASE);
+	pthread_t th[2];
+	for (int i = 0; i < 2; i++) {
+		pthread_create(&th[i], NULL, cont_race_observer_main, &a);
+	}
+	string new_id;
+	for (int i = 0; i < 20; i++) {
+		char hid[32], at[16];
+		snprintf(hid, sizeof(hid), "p0-a1-race%d", i);
+		snprintf(at, sizeof(at), "cr%d", i);
+		continue_replica_for_test(s, hid);
+		new_id = make_staging_copy(wal_master_dir, at, "k", "new");
+		cut_assert_equal_int(0, s->switch_to_staging(at, new_id));
+	}
+	__atomic_store_n(&a.stop, 1, __ATOMIC_RELEASE);
+	for (int i = 0; i < 2; i++) {
+		pthread_join(th[i], NULL);
+	}
+	const string copy_id = s->get_copy_id();
+	const bool behind = s->continuation_source_behind("");
+	const string after = get_value(s, "k");
+	drop_rocksdb(s, wal_master_dir);
+	cut_assert_equal_string(new_id.c_str(), copy_id.c_str());
+	cut_assert_false(behind);
+	cut_assert_equal_string("new", after.c_str());
+}
+
+// P2: the text client stream. A master_id_mismatch reply is waited for only
+// when it names the master_id this copy left.
+static int mismatch_result_for_test(storage_rocksdb* s, const char* reply_line) {
+	shared_connection c(new connection_sstream(reply_line));
+	op_repl_sync_wal op(c, s);
+	op.run_client_follow(501, s->get_master_id(), s->get_source_epoch(), s->get_incarnation(), 10, 1 << 20);
+	return op.get_client_result();
+}
+
+void test_master_id_mismatch_of_the_left_master_id_is_retried_within_the_grace() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	continue_replica_for_test(s, "p0-a1-p2a");
+	cut_assert_equal_int(op_repl_sync_wal::client_server_error,
+		mismatch_result_for_test(s, "SERVER_ERROR master_id_mismatch old-master-id\r\n"));
+	drop_rocksdb(s, wal_master_dir);
+}
+
+void test_master_id_mismatch_of_an_unrelated_master_id_rebuilds_at_once() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	continue_replica_for_test(s, "p0-a1-p2b");
+	cut_assert_equal_int(op_repl_sync_wal::client_master_id_mismatch,
+		mismatch_result_for_test(s, "SERVER_ERROR master_id_mismatch unrelated-master-id\r\n"));
+	// an empty-epoch / empty-id reply does not grant the grace either
+	cut_assert_equal_int(op_repl_sync_wal::client_master_id_mismatch,
+		mismatch_result_for_test(s, "SERVER_ERROR master_id_mismatch\r\n"));
+	drop_rocksdb(s, wal_master_dir);
+}
+
+void test_master_id_mismatch_of_the_left_master_id_without_a_continuation_rebuilds() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_int(0, s->set_master_id("old-master-id"));
+	cut_assert_equal_int(op_repl_sync_wal::client_master_id_mismatch,
+		mismatch_result_for_test(s, "SERVER_ERROR master_id_mismatch old-master-id\r\n"));
+	drop_rocksdb(s, wal_master_dir);
+}
+
+void test_master_id_mismatch_of_the_left_master_id_after_the_grace_rebuilds() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	s->set_continuation_grace_ms(200);
+	continue_replica_for_test(s, "p0-a1-p2c");
+	usleep(400 * 1000);
+	cut_assert_equal_int(op_repl_sync_wal::client_master_id_mismatch,
+		mismatch_result_for_test(s, "SERVER_ERROR master_id_mismatch old-master-id\r\n"));
+	drop_rocksdb(s, wal_master_dir);
+}
+
 // A newer value arrives by forwarding; the WAL then delivers an older change
 // for the same key. The newer value must stand.
 void test_apply_rule_forwarded_newer_survives_older_wal() {

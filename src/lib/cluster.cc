@@ -1480,7 +1480,28 @@ int cluster::_reconstruct_node(vector<node> v, uint64_t node_map_version) {
 					master_key = it->first;
 				}
 			}
-			this->_storage->history_on_map(me->second.node_partition, master_key, this->_node_key, node_map_version);
+			const int hc = this->_storage->history_on_map(me->second.node_partition, master_key, this->_node_key, node_map_version);
+			if (hc == 1) {
+				// Committed as a replica: the follower started from the
+				// previous history (the old master's, or one already
+				// pointed at the new master from the old position) is
+				// stopped; the reconcile below starts one from the
+				// committed epoch and cursor.
+				this->stop_wal_follower();
+#ifdef HAVE_LIBROCKSDB
+				// The read-source binding moves to the committed history
+				// under the same map write locks, before any validator
+				// decision (its apply takes them in read mode and is
+				// generation-checked) can compare the new epoch with the
+				// old binding.
+				if (storage_rocksdb* rdb = dynamic_cast<storage_rocksdb*>(this->_storage)) {
+					this->continue_read_source_locked(master_key, rdb->get_master_id(), rdb->get_source_epoch());
+				}
+#endif
+			}
+			// a pending history held the followers where they were (see
+			// _reconcile_wal_follower_locked); it is decided now
+			this->_reconcile_wal_follower_locked();
 		}
 	}
 
@@ -2281,6 +2302,26 @@ void cluster::bind_read_source(const string& source, const string& master_id, co
 		source.c_str(), master_id.c_str(), source_epoch.empty() ? "(legacy, lineage only)" : source_epoch.c_str(), reason.c_str());
 }
 
+void cluster::continue_read_source_locked(const string& source, const string& master_id, const string& source_epoch) {
+	pthread_mutex_lock(&this->_mutex_read_source);
+	// only a copy that was validated moves on; a copy already found different
+	// (none / needs_rebuild) is not made valid by a continuation
+	if (this->_read_source.st == source_binding::eligible || this->_read_source.st == source_binding::revalidating) {
+		const string from = this->_read_source.source_epoch;
+		if (this->_read_source.st == source_binding::eligible) {
+			this->_read_source.source = source;
+		}
+		this->_read_source.master_id = master_id;
+		this->_read_source.source_epoch = source_epoch;
+		this->_read_source.reason = "continued history committed (" + from + " -> " + source_epoch + ")";
+		this->_read_source.generation++;
+		this->_read_source_wake = true;
+		pthread_cond_signal(&this->_cond_read_source);
+		log_notice("read source continued: %s (master_id %s, source epoch %s -> %s)", source.c_str(), master_id.c_str(), from.c_str(), source_epoch.c_str());
+	}
+	pthread_mutex_unlock(&this->_mutex_read_source);
+}
+
 void cluster::reset_read_source(const string& reason) {
 	pthread_mutex_lock(&this->_mutex_read_source);
 	const bool changed = this->_read_source.st != source_binding::none;
@@ -2550,6 +2591,16 @@ int cluster::_reconcile_wal_follower_locked() {
 	}
 	if (this->_wal_follower_thread && this->_wal_follower_source == source_key && stats_object != NULL
 			&& stats_object->get_follow_record().state == "needs_rebuild") {
+		return 0;
+	}
+
+	if (this->_storage->history_replica_pending()) {
+		// A prepared history continuation of this replica is undecided: the
+		// epoch, master_id and cursor a follower of the new master must
+		// start from are the COMMIT's. One started now would ask the new
+		// master with the old position (another sequence space) and its
+		// first group would land on the continued history. The map that
+		// commits or discards the pending history reconciles again.
 		return 0;
 	}
 

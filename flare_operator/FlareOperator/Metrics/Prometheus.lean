@@ -173,6 +173,12 @@ structure OperatorMetrics where
   -- suspected AZ-scale outage with automatic failover intentionally halted.
   circuitBreakerTripped : Gauge
 
+  -- Gauge: 1 while a leader holds the Lease but waits, without exiting, for
+  -- the first-build approval of a new cluster (node map absent, past not
+  -- observable, no approval annotation); 0 otherwise. Exposed from the
+  -- metrics server, which already runs before the node-map decision.
+  firstBuildWaiting : Gauge
+
   -- Gauge: partitions requested by the CRD. Lets alerting compare
   -- masters(active) against the DESIRED count instead of a hardcoded one.
   partitionsDesired : Gauge
@@ -258,6 +264,7 @@ def initMetrics : IO OperatorMetrics := do
   let cordonMoveUnservedSeconds ← IO.mkRef 0.0
   let cordonMoveLastUnservedSeconds ← IO.mkRef 0.0
   let circuitBreakerTripped ← IO.mkRef 0.0
+  let firstBuildWaiting ← IO.mkRef 0.0
   let partitionsDesired ← IO.mkRef 0.0
   let migrationPhase ← IO.mkRef 0.0
   let migrationDesired ← IO.mkRef 0.0
@@ -299,6 +306,7 @@ def initMetrics : IO OperatorMetrics := do
     cordonMoveUnservedSeconds := { value := cordonMoveUnservedSeconds }
     cordonMoveLastUnservedSeconds := { value := cordonMoveLastUnservedSeconds }
     circuitBreakerTripped := { value := circuitBreakerTripped }
+    firstBuildWaiting := { value := firstBuildWaiting }
     partitionsDesired := { value := partitionsDesired }
     migrationPhase := { value := migrationPhase }
     migrationDesired := { value := migrationDesired }
@@ -593,6 +601,10 @@ def exportMetrics (metrics : OperatorMetrics) (clusterName : String) : IO String
   output := output ++ "# TYPE flare_operator_circuit_breaker_tripped gauge\n"
   let tripped ← metrics.circuitBreakerTripped.value.get
   output := output ++ formatGauge "flare_operator_circuit_breaker_tripped" labels tripped
+
+  output := output ++ "# HELP flare_operator_first_build_waiting 1 while the leader waits for the first-build approval annotation of a new cluster (no restart, no index server); alert if it stays 1 longer than expected\n"
+  output := output ++ "# TYPE flare_operator_first_build_waiting gauge\n"
+  output := output ++ formatGauge "flare_operator_first_build_waiting" labels (← metrics.firstBuildWaiting.value.get)
 
   -- Desired partitions from the CRD (gauge)
   output := output ++ "# HELP flare_operator_partitions_desired Partitions requested by the FlareCluster spec\n"

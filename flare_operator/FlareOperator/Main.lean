@@ -4720,6 +4720,20 @@ def main (args : List String) : IO Unit := do
   let reset := (← IO.getEnv "FLARE_NODE_MAP_RESET") == some "1"
   let mut nmAttempt := 0
   let mut nmSettled := false
+  -- The first-build wait (NodeMapRecovery.await): entered only for a missing
+  -- or empty map + unobservable past + no approval of THIS FlareCluster.
+  -- While it lasts the Lease is renewed by a keeper under the same rules as
+  -- the leader loop (LeaseKeeper.decide), readiness stays false (leader, no
+  -- TCP server) and no index server is started.
+  let mut awaiting := false
+  let mut awaitTicks := 0
+  let awaitDone ← IO.mkRef false
+  let awaitLeaseExit : String → IO Unit := fun why => do
+    IO.eprintln s!"[flare-operator] LOST LEASE while waiting for the first-build approval -- exiting ({why})"
+    healthStatus.setLeader false
+    let _ ← setRoleLabel identity ns "standby"
+    (← IO.getStderr).flush
+    IO.Process.exit 1
   while !nmSettled do
     nmAttempt := nmAttempt + 1
     let read := NodeMapRecovery.classifyRead (← readFlaredConfigMap cmName ns)
@@ -4730,7 +4744,49 @@ def main (args : List String) : IO Unit := do
       | .failed _ => false
     let (hist, approved) ← if needsHistory then nodeMapHistory crName ns s!"{crName}-operator-lease"
       else pure (NodeMapRecovery.History.unknown "not needed: the map is valid", false)
-    match NodeMapRecovery.decide read hist reset approved with
+    let decision := NodeMapRecovery.decide read hist reset approved
+    -- leaving the wait (to anything but another wait): stop the keeper,
+    -- clear the gauge, one Event for the transition
+    if awaiting && decision.kind != "await" then
+      awaiting := false
+      awaitDone.set true
+      metrics.firstBuildWaiting.set 0.0
+      IO.eprintln s!"[flare-operator] first-build wait ended after ~{awaitTicks * 5} s: decision is {decision.kind}"
+      Bridge.emitEvent crName ns "FlareFirstBuildWaitEnded" s!"the node map decision for {crName} is no longer waiting for the first-build approval ({decision.kind})" false
+    match decision with
+    | .await why =>
+      nmAttempt := 0   -- a wait does not use up the bounded retries of a failed read
+      if !awaiting then
+        awaiting := true
+        awaitTicks := 0
+        metrics.firstBuildWaiting.set 1.0
+        IO.eprintln s!"[flare-operator] WAITING for the first-build approval: {why}. The operator keeps its Lease, stays not Ready, serves no index and distributes no map until the approval is set"
+        Bridge.emitEvent crName ns "FlareFirstBuildWaiting" s!"waiting for the first-build approval of {crName}: kubectl annotate flarecluster {crName} flare.gree.net/first-build-approved=<its metadata.uid> (the operator does not restart while it waits)" true
+        let lastOkRef ← IO.mkRef (← IO.monoMsNow)
+        let leaseMs := leaseDurationSeconds * 1000
+        -- the first renew is checked at once; the keeper then runs on its own clock
+        let r0 ← renewOutcome leaseName ns identity
+        if r0 == .renewed then lastOkRef.set (← IO.monoMsNow)
+        match LeaseKeeper.decide r0 0 leaseMs 0 0 with
+        | .lost why => awaitLeaseExit why
+        | .keep => pure ()
+        let _ ← IO.asTask (prio := .dedicated) do
+          try
+            LeaseKeeper.run (do
+                let r ← renewOutcome leaseName ns identity
+                if r == .renewed then lastOkRef.set (← IO.monoMsNow)
+                pure r)
+              IO.monoMsNow (pure none) (fun ms => IO.sleep ms.toUInt32)
+              awaitDone.get awaitLeaseExit leaseMs (leaseMs / 3) 0 (← lastOkRef.get)
+          catch e =>
+            IO.eprintln s!"[flare-operator] first-build wait: lease keeper error: {e}"
+            awaitLeaseExit "the lease keeper stopped"
+      else
+        awaitTicks := awaitTicks + 1
+        -- logs are rate-limited: one line a minute
+        if awaitTicks % 12 == 0 then
+          IO.eprintln s!"[flare-operator] still waiting for the first-build approval ({awaitTicks * 5} s): {why}"
+      IO.sleep 5000
     | .load loaded =>
       -- MIGRATION: maps persisted by pre-thread operators load every node at
       -- the shared default 16, which collapses flared's per-destination proxy

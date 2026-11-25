@@ -40,6 +40,8 @@
 #include <boost/serialization/map.hpp>
 #include <boost/serialization/string.hpp>
 #include <boost/lexical_cast.hpp>
+#include <boost/function.hpp>
+#include <boost/bind.hpp>
 
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -263,6 +265,10 @@ protected:
 	string									_wal_follower_source;	// node key being followed
 	replication						_replication_type;
 	uint32_t							_proxy_prior_netmask;
+	// K8s first-build wait: retry the FIRST index connection of startup_node
+	// without a total limit (false = a failed first connect fails startup, as
+	// before). Never reaches past the node-add that follows the connection.
+	bool								_wait_first_index_connect;
 	uint32_t							_max_total_thread_queue;
 	bool								_read_unavailable_error;
 
@@ -275,6 +281,27 @@ public:
 
 	int startup_index(coordinator* coord, key_resolver::type key_resolver_type, int key_resolver_modular_hint, int key_resolver_modular_virtual);
 	int startup_node(const vector<index_server>& index_servers, uint32_t proxy_prior_netmask);
+
+	// First-index-connection wait (K8s operator mode only). The operator may
+	// not serve its index yet (a new cluster waiting for the first-build
+	// approval); flared then retries instead of exiting into a CrashLoop.
+	// Only the connection attempts BEFORE the first connection is established
+	// are covered: node-add, its reply and index loss afterwards are unchanged.
+	void set_wait_first_index_connect(bool b) { this->_wait_first_index_connect = b; };
+	static const int first_index_connect_timeout_ms = 5000;	// deadline of each attempt
+	static const uint32_t first_index_backoff_base_ms = 500;
+	static const uint32_t first_index_backoff_cap_ms = 30000;
+	// exponential backoff with jitter: for attempt n (0-based) the ceiling is
+	// min(cap, base * 2^n) and the result lies in [ceiling/2, ceiling];
+	// jitter_permille (0..1000) picks the point
+	static uint32_t first_index_backoff_ms(unsigned attempt, uint32_t jitter_permille);
+	// retries `open` until it yields a connection (no count or time limit);
+	// sleeps first_index_backoff_ms between attempts through `sleep_ms`;
+	// `stop` (may be empty) ends the wait with an empty connection
+	static shared_connection retry_first_index_open(const boost::function<shared_connection()>& open,
+			const boost::function<void(uint32_t)>& sleep_ms,
+			const boost::function<uint32_t()>& jitter_permille,
+			const boost::function<bool()>& stop);
 
 	int add_node(string node_server_name, int node_server_port);
 	int down_node(string node_server_name, int node_server_port, bool shutdown_mode = false);
@@ -571,6 +598,8 @@ protected:
 	// thread::enqueue so a thread reused since then refuses the item
 	int _get_proxy_thread(string node_key, int key_hash, shared_thread& t, unsigned int& t_id);
 	shared_connection _open_index();
+	static void _sleep_ms(uint32_t ms);
+	static uint32_t _jitter_permille();
 	shared_connection _open_index_single_server();
 	shared_connection _open_index_redundant();
 	int _get_reconstruction_bwlimit_for_new_partition(size_t current_partition_size);

@@ -737,6 +737,85 @@ namespace test_cluster
 		cut_assert_equal_int(cluster::proxy_request_error_partition, a.result,
 			cut_message("a change from a non-master was applied as a replica (or not routed as a client write)"));
 	}
+
+	// ---- first-index-connection wait (K8s first build) ----
+	struct fic {
+		int opens;
+		int succeed_at;		// the open that succeeds (1-based, 0 = never)
+		std::vector<uint32_t> sleeps;
+		int stop_after;		// stop() true after this many opens (0 = never)
+		fic() : opens(0), succeed_at(0), stop_after(0) {}
+		shared_connection open() {
+			opens++;
+			if (succeed_at > 0 && opens == succeed_at) {
+				return shared_connection_tcp(new connection_tcp("127.0.0.1", 1));
+			}
+			return shared_connection();
+		}
+		void sleep(uint32_t ms) { sleeps.push_back(ms); }
+		bool stop() { return stop_after > 0 && opens >= stop_after; }
+	};
+	static uint32_t jit_lo() { return 0; }
+	static uint32_t jit_hi() { return 1000; }
+
+	void test_first_index_backoff_bounds() {
+		for (unsigned a = 0; a < 40; a++) {
+			uint64_t ceiling = 500;
+			for (unsigned i = 0; i < a && ceiling < 30000; i++) { ceiling *= 2; }
+			if (ceiling > 30000) { ceiling = 30000; }
+			uint32_t lo = cluster::first_index_backoff_ms(a, 0);
+			uint32_t hi = cluster::first_index_backoff_ms(a, 1000);
+			cppcut_assert_equal((uint32_t)(ceiling / 2), lo);
+			cppcut_assert_equal((uint32_t)ceiling, hi);
+			for (uint32_t j = 0; j <= 1000; j += 100) {
+				uint32_t v = cluster::first_index_backoff_ms(a, j);
+				cut_assert_true(v >= lo && v <= hi);
+			}
+		}
+		cppcut_assert_equal((uint32_t)30000, cluster::first_index_backoff_ms(1000000, 1000));
+		cppcut_assert_equal((uint32_t)16000, cluster::first_index_backoff_ms(5, 5000)); // jitter clamped to the ceiling (500*2^5)
+	}
+
+	void test_first_index_retry_unbounded_until_connected() {
+		fic f;
+		f.succeed_at = 500;		// far past any count/time limit
+		shared_connection c = cluster::retry_first_index_open(
+				boost::bind(&fic::open, &f), boost::bind(&fic::sleep, &f, _1),
+				&jit_hi, boost::function<bool()>());
+		cut_assert_true(c.get() != NULL);
+		cppcut_assert_equal(500, f.opens);
+		cppcut_assert_equal((size_t)499, f.sleeps.size());
+		for (size_t i = 0; i < f.sleeps.size(); i++) {
+			cut_assert_true(f.sleeps[i] <= 30000);
+			cut_assert_true(f.sleeps[i] >= 250);
+		}
+		cppcut_assert_equal((uint32_t)30000, f.sleeps.back());
+		// grows from the base, never shrinks at max jitter
+		for (size_t i = 1; i < f.sleeps.size(); i++) {
+			cut_assert_true(f.sleeps[i] >= f.sleeps[i - 1]);
+		}
+	}
+
+	void test_first_index_retry_immediate_success_does_not_sleep() {
+		fic f;
+		f.succeed_at = 1;
+		shared_connection c = cluster::retry_first_index_open(
+				boost::bind(&fic::open, &f), boost::bind(&fic::sleep, &f, _1),
+				&jit_lo, boost::function<bool()>());
+		cut_assert_true(c.get() != NULL);
+		cppcut_assert_equal(1, f.opens);
+		cppcut_assert_equal((size_t)0, f.sleeps.size());
+	}
+
+	void test_first_index_retry_stop_ends_wait() {
+		fic f;
+		f.stop_after = 3;
+		shared_connection c = cluster::retry_first_index_open(
+				boost::bind(&fic::open, &f), boost::bind(&fic::sleep, &f, _1),
+				&jit_lo, boost::bind(&fic::stop, &f));
+		cut_assert_true(c.get() == NULL);
+		cppcut_assert_equal(3, f.opens);
+	}
 }
 
 // vim: foldmethod=marker tabstop=2 shiftwidth=2 noexpandtab autoindent

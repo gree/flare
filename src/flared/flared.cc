@@ -277,6 +277,9 @@ int flared::startup(int argc, char **argv) {
 			log_notice("K8s operator mode: using operator at %s:%d as index server",
 				op_host, atoi(op_port));
 		}
+		// the operator may wait for the first-build approval of a new cluster
+		// without serving its index: retry the first connection, do not exit
+		this->_cluster->set_wait_first_index_connect(op_host != NULL && op_port != NULL);
 		if (this->_cluster->startup_node(k8s_index_servers,
 																		 ini_option_object().get_proxy_prior_netmask()) < 0) {
 			return -1;

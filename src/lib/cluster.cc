@@ -104,6 +104,7 @@ cluster::cluster(thread_pool* req_tp, thread_pool* other_tp, string server_name,
 		_wal_follow_batch_delay_usec(0),
 		_replication_type(replication_async),
 		_proxy_prior_netmask(0), 
+		_wait_first_index_connect(false),
 		_max_total_thread_queue(0),
 		_read_unavailable_error(false) {
 	this->_node_key = this->to_node_key(server_name, server_port);
@@ -316,7 +317,18 @@ int cluster::startup_node(const vector<index_server>& index_servers, uint32_t pr
 
 	log_notice("setting up cluster node... (type=%d, index_server_name=%s, index_server_port=%d)", this->_type, this->_index_servers[0].index_server_name.c_str(), this->_index_servers[0].index_server_port);
 
-	shared_connection c = this->_open_index();
+	shared_connection c;
+	if (this->_wait_first_index_connect) {
+		// only up to the first established connection; everything after it
+		// (node-add, reply unknown, index loss) behaves as before
+		c = retry_first_index_open(
+				boost::bind(&cluster::_open_index, this),
+				boost::bind(&cluster::_sleep_ms, _1),
+				boost::bind(&cluster::_jitter_permille),
+				boost::function<bool()>());
+	} else {
+		c = this->_open_index();
+	}
 	if (!c) {
 		log_err("failed to connect to index server", 0);
 		return -1;
@@ -379,6 +391,50 @@ int cluster::startup_node(const vector<index_server>& index_servers, uint32_t pr
 	this->_fixed_proxy_event_listeners = listeners;
 
 	return 0;
+}
+
+uint32_t cluster::first_index_backoff_ms(unsigned attempt, uint32_t jitter_permille) {
+	uint64_t ceiling = first_index_backoff_base_ms;
+	for (unsigned i = 0; i < attempt && ceiling < first_index_backoff_cap_ms; i++) {
+		ceiling *= 2;
+	}
+	if (ceiling > first_index_backoff_cap_ms) {
+		ceiling = first_index_backoff_cap_ms;
+	}
+	if (jitter_permille > 1000) {
+		jitter_permille = 1000;
+	}
+	uint64_t half = ceiling / 2;
+	return (uint32_t)(half + (ceiling - half) * jitter_permille / 1000);
+}
+
+shared_connection cluster::retry_first_index_open(const boost::function<shared_connection()>& open,
+		const boost::function<void(uint32_t)>& sleep_ms,
+		const boost::function<uint32_t()>& jitter_permille,
+		const boost::function<bool()>& stop) {
+	for (unsigned attempt = 0; ; attempt++) {
+		shared_connection c = open();
+		if (c) {
+			return c;
+		}
+		if (stop && stop()) {
+			return shared_connection();
+		}
+		uint32_t ms = first_index_backoff_ms(attempt, jitter_permille());
+		// log on the first attempt, then about once a minute at the cap
+		if (attempt == 0 || attempt % 4 == 0) {
+			log_warning("index server is not reachable yet (attempt %u); retrying in %u msec -- flared keeps waiting for its first index connection", attempt + 1, ms);
+		}
+		sleep_ms(ms);
+	}
+}
+
+void cluster::_sleep_ms(uint32_t ms) {
+	usleep((useconds_t)ms * 1000);
+}
+
+uint32_t cluster::_jitter_permille() {
+	return (uint32_t)(random() % 1001);
 }
 
 /**
@@ -3628,6 +3684,10 @@ shared_connection cluster::_open_index_single_server() {
 	// The operator pod is expected to be reachable via K8s Service ClusterIP
 	// with minimal latency. If it's not reachable, K8s will restart the pod.
 	ctp->set_connect_retry_limit(2);
+	if (this->_wait_first_index_connect) {
+		// each attempt of the first-connection wait has a deadline
+		ctp->set_connect_timeout_ms(first_index_connect_timeout_ms);
+	}
 #endif
 	if (ctp && ctp->open() == 0) {
 		return ctp;

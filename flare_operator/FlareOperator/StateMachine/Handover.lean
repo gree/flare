@@ -184,6 +184,11 @@ structure Config where
       after a clean drain, prepare the successor and the eligible replicas
       so they keep their copies instead of rebuilding -/
   continuation : Bool := false
+  /-- how long a prepared (pending) history outlives the handover's own
+      deadline (= HandoverDrive.pendingGraceMs): after
+      demotedMs + handoverMs + pendingGraceMs flared drops the pending
+      record by itself and a successor promoted later takes a NEW epoch -/
+  pendingGraceMs : Nat := 30000
   deriving Repr
 
 /-- What Main observed this pass for one entry. `none` = not readable now;
@@ -429,7 +434,19 @@ def step (cfg : Config) (e : Entry) (o : Obs) : Entry × Action :=
       -- a replacement pod reporting V2 and master is not the successor)
       let epochOk := !e.successorArmed || (!e.toEpoch.isEmpty && o.successorEpoch == some e.toEpoch)
       let sameSuccessor := !cfg.continuation || (o.successorAlive && epochOk)
+      -- the continuation EXPIRED: the pending deadline passed before the
+      -- successor committed, so flared dropped the record and the
+      -- successor was promoted the ordinary way with a new epoch. That is
+      -- not a continued history (the copies of the continued replicas are
+      -- rebuilt by the normal repair): the handover itself is complete.
+      -- Before the deadline, or with an unreadable epoch, a mismatch is
+      -- still a real one (halted below).
+      let expiredNormal := cfg.continuation && e.successorArmed && !epochOk
+        && o.nowMs >= e.demotedMs + cfg.handoverMs + cfg.pendingGraceMs
+        && o.successorAlive && (o.successorEpoch.any fun ep => ep != e.toEpoch)
       if !e.hid.isEmpty && !e.fullSent then (e, .send)
+      else if expiredNormal && allApplied o.entryVersions v2 && o.successorOwnRole == some "master" then
+        (toPhase e .done o.nowMs "the continuation expired (pending deadline passed): the successor was promoted the ordinary way; the replicas rebuild", .finish)
       else if allApplied o.entryVersions v2 && o.successorOwnRole == some "master" && sameSuccessor then
         (toPhase e .done o.nowMs, .finish)
       -- addendum 4 §2: after V2 went to the successor it may already be

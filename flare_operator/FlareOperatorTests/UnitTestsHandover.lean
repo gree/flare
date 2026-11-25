@@ -113,6 +113,23 @@ private def recoveryResults : List (String × Bool) := Id.run do
                 && (step ccfg armed doneObs).1.phase == .done
                 && (step {} prom other).1.phase == .done
                 && (Ledger.fromJson? ({ entries := [armed] } : Ledger).toJson).map (fun l => l.entries.map (·.successorArmed)) == some [true])]
+  -- an EXPIRED continuation (pending deadline = demotedMs 1100 + Th 10000 + grace 30000):
+  -- the successor promoted the ordinary way, with another epoch, after it -> done
+  let pend := 1100 + 10000 + 30000
+  let (x1, xa1) := step ccfg armed { doneObs with successorEpoch := some "8:new", nowMs := pend }
+  let (x2, _) := step ccfg armed { doneObs with successorEpoch := some "8:new", nowMs := pend - 1 }
+  let (x3, _) := step ccfg armed { doneObs with successorEpoch := none, nowMs := pend + 5000 }
+  let (x4, _) := step ccfg armed { doneObs with successorEpoch := some "8:new", nowMs := pend, successorOwnRole := some "slave" }
+  let (x5, _) := step ccfg armed { doneObs with successorEpoch := some "8:new", nowMs := pend, successorAlive := false }
+  let (x6, xa6) := step ccfg armed { doneObs with successorEpoch := some "9:e", nowMs := pend }
+  r := r ++ [("recovery: an expired continuation (successor promoted normally, another epoch, after the pending deadline) finishes the handover as done (no HALTED, the replicas rebuild by the normal repair); before the deadline, unreadable epoch, not master or not the successor it still halts/waits; the continued epoch is done as before",
+              x1.phase == .done && xa1 == .finish && !x1.reason.startsWith "HALTED"
+                && x2.phase == .promoting && x2.reason.startsWith "HALTED"
+                && x3.phase == .promoting && x3.reason.startsWith "HALTED"
+                && x4.phase == .promoting && x5.phase == .promoting && x5.reason.startsWith "HALTED"
+                && x6.phase == .done && xa6 == .finish
+                && (step {} prom { doneObs with successorEpoch := some "8:new", nowMs := pend }).1.phase == .done
+                && ({} : Config).pendingGraceMs == HandoverDrive.pendingGraceMs)]
   -- the frozen keys: every copy of the partition while committing or V2 is out
   let slavesOf := fun (p : Nat) => if p == 0 then ["s:12121", "r1:12121", "r2:12121"] else []
   r := r ++ [("recovery: while committingReplicas, promoting with V2 out, or replacing a stopped successor (before its V3 too), the partition's copies (and a fenced successor) are not promoted by the failover/refill; not before V2 otherwise, not after",

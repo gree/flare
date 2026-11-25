@@ -109,6 +109,9 @@ public:
 	// R3-D: the evidence of the STORED copy while a rebuild is in progress
 	// (moved here, durably, when an attempt starts; never advertised)
 	static const char* const kReplRebuiltFromSuspendedKey;
+	// durable grace evidence of a continued replica: "v1 <left epoch> <deadline_ms> <left master_id|-> <committed epoch>"
+	static const char* const kReplContinuedKey;
+	static const uint64_t kContinuationGraceMs;
 	// History continuation across an ordered handover (design
 	// docs/design-handover-history-continuation.md): a PENDING history,
 	// prepared but not active. "v1 <role> <hid> <partition> <successor>
@@ -357,7 +360,8 @@ protected:
 	// when (wall clock ms) — under _mutex_generations
 	string _superseded_epoch;
 	string _superseded_master_id;	// the master_id the copy left ("" = none recorded)
-	uint64_t _continued_at_ms;
+	uint64_t _continued_deadline_ms;	// wall clock; persisted, 0 = none
+	uint64_t _continuation_grace_ms;	// window a continuation commit grants (tests shorten it)
 	// Expired entries hidden from a read but NOT deleted (replica side).
 	AtomicCounter _expire_filtered;
 
@@ -584,6 +588,10 @@ public:
 	// the probed master_id is the one the copy left at its continuation
 	// commit, inside the same grace window (false when none was recorded)
 	bool continuation_left_master_id(const string& server_master_id);
+	// the source reported `server_epoch`: when it is this copy's committed epoch,
+	// the successor has committed and the evidence is cleared (memory and disk)
+	void continuation_observe_source_epoch(const string& server_epoch);
+	void set_continuation_grace_ms(uint64_t ms) { this->_continuation_grace_ms = ms; }
 	// The epoch this copy left by a continued history ("" = none): a batch
 	// of that epoch can never be applied any more
 	string get_superseded_epoch();

@@ -922,6 +922,10 @@ public:
 	// Test only (NULL in production): called by reap_expired between its scan
 	// and its deletes, with the whole-lock still held for read.
 	static void (*_test_hook_reap_scanned)();
+	// Test only (NULL in production): called by continuation_observe_source_epoch
+	// before it deletes the continuation evidence, with the whole-lock held for
+	// read and the generations lock held.
+	static void (*_test_hook_continuation_before_delete)();
 	// Durably overwrite the replication cursor (kReplLastLsnKey). Used to
 	// seed the cursor after a full-dump reconstruction so the next WAL
 	// sync can be incremental. Returns 0 on success, -1 on write failure.

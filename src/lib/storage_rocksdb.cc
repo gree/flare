@@ -3383,9 +3383,16 @@ void storage_rocksdb::continuation_observe_source_epoch(const string& server_epo
 	if (server_epoch.empty()) {
 		return;
 	}
+	// Lock order wholelock -> generations (as history_commit and the copy
+	// switch). The whole-lock in read mode keeps switch_to_staging from closing
+	// or replacing the DB under the delete; _db is checked under it.
+	pthread_rwlock_rdlock(&this->_mutex_wholelock);
 	pthread_rwlock_wrlock(&this->_mutex_generations);
 	if (this->_continued_deadline_ms != 0 && server_epoch == this->_source_epoch && this->_db != NULL) {
 		// the successor reports the committed epoch: the exception is over
+		if (_test_hook_continuation_before_delete != NULL) {
+			_test_hook_continuation_before_delete();
+		}
 		rocksdb::WriteOptions wo;
 		wo.sync = true;
 		rocksdb::Status st = this->_db->Delete(wo, kReplContinuedKey);
@@ -3397,6 +3404,7 @@ void storage_rocksdb::continuation_observe_source_epoch(const string& server_epo
 		}
 	}
 	pthread_rwlock_unlock(&this->_mutex_generations);
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
 }
 
 int storage_rocksdb::history_arm(const string& hid, uint64_t map_version, string& result) {
@@ -6767,6 +6775,7 @@ uint64_t storage_rocksdb::get_repl_last_lsn() {
 void (*storage_rocksdb::_test_hook_reader_checked)() = NULL;
 void (*storage_rocksdb::_test_hook_wal_purge_decided)(storage_rocksdb*) = NULL;
 void (*storage_rocksdb::_test_hook_reap_scanned)() = NULL;
+void (*storage_rocksdb::_test_hook_continuation_before_delete)() = NULL;
 
 uint64_t storage_rocksdb::_get_repl_last_lsn_locked() {
 	string value;

@@ -5275,6 +5275,104 @@ void test_continuation_evidence_is_cleared_when_the_successor_commits() {
 	drop_rocksdb(s, wal_master_dir);
 }
 
+// P1 (review of f861c0b4): clearing the continuation evidence deletes from the
+// DB, which a copy switch closes and replaces under the whole-lock for write.
+// Deterministic form: the observer is held (hook) between taking its locks and
+// its delete for 300 ms while the switch runs; the switch must wait for it, and
+// the state after it is the switched copy's, with no evidence left.
+static int cont_hook_inside = 0;	// __atomic
+static struct timespec cont_observer_end;	// written by the observer, read after join
+
+static void cont_before_delete_hook() {
+	if (__atomic_exchange_n(&cont_hook_inside, 1, __ATOMIC_ACQ_REL)) {
+		return;
+	}
+	usleep(300 * 1000);
+}
+
+static void* cont_observer_main(void* p) {
+	static_cast<storage_rocksdb*>(p)->continuation_observe_source_epoch("99:load");
+	clock_gettime(CLOCK_MONOTONIC, &cont_observer_end);
+	return NULL;
+}
+
+void test_continuation_evidence_delete_waits_for_a_copy_switch() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	continue_replica_for_test(s, "p0-a1-sw");
+	const string new_id = make_staging_copy(wal_master_dir, "contsw", "k", "new");
+	__atomic_store_n(&cont_hook_inside, 0, __ATOMIC_RELEASE);
+	storage_rocksdb::_test_hook_continuation_before_delete = cont_before_delete_hook;
+	pthread_t th;
+	pthread_create(&th, NULL, cont_observer_main, s);
+	for (int i = 0; i < 5000 && !__atomic_load_n(&cont_hook_inside, __ATOMIC_ACQUIRE); i++) {
+		usleep(1000);
+	}
+	const int inside = __atomic_load_n(&cont_hook_inside, __ATOMIC_ACQUIRE);
+	const int r = s->switch_to_staging("contsw", new_id);
+	struct timespec switched;
+	clock_gettime(CLOCK_MONOTONIC, &switched);
+	pthread_join(th, NULL);
+	storage_rocksdb::_test_hook_continuation_before_delete = NULL;
+	const string copy_id = s->get_copy_id();
+	const bool behind = s->continuation_source_behind("");
+	const string after = get_value(s, "k");
+	drop_rocksdb(s, wal_master_dir);
+
+	cut_assert_equal_int(1, inside);
+	cut_assert_equal_int(0, r);
+	cut_assert_operator_double(ts_ms(switched), >=, ts_ms(cont_observer_end));
+	cut_assert_equal_string(new_id.c_str(), copy_id.c_str());
+	cut_assert_false(behind);
+	cut_assert_equal_string("new", after.c_str());
+}
+
+// The same race without a hook, many iterations: observers hammer the delete
+// while every iteration re-arms the evidence and switches the copy. Must not
+// crash; afterwards the live copy is the switched one and carries no evidence.
+struct cont_race_arg {
+	storage_rocksdb* s;
+	int stop;			// __atomic
+};
+
+static void* cont_race_observer_main(void* p) {
+	cont_race_arg* a = static_cast<cont_race_arg*>(p);
+	while (!__atomic_load_n(&a->stop, __ATOMIC_ACQUIRE)) {
+		a->s->continuation_observe_source_epoch("99:load");
+	}
+	return NULL;
+}
+
+void test_continuation_evidence_delete_races_copy_switches_without_crashing() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	cont_race_arg a;
+	a.s = s;
+	__atomic_store_n(&a.stop, 0, __ATOMIC_RELEASE);
+	pthread_t th[2];
+	for (int i = 0; i < 2; i++) {
+		pthread_create(&th[i], NULL, cont_race_observer_main, &a);
+	}
+	string new_id;
+	for (int i = 0; i < 20; i++) {
+		char hid[32], at[16];
+		snprintf(hid, sizeof(hid), "p0-a1-race%d", i);
+		snprintf(at, sizeof(at), "cr%d", i);
+		continue_replica_for_test(s, hid);
+		new_id = make_staging_copy(wal_master_dir, at, "k", "new");
+		cut_assert_equal_int(0, s->switch_to_staging(at, new_id));
+	}
+	__atomic_store_n(&a.stop, 1, __ATOMIC_RELEASE);
+	for (int i = 0; i < 2; i++) {
+		pthread_join(th[i], NULL);
+	}
+	const string copy_id = s->get_copy_id();
+	const bool behind = s->continuation_source_behind("");
+	const string after = get_value(s, "k");
+	drop_rocksdb(s, wal_master_dir);
+	cut_assert_equal_string(new_id.c_str(), copy_id.c_str());
+	cut_assert_false(behind);
+	cut_assert_equal_string("new", after.c_str());
+}
+
 // P2: the text client stream. A master_id_mismatch reply is waited for only
 // when it names the master_id this copy left.
 static int mismatch_result_for_test(storage_rocksdb* s, const char* reply_line) {

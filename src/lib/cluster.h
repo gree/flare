@@ -439,6 +439,9 @@ public:
 	source_binding get_read_source();
 	// a completed, validated copy (reconstruction activated it)
 	void bind_read_source(const string& source, const string& master_id, const string& source_epoch, const string& reason);
+	// A replica committed a continued history: move the binding of a still
+	// valid copy to it. Under the map write locks the caller holds.
+	void continue_read_source_locked(const string& source, const string& master_id, const string& source_epoch);
 	// no validated copy any more (a reconstruction started, or the role changed)
 	void reset_read_source(const string& reason);
 	storage* get_storage() { return this->_storage; }

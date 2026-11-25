@@ -219,6 +219,26 @@ def podsFailFile : String := "/tmp/handover-pods-fail"
 /-- The file the operator's FLARE_TEST_HANDOVER_SAVE_FAIL_FILE names. -/
 def saveFailFile : String := "/tmp/handover-save-fail"
 
+/-- Write errors that a scenario tolerates (reported, never hidden): only
+    these kinds, at most `maxCount`, all first-to-last within `maxWindowUs`. -/
+structure ErrorBound where
+  kinds : List String
+  maxCount : Nat
+  maxWindowUs : Nat
+
+/-- The errors of both loads against a bound: none when within it, else why not. -/
+def ErrorBound.violation (b : ErrorBound) (svc peer : LoadStats) : Option String :=
+  let kinds := svc.errorKinds ++ peer.errorKinds
+  let bad := kinds.filter fun (k, _) => !(b.kinds.any fun w => containsSubstr k w)
+  let count := svc.errors + peer.errors
+  let firsts := [svc.firstErrorUs, peer.firstErrorUs].filterMap id
+  let lasts := [svc.lastErrorUs, peer.lastErrorUs].filterMap id
+  let window := (lasts.max?.getD 0) - (firsts.min?.getD 0)
+  if !bad.isEmpty then some s!"error kind(s) outside {b.kinds}: {bad}"
+  else if count > b.maxCount then some s!"{count} errors exceed the bound {b.maxCount}"
+  else if window > b.maxWindowUs then some s!"errors span {window / 1000000} s, beyond the bound {b.maxWindowUs / 1000000} s"
+  else none
+
 structure SwitchObs where
   opOk : Bool
   opDetail : String
@@ -239,6 +259,8 @@ structure SwitchObs where
       than the clients' wait (approved category (a), 2026-10-26: errors
       possible, no acknowledged write lost) -/
   errorsAllowed : Bool := false
+  /-- errors tolerated within this bound (and reported) -/
+  errorBound : Option ErrorBound := none
 
 /-- The target: the operation happened, 0 errors on both loads, 0
     acknowledged writes missing on the final master and on the replica
@@ -253,7 +275,10 @@ def switchVerdict (o : SwitchObs) : Option String :=
   | some mm, some mr =>
     let errs := o.svc.errors + o.peer.errors
     if mm != 0 || mr != 0 then some s!"DATA: {mm} acknowledged write(s) missing on the final master, {mr} on the replica 120 s after the switch settled ({o.missingReplica} when it settled; see missing.txt); {errs} write error(s)"
-    else if errs != 0 && !o.errorsAllowed then some s!"WRITE ERRORS: {o.svc.errors} on the client path {o.svc.errorKinds} by pod {o.svcByPod}, {o.peer.errors} on the proxy path {o.peer.errorKinds} by pod {o.peerByPod} (a planned switch must only delay)"
+    else if errs != 0 && !o.errorsAllowed && (o.errorBound.bind (·.violation o.svc o.peer)).isSome then
+      let why := (o.errorBound.bind (·.violation o.svc o.peer)).getD ""
+      some s!"WRITE ERRORS beyond the bound of the held commit: {why}; svc {o.svc.errors} {o.svc.errorKinds} by pod {o.svcByPod}, peer {o.peer.errors} {o.peer.errorKinds} by pod {o.peerByPod}"
+    else if errs != 0 && !o.errorsAllowed && o.errorBound.isNone then some s!"WRITE ERRORS: {o.svc.errors} on the client path {o.svc.errorKinds} by pod {o.svcByPod}, {o.peer.errors} on the proxy path {o.peer.errorKinds} by pod {o.peerByPod} (a planned switch must only delay)"
     else if !o.redundant then some "redundancy (master + active replica) was not restored within the bound"
     else none
 
@@ -262,7 +287,7 @@ def switchVerdict (o : SwitchObs) : Option String :=
     forwards those deletes to its replica: a forward that is never answered
     was counted as `proxy_write_failed` for that replica, which made it no
     successor for a cordon move and failed a handover's drain check. -/
-private def switchRun (c : Ctx) (op : SwitchOp) (noreplyDeletes : Bool := false) : IO (Except String SwitchObs) := do
+private def switchRun (c : Ctx) (op : SwitchOp) (noreplyDeletes : Bool := false) (errorBound : Option ErrorBound := none) : IO (Except String SwitchObs) := do
   match ← c.placement with
   | .error e => return .error e
   | .ok p =>
@@ -688,7 +713,15 @@ private def switchRun (c : Ctx) (op : SwitchOp) (noreplyDeletes : Bool := false)
     let acks : List WriteRec := ((svcRs ++ peerRs).filter (fun (r : LoadRec) => r.ack)).map (fun (r : LoadRec) => r.toWrite)
     let copies ← finalCopies c "settled"
     let copyOf := fun (cs : List (String × Option (List (String × String)))) (pod : Option String) => pod.bind fun n => (cs.lookup n).join
-    let replicaPod : Option String := (ps.find? (fun (r : PodRow) => some r.name != newM)).map (fun (r : PodRow) => r.name)
+    -- the replica is read from the node map's slaves of the partition (not
+    -- "the first pod that is not the new master": a recreated old master is
+    -- a proxy until its copy is rebuilt). With three copies it is the slave
+    -- that is not the old master; with two, the old master's recreated pod.
+    let slaves := ((← c.roles).map (·.2)).getD []
+    let replicaPod : Option String :=
+      match slaves.filter (fun n => n != p.master.name && ps.any (·.name == n)) with
+      | n :: _ => some n
+      | [] => slaves.find? (fun n => ps.any (·.name == n))
     let mm ← match copyOf copies newM with | some d => pure (some (← recordMissing c "master" acks d)) | none => pure none
     let mr ← match copyOf copies replicaPod with | some d => pure (some (← recordMissing c "replica-settled" acks d)) | none => pure none
     -- a gap that a repair fills is delayed, not lost: read the replica again after 120 s
@@ -702,7 +735,7 @@ private def switchRun (c : Ctx) (op : SwitchOp) (noreplyDeletes : Bool := false)
                            svcByPod := errorsByPod ips svcRs, peerByPod := errorsByPod ips peerRs,
                            missingMaster := mm, missingReplica := mr, missingReplicaLater := mrLater,
                            redundant := red, newMaster := newM, checkFail,
-                           errorsAllowed := op == SwitchOp.deleteMasterLeaseTakeover }
+                           errorsAllowed := op == SwitchOp.deleteMasterLeaseTakeover, errorBound }
     c.art "report.txt" (o.svc.summary "svc")
     c.art "report.txt" (o.peer.summary "peer")
     return .ok o
@@ -718,7 +751,8 @@ private def podIncarnations (c : Ctx) : IO (List (String × String × String × 
       | _ => none
   | .error _ => return []
 
-def switchTest (c : Ctx) (op : SwitchOp) (noreplyDeletes : Bool := false) : IO TestResult := do
+def switchTest (c : Ctx) (op : SwitchOp) (noreplyDeletes : Bool := false) (errorBound : Option ErrorBound := none)
+    (injectedRestarts : Option (IO.Ref (List String)) := none) : IO TestResult := do
   -- a flared that restarts INSIDE its pod (same UID) during an operation
   -- that only replaces or keeps pods is no part of the operation
   -- (41278035134: a master's flared died with no log line): recorded before
@@ -727,14 +761,19 @@ def switchTest (c : Ctx) (op : SwitchOp) (noreplyDeletes : Bool := false) : IO T
   let inc0 ← podIncarnations c
   for (n, u, r, cid, last) in inc0 do
     IO.eprintln s!"# [{c.test}] before: {n} uid {u} restarts {r} container {cid} lastState.terminated {last}"
-  let run ← switchRun c op noreplyDeletes
+  let run ← switchRun c op noreplyDeletes errorBound
   let inc1 ← podIncarnations c
   let mut unexpected : List String := []
+  -- a restart the test itself injected (history continuation: flared of the
+  -- continued replica restarted inside the delayed-successor window)
+  let injected ← match injectedRestarts with
+    | some ref => ref.get
+    | none => pure []
   for (n, u, r, cid, last) in inc1 do
     IO.eprintln s!"# [{c.test}] after: {n} uid {u} restarts {r} container {cid} lastState.terminated {last}"
     match inc0.find? (fun (n0, u0, _, _, _) => n0 == n && u0 == u) with
     | some (_, _, r0, cid0, _) =>
-      if r0 != r || cid0 != cid then
+      if (r0 != r || cid0 != cid) && !injected.contains n then
         unexpected := unexpected ++ [s!"{n} (restarts {r0} -> {r}, container {cid0} -> {cid}, lastState.terminated {last})"]
     | none => pure ()
   if !unexpected.isEmpty then
@@ -1975,6 +2014,308 @@ def continuationSwitchSuite : TestSuite :=
     tests := [{ name := "(A4) kubectl delete pod of the MASTER with three copies and history continuation on, under a client-like load: 0 write errors, 0 acknowledged writes missing, and the replica that is not the successor keeps its copy (COMMITTED as replica, no staged rebuild after it)",
                 run := continuationSwitchTest c }] }
 
+/-- The replica that keeps its copy must keep FOLLOWING across the handover
+    under write load (a dev cluster, 200 writes/s of new keys: it committed the
+    continued history and was then rebuilt anyway, because a group of the
+    follower it had before the commit landed on the new epoch and was refused
+    as another history). The S1 verdict of `continuationSwitchTest` (0 write
+    errors, 0 acknowledged writes missing) plus, for the replica that
+    committed: nothing in its flared log after the commit says a follow apply
+    was refused or that it needs a rebuild, the operator opened no replica
+    repair for it, it ends `following` with the new master's position, and
+    all copies hold the same number of items. -/
+def historyCommitDelayFile : String := "/tmp/history-commit-delay"
+
+/- Why the delays below (CI runs 45535925846 and 45549033241): a write is
+    held from the demote map until the successor accepts the promotion, and
+    fails once that outlasts W = 20 s. With no delay at all that window was
+    10.2 s on one run and 17.0 s on the next (every operator pass reads the
+    pods under the load and takes 3-4 s), so a 9 s hold passed with 19.6 s
+    and then failed with 25.8 s: a hold that is meant to cause no error must
+    leave room for the handover itself. The pending record lives until
+    demote + 10 s + 30 s; with the restarted replica the successor's commit
+    started 20.6 s after the demote, so 22 s of hold crossed it. -/
+
+/-- The log of a pod's flared since `t0`: the previous container's (when it
+    was restarted) followed by the current one's. -/
+private def flaredLogSince (ns pod t0 : String) : IO String := do
+  let prev ← match ← kubectl ["logs", "-n", ns, pod, "-c", "flared", "--previous", "--since-time", t0] with
+    | .ok o => pure o | .error _ => pure ""
+  let cur ← match ← kubectl ["logs", "-n", ns, pod, "-c", "flared", "--since-time", t0] with
+    | .ok o => pure o | .error _ => pure ""
+  return prev ++ "\n" ++ cur
+
+/-- Restart flared (container restart, the pod and its data directory stay)
+    of the first pod whose log says it COMMITTED the continued history as a
+    replica — i.e. inside the window in which the delayed successor has not
+    committed yet. Returns the pod, or none when `stop` was set first. -/
+private partial def restartCommitter (c : Ctx) (t0 : String) (stop : IO.Ref Bool)
+    (restarted : IO.Ref (List String)) : IO (Option String) := do
+  if ← stop.get then return none
+  let ns := c.cfg.«namespace»
+  for p in (← c.pods).getD [] do
+    let lg ← match ← kubectl ["logs", "-n", ns, p.name, "-c", "flared", "--since-time", t0] with
+      | .ok o => pure o | .error _ => pure ""
+    if containsSubstr lg "COMMITTED as replica" then
+      -- recorded first: the precondition check of switchTest must expect it
+      restarted.set [p.name]
+      c.event s!"{p.name} committed the continued history as a replica; restarting its flared inside the successor's delay window"
+      match ← kubectl ["exec", "-n", ns, p.name, "-c", "flared", "--", "sh", "-c", "kill -TERM 1"] with
+      | .ok _ => return some p.name
+      | .error e => c.event s!"restart of flared in {p.name} failed: {e.take 200}"; return none
+  IO.sleep 500
+  restartCommitter c t0 stop restarted
+
+/-- The errors that a held successor commit may cause, and why this bound.
+    A write that reaches the partition between the demote and the
+    successor's commit waits in the proxy path (pre_proxy_write, W = 20 s)
+    and fails TIMEOUT / no_partition_available only when the hold outlasts
+    W; the load has 6 closed-loop workers, each blocked at most twice
+    (a failed request is followed by one more that can fail the same way).
+    So: at most 12 errors, all of those two kinds, and they start no earlier
+    than the hold and end with it — first to last within the delay plus the
+    client's 30 s request deadline is a loose upper bound; we use delay + 10 s
+    (an error is stamped at the request's start, W after which it fails). -/
+def heldCommitBound (delaySecs : Nat) : ErrorBound :=
+  { kinds := ["TIMEOUT", "no_partition_available"], maxCount := 12, maxWindowUs := (delaySecs + 10) * 1000000 }
+
+/-- The delay EXCEEDS the designed bound (handover Th 10 s + pending grace
+    30 s, counted from the demote): the pending record expires, the
+    successor is promoted the ordinary way with a new epoch. Safe rebuild of
+    the continued replica; the handover must finish as done (the report of
+    the silent successor while its commit is held is allowed, any other
+    HALTED is not), the third copy comes back. Errors are allowed within a wider bound (the hold
+    is longer than W = 20 s for the whole excess) and reported. -/
+def heldCommitBoundExceeded (delaySecs : Nat) : ErrorBound :=
+  { kinds := ["TIMEOUT", "no_partition_available"], maxCount := 30, maxWindowUs := (delaySecs + 15) * 1000000 }
+
+def continuationLoadTest (c : Ctx) (delaySecs : Nat := 0) (restartInWindow : Bool := false)
+    (exceedsBound : Bool := false) : IO TestResult := do
+  let t0 := (← IO.Process.output { cmd := "date", args := #["-u", "+%Y-%m-%dT%H:%M:%SZ"] }).stdout.trim
+  -- delayed successor: the suite sets the seam env on every flared; the
+  -- file makes the successor's commit wait, so the replica commits first and
+  -- the validator (2 s) probes a successor still at the old master_id/epoch
+  if delaySecs > 0 then
+    for p in (← c.pods).getD [] do
+      discard <| kubectl ["exec", "-n", c.cfg.«namespace», p.name, "-c", "flared", "--", "sh", "-c",
+        s!"echo {delaySecs} > {historyCommitDelayFile}"]
+  let stop ← IO.mkRef false
+  let restarted ← IO.mkRef ([] : List String)
+  let restarter ← if restartInWindow then
+      some <$> IO.asTask (restartCommitter c t0 stop restarted)
+    else pure none
+  let bound : Option ErrorBound :=
+    -- a hold within W = 20 s must cause no error; a restarted replica cannot
+    -- confirm its commit, so the operator waits the whole handover bound
+    -- (Th 10 s) before it promotes and the no-master window outlasts W
+    if delaySecs <= 20 && !restartInWindow then none
+    else if exceedsBound then some (heldCommitBoundExceeded delaySecs)
+    else some (heldCommitBound delaySecs)
+  let r ← switchTest c .deleteMaster (injectedRestarts := some restarted) (errorBound := bound)
+  stop.set true
+  let restartedPod : Option String ← match restarter with
+    | some t => match ← IO.wait t with
+      | .ok o => pure o
+      | .error _ => pure none
+    | none => pure none
+  if restartInWindow && restartedPod.isNone then
+    return .fail "the continued replica's flared was not restarted inside the delayed-successor window: the restart case was not exercised"
+  match r with
+  | .pass =>
+    let ns := c.cfg.«namespace»
+    if exceedsBound then
+      -- the continuation expired: the handover finished as done (never
+      -- HALTED), the replicas were rebuilt, all copies are back
+      let opLog ← match ← kubectl ["logs", "-n", ns, "-l", s!"app={c.cfg.operatorName}", "--since-time", t0, "--tail=-1"] with
+        | .ok o => pure o | .error _ => pure ""
+      let lines := opLog.splitOn "\n"
+      -- a successor whose commit is held longer than Th does not answer the
+      -- operator's reads: HALTED "does not answer with its binding" is the
+      -- designed report for that silence and ends (done) once it answers.
+      -- Any other HALTED (e.g. it answers on another epoch before the
+      -- deadline) is a real mismatch.
+      let halts := lines.filter fun l => containsSubstr l "HANDOVER" && containsSubstr l "HALTED"
+      let halted := halts.filter fun l => !containsSubstr l "does not answer with its binding"
+      let done := lines.filter fun l => containsSubstr l "HANDOVER" && containsSubstr l " done in "
+      let expired := lines.filter fun l => containsSubstr l "the continuation expired"
+      c.art "continuation.txt" s!"silent-successor halts {halts.length - halted.length}; other halts {halted.take 3}; done {done.take 2}; expired {expired.take 2}"
+      if !halted.isEmpty then
+        return .fail s!"the handover was HALTED for a reason other than the silent successor: {halted.take 2}"
+      if done.isEmpty then
+        return .fail "the handover did not finish as done after the continuation expired"
+      if expired.isEmpty then
+        return .fail "the continuation did not expire (the successor committed in time): the case above the designed bound was not exercised"
+      let settled ← waitForCondition "all three copies are back with the same number of items" 300 do
+        let ps := ((← c.pods).getD []).filter (fun p => p.ready && !p.deleting && !p.ip.isEmpty)
+        let mut counts : List (Option String) := []
+        for p in ps do
+          counts := counts ++ [(← c.stats p.ip).bind (statOf · "curr_items")]
+        let slaves := ((← c.roles).map (·.2)).getD []
+        return ps.length == c.cfg.replicas && counts.all (·.isSome) && counts.eraseDups.length == 1
+          && slaves.length + 1 == c.cfg.replicas
+      if !settled then
+        return .fail "the third copy did not come back (not all copies Active with the same item count) after the continuation expired"
+      return .pass
+    let pods := (← c.pods).getD []
+    let mut committer : Option PodRow := none
+    let mut afterCommit := ""
+    for p in pods do
+      let lg ← flaredLogSince ns p.name t0
+      match lg.splitOn "COMMITTED as replica" with
+      | _ :: rest@(_ :: _) =>
+        committer := some p
+        afterCommit := "COMMITTED as replica".intercalate rest
+      | _ => pure ()
+    let some k := committer | return .fail "0 errors / 0 missing, but no replica committed the continued history (it rebuilt)"
+    let forbidden := ["follow apply refused", "needs_rebuild", "NEEDS REBUILD", "staged rebuild may start", "source is serving a different history"]
+      ++ (if delaySecs > 0 then ["lineage differs", "history differs"] else [])
+    let hits := forbidden.filter (containsSubstr afterCommit ·)
+    if delaySecs > 0 then
+      let mut delayed := false
+      for p in pods do
+        let lg ← flaredLogSince ns p.name t0
+        delayed := delayed || containsSubstr lg "FLARE_TEST_HISTORY_COMMIT_DELAY_FILE"
+      if !delayed then
+        return .fail "no successor commit was delayed by the test seam: the window under test did not open"
+    c.art "continuation.txt" s!"committer {k.name}; after its commit its log contains {hits}"
+    if restartInWindow then
+      -- the restarted process found the durable evidence (the window was
+      -- still open when it opened the database) and the successor committed
+      -- after it; the copy was neither rebuilt nor repaired
+      if restartedPod != some k.name then
+        return .fail s!"the restarted pod {restartedPod} is not the committer {k.name}"
+      if !containsSubstr afterCommit "continuation evidence restored" then
+        return .fail s!"{k.name} restarted but its new process did not restore the continuation evidence (the window had closed, or the evidence was lost): the case was not exercised or the evidence is not durable"
+    if !hits.isEmpty then
+      return .fail s!"{k.name} committed the continued history and then logged {hits} (its follower of the old history was not harmless)"
+    let opLog ← match ← kubectl ["logs", "-n", ns, "-l", s!"app={c.cfg.operatorName}", "--since-time", t0, "--tail=-1"] with
+      | .ok o => pure o | .error _ => pure ""
+    let repairs := ((opLog.splitOn "\n").filter fun l => containsSubstr l "REPLICA REPAIR" && containsSubstr l k.name)
+    if !repairs.isEmpty then
+      return .fail s!"the operator opened a replica repair for {k.name} after it committed: {repairs.take 2}"
+    -- the copies settle on the same number of items, and the committer follows
+    let settled ← waitForCondition "every Active copy holds the same number of items and the committer follows" 180 do
+      let ps := ((← c.pods).getD []).filter (fun p => p.ready && !p.deleting && !p.ip.isEmpty)
+      let mut counts : List (Option String) := []
+      for p in ps do
+        counts := counts ++ [(← c.stats p.ip).bind (statOf · "curr_items")]
+      let fs := (← c.stats k.ip).bind (statOf · "repl_follow_state")
+      return ps.length == c.cfg.replicas && counts.all (·.isSome) && (counts.eraseDups.length == 1) && fs == some "following"
+    if !settled then
+      let ps := ((← c.pods).getD []).filter (fun p => !p.ip.isEmpty)
+      let mut seen : List (String × Option String × Option String) := []
+      for p in ps do
+        let st ← c.stats p.ip
+        seen := seen ++ [(p.name, st.bind (statOf · "curr_items"), st.bind (statOf · "repl_follow_state"))]
+      return .fail s!"the copies did not settle on the same item count with {k.name} following: {seen}"
+    return .pass
+  | other => return other
+
+/-- history-continuation-handover-load: 3 copies, continuation on, the load of
+    A4 (4 x 200/s through the client Service, 2 x 200/s through the all-pods
+    Service, a new connection per request) across a graceful delete of the
+    master; the remaining replica must keep its copy AND keep following. -/
+def continuationLoadSuite : TestSuite :=
+  let cfg := { cfgOf "node-hc-load" true false with
+    replicas := 3, operatorEnv := [("FLARE_OPERATOR_HISTORY_CONTINUATION", "on")] }
+  let c : Ctx := { cfg, suite := "history-continuation-handover-load", test := "hc-load-delete" }
+  { name := "history-continuation-handover-load"
+    setup := do
+      deployCluster cfg
+      discard <| waitClusterSettled cfg
+    teardown := do
+      for w in ← dataWorkers do uncordon w
+      cleanupCluster cfg
+    onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
+    afterEach := fun i => saveFullLogs cfg.«namespace» s!"after-test-{i}"
+    tests := [{ name := "kubectl delete pod of the MASTER with three copies and history continuation on, under a write load: 0 write errors, 0 acknowledged writes missing, equal item counts, and the replica that is not the successor commits AND keeps following (no follow refusal, no needs_rebuild, no replica repair)",
+                run := continuationLoadTest c }] }
+
+/-- history-continuation-handover-load-delayed: the same load and delete, but
+    the successor's continuation commit is delayed by 1 s (test seam
+    FLARE_TEST_HISTORY_COMMIT_DELAY_FILE), so the replica commits FIRST and
+    the read-source validator (every 2 s) probes a successor that still
+    reports the old master_id and the superseded epoch. Sizing (measured, CI
+    run 45555633369): the successor is armed ~1.4 s before its commit even
+    without a hold, so 1 s makes the armed-uncommitted period ~2.4 s, longer
+    than one probe interval (2 s). The no-master window is ~17.3-17.6 s with
+    no hold (hc-load-delete, 17.6 s without an ack) and a 3 s hold made it
+    20.3 s, past the clients' W = 20 s (2 proxy errors); 1 s gives ~18.5 s,
+    ~1.5 s under W. The window itself is tracked in
+    flare-handover-nomaster-window. Pass: the replica is
+    not rebuilt (no NEEDS REBUILD / lineage differs / history differs, no
+    replica repair), keeps following after the successor commits, 0 write
+    errors, 0 acknowledged writes missing, copies equal. -/
+def continuationLoadDelayedSuite : TestSuite :=
+  let cfg := { cfgOf "node-hc-loadd" true false with
+    replicas := 3, operatorEnv := [("FLARE_OPERATOR_HISTORY_CONTINUATION", "on")],
+    flaredEnv := [("FLARE_TEST_HISTORY_COMMIT_DELAY_FILE", historyCommitDelayFile)] }
+  let c : Ctx := { cfg, suite := "history-continuation-handover-load-delayed", test := "hc-load-delayed" }
+  { name := "history-continuation-handover-load-delayed"
+    setup := do
+      deployCluster cfg
+      discard <| waitClusterSettled cfg
+    teardown := do
+      for w in ← dataWorkers do uncordon w
+      cleanupCluster cfg
+    onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
+    afterEach := fun i => saveFullLogs cfg.«namespace» s!"after-test-{i}"
+    tests := [{ name := "kubectl delete pod of the MASTER under a write load with the successor's continuation commit delayed 1 s: the replica commits first, the validator probes the successor still at the old master_id/epoch, and it is not rebuilt, keeps following, 0 write errors, 0 acknowledged writes missing, equal item counts",
+                run := continuationLoadTest c 1 }] }
+
+/-- history-continuation-handover-load-restart: the delayed-successor case
+    (the successor's continuation commit is held 10 s: inside the designed bound
+    of 10 s handover + 30 s pending grace from the demote. With the replica
+    restarted the operator promotes only at its handover bound, so the
+    no-master window outlasts the clients' 20 s wait and a few
+    TIMEOUT / no_partition_available errors are tolerated within `heldCommitBound`) plus a container
+    restart of the continued replica's flared inside that window (the pod and
+    its data directory stay). The new process must restore the durable
+    continuation evidence and not treat the successor still at the old
+    master_id/epoch as another history: no rebuild, no replica repair, it keeps
+    following after the successor commits, 0 acknowledged writes missing,
+    copies equal. -/
+def continuationLoadRestartSuite : TestSuite :=
+  let cfg := { cfgOf "node-hc-loadr" true false with
+    replicas := 3, operatorEnv := [("FLARE_OPERATOR_HISTORY_CONTINUATION", "on")],
+    flaredEnv := [("FLARE_TEST_HISTORY_COMMIT_DELAY_FILE", historyCommitDelayFile)] }
+  let c : Ctx := { cfg, suite := "history-continuation-handover-load-restart", test := "hc-load-restart" }
+  { name := "history-continuation-handover-load-restart"
+    setup := do
+      deployCluster cfg
+      discard <| waitClusterSettled cfg
+    teardown := do
+      for w in ← dataWorkers do uncordon w
+      cleanupCluster cfg
+    onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
+    afterEach := fun i => saveFullLogs cfg.«namespace» s!"after-test-{i}"
+    tests := [{ name := "kubectl delete pod of the MASTER under a write load with the successor's continuation commit delayed 10 s (inside the designed bound) and flared of the continued replica restarted (container restart, data dir kept) inside that window: the new process restores the durable continuation evidence, is not rebuilt or repaired, keeps following after the successor commits, write errors only as TIMEOUT / no_partition_available from the held commit and within the bound (reported), 0 acknowledged writes missing, equal item counts",
+                run := continuationLoadTest c 10 (restartInWindow := true) }] }
+
+/-- history-continuation-handover-load-expired: the successor's commit is
+    held 45 s, ABOVE the designed bound (pending deadline = demote + 10 s +
+    30 s). flared drops the pending record, the successor is promoted the
+    ordinary way with a new epoch, the continued replica is rebuilt safely.
+    Pass: the handover finishes as done, all three copies are
+    back with equal item counts, 0 acknowledged writes missing; write errors
+    only TIMEOUT / no_partition_available within `heldCommitBoundExceeded`. -/
+def continuationLoadExpiredSuite : TestSuite :=
+  let cfg := { cfgOf "node-hc-loade" true false with
+    replicas := 3, operatorEnv := [("FLARE_OPERATOR_HISTORY_CONTINUATION", "on")],
+    flaredEnv := [("FLARE_TEST_HISTORY_COMMIT_DELAY_FILE", historyCommitDelayFile)] }
+  let c : Ctx := { cfg, suite := "history-continuation-handover-load-expired", test := "hc-load-expired" }
+  { name := "history-continuation-handover-load-expired"
+    setup := do
+      deployCluster cfg
+      discard <| waitClusterSettled cfg
+    teardown := do
+      for w in ← dataWorkers do uncordon w
+      cleanupCluster cfg
+    onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
+    afterEach := fun i => saveFullLogs cfg.«namespace» s!"after-test-{i}"
+    tests := [{ name := "kubectl delete pod of the MASTER under a write load with the successor's continuation commit delayed 45 s (above the designed bound): the continuation expires, the continued replica is safely rebuilt, the handover finishes as done (a HALTED for the silent successor while its commit is held is allowed, any other is not), all three copies come back, 0 acknowledged writes missing, write errors only TIMEOUT / no_partition_available within the bound (reported)",
+                run := continuationLoadTest c 45 (exceedsBound := true) }] }
+
 /-- node-ops-switch-tmpfs-continuation-cordon-master: C1 (cordon + drain of
     the master's worker, the node guard and the cordon move) with three
     copies and the continuation on: the C1 verdict and no rebuild of the
@@ -2009,6 +2350,6 @@ def switchSuites : List TestSuite :=
     ++ [Scenario.op .cordonMaster, .op .cordonReplica, .cordonBlocked, .cordonCancel, .cordonNoSuccessor, .cordonOperatorRestart, .cordonTwoNodes, .cordonNoOperator, .cordonRestartQuiet, .cordonStuck, .cordonMasterNoreply].map (fun sc => scenarioSuite sc .tmpfs)
     ++ [Scenario.op .cordonMaster, .op .cordonReplica].map (fun sc => scenarioSuite sc .pvcNfs)
     ++ [scenarioSuite .cordonPinned .pvcLocal]
-    ++ [continuationSwitchSuite, continuationCordonSuite]
+    ++ [continuationSwitchSuite, continuationCordonSuite, continuationLoadSuite, continuationLoadDelayedSuite, continuationLoadRestartSuite, continuationLoadExpiredSuite]
 
 end FlareOperator.E2E.Tests.NodeOpsSwitch

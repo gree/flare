@@ -109,6 +109,9 @@ public:
 	// R3-D: the evidence of the STORED copy while a rebuild is in progress
 	// (moved here, durably, when an attempt starts; never advertised)
 	static const char* const kReplRebuiltFromSuspendedKey;
+	// durable grace evidence of a continued replica: "v1 <left epoch> <deadline_ms> <left master_id|-> <committed epoch>"
+	static const char* const kReplContinuedKey;
+	static const uint64_t kContinuationGraceMs;
 	// History continuation across an ordered handover (design
 	// docs/design-handover-history-continuation.md): a PENDING history,
 	// prepared but not active. "v1 <role> <hid> <partition> <successor>
@@ -353,6 +356,12 @@ protected:
 	// history. Off until the cluster says this node is a master.
 	volatile bool _lazy_expiry_delete;
 	uint64_t _follow_generation;
+	// History continuation (replica commit): the epoch the copy left, and
+	// when (wall clock ms) — under _mutex_generations
+	string _superseded_epoch;
+	string _superseded_master_id;	// the master_id the copy left ("" = none recorded)
+	uint64_t _continued_deadline_ms;	// wall clock; persisted, 0 = none
+	uint64_t _continuation_grace_ms;	// window a continuation commit grants (tests shorten it)
 	// Expired entries hidden from a read but NOT deleted (replica side).
 	AtomicCounter _expire_filtered;
 
@@ -570,6 +579,22 @@ public:
 	// expected (the copy read at the barrier)
 	int history_replica_prepare(const pending_history& in, const string& expected_incarnation, string& result);
 	int history_commit(const string& hid, string& result);
+	virtual bool history_replica_pending();
+	// After a replica committed a continued history (and for a bounded time):
+	// is a refusal by the source `server_epoch` ("" = not known, the
+	// master_id answer) the new master not having committed it yet? Then the
+	// follower retries; it is not a history that differs.
+	bool continuation_source_behind(const string& server_epoch);
+	// the probed master_id is the one the copy left at its continuation
+	// commit, inside the same grace window (false when none was recorded)
+	bool continuation_left_master_id(const string& server_master_id);
+	// the source reported `server_epoch`: when it is this copy's committed epoch,
+	// the successor has committed and the evidence is cleared (memory and disk)
+	void continuation_observe_source_epoch(const string& server_epoch);
+	void set_continuation_grace_ms(uint64_t ms) { this->_continuation_grace_ms = ms; }
+	// The epoch this copy left by a continued history ("" = none): a batch
+	// of that epoch can never be applied any more
+	string get_superseded_epoch();
 	int history_discard(const string& hid, const string& why, string& result);
 	// arm: bind the pending record of `hid` to the V2 map version (sent by
 	// the operator BEFORE that map; idempotent for the same version)
@@ -897,6 +922,10 @@ public:
 	// Test only (NULL in production): called by reap_expired between its scan
 	// and its deletes, with the whole-lock still held for read.
 	static void (*_test_hook_reap_scanned)();
+	// Test only (NULL in production): called by continuation_observe_source_epoch
+	// before it deletes the continuation evidence, with the whole-lock held for
+	// read and the generations lock held.
+	static void (*_test_hook_continuation_before_delete)();
 	// Durably overwrite the replication cursor (kReplLastLsnKey). Used to
 	// seed the cursor after a full-dump reconstruction so the next WAL
 	// sync can be incremental. Returns 0 on success, -1 on write failure.

@@ -81,6 +81,8 @@ const char* const storage_rocksdb::kReplRebuiltFromKey = "__flare_repl_rebuilt_f
 const char* const storage_rocksdb::kReplRebuiltFromSuspendedKey = "__flare_repl_rebuilt_from_suspended";
 const char* const storage_rocksdb::kCopyIdKey = "__flare_copy_id";
 const char* const storage_rocksdb::kReplPendingHistoryKey = "__flare_repl_pending_history";
+const char* const storage_rocksdb::kReplContinuedKey = "__flare_repl_continued";
+const uint64_t storage_rocksdb::kContinuationGraceMs = 120000;
 // Receipts of COMPLETED bulks (truncate / flush_all): "<pred copy> <succ copy>
 // <new epoch>" per line, the last kBulkChainKeep, written only AFTER the new
 // epoch was recorded (docs/design-authoritative-history.md: the operator
@@ -105,7 +107,8 @@ bool storage_rocksdb::is_reserved_key(const string& key) {
 		|| key == kReplSourceEpochKey || key == kReplSourceEpochReasonKey || key == kReplIncarnationKey
 		|| key == kReplRestoreDoneKey || key == kReplRebuiltFromKey || key == kReplRebuiltFromSuspendedKey || key == kCopyIdKey
 		|| key == kBulkChainKey || key == kBulkPendingKey
-		|| key == kPartitionBindingKey || key == kRestoredUnverifiedKey || key == kReplPendingHistoryKey;
+		|| key == kPartitionBindingKey || key == kRestoredUnverifiedKey || key == kReplPendingHistoryKey
+		|| key == kReplContinuedKey;
 }
 // }}}
 
@@ -173,6 +176,8 @@ storage_rocksdb::storage_rocksdb(
 	_blob_gc_ioerror_for_test(false),
 	_lazy_expiry_delete(false),
 	_follow_generation(0),
+	_continued_deadline_ms(0),
+	_continuation_grace_ms(kContinuationGraceMs),
 	_expire_filtered(0),
 	_snapshot_bootstrap(0),
 	_corruption_detected(0),
@@ -653,6 +658,44 @@ int storage_rocksdb::_load_or_init_generations() {
 				log_notice("suspended rebuild evidence of the stored copy restored (rebuild in progress): master_id=%s, source epoch %s", parts[0].c_str(), parts[1].c_str());
 			} else {
 				log_notice("suspended rebuild evidence ignored: recorded under another local history or malformed [%s]", sv.c_str());
+			}
+		}
+	}
+	// Continuation evidence (the grace of a continued replica): valid only
+	// for the epoch its commit installed and until its persisted wall-clock
+	// deadline (commit time + window, never restarted by a restart).
+	if (rc == 0) {
+		this->_superseded_epoch.clear();
+		this->_superseded_master_id.clear();
+		this->_continued_deadline_ms = 0;
+		string cv;
+		rocksdb::Status cs = this->_db->Get(this->_read_options, kReplContinuedKey, &cv);
+		if (cs.ok()) {
+			vector<string> parts;
+			string::size_type at = 0;
+			while (at <= cv.size()) {
+				string::size_type sp = cv.find(' ', at);
+				if (sp == string::npos) { parts.push_back(cv.substr(at)); break; }
+				parts.push_back(cv.substr(at, sp - at));
+				at = sp + 1;
+			}
+			uint64_t deadline = 0;
+			if (parts.size() == 5 && parts[0] == "v1" && !parts[1].empty() && !parts[2].empty()
+					&& !parts[3].empty() && parts[4] == this->_source_epoch) {
+				try {
+					deadline = boost::lexical_cast<uint64_t>(parts[2]);
+				} catch (boost::bad_lexical_cast&) {
+					deadline = 0;
+				}
+			}
+			if (deadline != 0) {
+				this->_superseded_epoch = parts[1];
+				this->_superseded_master_id = parts[3] == "-" ? string("") : parts[3];
+				this->_continued_deadline_ms = deadline;
+				log_notice("continuation evidence restored: left epoch %s, master_id %s, grace until %llu ms",
+					parts[1].c_str(), parts[3].c_str(), static_cast<unsigned long long>(deadline));
+			} else {
+				log_notice("continuation evidence ignored: recorded under another local history or malformed [%s]", cv.c_str());
 			}
 		}
 	}
@@ -3159,6 +3202,21 @@ int storage_rocksdb::history_commit(const string& hid, string& result) {
 	}
 	bool pinned_here = false;
 	if (p.role == "successor") {
+		// test seam: when FLARE_TEST_HISTORY_COMMIT_DELAY_FILE names a file
+		// holding a number of seconds, the successor's commit waits that long
+		// (its replicas commit first). Inert when the variable is unset.
+		const char* delay_file = getenv("FLARE_TEST_HISTORY_COMMIT_DELAY_FILE");
+		if (delay_file != NULL && delay_file[0] != '\0') {
+			FILE* df = fopen(delay_file, "r");
+			if (df != NULL) {
+				int secs = 0;
+				if (fscanf(df, "%d", &secs) == 1 && secs > 0 && secs <= 60) {
+					log_warning("history continuation: successor commit of %s delayed %d s by FLARE_TEST_HISTORY_COMMIT_DELAY_FILE (test seam)", p.hid.c_str(), secs);
+					sleep(secs);
+				}
+				fclose(df);
+			}
+		}
 		// the new master keeps every WAL file from S until the prepared
 		// replicas are past it (WAL_PIN), written BEFORE the history is
 		// committed so a crash in between still protects S+1 on
@@ -3206,7 +3264,19 @@ int storage_rocksdb::history_commit(const string& hid, string& result) {
 		b.Put(kReplSourceEpochKey, p.to_epoch);
 		b.Put(kReplSourceEpochReasonKey, "continued");
 		b.Put(kReplMasterIdKey, p.master_id);
+		string left_master_id;
+		uint64_t continued_deadline = 0;
 		if (p.role == "replica") {
+			// the grace evidence is durable with the epoch change itself: a
+			// restart before the successor commits must not turn the wait
+			// into a rebuild. A wall-clock deadline, so a restart cannot
+			// extend the window.
+			pthread_rwlock_rdlock(&this->_mutex_master_id);
+			left_master_id = this->_master_id;
+			pthread_rwlock_unlock(&this->_mutex_master_id);
+			continued_deadline = now_ms + this->_continuation_grace_ms;
+			b.Put(kReplContinuedKey, "v1 " + p.from_epoch + " " + boost::lexical_cast<string>(continued_deadline)
+				+ " " + (left_master_id.empty() ? string("-") : left_master_id) + " " + p.to_epoch);
 			// continues the new master's WAL from S; rebuilt from its history
 			b.Put(kReplLastLsnKey, boost::lexical_cast<string>(p.seq));
 			b.Put(kReplRebuiltFromKey, p.master_id + " " + p.to_epoch + " " + p.to_epoch);
@@ -3218,6 +3288,7 @@ int storage_rocksdb::history_commit(const string& hid, string& result) {
 			}
 			b.Delete(kReplRebuiltFromKey);
 			b.Delete(kReplRebuiltFromSuspendedKey);
+			b.Delete(kReplContinuedKey);
 		}
 		b.Delete(kReplPendingHistoryKey);
 		rocksdb::WriteOptions wo;
@@ -3234,6 +3305,17 @@ int storage_rocksdb::history_commit(const string& hid, string& result) {
 		if (p.role == "replica") {
 			this->_rebuilt_from_master_id = p.master_id;
 			this->_rebuilt_from_epoch = p.to_epoch;
+			// The follower of the OLD master (and one already started
+			// toward the new one from the old position) belongs to the
+			// history just left. This runs under the whole-lock in write
+			// mode, the same lock an apply takes in read mode after the
+			// generation check: a group of the old stream is either
+			// applied before this commit or refused as a stale follower
+			// after it, never applied on top of the continued history.
+			this->_superseded_epoch = p.from_epoch;
+			this->_superseded_master_id = left_master_id;
+			this->_continued_deadline_ms = continued_deadline;
+			this->bump_follow_generation();
 		} else {
 			this->_rebuilt_from_master_id.clear();
 			this->_rebuilt_from_epoch.clear();
@@ -3257,6 +3339,72 @@ int storage_rocksdb::history_commit(const string& hid, string& result) {
 		this->wal_pin_release(hid, pr);
 	}
 	return r;
+}
+
+bool storage_rocksdb::history_replica_pending() {
+	pending_history p;
+	return this->get_pending_history(p) && p.role == "replica";
+}
+
+string storage_rocksdb::get_superseded_epoch() {
+	pthread_rwlock_rdlock(&this->_mutex_generations);
+	const string e = this->_superseded_epoch;
+	pthread_rwlock_unlock(&this->_mutex_generations);
+	return e;
+}
+
+bool storage_rocksdb::continuation_source_behind(const string& server_epoch) {
+	pthread_rwlock_rdlock(&this->_mutex_generations);
+	const bool continued = !this->_superseded_epoch.empty() && this->_continued_deadline_ms != 0;
+	const uint64_t deadline = this->_continued_deadline_ms;
+	const bool same_epoch = !server_epoch.empty() && server_epoch == this->_superseded_epoch;
+	pthread_rwlock_unlock(&this->_mutex_generations);
+	if (!continued || (!server_epoch.empty() && !same_epoch)) {
+		return false;
+	}
+	const uint64_t now = wal_pin::now_ms();
+	return now != 0 && now < deadline;
+}
+
+bool storage_rocksdb::continuation_left_master_id(const string& server_master_id) {
+	pthread_rwlock_rdlock(&this->_mutex_generations);
+	const bool match = !server_master_id.empty() && !this->_superseded_epoch.empty()
+		&& !this->_superseded_master_id.empty() && server_master_id == this->_superseded_master_id;
+	const uint64_t deadline = this->_continued_deadline_ms;
+	pthread_rwlock_unlock(&this->_mutex_generations);
+	if (!match || deadline == 0) {
+		return false;
+	}
+	const uint64_t now = wal_pin::now_ms();
+	return now != 0 && now < deadline;
+}
+
+void storage_rocksdb::continuation_observe_source_epoch(const string& server_epoch) {
+	if (server_epoch.empty()) {
+		return;
+	}
+	// Lock order wholelock -> generations (as history_commit and the copy
+	// switch). The whole-lock in read mode keeps switch_to_staging from closing
+	// or replacing the DB under the delete; _db is checked under it.
+	pthread_rwlock_rdlock(&this->_mutex_wholelock);
+	pthread_rwlock_wrlock(&this->_mutex_generations);
+	if (this->_continued_deadline_ms != 0 && server_epoch == this->_source_epoch && this->_db != NULL) {
+		// the successor reports the committed epoch: the exception is over
+		if (_test_hook_continuation_before_delete != NULL) {
+			_test_hook_continuation_before_delete();
+		}
+		rocksdb::WriteOptions wo;
+		wo.sync = true;
+		rocksdb::Status st = this->_db->Delete(wo, kReplContinuedKey);
+		if (st.ok()) {
+			this->_continued_deadline_ms = 0;
+			this->_superseded_master_id.clear();
+		} else {
+			log_warning("failed to clear the continuation evidence: %s", st.ToString().c_str());
+		}
+	}
+	pthread_rwlock_unlock(&this->_mutex_generations);
+	pthread_rwlock_unlock(&this->_mutex_wholelock);
 }
 
 int storage_rocksdb::history_arm(const string& hid, uint64_t map_version, string& result) {
@@ -6385,6 +6533,16 @@ int storage_rocksdb::apply_wal_batches(const string& source_epoch, const string&
 			refusal = apply_refused_stale_follower;
 			break;
 		}
+		// A batch of the history this copy left by a continuation (its
+		// follower of the old master, or one started toward the new master
+		// before the commit): refused as a stale follower whatever generation
+		// it carries. It is not a history that differs, the copy IS on the
+		// continued one, so it must not make the copy rebuild.
+		if (!source_epoch.empty() && source_epoch != this->get_source_epoch()
+				&& source_epoch == this->get_superseded_epoch()) {
+			refusal = apply_refused_stale_follower;
+			break;
+		}
 		const uint64_t cursor0 = this->_get_repl_last_lsn_locked();
 		// The position as it moves through the group: each batch is decided
 		// against the position the batches before it have already reached,
@@ -6617,6 +6775,7 @@ uint64_t storage_rocksdb::get_repl_last_lsn() {
 void (*storage_rocksdb::_test_hook_reader_checked)() = NULL;
 void (*storage_rocksdb::_test_hook_wal_purge_decided)(storage_rocksdb*) = NULL;
 void (*storage_rocksdb::_test_hook_reap_scanned)() = NULL;
+void (*storage_rocksdb::_test_hook_continuation_before_delete)() = NULL;
 
 uint64_t storage_rocksdb::_get_repl_last_lsn_locked() {
 	string value;

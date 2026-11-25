@@ -130,6 +130,16 @@ private def recoveryResults : List (String × Bool) := Id.run do
                 && x6.phase == .done && xa6 == .finish
                 && (step {} prom { doneObs with successorEpoch := some "8:new", nowMs := pend }).1.phase == .done
                 && ({} : Config).pendingGraceMs == HandoverDrive.pendingGraceMs)]
+  -- the silent successor of a held commit: HALTED while it does not answer,
+  -- then the same entry ends done once it answers on another epoch after the
+  -- pending deadline (the halt is a report, not a final state)
+  let (s1, sa1) := step ccfg armed { doneObs with successorAlive := false, successorEpoch := none, nowMs := pend }
+  let (s2, sa2) := step ccfg s1 { doneObs with successorEpoch := some "8:new", nowMs := pend + 20000 }
+  let (s3, _) := step ccfg s1 { doneObs with successorEpoch := some "8:new", nowMs := pend - 20000 }
+  r := r ++ [("recovery: a successor silent past Th is HALTED (promoting, no replacement without a confirmed stop); the same HALTED entry finishes as done when the successor answers on another epoch after the pending deadline, and keeps halting for another epoch before it",
+              s1.phase == .promoting && sa1 == .none && s1.reason.startsWith "HALTED" && s1.reason.endsWith "no other replica is promoted"
+                && s2.phase == .done && sa2 == .finish && !s2.reason.startsWith "HALTED"
+                && s3.phase == .promoting && s3.reason.startsWith "HALTED")]
   -- the frozen keys: every copy of the partition while committing or V2 is out
   let slavesOf := fun (p : Nat) => if p == 0 then ["s:12121", "r1:12121", "r2:12121"] else []
   r := r ++ [("recovery: while committingReplicas, promoting with V2 out, or replacing a stopped successor (before its V3 too), the partition's copies (and a fenced successor) are not promoted by the failover/refill; not before V2 otherwise, not after",

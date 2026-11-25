@@ -2026,6 +2026,16 @@ def continuationSwitchSuite : TestSuite :=
     all copies hold the same number of items. -/
 def historyCommitDelayFile : String := "/tmp/history-commit-delay"
 
+/- Why the delays below (CI runs 45535925846 and 45549033241): a write is
+    held from the demote map until the successor accepts the promotion, and
+    fails once that outlasts W = 20 s. With no delay at all that window was
+    10.2 s on one run and 17.0 s on the next (every operator pass reads the
+    pods under the load and takes 3-4 s), so a 9 s hold passed with 19.6 s
+    and then failed with 25.8 s: a hold that is meant to cause no error must
+    leave room for the handover itself. The pending record lives until
+    demote + 10 s + 30 s; with the restarted replica the successor's commit
+    started 20.6 s after the demote, so 22 s of hold crossed it. -/
+
 /-- The log of a pod's flared since `t0`: the previous container's (when it
     was restarted) followed by the current one's. -/
 private def flaredLogSince (ns pod t0 : String) : IO String := do
@@ -2072,8 +2082,9 @@ def heldCommitBound (delaySecs : Nat) : ErrorBound :=
 /-- The delay EXCEEDS the designed bound (handover Th 10 s + pending grace
     30 s, counted from the demote): the pending record expires, the
     successor is promoted the ordinary way with a new epoch. Safe rebuild of
-    the continued replica; the handover must finish as done (no HALTED), the
-    third copy comes back. Errors are allowed within a wider bound (the hold
+    the continued replica; the handover must finish as done (the report of
+    the silent successor while its commit is held is allowed, any other
+    HALTED is not), the third copy comes back. Errors are allowed within a wider bound (the hold
     is longer than W = 20 s for the whole excess) and reported. -/
 def heldCommitBoundExceeded (delaySecs : Nat) : ErrorBound :=
   { kinds := ["TIMEOUT", "no_partition_available"], maxCount := 30, maxWindowUs := (delaySecs + 15) * 1000000 }
@@ -2094,7 +2105,10 @@ def continuationLoadTest (c : Ctx) (delaySecs : Nat := 0) (restartInWindow : Boo
       some <$> IO.asTask (restartCommitter c t0 stop restarted)
     else pure none
   let bound : Option ErrorBound :=
-    if delaySecs <= 20 then none  -- a hold within W = 20 s must cause no error
+    -- a hold within W = 20 s must cause no error; a restarted replica cannot
+    -- confirm its commit, so the operator waits the whole handover bound
+    -- (Th 10 s) before it promotes and the no-master window outlasts W
+    if delaySecs <= 20 && !restartInWindow then none
     else if exceedsBound then some (heldCommitBoundExceeded delaySecs)
     else some (heldCommitBound delaySecs)
   let r ← switchTest c .deleteMaster (injectedRestarts := some restarted) (errorBound := bound)
@@ -2115,12 +2129,18 @@ def continuationLoadTest (c : Ctx) (delaySecs : Nat := 0) (restartInWindow : Boo
       let opLog ← match ← kubectl ["logs", "-n", ns, "-l", s!"app={c.cfg.operatorName}", "--since-time", t0, "--tail=-1"] with
         | .ok o => pure o | .error _ => pure ""
       let lines := opLog.splitOn "\n"
-      let halted := lines.filter fun l => containsSubstr l "CRITICAL: HANDOVER" || (containsSubstr l "HANDOVER" && containsSubstr l "HALTED")
+      -- a successor whose commit is held longer than Th does not answer the
+      -- operator's reads: HALTED "does not answer with its binding" is the
+      -- designed report for that silence and ends (done) once it answers.
+      -- Any other HALTED (e.g. it answers on another epoch before the
+      -- deadline) is a real mismatch.
+      let halts := lines.filter fun l => containsSubstr l "HANDOVER" && containsSubstr l "HALTED"
+      let halted := halts.filter fun l => !containsSubstr l "does not answer with its binding"
       let done := lines.filter fun l => containsSubstr l "HANDOVER" && containsSubstr l " done in "
       let expired := lines.filter fun l => containsSubstr l "the continuation expired"
-      c.art "continuation.txt" s!"halted {halted.take 3}; done {done.take 2}; expired {expired.take 2}"
+      c.art "continuation.txt" s!"silent-successor halts {halts.length - halted.length}; other halts {halted.take 3}; done {done.take 2}; expired {expired.take 2}"
       if !halted.isEmpty then
-        return .fail s!"the handover was HALTED after the continuation expired: {halted.take 2}"
+        return .fail s!"the handover was HALTED for a reason other than the silent successor: {halted.take 2}"
       if done.isEmpty then
         return .fail "the handover did not finish as done after the continuation expired"
       if expired.isEmpty then
@@ -2212,7 +2232,7 @@ def continuationLoadSuite : TestSuite :=
                 run := continuationLoadTest c }] }
 
 /-- history-continuation-handover-load-delayed: the same load and delete, but
-    the successor's continuation commit is delayed by 9 s (test seam
+    the successor's continuation commit is delayed by 3 s (test seam
     FLARE_TEST_HISTORY_COMMIT_DELAY_FILE), so the replica commits FIRST and
     the read-source validator (every 2 s) probes a successor that still
     reports the old master_id and the superseded epoch. Pass: the replica is
@@ -2233,12 +2253,14 @@ def continuationLoadDelayedSuite : TestSuite :=
       cleanupCluster cfg
     onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
     afterEach := fun i => saveFullLogs cfg.«namespace» s!"after-test-{i}"
-    tests := [{ name := "kubectl delete pod of the MASTER under a write load with the successor's continuation commit delayed 9 s: the replica commits first, the validator probes the successor still at the old master_id/epoch, and it is not rebuilt, keeps following, 0 write errors, 0 acknowledged writes missing, equal item counts",
-                run := continuationLoadTest c 9 }] }
+    tests := [{ name := "kubectl delete pod of the MASTER under a write load with the successor's continuation commit delayed 3 s: the replica commits first, the validator probes the successor still at the old master_id/epoch, and it is not rebuilt, keeps following, 0 write errors, 0 acknowledged writes missing, equal item counts",
+                run := continuationLoadTest c 3 }] }
 
 /-- history-continuation-handover-load-restart: the delayed-successor case
-    (the successor's continuation commit is held 22 s: inside the designed bound
-    of 10 s handover + 30 s pending grace from the demote, outside the clients' 20 s wait, so a few
+    (the successor's continuation commit is held 10 s: inside the designed bound
+    of 10 s handover + 30 s pending grace from the demote. With the replica
+    restarted the operator promotes only at its handover bound, so the
+    no-master window outlasts the clients' 20 s wait and a few
     TIMEOUT / no_partition_available errors are tolerated within `heldCommitBound`) plus a container
     restart of the continued replica's flared inside that window (the pod and
     its data directory stay). The new process must restore the durable
@@ -2260,14 +2282,14 @@ def continuationLoadRestartSuite : TestSuite :=
       cleanupCluster cfg
     onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
     afterEach := fun i => saveFullLogs cfg.«namespace» s!"after-test-{i}"
-    tests := [{ name := "kubectl delete pod of the MASTER under a write load with the successor's continuation commit delayed 22 s (inside the designed bound) and flared of the continued replica restarted (container restart, data dir kept) inside that window: the new process restores the durable continuation evidence, is not rebuilt or repaired, keeps following after the successor commits, write errors only as TIMEOUT / no_partition_available from the held commit and within the bound (reported), 0 acknowledged writes missing, equal item counts",
-                run := continuationLoadTest c 22 (restartInWindow := true) }] }
+    tests := [{ name := "kubectl delete pod of the MASTER under a write load with the successor's continuation commit delayed 10 s (inside the designed bound) and flared of the continued replica restarted (container restart, data dir kept) inside that window: the new process restores the durable continuation evidence, is not rebuilt or repaired, keeps following after the successor commits, write errors only as TIMEOUT / no_partition_available from the held commit and within the bound (reported), 0 acknowledged writes missing, equal item counts",
+                run := continuationLoadTest c 10 (restartInWindow := true) }] }
 
 /-- history-continuation-handover-load-expired: the successor's commit is
     held 45 s, ABOVE the designed bound (pending deadline = demote + 10 s +
     30 s). flared drops the pending record, the successor is promoted the
     ordinary way with a new epoch, the continued replica is rebuilt safely.
-    Pass: the handover finishes as done (no HALTED), all three copies are
+    Pass: the handover finishes as done, all three copies are
     back with equal item counts, 0 acknowledged writes missing; write errors
     only TIMEOUT / no_partition_available within `heldCommitBoundExceeded`. -/
 def continuationLoadExpiredSuite : TestSuite :=
@@ -2284,7 +2306,7 @@ def continuationLoadExpiredSuite : TestSuite :=
       cleanupCluster cfg
     onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
     afterEach := fun i => saveFullLogs cfg.«namespace» s!"after-test-{i}"
-    tests := [{ name := "kubectl delete pod of the MASTER under a write load with the successor's continuation commit delayed 45 s (above the designed bound): the continuation expires, the continued replica is safely rebuilt, the handover finishes as done (no HALTED), all three copies come back, 0 acknowledged writes missing, write errors only TIMEOUT / no_partition_available within the bound (reported)",
+    tests := [{ name := "kubectl delete pod of the MASTER under a write load with the successor's continuation commit delayed 45 s (above the designed bound): the continuation expires, the continued replica is safely rebuilt, the handover finishes as done (a HALTED for the silent successor while its commit is held is allowed, any other is not), all three copies come back, 0 acknowledged writes missing, write errors only TIMEOUT / no_partition_available within the bound (reported)",
                 run := continuationLoadTest c 45 (exceedsBound := true) }] }
 
 /-- node-ops-switch-tmpfs-continuation-cordon-master: C1 (cordon + drain of

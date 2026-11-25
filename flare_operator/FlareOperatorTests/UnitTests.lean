@@ -1671,6 +1671,14 @@ def checkNodeMapRecovery (ctx : Ctx) : IO Unit := do
       && ((NodeMapRecovery.approvalMessage "flare-x" uid).splitOn uid).length > 1)
   check ctx "SAF-09: clearing the condition is a merge patch that nulls the conditions (nothing else is written)"
     (NodeMapRecovery.approvalConditionClearPatch.compress == "{\"status\":{\"conditions\":null}}")
+  -- the waiting operator's answer: one fixed SERVER_ERROR line, no node, no META, no OK
+  let pend := FlareOperator.Flare.serializeResponse FlareOperator.Flare.firstBuildPendingResponse
+  check ctx "first-build wait: the pending answer is exactly one SERVER_ERROR line with the token flared waits on"
+    (pend == "SERVER_ERROR first_build_approval_pending\r\n")
+  check ctx "first-build wait: the pending answer is not an index (no NODE/META/END/OK line) and not the registration refusal"
+    ((pend.splitOn "NODE").length == 1 && (pend.splitOn "META").length == 1 && (pend.splitOn "END").length == 1
+      && pend != FlareOperator.Flare.serializeOK
+      && pend != FlareOperator.Flare.serializeServerError "registration closed: the first-build history record is not written yet")
   let p (n : String) (r : Bool) (v i : Option Nat) : NodeMapRecovery.PodEvidence := { name := n, ready := r, nodeMapVersion := v, currItems := i }
   let isSeen := fun (h : NodeMapRecovery.History) => match h with | .seen _ => true | _ => false
   let isUnk := fun (h : NodeMapRecovery.History) => match h with | .unknown _ => true | _ => false

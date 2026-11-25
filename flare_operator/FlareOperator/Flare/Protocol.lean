@@ -123,6 +123,15 @@ def serializeOK : String := "OK\r\n"
 def serializeServerError (msg : String) : String := s!"SERVER_ERROR {msg}\r\n"
 def serializeError : String := "ERROR\r\n"
 
+/-- The answer of an operator that waits for the first-build approval of a NEW
+    cluster: to EVERY request, nothing else (no node map, no registration).
+    flared waits and retries only on exactly this answer; a client that does not
+    know it sees a plain SERVER_ERROR, as it saw a refused connection before.
+    The C++ side (cluster::first_build_pending_answer) holds the same token. -/
+def firstBuildPendingToken : String := "first_build_approval_pending"
+
+def firstBuildPendingResponse : FlareResponse := .ServerError firstBuildPendingToken
+
 /-- Serialize a FlareResponse to wire format. -/
 def serializeResponse (resp : FlareResponse) : String :=
   match resp with

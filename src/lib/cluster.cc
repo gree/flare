@@ -1488,6 +1488,16 @@ int cluster::_reconstruct_node(vector<node> v, uint64_t node_map_version) {
 				// stopped; the reconcile below starts one from the
 				// committed epoch and cursor.
 				this->stop_wal_follower();
+#ifdef HAVE_LIBROCKSDB
+				// The read-source binding moves to the committed history
+				// under the same map write locks, before any validator
+				// decision (its apply takes them in read mode and is
+				// generation-checked) can compare the new epoch with the
+				// old binding.
+				if (storage_rocksdb* rdb = dynamic_cast<storage_rocksdb*>(this->_storage)) {
+					this->continue_read_source_locked(master_key, rdb->get_master_id(), rdb->get_source_epoch());
+				}
+#endif
 			}
 			// a pending history held the followers where they were (see
 			// _reconcile_wal_follower_locked); it is decided now
@@ -2290,6 +2300,26 @@ void cluster::bind_read_source(const string& source, const string& master_id, co
 	pthread_rwlock_unlock(&this->_mutex_node_map);
 	log_notice("read source %s: %s (master_id %s, source epoch %s): %s", still_master ? "BOUND" : "BOUND FOR RE-VALIDATION",
 		source.c_str(), master_id.c_str(), source_epoch.empty() ? "(legacy, lineage only)" : source_epoch.c_str(), reason.c_str());
+}
+
+void cluster::continue_read_source_locked(const string& source, const string& master_id, const string& source_epoch) {
+	pthread_mutex_lock(&this->_mutex_read_source);
+	// only a copy that was validated moves on; a copy already found different
+	// (none / needs_rebuild) is not made valid by a continuation
+	if (this->_read_source.st == source_binding::eligible || this->_read_source.st == source_binding::revalidating) {
+		const string from = this->_read_source.source_epoch;
+		if (this->_read_source.st == source_binding::eligible) {
+			this->_read_source.source = source;
+		}
+		this->_read_source.master_id = master_id;
+		this->_read_source.source_epoch = source_epoch;
+		this->_read_source.reason = "continued history committed (" + from + " -> " + source_epoch + ")";
+		this->_read_source.generation++;
+		this->_read_source_wake = true;
+		pthread_cond_signal(&this->_cond_read_source);
+		log_notice("read source continued: %s (master_id %s, source epoch %s -> %s)", source.c_str(), master_id.c_str(), from.c_str(), source_epoch.c_str());
+	}
+	pthread_mutex_unlock(&this->_mutex_read_source);
 }
 
 void cluster::reset_read_source(const string& reason) {

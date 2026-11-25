@@ -54,7 +54,12 @@ struct source_probe {
 	std::string		master_id;
 	bool			epoch_token;	// the reply carried a source_epoch field at all
 	std::string		source_epoch;
-	source_probe(): complete(false), epoch_token(false) {}
+	// The probed master reports the history this copy LEFT when it committed
+	// a continued history, within the grace window: the successor has not
+	// committed (promoted) yet. Set by the caller from the storage; never for
+	// a copy that was not continued.
+	bool			continued_source_behind;
+	source_probe(): complete(false), epoch_token(false), continued_source_behind(false) {}
 };
 
 /**
@@ -106,6 +111,11 @@ inline source_decision decide_source(const source_binding& b, const std::string&
 			return (b.st == source_binding::eligible && same_source) ? decision_keep : decision_wait_unknown;
 		}
 		if (p.source_epoch != b.source_epoch) {
+			if (p.continued_source_behind) {
+				// the continued history is ahead of the successor's, which
+				// has not committed it yet: not a history that differs
+				return (b.st == source_binding::eligible && same_source) ? decision_keep : decision_wait_unknown;
+			}
 			return decision_needs_rebuild;
 		}
 		return (b.st == source_binding::eligible && same_source) ? decision_keep : decision_rebind;

@@ -86,4 +86,27 @@ namespace test_source_eligibility {
 		// a legacy copy facing a peer that now has a history: cannot compare
 		cut_assert_equal_int(decision_wait_unknown, decide_source(bound(source_binding::revalidating, "m1", "L", ""), "m2", probe("L", "e1")));
 	}
+
+	// a replica that committed a continued history: its binding is moved to
+	// E', and the successor that reports E' is the same history
+	void test_continued_binding_keeps_against_successor_at_new_history() {
+		cut_assert_equal_int(decision_keep, decide_source(bound(source_binding::eligible, "m2", "L2", "e3"), "m2", probe("L2", "e3")));
+		cut_assert_equal_int(decision_rebind, decide_source(bound(source_binding::revalidating, "m1", "L2", "e3"), "m2", probe("L2", "e3")));
+	}
+
+	// the successor has not committed yet and still reports the history the
+	// copy left: waits (keeps), no rebuild
+	void test_continued_source_behind_is_not_a_rebuild() {
+		source_probe p = probe("L2", "e2");
+		p.continued_source_behind = true;
+		cut_assert_equal_int(decision_keep, decide_source(bound(source_binding::eligible, "m2", "L2", "e3"), "m2", p));
+		cut_assert_equal_int(decision_wait_unknown, decide_source(bound(source_binding::revalidating, "m1", "L2", "e3"), "m2", p));
+	}
+
+	// a copy that was NOT continued (flag unset) still rebuilds on a real
+	// history difference
+	void test_not_continued_copy_with_other_history_still_rebuilds() {
+		cut_assert_equal_int(decision_needs_rebuild, decide_source(bound(source_binding::eligible, "m2", "L2", "e3"), "m2", probe("L2", "e2")));
+		cut_assert_equal_int(decision_needs_rebuild, decide_source(bound(source_binding::revalidating, "m1", "L", "e1"), "m2", probe("L", "e2")));
+	}
 }

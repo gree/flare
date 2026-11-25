@@ -30,6 +30,7 @@
 #include <fstream>
 #include <stdlib.h>
 #include <unistd.h>
+#include <time.h>
 
 #include <app.h>
 #include <cluster.h>
@@ -740,22 +741,21 @@ namespace test_cluster
 			cut_message("a change from a non-master was applied as a replica (or not routed as a client write)"));
 	}
 
-	// ---- first-index-connection wait (K8s first build) ----
+	// ---- first-build wait (K8s first build) ----
+	// scripted attempts: what each registration attempt answers
 	struct fic {
-		int opens;
-		int succeed_at;		// the open that succeeds (1-based, 0 = never)
+		std::vector<cluster::first_index_step> script;	// the last entry repeats
+		int attempts;
 		std::vector<uint32_t> sleeps;
-		int stop_after;		// stop() true after this many opens (0 = never)
-		fic() : opens(0), succeed_at(0), stop_after(0) {}
-		shared_connection open() {
-			opens++;
-			if (succeed_at > 0 && opens == succeed_at) {
-				return shared_connection_tcp(new connection_tcp("127.0.0.1", 1));
-			}
-			return shared_connection();
+		int stop_after;		// stop() true after this many attempts (0 = never)
+		fic() : attempts(0), stop_after(0) {}
+		cluster::first_index_step attempt() {
+			cluster::first_index_step r = script[(size_t)attempts < script.size() ? attempts : script.size() - 1];
+			attempts++;
+			return r;
 		}
 		void sleep(uint32_t ms) { sleeps.push_back(ms); }
-		bool stop() { return stop_after > 0 && opens >= stop_after; }
+		bool stop() { return stop_after > 0 && attempts >= stop_after; }
 	};
 	static uint32_t jit_lo() { return 0; }
 	static uint32_t jit_hi() { return 1000; }
@@ -779,58 +779,116 @@ namespace test_cluster
 		cppcut_assert_equal((uint32_t)2000, cluster::first_index_backoff_ms(2, 5000)); // jitter clamped to the ceiling (500*2^2)
 	}
 
-	void test_first_index_retry_unbounded_until_connected() {
+	// THE decision: only the explicit pending answer, with the wait enabled, waits
+	void test_first_index_decide_only_the_explicit_signal_waits() {
+		// not connected (refused, timed out, resolver): fails, whatever else is set
+		cppcut_assert_equal((int)cluster::first_index_failed, (int)cluster::first_index_decide(true, false, false, false));
+		cppcut_assert_equal((int)cluster::first_index_failed, (int)cluster::first_index_decide(true, false, false, true));
+		// registered: goes on
+		cppcut_assert_equal((int)cluster::first_index_registered, (int)cluster::first_index_decide(true, true, true, false));
+		cppcut_assert_equal((int)cluster::first_index_registered, (int)cluster::first_index_decide(false, true, true, false));
+		// connected, not registered, no pending answer (any other answer, a closed connection): fails
+		cppcut_assert_equal((int)cluster::first_index_failed, (int)cluster::first_index_decide(true, true, false, false));
+		// the pending answer waits only when the wait is enabled
+		cppcut_assert_equal((int)cluster::first_index_pending, (int)cluster::first_index_decide(true, true, false, true));
+		cppcut_assert_equal((int)cluster::first_index_failed, (int)cluster::first_index_decide(false, true, false, true));
+	}
+
+	// the answer is exactly one line; nothing close to it counts
+	void test_first_build_pending_line_is_exact() {
+		cut_assert_true(cluster::is_first_build_pending_line("SERVER_ERROR first_build_approval_pending"));
+		cut_assert_true(cluster::is_first_build_pending_line("SERVER_ERROR first_build_approval_pending\n"));
+		cut_assert_true(cluster::is_first_build_pending_line("SERVER_ERROR first_build_approval_pending\r\n"));
+		cut_assert_false(cluster::is_first_build_pending_line(NULL));
+		cut_assert_false(cluster::is_first_build_pending_line(""));
+		cut_assert_false(cluster::is_first_build_pending_line("SERVER_ERROR first_build_approval_pending2"));
+		cut_assert_false(cluster::is_first_build_pending_line("SERVER_ERROR first_build_approval_pending extra"));
+		cut_assert_false(cluster::is_first_build_pending_line("SERVER_ERROR first_build_approval"));
+		cut_assert_false(cluster::is_first_build_pending_line("SERVER_ERROR registration closed: the first-build history record is not written yet"));
+		cut_assert_false(cluster::is_first_build_pending_line("SERVER_ERROR failed to add node"));
+		cut_assert_false(cluster::is_first_build_pending_line("first_build_approval_pending"));
+		cut_assert_false(cluster::is_first_build_pending_line("NODE flared-0 12121 0 0 0 0 16"));
+		cut_assert_false(cluster::is_first_build_pending_line("END"));
+	}
+
+	void test_first_index_wait_pending_then_registered() {
 		fic f;
-		f.succeed_at = 500;		// far past any count/time limit
-		shared_connection c = cluster::retry_first_index_open(
-				boost::bind(&fic::open, &f), boost::bind(&fic::sleep, &f, _1),
+		for (int i = 0; i < 499; i++) { f.script.push_back(cluster::first_index_pending); }
+		f.script.push_back(cluster::first_index_registered);
+		cluster::first_index_wait_result r = cluster::run_first_index_wait(
+				boost::bind(&fic::attempt, &f), boost::bind(&fic::sleep, &f, _1),
 				&jit_hi, boost::function<bool()>());
-		cut_assert_true(c.get() != NULL);
-		cppcut_assert_equal(500, f.opens);
+		cppcut_assert_equal((int)cluster::first_index_wait_registered, (int)r);
+		cppcut_assert_equal(500, f.attempts);
 		cppcut_assert_equal((size_t)499, f.sleeps.size());
 		for (size_t i = 0; i < f.sleeps.size(); i++) {
 			cut_assert_true(f.sleeps[i] <= 3000);
 			cut_assert_true(f.sleeps[i] >= 250);
 		}
 		cppcut_assert_equal((uint32_t)3000, f.sleeps.back());
-		// grows from the base, never shrinks at max jitter
 		for (size_t i = 1; i < f.sleeps.size(); i++) {
 			cut_assert_true(f.sleeps[i] >= f.sleeps[i - 1]);
 		}
 	}
 
-	void test_first_index_retry_immediate_success_does_not_sleep() {
+	// no pending answer, no wait: the first failure ends startup, no sleep
+	void test_first_index_no_wait_without_the_signal() {
 		fic f;
-		f.succeed_at = 1;
-		shared_connection c = cluster::retry_first_index_open(
-				boost::bind(&fic::open, &f), boost::bind(&fic::sleep, &f, _1),
+		f.script.push_back(cluster::first_index_failed);
+		cluster::first_index_wait_result r = cluster::run_first_index_wait(
+				boost::bind(&fic::attempt, &f), boost::bind(&fic::sleep, &f, _1),
 				&jit_lo, boost::function<bool()>());
-		cut_assert_true(c.get() != NULL);
-		cppcut_assert_equal(1, f.opens);
+		cppcut_assert_equal((int)cluster::first_index_wait_failed, (int)r);
+		cppcut_assert_equal(1, f.attempts);
 		cppcut_assert_equal((size_t)0, f.sleeps.size());
 	}
 
-	void test_first_index_retry_stop_ends_wait() {
+	// a failure after the operator said "pending" (it went away) ends startup, as before
+	void test_first_index_failure_during_the_wait_ends_it() {
 		fic f;
-		f.stop_after = 3;
-		shared_connection c = cluster::retry_first_index_open(
-				boost::bind(&fic::open, &f), boost::bind(&fic::sleep, &f, _1),
-				&jit_lo, boost::bind(&fic::stop, &f));
-		cut_assert_true(c.get() == NULL);
-		cppcut_assert_equal(3, f.opens);
+		f.script.push_back(cluster::first_index_pending);
+		f.script.push_back(cluster::first_index_pending);
+		f.script.push_back(cluster::first_index_failed);
+		cluster::first_index_wait_result r = cluster::run_first_index_wait(
+				boost::bind(&fic::attempt, &f), boost::bind(&fic::sleep, &f, _1),
+				&jit_lo, boost::function<bool()>());
+		cppcut_assert_equal((int)cluster::first_index_wait_failed, (int)r);
+		cppcut_assert_equal(3, f.attempts);
+		cppcut_assert_equal((size_t)2, f.sleeps.size());
 	}
 
-	// SIGTERM: the stop predicate is checked before an attempt as well, so a
-	// request that arrived during the backoff ends the wait without another open
-	void test_first_index_retry_stop_before_the_first_attempt() {
+	void test_first_index_immediate_registration_does_not_sleep() {
 		fic f;
-		f.stop_after = 0;
+		f.script.push_back(cluster::first_index_registered);
+		cluster::first_index_wait_result r = cluster::run_first_index_wait(
+				boost::bind(&fic::attempt, &f), boost::bind(&fic::sleep, &f, _1),
+				&jit_lo, boost::function<bool()>());
+		cppcut_assert_equal((int)cluster::first_index_wait_registered, (int)r);
+		cppcut_assert_equal(1, f.attempts);
+		cppcut_assert_equal((size_t)0, f.sleeps.size());
+	}
+
+	void test_first_index_wait_stop_ends_wait() {
+		fic f;
+		f.script.push_back(cluster::first_index_pending);
+		f.stop_after = 3;
+		cluster::first_index_wait_result r = cluster::run_first_index_wait(
+				boost::bind(&fic::attempt, &f), boost::bind(&fic::sleep, &f, _1),
+				&jit_lo, boost::bind(&fic::stop, &f));
+		cppcut_assert_equal((int)cluster::first_index_wait_stopped, (int)r);
+		cppcut_assert_equal(3, f.attempts);
+	}
+
+	// SIGTERM during the backoff: ends the wait without another attempt
+	void test_first_index_wait_stop_after_the_backoff() {
+		fic f;
+		f.script.push_back(cluster::first_index_pending);
 		bool stopped = true;
-		shared_connection c = cluster::retry_first_index_open(
-				boost::bind(&fic::open, &f), boost::bind(&fic::sleep, &f, _1),
+		cluster::first_index_wait_result r = cluster::run_first_index_wait(
+				boost::bind(&fic::attempt, &f), boost::bind(&fic::sleep, &f, _1),
 				&jit_lo, boost::bind(&stop_flag, &stopped));
-		cut_assert_true(c.get() == NULL);
-		cppcut_assert_equal(0, f.opens);
+		cppcut_assert_equal((int)cluster::first_index_wait_stopped, (int)r);
+		cppcut_assert_equal(1, f.attempts);
 		cppcut_assert_equal((size_t)0, f.sleeps.size());
 	}
 
@@ -841,11 +899,11 @@ namespace test_cluster
 		long long stall_sec;			// the duration of an attempt (a stalled lookup)
 		long long worst_age_at_end_of_attempt;
 		clk() : now(1000), last_beat(-1), stall_sec(0), worst_age_at_end_of_attempt(0) {}
-		shared_connection open() {
+		cluster::first_index_step attempt() {
 			now += stall_sec;
 			long long age = now - last_beat;
 			if (age > worst_age_at_end_of_attempt) { worst_age_at_end_of_attempt = age; }
-			return shared_connection();
+			return cluster::first_index_pending;
 		}
 		void sleep(uint32_t ms) { now += ms / 1000; }
 		void beat() { last_beat = now; }
@@ -854,21 +912,89 @@ namespace test_cluster
 
 	void test_first_index_heartbeat_stays_fresh_while_attempts_return() {
 		clk k;
-		k.stall_sec = 5;	// the per-attempt deadline
-		cluster::retry_first_index_open(
-				boost::bind(&clk::open, &k), boost::bind(&clk::sleep, &k, _1),
+		k.stall_sec = 10;	// the per-attempt deadline
+		cluster::run_first_index_wait(
+				boost::bind(&clk::attempt, &k), boost::bind(&clk::sleep, &k, _1),
 				&jit_hi, boost::bind(&clk::stop, &k), boost::bind(&clk::beat, &k));
 		cut_assert_true(k.worst_age_at_end_of_attempt < (long long)cluster::first_index_marker_max_age_sec);
 	}
 
 	void test_first_index_heartbeat_goes_stale_when_an_attempt_stalls() {
 		clk k;
-		k.stall_sec = 300;	// a resolver that does not answer: outside the 5 s connect deadline
-		cluster::retry_first_index_open(
-				boost::bind(&clk::open, &k), boost::bind(&clk::sleep, &k, _1),
+		k.stall_sec = 300;	// an attempt with no deadline
+		k.last_beat = 1000;	// the beat after the first pending answer
+		cluster::run_first_index_wait(
+				boost::bind(&clk::attempt, &k), boost::bind(&clk::sleep, &k, _1),
 				&jit_hi, boost::bind(&clk::stop, &k), boost::bind(&clk::beat, &k));
-		// the marker was last written before the stalled attempt, so the probe stops accepting it
 		cut_assert_true(k.worst_age_at_end_of_attempt >= (long long)cluster::first_index_marker_max_age_sec);
+	}
+
+	// ---- P2: an attempt that sits in the resolver is bounded and stoppable ----
+	struct stall {
+		unsigned ms;				// how long the "resolver" does not answer
+		stall(unsigned m) : ms(m) {}
+		shared_connection open() {
+			usleep(ms * 1000);
+			return shared_connection();
+		}
+	};
+	struct stop_later {
+		long long at_ms;		// the stop request arrives this long after the start
+		struct timespec t0;
+		stop_later(long long a) : at_ms(a) { clock_gettime(CLOCK_MONOTONIC, &t0); }
+		bool stop() {
+			struct timespec n;
+			clock_gettime(CLOCK_MONOTONIC, &n);
+			return ((n.tv_sec - t0.tv_sec) * 1000LL + (n.tv_nsec - t0.tv_nsec) / 1000000LL) >= at_ms;
+		}
+	};
+	static long long mono_ms() {
+		struct timespec n;
+		clock_gettime(CLOCK_MONOTONIC, &n);
+		return n.tv_sec * 1000LL + n.tv_nsec / 1000000LL;
+	}
+
+	// SIGTERM during a resolver stall (the lookup does not return for 5 s): the
+	// attempt ends within the stop poll, not when the lookup returns
+	void test_open_bounded_sigterm_during_a_resolver_stall() {
+		stall s(5000);
+		stop_later sl(200);
+		bool stopped = false;
+		long long t0 = mono_ms();
+		shared_connection c = cluster::open_bounded(boost::bind(&stall::open, &s),
+				boost::bind(&stop_later::stop, &sl), 10000, 100, &stopped);
+		long long dt = mono_ms() - t0;
+		cut_assert_true(c.get() == NULL);
+		cut_assert_true(stopped);
+		cut_assert_true(dt >= 150);
+		cut_assert_true(dt < 1000, cut_message("the stop took %lld ms to end the attempt", dt));
+	}
+
+	// a resolver that never answers: the attempt ends at its deadline
+	void test_open_bounded_deadline_during_a_resolver_stall() {
+		stall s(5000);
+		bool stopped = true;
+		long long t0 = mono_ms();
+		shared_connection c = cluster::open_bounded(boost::bind(&stall::open, &s),
+				boost::function<bool()>(), 500, 100, &stopped);
+		long long dt = mono_ms() - t0;
+		cut_assert_true(c.get() == NULL);
+		cut_assert_false(stopped);
+		cut_assert_true(dt >= 450);
+		cut_assert_true(dt < 1500, cut_message("the deadline took %lld ms", dt));
+	}
+
+	// an attempt that returns in time passes its connection through
+	struct quick {
+		shared_connection open() { return shared_connection_tcp(new connection_tcp("127.0.0.1", 1)); }
+	};
+	void test_open_bounded_passes_a_connection_through() {
+		quick q;
+		bool stopped = true;
+		shared_connection c = cluster::open_bounded(boost::bind(&quick::open, &q),
+				boost::function<bool()>(), 5000, 100, &stopped);
+		cut_assert_true(c.get() != NULL);
+		cut_assert_false(stopped);
 	}
 
 	void test_first_index_marker_freshness_rule() {

@@ -107,7 +107,7 @@ def suite : TestSuite := {
         let gauge ← waitingGauge
         IO.eprintln s!"# gauge: {gauge}"
         match gauge with
-        | some l => if !(l.trim.endsWith " 1" || l.trim.endsWith " 1.0") then return .fail s!"the waiting gauge is not 1: {l}"
+        | some l => if !(l.trim.endsWith " 1" || l.trim.endsWith " 1.0" || l.trim.endsWith " 1.000000") then return .fail s!"the waiting gauge is not 1: {l}"
         | none => return .fail "the waiting gauge could not be read"
         return .pass },
 
@@ -142,7 +142,7 @@ def suite : TestSuite := {
           return ((← kubectlGetJsonpath "flarecluster" cfg.name ns annotation).toOption.getD "x").trim.isEmpty
         if !consumed then return .fail "the approval was not consumed after the map was persisted"
         match ← waitingGauge with
-        | some l => if !(l.trim.endsWith " 0" || l.trim.endsWith " 0.0") then return .fail s!"the waiting gauge did not return to 0: {l}"
+        | some l => if !(l.trim.endsWith " 0" || l.trim.endsWith " 0.0" || l.trim.endsWith " 0.000000") then return .fail s!"the waiting gauge did not return to 0: {l}"
         | none => pure ()
         return .pass }
   ]

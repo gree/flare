@@ -269,6 +269,8 @@ protected:
 	// without a total limit (false = a failed first connect fails startup, as
 	// before). Never reaches past the node-add that follows the connection.
 	bool								_wait_first_index_connect;
+	// ends the first-connection wait (flared: its shutdown request); empty = never
+	boost::function<bool()>	_first_index_stop;
 	uint32_t							_max_total_thread_queue;
 	bool								_read_unavailable_error;
 
@@ -288,8 +290,17 @@ public:
 	// Only the connection attempts BEFORE the first connection is established
 	// are covered: node-add, its reply and index loss afterwards are unchanged.
 	void set_wait_first_index_connect(bool b) { this->_wait_first_index_connect = b; };
-	// exists only while startup_node waits for the first index connection
+	void set_first_index_stop(const boost::function<bool()>& stop) { this->_first_index_stop = stop; };
+	// exists only while startup_node waits for the first index connection.
+	// Its content is the time (epoch seconds) of the last attempt step: a
+	// heartbeat the liveness probe accepts only while it is fresh, so a
+	// stalled attempt (a resolver that does not answer) stops passing it.
 	static const char* const first_index_wait_marker;
+	static const unsigned first_index_marker_max_age_sec = 60;	// the chart's probe uses the same value
+	// writes `now` into `path` atomically (temp file + rename); false on failure
+	static bool write_first_index_marker(const char* path, time_t now);
+	// the probe's rule: the marker exists, holds a time, and is younger than max_age_sec
+	static bool first_index_marker_fresh(const char* path, time_t now, unsigned max_age_sec);
 	static const int first_index_connect_timeout_ms = 5000;	// deadline of each attempt
 	static const uint32_t first_index_backoff_base_ms = 500;
 	static const uint32_t first_index_backoff_cap_ms = 30000;
@@ -299,11 +310,15 @@ public:
 	static uint32_t first_index_backoff_ms(unsigned attempt, uint32_t jitter_permille);
 	// retries `open` until it yields a connection (no count or time limit);
 	// sleeps first_index_backoff_ms between attempts through `sleep_ms`;
-	// `stop` (may be empty) ends the wait with an empty connection
+	// `stop` (may be empty) is checked between attempts (and by the production
+	// sleep during the backoff) and ends the wait with an empty connection;
+	// `heartbeat` (may be empty) is called before each attempt and after a failed
+	// one, never inside an attempt, so a stalled attempt leaves it stale
 	static shared_connection retry_first_index_open(const boost::function<shared_connection()>& open,
 			const boost::function<void(uint32_t)>& sleep_ms,
 			const boost::function<uint32_t()>& jitter_permille,
-			const boost::function<bool()>& stop);
+			const boost::function<bool()>& stop,
+			const boost::function<void()>& heartbeat = boost::function<void()>());
 
 	int add_node(string node_server_name, int node_server_port);
 	int down_node(string node_server_name, int node_server_port, bool shutdown_mode = false);
@@ -600,8 +615,9 @@ protected:
 	// thread::enqueue so a thread reused since then refuses the item
 	int _get_proxy_thread(string node_key, int key_hash, shared_thread& t, unsigned int& t_id);
 	shared_connection _open_index();
-	static void _sleep_ms(uint32_t ms);
+	static void _sleep_ms(uint32_t ms, const boost::function<bool()>& stop);
 	static uint32_t _jitter_permille();
+	static void _first_index_heartbeat();
 	shared_connection _open_index_single_server();
 	shared_connection _open_index_redundant();
 	int _get_reconstruction_bwlimit_for_new_partition(size_t current_partition_size);

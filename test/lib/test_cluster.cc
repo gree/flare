@@ -28,6 +28,8 @@
 #include "op_get.h"
 
 #include <fstream>
+#include <stdlib.h>
+#include <unistd.h>
 
 #include <app.h>
 #include <cluster.h>
@@ -757,6 +759,7 @@ namespace test_cluster
 	};
 	static uint32_t jit_lo() { return 0; }
 	static uint32_t jit_hi() { return 1000; }
+	static bool stop_flag(bool* b) { return *b; }
 
 	void test_first_index_backoff_bounds() {
 		for (unsigned a = 0; a < 40; a++) {
@@ -815,6 +818,72 @@ namespace test_cluster
 				&jit_lo, boost::bind(&fic::stop, &f));
 		cut_assert_true(c.get() == NULL);
 		cppcut_assert_equal(3, f.opens);
+	}
+
+	// SIGTERM: the stop predicate is checked before an attempt as well, so a
+	// request that arrived during the backoff ends the wait without another open
+	void test_first_index_retry_stop_before_the_first_attempt() {
+		fic f;
+		f.stop_after = 0;
+		bool stopped = true;
+		shared_connection c = cluster::retry_first_index_open(
+				boost::bind(&fic::open, &f), boost::bind(&fic::sleep, &f, _1),
+				&jit_lo, boost::bind(&stop_flag, &stopped));
+		cut_assert_true(c.get() == NULL);
+		cppcut_assert_equal(0, f.opens);
+		cppcut_assert_equal((size_t)0, f.sleeps.size());
+	}
+
+	// heartbeat vs. a resolver stall (an attempt that does not return for long)
+	struct clk {
+		long long now;
+		long long last_beat;
+		long long stall_sec;			// the duration of an attempt (a stalled lookup)
+		long long worst_age_at_end_of_attempt;
+		clk() : now(1000), last_beat(-1), stall_sec(0), worst_age_at_end_of_attempt(0) {}
+		shared_connection open() {
+			now += stall_sec;
+			long long age = now - last_beat;
+			if (age > worst_age_at_end_of_attempt) { worst_age_at_end_of_attempt = age; }
+			return shared_connection();
+		}
+		void sleep(uint32_t ms) { now += ms / 1000; }
+		void beat() { last_beat = now; }
+		bool stop() { return now > 1000 + 600; }
+	};
+
+	void test_first_index_heartbeat_stays_fresh_while_attempts_return() {
+		clk k;
+		k.stall_sec = 5;	// the per-attempt deadline
+		cluster::retry_first_index_open(
+				boost::bind(&clk::open, &k), boost::bind(&clk::sleep, &k, _1),
+				&jit_hi, boost::bind(&clk::stop, &k), boost::bind(&clk::beat, &k));
+		cut_assert_true(k.worst_age_at_end_of_attempt < (long long)cluster::first_index_marker_max_age_sec);
+	}
+
+	void test_first_index_heartbeat_goes_stale_when_an_attempt_stalls() {
+		clk k;
+		k.stall_sec = 300;	// a resolver that does not answer: outside the 5 s connect deadline
+		cluster::retry_first_index_open(
+				boost::bind(&clk::open, &k), boost::bind(&clk::sleep, &k, _1),
+				&jit_hi, boost::bind(&clk::stop, &k), boost::bind(&clk::beat, &k));
+		// the marker was last written before the stalled attempt, so the probe stops accepting it
+		cut_assert_true(k.worst_age_at_end_of_attempt >= (long long)cluster::first_index_marker_max_age_sec);
+	}
+
+	void test_first_index_marker_freshness_rule() {
+		char dir[] = "/tmp/test_cluster_marker_XXXXXX";
+		cut_assert_not_null(mkdtemp(dir));
+		std::string path = std::string(dir) + "/marker";
+		cut_assert_false(cluster::first_index_marker_fresh(path.c_str(), 5000, 60));	// absent
+		cut_assert_true(cluster::write_first_index_marker(path.c_str(), 5000));
+		cut_assert_true(cluster::first_index_marker_fresh(path.c_str(), 5000, 60));
+		cut_assert_true(cluster::first_index_marker_fresh(path.c_str(), 5059, 60));
+		cut_assert_false(cluster::first_index_marker_fresh(path.c_str(), 5060, 60));	// stale
+		cut_assert_true(cluster::write_first_index_marker(path.c_str(), 6000));		// a later beat refreshes it
+		cut_assert_true(cluster::first_index_marker_fresh(path.c_str(), 6010, 60));
+		unlink(path.c_str());
+		rmdir(dir);
 	}
 }
 

@@ -282,6 +282,8 @@ int flared::startup(int argc, char **argv) {
 		// Every K8s operator build, whether the index server comes from these
 		// variables or from the config (the chart passes it in the config).
 		this->_cluster->set_wait_first_index_connect(true);
+		// SIGTERM/SIGINT end the wait at once (the handler only sets the request)
+		this->_cluster->set_first_index_stop(boost::bind(&app::is_shutdown_requested, this));
 		if (this->_cluster->startup_node(k8s_index_servers,
 																		 ini_option_object().get_proxy_prior_netmask()) < 0) {
 			return -1;

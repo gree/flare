@@ -329,20 +329,23 @@ int cluster::startup_node(const vector<index_server>& index_servers, uint32_t pr
 		// flared listens only after its registration, so the liveness probe
 		// cannot reach its port while it waits here: this marker tells the
 		// probe that the process is alive and waiting (the chart's liveness
-		// accepts it). It exists only during this wait, never afterwards.
+		// accepts it while it is fresh). It exists only during this wait,
+		// never afterwards, and is removed on a shutdown request too.
 		const char* marker = cluster::first_index_wait_marker;
-		FILE* mf = fopen(marker, "w");
-		if (mf != NULL) {
-			fclose(mf);
-		} else {
+		if (!write_first_index_marker(marker, time(NULL))) {
 			log_warning("could not create %s (%s): the liveness probe may restart this process while it waits for the index server", marker, strerror(errno));
 		}
 		c = retry_first_index_open(
 				boost::bind(&cluster::_open_index, this),
-				boost::bind(&cluster::_sleep_ms, _1),
+				boost::bind(&cluster::_sleep_ms, _1, this->_first_index_stop),
 				boost::bind(&cluster::_jitter_permille),
-				boost::function<bool()>());
+				this->_first_index_stop,
+				boost::bind(&cluster::_first_index_heartbeat));
 		unlink(marker);
+		if (!c && this->_first_index_stop && this->_first_index_stop()) {
+			log_notice("shutdown requested while waiting for the first index connection", 0);
+			return -1;
+		}
 	} else {
 		c = this->_open_index();
 	}
@@ -428,14 +431,24 @@ uint32_t cluster::first_index_backoff_ms(unsigned attempt, uint32_t jitter_permi
 shared_connection cluster::retry_first_index_open(const boost::function<shared_connection()>& open,
 		const boost::function<void(uint32_t)>& sleep_ms,
 		const boost::function<uint32_t()>& jitter_permille,
-		const boost::function<bool()>& stop) {
+		const boost::function<bool()>& stop,
+		const boost::function<void()>& heartbeat) {
 	for (unsigned attempt = 0; ; attempt++) {
+		if (stop && stop()) {
+			return shared_connection();
+		}
+		if (heartbeat) {
+			heartbeat();
+		}
 		shared_connection c = open();
 		if (c) {
 			return c;
 		}
 		if (stop && stop()) {
 			return shared_connection();
+		}
+		if (heartbeat) {
+			heartbeat();
 		}
 		uint32_t ms = first_index_backoff_ms(attempt, jitter_permille());
 		// log on the first attempt, then about once a minute at the cap
@@ -446,8 +459,52 @@ shared_connection cluster::retry_first_index_open(const boost::function<shared_c
 	}
 }
 
-void cluster::_sleep_ms(uint32_t ms) {
-	usleep((useconds_t)ms * 1000);
+bool cluster::write_first_index_marker(const char* path, time_t now) {
+	std::string tmp = std::string(path) + ".tmp";
+	FILE* f = fopen(tmp.c_str(), "w");
+	if (f == NULL) {
+		return false;
+	}
+	bool ok = fprintf(f, "%lld\n", (long long)now) > 0;
+	ok = (fclose(f) == 0) && ok;
+	if (!ok || rename(tmp.c_str(), path) < 0) {
+		unlink(tmp.c_str());
+		return false;
+	}
+	return true;
+}
+
+bool cluster::first_index_marker_fresh(const char* path, time_t now, unsigned max_age_sec) {
+	FILE* f = fopen(path, "r");
+	if (f == NULL) {
+		return false;
+	}
+	long long t = 0;
+	int n = fscanf(f, "%lld", &t);
+	fclose(f);
+	if (n != 1) {
+		return false;
+	}
+	long long age = (long long)now - t;
+	return age < (long long)max_age_sec;
+}
+
+void cluster::_first_index_heartbeat() {
+	// best effort: a failed write leaves the marker as it was (it ages out)
+	write_first_index_marker(first_index_wait_marker, time(NULL));
+}
+
+// sleeps in short slices so that a shutdown request ends the backoff at once
+void cluster::_sleep_ms(uint32_t ms, const boost::function<bool()>& stop) {
+	const uint32_t slice_ms = 200;
+	while (ms > 0) {
+		if (stop && stop()) {
+			return;
+		}
+		uint32_t d = ms < slice_ms ? ms : slice_ms;
+		usleep((useconds_t)d * 1000);
+		ms -= d;
+	}
 }
 
 uint32_t cluster::_jitter_permille() {
@@ -3704,6 +3761,9 @@ shared_connection cluster::_open_index_single_server() {
 	if (this->_wait_first_index_connect) {
 		// each attempt of the first-connection wait has a deadline
 		ctp->set_connect_timeout_ms(first_index_connect_timeout_ms);
+		// the wait loop is the retry: one connect per attempt keeps a
+		// shutdown request from waiting behind several blackholed connects
+		ctp->set_connect_retry_limit(0);
 	}
 #endif
 	if (ctp && ctp->open() == 0) {

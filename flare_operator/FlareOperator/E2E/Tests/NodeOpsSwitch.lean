@@ -2232,10 +2232,17 @@ def continuationLoadSuite : TestSuite :=
                 run := continuationLoadTest c }] }
 
 /-- history-continuation-handover-load-delayed: the same load and delete, but
-    the successor's continuation commit is delayed by 3 s (test seam
+    the successor's continuation commit is delayed by 1 s (test seam
     FLARE_TEST_HISTORY_COMMIT_DELAY_FILE), so the replica commits FIRST and
     the read-source validator (every 2 s) probes a successor that still
-    reports the old master_id and the superseded epoch. Pass: the replica is
+    reports the old master_id and the superseded epoch. Sizing (measured, CI
+    run 45555633369): the successor is armed ~1.4 s before its commit even
+    without a hold, so 1 s makes the armed-uncommitted period ~2.4 s, longer
+    than one probe interval (2 s). The no-master window is ~17.3-17.6 s with
+    no hold (hc-load-delete, 17.6 s without an ack) and a 3 s hold made it
+    20.3 s, past the clients' W = 20 s (2 proxy errors); 1 s gives ~18.5 s,
+    ~1.5 s under W. The window itself is tracked in
+    flare-handover-nomaster-window. Pass: the replica is
     not rebuilt (no NEEDS REBUILD / lineage differs / history differs, no
     replica repair), keeps following after the successor commits, 0 write
     errors, 0 acknowledged writes missing, copies equal. -/
@@ -2253,8 +2260,8 @@ def continuationLoadDelayedSuite : TestSuite :=
       cleanupCluster cfg
     onFailure := dumpClusterDiagnostics cfg.«namespace» s!"app={cfg.operatorName}"
     afterEach := fun i => saveFullLogs cfg.«namespace» s!"after-test-{i}"
-    tests := [{ name := "kubectl delete pod of the MASTER under a write load with the successor's continuation commit delayed 3 s: the replica commits first, the validator probes the successor still at the old master_id/epoch, and it is not rebuilt, keeps following, 0 write errors, 0 acknowledged writes missing, equal item counts",
-                run := continuationLoadTest c 3 }] }
+    tests := [{ name := "kubectl delete pod of the MASTER under a write load with the successor's continuation commit delayed 1 s: the replica commits first, the validator probes the successor still at the old master_id/epoch, and it is not rebuilt, keeps following, 0 write errors, 0 acknowledged writes missing, equal item counts",
+                run := continuationLoadTest c 1 }] }
 
 /-- history-continuation-handover-load-restart: the delayed-successor case
     (the successor's continuation commit is held 10 s: inside the designed bound

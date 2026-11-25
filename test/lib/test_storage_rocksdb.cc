@@ -5208,6 +5208,119 @@ void test_a_real_epoch_mismatch_is_still_refused_as_another_history() {
 	drop_rocksdb(s, wal_master_dir);
 }
 
+// Commit a replica continuation on `s` (it left master_id "old-master-id" and
+// its current epoch); returns the epoch it left.
+static string continue_replica_for_test(storage_rocksdb* s, const char* hid) {
+	const string e0 = s->get_source_epoch();
+	const string inc = s->get_incarnation();
+	cut_assert_equal_int(0, s->set_master_id("old-master-id"));
+	cut_assert_equal_int(0, s->set_repl_last_lsn(9));
+	storage_rocksdb::pending_history in;
+	in.hid = hid;
+	in.partition = 0;
+	in.successor = "succ:12121";
+	in.from_epoch = e0;
+	in.to_epoch = "99:load";
+	in.seq = 500;
+	in.master_id = "new-master-id";
+	in.deadline_ms = wal_pin::now_ms() + 60000;
+	string res;
+	cut_assert_equal_int(0, s->history_replica_prepare(in, inc, res));
+	cut_assert_equal_int(0, s->history_arm(hid, 5, res));
+	cut_assert_equal_int(1, s->history_on_map(0, "succ:12121", "me:12121", 5));
+	return e0;
+}
+
+// P1: the grace of a continued replica survives a restart of flared, bound to
+// the epoch/master_id it left, and is not extended by the restart.
+void test_continuation_evidence_survives_restart_and_expires_by_its_deadline() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	s->set_continuation_grace_ms(1500);
+	const string e0 = continue_replica_for_test(s, "p0-a1-dur");
+	cut_assert_true(s->continuation_source_behind(e0));
+	drop_rocksdb_noremove(s);
+	// restart inside the window: the evidence is back, bound to the old lineage
+	s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_string("99:load", s->get_source_epoch().c_str());
+	cut_assert_equal_string(e0.c_str(), s->get_superseded_epoch().c_str());
+	cut_assert_true(s->continuation_source_behind(e0));
+	cut_assert_true(s->continuation_source_behind(""));
+	cut_assert_false(s->continuation_source_behind("98:another"));
+	cut_assert_true(s->continuation_left_master_id("old-master-id"));
+	cut_assert_false(s->continuation_left_master_id("unrelated-master-id"));
+	cut_assert_false(s->continuation_left_master_id(""));
+	// a restart does not restart the window: the persisted deadline stands
+	drop_rocksdb_noremove(s);
+	usleep(1700 * 1000);
+	s = make_rocksdb(wal_master_dir);
+	cut_assert_false(s->continuation_source_behind(e0));
+	cut_assert_false(s->continuation_left_master_id("old-master-id"));
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// The successor reporting the committed epoch ends the exception, durably.
+void test_continuation_evidence_is_cleared_when_the_successor_commits() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	const string e0 = continue_replica_for_test(s, "p0-a1-clr");
+	// another epoch is not the successor's commit
+	s->continuation_observe_source_epoch(e0);
+	cut_assert_true(s->continuation_source_behind(e0));
+	s->continuation_observe_source_epoch("99:load");
+	cut_assert_false(s->continuation_source_behind(e0));
+	cut_assert_false(s->continuation_left_master_id("old-master-id"));
+	drop_rocksdb_noremove(s);
+	s = make_rocksdb(wal_master_dir);
+	cut_assert_false(s->continuation_source_behind(e0));
+	cut_assert_false(s->continuation_left_master_id("old-master-id"));
+	drop_rocksdb(s, wal_master_dir);
+}
+
+// P2: the text client stream. A master_id_mismatch reply is waited for only
+// when it names the master_id this copy left.
+static int mismatch_result_for_test(storage_rocksdb* s, const char* reply_line) {
+	shared_connection c(new connection_sstream(reply_line));
+	op_repl_sync_wal op(c, s);
+	op.run_client_follow(501, s->get_master_id(), s->get_source_epoch(), s->get_incarnation(), 10, 1 << 20);
+	return op.get_client_result();
+}
+
+void test_master_id_mismatch_of_the_left_master_id_is_retried_within_the_grace() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	continue_replica_for_test(s, "p0-a1-p2a");
+	cut_assert_equal_int(op_repl_sync_wal::client_server_error,
+		mismatch_result_for_test(s, "SERVER_ERROR master_id_mismatch old-master-id\r\n"));
+	drop_rocksdb(s, wal_master_dir);
+}
+
+void test_master_id_mismatch_of_an_unrelated_master_id_rebuilds_at_once() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	continue_replica_for_test(s, "p0-a1-p2b");
+	cut_assert_equal_int(op_repl_sync_wal::client_master_id_mismatch,
+		mismatch_result_for_test(s, "SERVER_ERROR master_id_mismatch unrelated-master-id\r\n"));
+	// an empty-epoch / empty-id reply does not grant the grace either
+	cut_assert_equal_int(op_repl_sync_wal::client_master_id_mismatch,
+		mismatch_result_for_test(s, "SERVER_ERROR master_id_mismatch\r\n"));
+	drop_rocksdb(s, wal_master_dir);
+}
+
+void test_master_id_mismatch_of_the_left_master_id_without_a_continuation_rebuilds() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	cut_assert_equal_int(0, s->set_master_id("old-master-id"));
+	cut_assert_equal_int(op_repl_sync_wal::client_master_id_mismatch,
+		mismatch_result_for_test(s, "SERVER_ERROR master_id_mismatch old-master-id\r\n"));
+	drop_rocksdb(s, wal_master_dir);
+}
+
+void test_master_id_mismatch_of_the_left_master_id_after_the_grace_rebuilds() {
+	storage_rocksdb* s = make_rocksdb(wal_master_dir);
+	s->set_continuation_grace_ms(200);
+	continue_replica_for_test(s, "p0-a1-p2c");
+	usleep(400 * 1000);
+	cut_assert_equal_int(op_repl_sync_wal::client_master_id_mismatch,
+		mismatch_result_for_test(s, "SERVER_ERROR master_id_mismatch old-master-id\r\n"));
+	drop_rocksdb(s, wal_master_dir);
+}
+
 // A newer value arrives by forwarding; the WAL then delivers an older change
 // for the same key. The newer value must stand.
 void test_apply_rule_forwarded_newer_survives_older_wal() {

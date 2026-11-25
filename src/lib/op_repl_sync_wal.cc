@@ -584,9 +584,11 @@ int op_repl_sync_wal::_parse_text_client_stream() {
 					server_id.erase(server_id.size() - 1);
 				}
 				this->_server_master_id = server_id;
-				if (rocksdb->continuation_source_behind("")) {
-					// just continued a history, and the new master has not
-					// committed it yet: ask again, do not rebuild
+				if (rocksdb->continuation_left_master_id(server_id)) {
+					// just continued a history, and the master that answers is
+					// the one this copy left (an unrelated master_id is never
+					// waited for): the new master has not committed it yet,
+					// ask again, do not rebuild
 					this->_client_result = client_server_error;
 					log_notice("master_id mismatch (server reports %s): the new master has not committed the continued history yet -> retry", server_id.c_str());
 				} else {
@@ -655,6 +657,9 @@ int op_repl_sync_wal::_parse_text_client_stream() {
 			// The history this source is serving, and its current position.
 			n += util::next_word(p+n, q, sizeof(q));
 			this->_server_epoch = q;
+			// the successor reports the epoch this copy committed: the
+			// continuation exception is over
+			rocksdb->continuation_observe_source_epoch(this->_server_epoch);
 			n += util::next_digit(p+n, q, sizeof(q));
 			if (q[0]) {
 				try {

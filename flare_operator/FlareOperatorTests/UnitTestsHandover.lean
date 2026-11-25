@@ -140,6 +140,18 @@ private def recoveryResults : List (String × Bool) := Id.run do
               s1.phase == .promoting && sa1 == .none && s1.reason.startsWith "HALTED" && s1.reason.endsWith "no other replica is promoted"
                 && s2.phase == .done && sa2 == .finish && !s2.reason.startsWith "HALTED"
                 && s3.phase == .promoting && s3.reason.startsWith "HALTED")]
+  -- the same expired continuation while the successor is not yet the master with V2
+  -- applied everywhere (late promotion under load): it waits, never HALTED; a foreign
+  -- epoch before the pending deadline still halts
+  let late := { doneObs with successorEpoch := some "8:new", nowMs := pend + 20000 }
+  let (y1, ya1) := step ccfg armed { late with successorOwnRole := some "slave" }
+  let (y2, _) := step ccfg armed { late with entryVersions := [("s:12121", some 8), ("m:12121", some 9)] }
+  let (y3, _) := step ccfg armed { late with successorEpoch := some "8:new", nowMs := pend - 1, successorOwnRole := some "slave" }
+  r := r ++ [("recovery: an expired continuation whose successor (ordinary epoch) is not yet master / V2 not applied everywhere waits without the epoch HALTED and finishes done once it holds; before the pending deadline the foreign epoch still halts",
+              y1.phase == .promoting && !y1.reason.startsWith "HALTED" && ya1 == .none
+                && y2.phase == .promoting && !y2.reason.startsWith "HALTED"
+                && y3.reason.startsWith "HALTED"
+                && (step ccfg y1 late).1.phase == .done)]
   -- the frozen keys: every copy of the partition while committing or V2 is out
   let slavesOf := fun (p : Nat) => if p == 0 then ["s:12121", "r1:12121", "r2:12121"] else []
   r := r ++ [("recovery: while committingReplicas, promoting with V2 out, or replacing a stopped successor (before its V3 too), the partition's copies (and a fenced successor) are not promoted by the failover/refill; not before V2 otherwise, not after",

@@ -461,7 +461,10 @@ def step (cfg : Config) (e : Entry) (o : Obs) : Entry × Action :=
           | none => ({ toPhase e .aborted o.nowMs s!"the successor {e.successor} stopped after V2 (its kubelet confirmed it) and no replica committed: the failover rules apply" with noRollback := true }, .finish)
         else
           (halt e s!"V2 went to the successor {e.successor}, which does not answer with its binding (its stop is not confirmed by its kubelet): no other replica is promoted", .none)
-      else if cfg.continuation && o.nowMs >= e.phaseMs + cfg.handoverMs && !epochOk then
+      -- an expired continuation is never this halt: the successor is already on
+      -- the ordinary promotion's epoch and only waits to be the master with V2
+      -- applied everywhere (done above as soon as both hold)
+      else if cfg.continuation && o.nowMs >= e.phaseMs + cfg.handoverMs && !epochOk && !expiredNormal then
         (halt e s!"the successor {e.successor} answers with its binding but not on the continued epoch {e.toEpoch} ({o.successorEpoch.getD "unreadable"}): not done, no other replica is promoted", .none)
       else (e, .none)
   | .preparing =>

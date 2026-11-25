@@ -112,6 +112,10 @@ structure ClusterConfig where
       a replacement) needs to be observable. 0 = no hook (fast pod deletes, the
       default for most suites). Mirrors the chart's cluster.drainSeconds. -/
   drainSeconds : Nat := 0
+  /-- terminationGracePeriodSeconds of the flared StatefulSet; 0 = the suite
+      default (5, or the drain window + 75). A suite that must tell a prompt
+      exit from a SIGKILL at the grace period sets it long. -/
+  terminationGraceSeconds : Nat := 0
   /-- Deploy the operator WITHOUT its FlareCluster and StatefulSet (they come
       later through `deployDeferredCluster`): the operator-before-cluster
       install the SAF-09 waiting state exists for. -/
@@ -420,7 +424,8 @@ def statefulSetYaml (cfg : ClusterConfig) : String :=
   -- operator's graceful drain is observable. grace must exceed drainSeconds.
   -- + flared's own stop budget after SIGTERM (65 s: the forward hold 60 s +
   -- 5 s, see the chart) + 10 s
-  let graceSeconds := if cfg.drainSeconds > 0 then cfg.drainSeconds + 75 else 5
+  let graceSeconds := if cfg.terminationGraceSeconds > 0 then cfg.terminationGraceSeconds
+    else if cfg.drainSeconds > 0 then cfg.drainSeconds + 75 else 5
   -- the chart's hook (helm/flare-operator/templates/flare-cluster.yaml): wait
   -- until the node's own role is proxy and no in-cluster forward is in flight
   -- (NODE-OPS-LOSSLESS-PLAN L2), then until no new client connection has

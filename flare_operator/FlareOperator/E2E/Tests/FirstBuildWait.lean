@@ -37,6 +37,9 @@ private def cfg : ClusterConfig := {
   debugPod := "debug-fb-wait"
   storageBackend := "rocksdb"
   deferClusterCr := true
+  -- long on purpose: a flared that ignores SIGTERM while it waits would only
+  -- go at this grace period (SIGKILL), which the deletion test tells apart
+  terminationGraceSeconds := 90
 }
 
 private def ns : String := cfg.«namespace»
@@ -68,6 +71,31 @@ private def waitingGauge : IO (Option String) := do
     match ← execInDebugPod cfg.debugPod ns s!"printf 'GET /metrics HTTP/1.0\\r\\n\\r\\n' | nc -w 3 {ip} 9090" with
     | .error _ => return none
     | .ok out => return (out.splitOn "\n").find? (fun l => containsSubstr l "flare_operator_first_build_waiting{")
+
+/-- seconds since the Lease was last renewed (its renewTime), as the API
+    holds it -/
+private def leaseRenewAge : IO (Option Nat) := do
+  match ← kubectlGetJsonpath "lease" leaseName ns "{.spec.renewTime}" with
+  | .error _ => return none
+  | .ok t =>
+    if t.isEmpty then return none
+    let r ← IO.Process.output { cmd := "date", args := #["-d", t, "+%s"] }
+    let n ← IO.Process.output { cmd := "date", args := #["+%s"] }
+    match r.stdout.trim.toNat?, n.stdout.trim.toNat? with
+    | some a, some b => return some (if b ≥ a then b - a else 0)
+    | _, _ => return none
+
+private def leaseTransitions : IO String :=
+  return ((← kubectlGetJsonpath "lease" leaseName ns "{.spec.leaseTransitions}").toOption.getD "")
+
+private def conditionPath (field : String) : String :=
+  "{.status.conditions[?(@.type==\"FirstBuildApproval\")]." ++ field ++ "}"
+
+private def operatorReady : IO String := do
+  match ← kubectl ["get", "pods", "-n", ns, "-l", s!"app={cfg.operatorName}", "-o",
+      "jsonpath={.items[0].status.conditions[?(@.type==\"Ready\")].status}"] with
+  | .ok o => return o.trim
+  | .error _ => return ""
 
 def suite : TestSuite := {
   name := "first-build-wait"
@@ -109,7 +137,58 @@ def suite : TestSuite := {
         match gauge with
         | some l => if !(l.trim.endsWith " 1" || l.trim.endsWith " 1.0" || l.trim.endsWith " 1.000000") then return .fail s!"the waiting gauge is not 1: {l}"
         | none => return .fail "the waiting gauge could not be read"
+        -- the status condition of the Issue goal: present while waiting, naming the annotation and the UID
+        let uid := ((← kubectlGetJsonpath "flarecluster" cfg.name ns "{.metadata.uid}").toOption.getD "")
+        let cStatus := ((← kubectlGetJsonpath "flarecluster" cfg.name ns (conditionPath "status")).toOption.getD "")
+        let cMsg := ((← kubectlGetJsonpath "flarecluster" cfg.name ns (conditionPath "message")).toOption.getD "")
+        IO.eprintln s!"# condition FirstBuildApproval={cStatus}: {cMsg}"
+        if cStatus != "Required" then return .fail s!"the FirstBuildApproval condition is not Required while waiting: [{cStatus}]"
+        if uid.isEmpty || !containsSubstr cMsg uid || !containsSubstr cMsg "flare.gree.net/first-build-approved" then
+          return .fail s!"the condition message does not name the annotation and the UID: {cMsg}"
+        -- readiness is false while waiting (a leader without an index server)
+        let ready ← operatorReady
+        IO.eprintln s!"# operator Ready: [{ready}]"
+        if ready != "False" then return .fail s!"the operator is Ready while it waits: [{ready}]"
+        -- the Lease is renewed ON TIME, not merely named: a fresh renewTime that moves
+        let age1 ← leaseRenewAge
+        IO.sleep 9000
+        let age2 ← leaseRenewAge
+        IO.eprintln s!"# renew age: {age1} then {age2} (the lease lasts 15 s)"
+        match age1, age2 with
+        | some a, some b => if a > 14 || b > 14 then return .fail s!"the Lease renewTime is stale while waiting ({a} s, {b} s)"
+        | _, _ => return .fail "the Lease renewTime could not be read"
         return .pass },
+
+    { name := "deleting a waiting flared pod ends it promptly (SIGTERM), not at the grace period (SIGKILL)"
+      run := do
+        let pods ← getPodNames s!"cluster={cfg.name}" ns
+        match pods with
+        | [] => return .fail "no flared pod to delete"
+        | pod :: _ =>
+          let uid0 := ((← kubectlGetJsonpath "pod" pod ns "{.metadata.uid}").toOption.getD "")
+          let t0 ← IO.monoMsNow
+          discard <| kubectl ["delete", "pod", pod, "-n", ns, "--wait=false"]
+          -- the exit code of the stopped container, if it can still be seen
+          let mut lastExit := ""
+          let mut gone := false
+          for _ in [0:300] do
+            let cur := ((← kubectlGetJsonpath "pod" pod ns "{.metadata.uid}").toOption.getD "")
+            if cur != uid0 then
+              gone := true
+              break
+            let ec := ((← kubectlGetJsonpath "pod" pod ns "{.status.containerStatuses[0].state.terminated.exitCode}").toOption.getD "")
+            if !ec.isEmpty then lastExit := ec
+            IO.sleep 200
+          let dt := ((← IO.monoMsNow) - t0) / 1000
+          IO.eprintln s!"# the waiting flared pod was gone after {dt} s (grace {cfg.terminationGraceSeconds} s), exit code seen [{lastExit}]"
+          if !gone then return .fail "the deleted waiting flared pod did not go within 60 s"
+          if dt > 20 then return .fail s!"the waiting flared pod needed {dt} s to stop: it does not end its first-connection wait on SIGTERM"
+          if lastExit == "137" then return .fail "the waiting flared container was killed (137), not stopped by SIGTERM"
+          -- the StatefulSet's replacement waits again (a clean container, no restart)
+          let back ← waitForCondition "the replacement flared pod exists" 120 do
+            return (← getPodNames s!"cluster={cfg.name}" ns).contains pod
+          if !back then return .fail "the flared pod was not recreated"
+          return .pass },
 
     { name := "an approval with a WRONG uid changes nothing: still waiting, no restart, no fresh start"
       run := do
@@ -124,11 +203,27 @@ def suite : TestSuite := {
 
     { name := "the approval with the FlareCluster's own uid lets the cluster build, still without a restart"
       run := do
+        let transitions0 ← leaseTransitions
+        let holder0 := ((← kubectlGetJsonpath "lease" leaseName ns "{.spec.holderIdentity}").toOption.getD "")
         approveFirstBuild cfg
+        -- across the wait -> normal loop transition: sample the Lease's renewTime
+        -- all along; it must never be older than the 15 s lease
+        let worst ← IO.mkRef (0 : Nat)
+        let samples ← IO.mkRef (0 : Nat)
         let built ← waitForCondition "partition 0 has an Active master and an Active slave" 300 do
+          match ← leaseRenewAge with
+          | some a =>
+            worst.modify (max a)
+            samples.modify (· + 1)
+          | none => pure ()
           let es := parseNodeSync (← operatorTcpCmd cfg.debugPod ns cfg.operatorName cfg.operatorPort "node sync")
           let p0 := es.filter (·.partition == 0)
           return p0.any (fun e => e.role == 0 && e.state == 0) && p0.any (fun e => e.role == 1 && e.state == 0)
+        IO.eprintln s!"# Lease renewTime across the transition: oldest age {← worst.get} s in {← samples.get} samples (lease 15 s)"
+        if (← worst.get) > 14 then return .fail s!"the Lease went {← worst.get} s without a renew across the wait -> normal loop handoff"
+        if (← leaseTransitions) != transitions0 then return .fail s!"the Lease changed hands (transitions {transitions0} -> {← leaseTransitions})"
+        if ((← kubectlGetJsonpath "lease" leaseName ns "{.spec.holderIdentity}").toOption.getD "") != holder0 then
+          return .fail "the Lease holder changed across the transition"
         let logs ← opLog 5000
         let ops ← restartsOf s!"app={cfg.operatorName}"
         let flared ← restartsOf s!"cluster={cfg.name}"
@@ -141,6 +236,12 @@ def suite : TestSuite := {
         let consumed ← waitForCondition "the approval is consumed" 120 do
           return ((← kubectlGetJsonpath "flarecluster" cfg.name ns annotation).toOption.getD "x").trim.isEmpty
         if !consumed then return .fail "the approval was not consumed after the map was persisted"
+        let cleared ← waitForCondition "the FirstBuildApproval condition is cleared" 60 do
+          return ((← kubectlGetJsonpath "flarecluster" cfg.name ns (conditionPath "status")).toOption.getD "x").trim.isEmpty
+        if !cleared then return .fail "the FirstBuildApproval condition is still set after the approval"
+        if (← operatorReady) != "True" then
+          let rdy ← waitForCondition "the operator becomes Ready" 120 do return (← operatorReady) == "True"
+          if !rdy then return .fail "the operator is not Ready after the approval"
         match ← waitingGauge with
         | some l => if !(l.trim.endsWith " 0" || l.trim.endsWith " 0.0" || l.trim.endsWith " 0.000000") then return .fail s!"the waiting gauge did not return to 0: {l}"
         | none => pure ()

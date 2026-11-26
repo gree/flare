@@ -112,6 +112,10 @@ structure ClusterConfig where
       a replacement) needs to be observable. 0 = no hook (fast pod deletes, the
       default for most suites). Mirrors the chart's cluster.drainSeconds. -/
   drainSeconds : Nat := 0
+  /-- terminationGracePeriodSeconds of the flared StatefulSet; 0 = the suite
+      default (5, or the drain window + 75). A suite that must tell a prompt
+      exit from a SIGKILL at the grace period sets it long. -/
+  terminationGraceSeconds : Nat := 0
   /-- Deploy the operator WITHOUT its FlareCluster and StatefulSet (they come
       later through `deployDeferredCluster`): the operator-before-cluster
       install the SAF-09 waiting state exists for. -/
@@ -420,7 +424,8 @@ def statefulSetYaml (cfg : ClusterConfig) : String :=
   -- operator's graceful drain is observable. grace must exceed drainSeconds.
   -- + flared's own stop budget after SIGTERM (65 s: the forward hold 60 s +
   -- 5 s, see the chart) + 10 s
-  let graceSeconds := if cfg.drainSeconds > 0 then cfg.drainSeconds + 75 else 5
+  let graceSeconds := if cfg.terminationGraceSeconds > 0 then cfg.terminationGraceSeconds
+    else if cfg.drainSeconds > 0 then cfg.drainSeconds + 75 else 5
   -- the chart's hook (helm/flare-operator/templates/flare-cluster.yaml): wait
   -- until the node's own role is proxy and no in-cluster forward is in flight
   -- (NODE-OPS-LOSSLESS-PLAN L2), then until no new client connection has
@@ -581,9 +586,15 @@ spec:
           volumeMounts:
             - name: flared-config
               mountPath: /etc/flared{pvcMount}
+          # mirrors the helm chart: the port answers, or flared waits for its
+          # first index connection (marker present only during that wait, holding the
+          # time of the last attempt step; accepted while younger than 60 s)
           livenessProbe:
-            tcpSocket:
-              port: {cfg.flarePort}
+            exec:
+              command:
+                - /bin/bash
+                - -c
+                - 'read -r t < /tmp/flared-waiting-first-index 2>/dev/null && [ $(( EPOCHSECONDS - t )) -lt 60 ] || exec 3<>/dev/tcp/127.0.0.1/{cfg.flarePort}'
             initialDelaySeconds: 10
             periodSeconds: 5
             failureThreshold: 6
@@ -1093,9 +1104,18 @@ def deployCluster (cfg : ClusterConfig) : IO Unit := do
 
 /-- Create the FlareCluster (optionally approving its first build) and the
     StatefulSet of a cluster deployed with `deferClusterCr`. -/
-def deployDeferredCluster (cfg : ClusterConfig) (approve : Bool := true) : IO Unit := do
+def deployDeferredCluster (cfg : ClusterConfig) (approve : Bool := true)
+    (afterOperatorWaits : Bool := false) : IO Unit := do
   applyYaml (flareClusterCrdYaml cfg)
   if approve then approveFirstBuild cfg
+  -- A flared that starts before the operator announced the first-build wait
+  -- exits at its index connection and is restarted (as for any unreachable
+  -- operator); with `afterOperatorWaits` the StatefulSet follows the
+  -- announcement, so the wait itself can be asserted to cost no restart.
+  if afterOperatorWaits then
+    let waiting ← waitForCondition "the operator announces the first-build wait" 180 do
+      return containsSubstr (← kubectlLogsLabel s!"app={cfg.operatorName}" cfg.«namespace» 3000) "WAITING for the first-build approval"
+    if !waiting then throw (IO.userError "the operator did not announce the first-build wait")
   applyYaml (statefulSetYaml cfg)
 
 /-- Deploy a second cluster for inter-cluster replication tests. -/

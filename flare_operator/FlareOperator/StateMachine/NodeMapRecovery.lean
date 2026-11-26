@@ -17,14 +17,16 @@
     * the map is missing or empty, and
         - the cluster is PROVEN new           → first build: start fresh
         - something shows it ran              → halt: an actual loss
-        - the past cannot be observed         → retry, unless a first build
-          of THIS FlareCluster was approved by annotation (its own UID)
+        - the past cannot be observed         → await (wait, do not exit),
+          unless a first build of THIS FlareCluster was approved by
+          annotation (its own UID)
   Not observing the past is never read as "no past" (review 2026-10-05).
   `reset` (FLARE_NODE_MAP_RESET=1) lets a human deliberately accept a fresh
   start where the decision would halt; it never overrides a failed read.
   Automatic reconstruction of a lost map is NOT done here (later work).
 -/
 import FlareOperator.K8s.FlareCluster
+import Lean.Data.Json
 
 namespace FlareOperator.NodeMapRecovery
 
@@ -53,12 +55,18 @@ inductive Decision where
   | load (state : FlareClusterState)
   | fresh (why : String)
   | retry (why : String)
+  /-- The ONE case that waits (indefinitely, without exiting): the map is
+      missing or empty, the past cannot be observed, and no approval of
+      THIS FlareCluster is set. Everything else that is undecided
+      (`retry`: a failed read) keeps its bounded retry and exit. -/
+  | await (why : String)
   | halt (why : String)
 
 def Decision.kind : Decision → String
   | .load _ => "load"
   | .fresh _ => "fresh"
   | .retry _ => "retry"
+  | .await _ => "await"
   | .halt _ => "halt"
 
 /-- Strict parse of the persisted format written by `serializeNodeMap`:
@@ -99,7 +107,7 @@ private def missing (what : String) (h : History) (reset firstBuildApproved : Bo
   | .unknown why =>
     if firstBuildApproved then
       .fresh s!"first build APPROVED by annotation (flare.gree.net/first-build-approved = this FlareCluster's UID): the node map is {what} and the past could not be observed ({why})"
-    else .retry s!"the node map is {what} and a first build cannot be told from a loss: {why}. Restore the ConfigMap, or approve a first build of THIS FlareCluster: kubectl annotate flarecluster <name> flare.gree.net/first-build-approved=<its metadata.uid> (RUNBOOK #node-map-lost)"
+    else .await s!"the node map is {what} and a first build cannot be told from a loss: {why}. Restore the ConfigMap, or approve a first build of THIS FlareCluster: kubectl annotate flarecluster <name> flare.gree.net/first-build-approved=<its metadata.uid> (RUNBOOK #node-map-lost)"
   | .seen why =>
     if reset then .fresh s!"FLARE_NODE_MAP_RESET=1: starting from an EMPTY map although it is {what} and the cluster ran before ({why})"
     else .halt s!"the node map is {what} but the cluster ran before ({why}): refusing to start from an empty map. Restore the ConfigMap, or set FLARE_NODE_MAP_RESET=1 to accept a fresh start (RUNBOOK #node-map-lost)"
@@ -165,5 +173,29 @@ def history (leaseMarker : Except String (Option String)) (podsListed : Bool)
           match pods.find? (fun p => p.nodeMapVersion.isNone || p.currItems.isNone) with
           | some p => .unknown s!"pod {p.name} did not report its node map version and item count{if p.ready then "" else " (not Ready)"}"
           | none => .provenEmpty s!"no Lease marker; all {pods.length} pods report node map version 0 and 0 items"
+
+/-! ### The `FirstBuildApproval` status condition
+
+While the operator waits (`await`) the FlareCluster carries
+`status.conditions[type=FirstBuildApproval]` with status `Required`; it is
+removed when the wait ends. The message names the annotation and the UID of
+THIS FlareCluster, the one value that approves it. -/
+
+def approvalConditionType : String := "FirstBuildApproval"
+
+def approvalMessage (crName uid : String) : String :=
+  s!"waiting for the first-build approval of {crName}: kubectl annotate flarecluster {crName} flare.gree.net/first-build-approved={uid} (the annotation value must be this FlareCluster's metadata.uid, {uid}); the operator does not restart while it waits"
+
+/-- Merge patch (status subresource) that sets the condition. -/
+def approvalConditionPatch (crName uid transitionTime : String) : Lean.Json :=
+  Lean.Json.mkObj [("status", Lean.Json.mkObj [("conditions", Lean.Json.arr #[
+    Lean.Json.mkObj [("type", approvalConditionType), ("status", "Required"),
+      ("reason", "FirstBuildApprovalRequired"), ("message", approvalMessage crName uid),
+      ("lastTransitionTime", transitionTime)]])])]
+
+/-- Merge patch (status subresource) that removes the conditions (this
+    condition is the only one the operator writes). -/
+def approvalConditionClearPatch : Lean.Json :=
+  Lean.Json.mkObj [("status", Lean.Json.mkObj [("conditions", Lean.Json.null)])]
 
 end FlareOperator.NodeMapRecovery

@@ -1242,6 +1242,8 @@ private def ensureHistoryStore (crName ns : String) (partitions : Nat) : IO Bool
   if ok then
     historyEnsuredRef.set true
     registrationGateRef.set none
+    -- the first build's wait ends with the first registration that is served
+    firstBuildPendingRef.set false
   else
     -- nothing is persisted or handed out before the record exists: the pass
     -- returns, and `node add` is refused (no role, no map)
@@ -4664,6 +4666,23 @@ def main (args : List String) : IO Unit := do
 
   -- Initialize shared state
   let stateRef ← IO.mkRef FlareClusterState.default
+  -- The CRD ref exists before the node-map decision: the index port may be
+  -- opened during the first-build wait (answering "pending" and nothing else),
+  -- and the same server serves from these refs afterwards. Its sentinel is
+  -- replaced by the fetched spec before the first request is served.
+  let crdRef ← IO.mkRef ({
+    metadata := { name := some crName, «namespace» := some ns }
+    spec := { partitions := 0, replicas := 0 }
+  } : FlareClusterView)
+  let indexServerStarted ← IO.mkRef false
+  let startIndexServer : IO Unit := do
+    if (← indexServerStarted.get) then return
+    indexServerStarted.set true
+    let _ ← IO.asTask (prio := .dedicated) do
+      try
+        startServerFromRefs port stateRef crdRef
+      catch e =>
+        IO.eprintln s!"[flare-operator] TCP server error: {e}"
 
   -- A0 stage 6b: the node-guard webhook (plain HTTP on 127.0.0.1; the
   -- chart's sidecar terminates TLS). Leader only: its Service selects the
@@ -4720,6 +4739,22 @@ def main (args : List String) : IO Unit := do
   let reset := (← IO.getEnv "FLARE_NODE_MAP_RESET") == some "1"
   let mut nmAttempt := 0
   let mut nmSettled := false
+  -- The first-build wait (NodeMapRecovery.await): entered only for a missing
+  -- or empty map + unobservable past + no approval of THIS FlareCluster.
+  -- While it lasts the Lease is renewed by a keeper under the same rules as
+  -- the leader loop (LeaseKeeper.decide), readiness stays false (leader, no
+  -- TCP server) and no index server is started.
+  let mut awaiting := false
+  let mut conditionSet := false
+  let mut waitUid := ""
+  let mut awaitTicks := 0
+  let awaitDone ← IO.mkRef false
+  let awaitLeaseExit : String → IO Unit := fun why => do
+    IO.eprintln s!"[flare-operator] LOST LEASE while waiting for the first-build approval -- exiting ({why})"
+    healthStatus.setLeader false
+    let _ ← setRoleLabel identity ns "standby"
+    (← IO.getStderr).flush
+    IO.Process.exit 1
   while !nmSettled do
     nmAttempt := nmAttempt + 1
     let read := NodeMapRecovery.classifyRead (← readFlaredConfigMap cmName ns)
@@ -4730,7 +4765,76 @@ def main (args : List String) : IO Unit := do
       | .failed _ => false
     let (hist, approved) ← if needsHistory then nodeMapHistory crName ns s!"{crName}-operator-lease"
       else pure (NodeMapRecovery.History.unknown "not needed: the map is valid", false)
-    match NodeMapRecovery.decide read hist reset approved with
+    let decision := NodeMapRecovery.decide read hist reset approved
+    -- leaving the wait (to anything but another wait): clear the gauge and
+    -- the status condition, one Event for the transition. The wait keeper is
+    -- NOT stopped here: it keeps renewing the Lease until the normal loop's
+    -- first accepted renew (`awaitDone`, set in the leader loop below), so
+    -- initialisation after the wait leaves no gap in the 15 s Lease.
+    let wasAwaiting := awaiting
+    if awaiting && decision.kind != "await" then
+      awaiting := false
+      conditionSet := false
+      metrics.firstBuildWaiting.set 0.0
+      Bridge.clearFirstBuildCondition crName ns
+      IO.eprintln s!"[flare-operator] first-build wait ended after ~{awaitTicks * 5} s: decision is {decision.kind}"
+      Bridge.emitEvent crName ns "FlareFirstBuildWaitEnded" s!"the node map decision for {crName} is no longer waiting for the first-build approval ({decision.kind})" false
+    -- a predecessor killed while waiting may have left the condition behind
+    -- and the approval came before this process looked: remove it (a read,
+    -- written only when it is there; only a first build takes this branch)
+    if !wasAwaiting && decision.kind == "fresh" then
+      Bridge.clearFirstBuildCondition crName ns
+    match decision with
+    | .await why =>
+      nmAttempt := 0   -- a wait does not use up the bounded retries of a failed read
+      if !awaiting then
+        awaiting := true
+        awaitTicks := 0
+        metrics.firstBuildWaiting.set 1.0
+        IO.eprintln s!"[flare-operator] WAITING for the first-build approval: {why}. The operator keeps its Lease, answers every index request with {firstBuildPendingToken}, serves no index and distributes no map until the approval is set"
+        let crUid := match ← kubectl ["get", "flarecluster", crName, "-n", ns, "-o", "jsonpath={.metadata.uid}"] with
+          | .ok u => u.trim
+          | .error _ => "<its metadata.uid>"
+        waitUid := crUid
+        Bridge.emitEvent crName ns "FlareFirstBuildWaiting" (NodeMapRecovery.approvalMessage crName crUid) true
+        conditionSet ← Bridge.setFirstBuildCondition crName ns crUid
+        -- THE signal flared waits on: the index port answers every request with
+        -- `SERVER_ERROR first_build_approval_pending` and nothing else (no map,
+        -- no registration) until service starts. Only this path sets it, so
+        -- an existing cluster's operator never emits it. The operator is Ready
+        -- meanwhile (the Service routes only to Ready pods).
+        firstBuildPendingRef.set true
+        startIndexServer
+        healthStatus.setTcpServerReady true
+        IO.eprintln s!"[flare-operator] index port {port} answers {firstBuildPendingToken} to every request while the first build waits"
+        let lastOkRef ← IO.mkRef (← IO.monoMsNow)
+        let leaseMs := leaseDurationSeconds * 1000
+        -- the first renew is checked at once; the keeper then runs on its own clock
+        let r0 ← renewOutcome leaseName ns identity
+        if r0 == .renewed then lastOkRef.set (← IO.monoMsNow)
+        match LeaseKeeper.decide r0 0 leaseMs 0 0 with
+        | .lost why => awaitLeaseExit why
+        | .keep => pure ()
+        let _ ← IO.asTask (prio := .dedicated) do
+          try
+            LeaseKeeper.run (do
+                let r ← renewOutcome leaseName ns identity
+                if r == .renewed then lastOkRef.set (← IO.monoMsNow)
+                pure r)
+              IO.monoMsNow (pure none) (fun ms => IO.sleep ms.toUInt32)
+              awaitDone.get awaitLeaseExit leaseMs (leaseMs / 3) 0 (← lastOkRef.get)
+          catch e =>
+            IO.eprintln s!"[flare-operator] first-build wait: lease keeper error: {e}"
+            awaitLeaseExit "the lease keeper stopped"
+      else
+        awaitTicks := awaitTicks + 1
+        -- a condition that could not be written is retried each tick
+        if !conditionSet then
+          conditionSet ← Bridge.setFirstBuildCondition crName ns waitUid
+        -- logs are rate-limited: one line a minute
+        if awaitTicks % 12 == 0 then
+          IO.eprintln s!"[flare-operator] still waiting for the first-build approval ({awaitTicks * 5} s): {why}"
+      IO.sleep 5000
     | .load loaded =>
       -- MIGRATION: maps persisted by pre-thread operators load every node at
       -- the shared default 16, which collapses flared's per-destination proxy
@@ -4823,7 +4927,7 @@ def main (args : List String) : IO Unit := do
         -- the reconcile loop will keep retrying each tick.
         IO.eprintln s!"[flare-operator] WARNING: no FlareCluster spec yet — parking registrations as proxies until it appears (refetching every tick)"
       pure result
-  let crdRef ← IO.mkRef initialCrd
+  crdRef.set initialCrd
   -- Always start from None phase - operator manages migration state internally
   -- Restore the migration phase from CR status: an operator restart during
   -- an active migration must not forget it (the previous version always
@@ -4908,12 +5012,13 @@ def main (args : List String) : IO Unit := do
     IO.eprintln s!"[flare-operator] TEST SEAM: occupying the shared task pool with {n} task(s) sleeping 60 s"
     for _ in [0:n] do
       let _ ← IO.asTask (prio := .default) (IO.sleep 60000)
-  -- Start TCP server in background (using Server.TcpServer)
-  let _ ← IO.asTask (prio := .dedicated) do
-    try
-      startServerFromRefs port stateRef crdRef
-    catch e =>
-      IO.eprintln s!"[flare-operator] TCP server error: {e}"
+  -- Start TCP server in background (using Server.TcpServer); already running
+  -- when the first build waited (then it answered "pending" until now). A
+  -- start that did not wait for an approval has no pending state to end.
+  startIndexServer
+  -- A first build keeps answering "pending" until its registration gate opens
+  -- (ensureHistoryStore); any other decision (a map was loaded) opens now.
+  if (← registrationGateRef.get).isNone then firstBuildPendingRef.set false
 
   -- Mark TCP server as ready for health checks
   healthStatus.setTcpServerReady true
@@ -4966,6 +5071,9 @@ def main (args : List String) : IO Unit := do
     match LeaseKeeper.decide r (nowMs - (← lastRenewOkRef.get)) leaseMs 0 passDeadlineMs with
     | .lost why => stepDownAndExit why
     | .keep => pure ()
+    -- handoff: the first-build wait's keeper (if there was a wait) ends only
+    -- now that the normal loop's own renew was accepted
+    if LeaseKeeper.handsOver r then awaitDone.set true
     -- Self-healing label assert: a leader whose label patch failed (or was
     -- stripped externally) reclaims the index Service every tick.
     let _ ← setRoleLabel identity ns "leader"

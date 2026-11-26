@@ -44,12 +44,16 @@ protected:
 
 	string		_node_server_name;
 	int				_node_server_port;
+	bool			_first_build_pending;
 
 public:
 	op_node_add(shared_connection c, cluster* cl);
 	virtual ~op_node_add();
 
 	virtual int run_client(vector<cluster::node>& v);
+	// the last run_client failed because the operator answered exactly
+	// "SERVER_ERROR first_build_approval_pending" (it waits for the first-build approval)
+	bool first_build_pending() const { return this->_first_build_pending; };
 
 protected:
 	virtual int _parse_text_server_parameters();

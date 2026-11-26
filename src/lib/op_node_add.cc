@@ -39,7 +39,8 @@ op_node_add::op_node_add(shared_connection c, cluster* cl):
 		op(c, "node_add"),
 		_cluster(cl),
 		_node_server_name(""),
-		_node_server_port(0) {
+		_node_server_port(0),
+		_first_build_pending(false) {
 }
 
 /**
@@ -57,6 +58,7 @@ op_node_add::~op_node_add() {
  *	send client request
  */
 int op_node_add::run_client(vector<cluster::node>& v) {
+	this->_first_build_pending = false;
 	if (this->_run_client() < 0) {
 		return -1;
 	}
@@ -157,6 +159,14 @@ int op_node_add::_parse_text_client_parameters(vector<cluster::node>& v) {
 		if (strcmp(p, "END\n") == 0) {
 			delete[] p;
 			break;
+		}
+
+		if (cluster::is_first_build_pending_line(p)) {
+			// not an index: the operator waits for its first-build approval
+			log_notice("the operator waits for the first-build approval", 0);
+			this->_first_build_pending = true;
+			delete[] p;
+			return -1;
 		}
 
 		cluster::node n;

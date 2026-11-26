@@ -53,6 +53,14 @@ def decide (r : Renewal) (sinceOkMs leaseMs passAgeMs passDeadlineMs : Nat) : Ve
       if sinceOkMs ≥ leaseMs then .lost s!"no renew was accepted for {sinceOkMs}ms (the lease is {leaseMs}ms)"
       else .keep
 
+/-- Handoff of the first-build wait (NodeMapRecovery.await): while the process
+    waits, a keeper of its own renews the lease; when the wait ends the normal
+    loop only starts renewing after initialisation (server start, ledger
+    load, ...). The wait keeper therefore stops only when the normal loop's
+    first renew was ACCEPTED (holder checked, as `decide` does): a failed or
+    foreign result does not end it, so there is no gap in the lease. -/
+def handsOver (r : Renewal) : Bool := r == .renewed
+
 /-- The keeper loop. `renew` makes one renew attempt; `now` is a monotonic
     clock (ms); `passStart` is the start of the running pass (none = between
     passes); `sleep` waits; `done` ends the loop (tests); `onLost` is told once

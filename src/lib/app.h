@@ -91,6 +91,7 @@ public:
 	virtual int shutdown();
 
 	int request_shutdown() { this->_shutdown_request = true; return 0; };
+	bool is_shutdown_requested() const { return this->_shutdown_request; };
 
 	int set_ident(string ident) { this->_ident = ident; return 0; };
 	string get_ident() { return this->_ident; };

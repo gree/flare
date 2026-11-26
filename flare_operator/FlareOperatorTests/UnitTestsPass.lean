@@ -84,6 +84,42 @@ private def simulate (passMs periodMs leaseMs deadlineMs : Nat) (answer : Nat �
   maxGap.modify (max ((← clock.get) - (← lastOk.get)))
   pure (← lost.get, ← maxGap.get)
 
+/-- The first-build wait's keeper handing over to the normal loop. The wait
+    ends at t = 0; initialisation (server start, ledger load, ...) takes
+    `initMs`; then the normal loop renews once (`loopAnswer`). With
+    `handoff` the wait keeper runs until that renew was accepted
+    (`handsOver`); without it (the old behaviour) it stopped at t = 0.
+    Returns (lost reason, longest time without an accepted renew). -/
+private def simulateHandoff (initMs periodMs leaseMs : Nat) (handoff : Bool) (loopAnswer : Nat → Renewal)
+    : IO (Option String × Nat) := do
+  let clock ← IO.mkRef (0 : Nat)
+  let lastOk ← IO.mkRef (0 : Nat)
+  let maxGap ← IO.mkRef (0 : Nat)
+  let lost ← IO.mkRef (none : Option String)
+  let handed ← IO.mkRef (!handoff)
+  let accepted : Nat → IO Unit := fun t => do
+    maxGap.modify (max (t - (← lastOk.get)))
+    lastOk.set t
+  let renew : IO Renewal := do
+    let t ← clock.get
+    accepted t
+    pure .renewed
+  -- the normal loop's first renew happens once initialisation is over
+  let done : IO Bool := do
+    if (← handed.get) then return true
+    let t ← clock.get
+    if t ≥ initMs then
+      let r := loopAnswer t
+      if r == .renewed then accepted t
+      if handsOver r then handed.set true
+    pure ((← handed.get) || (← lost.get).isSome)
+  run renew clock.get (pure none) (fun ms => clock.modify (· + ms)) done
+    (fun why => lost.set (some why)) leaseMs periodMs 0 0
+  -- after the handoff the normal loop's keeper takes over; the old behaviour
+  -- left the interval from the last renew to the loop's first one open
+  accepted (max (← clock.get) initMs)
+  pure (← lost.get, ← maxGap.get)
+
 def results : IO (List (String × Bool)) := do
   let mut r : List (String × Bool) := []
   -- every gate decision reads the nodes fresh, each node once, together
@@ -148,6 +184,18 @@ def results : IO (List (String × Bool)) := do
   r := r ++ [("lease: decide — renewed keeps; failed keeps until the lease age; other holder loses",
               decide .renewed 0 lease 0 0 == .keep && decide .failed 14999 lease 0 0 == .keep
                 && decide .failed 15000 lease 0 0 != .keep && decide .otherHolder 0 lease 0 0 != .keep)]
+  -- first-build wait: handoff of the Lease to the normal loop
+  let (hl1, hg1) ← simulateHandoff 40000 5000 lease true fun _ => .renewed
+  r := r ++ [(s!"lease handoff: a 40 s initialisation after the wait is covered by the wait keeper until the loop's first accepted renew (longest gap {hg1} ms of {lease} ms)",
+              hl1 == none && hg1 ≤ 5000)]
+  let (_, hg0) ← simulateHandoff 40000 5000 lease false fun _ => .renewed
+  r := r ++ [(s!"lease handoff: stopping the wait keeper when the wait ends (the old behaviour) leaves a gap past the lease ({hg0} ms), the case this prevents",
+              decide (hg0 > lease))]
+  let (hl2, hg2) ← simulateHandoff 40000 5000 lease true fun t => if t < 50000 then .failed else .renewed
+  r := r ++ [(s!"lease handoff: a loop renew that fails does not end the wait keeper (still renewing, longest gap {hg2} ms)",
+              hl2 == none && hg2 ≤ 5000)]
+  r := r ++ [("lease handoff: only an accepted renew hands over; another holder or a failed renew does not",
+              handsOver .renewed && !handsOver .failed && !handsOver .otherHolder)]
   -- service selector
   let shape4 := ServiceSelector.parseShape "flare-prod-nodes-1|RequireDualStack|[\"IPv4\",\"IPv6\"]"
   r := r ++ [("service: the shape is read from one get",

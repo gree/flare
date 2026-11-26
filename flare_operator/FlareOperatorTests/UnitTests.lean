@@ -1613,15 +1613,38 @@ def checkNodeMapRecovery (ctx : Ctx) : IO Unit := do
     (kindOf (NodeMapRecovery.decide .notFound ran false) == "halt"
       && kindOf (NodeMapRecovery.decide .notFound ran true) == "fresh"
       && kindOf (NodeMapRecovery.decide .notFound ran false true) == "halt")
-  check ctx "SAF-09: missing map + an UNOBSERVED past = retry, never a first build (reset does not change that)"
-    (kindOf (NodeMapRecovery.decide .notFound unk false) == "retry"
-      && kindOf (NodeMapRecovery.decide .notFound unk true) == "retry")
+  check ctx "SAF-09: missing map + an UNOBSERVED past + no approval = await (wait, never a first build, never an exit; reset does not change that)"
+    (kindOf (NodeMapRecovery.decide .notFound unk false) == "await"
+      && kindOf (NodeMapRecovery.decide .notFound unk true) == "await")
   check ctx "SAF-09: an unobserved past + first-build approval for this FlareCluster = first build"
     (kindOf (NodeMapRecovery.decide .notFound unk false true) == "fresh")
   check ctx "SAF-09: an EMPTY map is treated like a missing one"
     (kindOf (NodeMapRecovery.decide (.present "  \n") proven false) == "fresh"
       && kindOf (NodeMapRecovery.decide (.present "") ran false) == "halt"
-      && kindOf (NodeMapRecovery.decide (.present "") unk false) == "retry")
+      && kindOf (NodeMapRecovery.decide (.present "") unk false) == "await")
+  -- the wait decision table: ONLY (map missing/empty, past unknown, no approval) waits
+  let waits := fun (r : NodeMapRecovery.Read) (h : NodeMapRecovery.History) (reset appr : Bool) =>
+    kindOf (NodeMapRecovery.decide r h reset appr) == "await"
+  check ctx "first-build wait: waits for exactly (map absent or empty) + unknown history + no correct-UID approval"
+    (waits .notFound unk false false && waits (.present "") unk false false && waits (.present " \n") unk false false)
+  check ctx "first-build wait: the correct-UID approval ends the wait (first build); it gives no more than the existing unknown -> fresh"
+    (kindOf (NodeMapRecovery.decide .notFound unk false true) == "fresh"
+      && kindOf (NodeMapRecovery.decide (.present "") unk false true) == "fresh"
+      && kindOf (NodeMapRecovery.decide .notFound ran false true) == "halt"
+      && kindOf (NodeMapRecovery.decide (.failed "x") unk false true) == "retry")
+  check ctx "first-build wait: a failed read, an invalid map and seen history never wait (fail closed as before)"
+    (!waits (.failed "timeout") unk false false && !waits (.failed "timeout") unk true false
+      && !waits (.present "version=x") unk false false && !waits (.present "version=x") ran false false
+      && !waits .notFound ran false false && !waits .notFound ran true false
+      && !waits (.present "") ran false false
+      && kindOf (NodeMapRecovery.decide (.failed "timeout") unk false false) == "retry"
+      && kindOf (NodeMapRecovery.decide (.present "version=x") unk false false) == "halt"
+      && kindOf (NodeMapRecovery.decide .notFound ran false false) == "halt")
+  check ctx "first-build wait: a proven-new cluster and a valid map never wait"
+    (!waits .notFound proven false false && !waits (.present nmGood) unk false false
+      && !waits (.present nmGood) proven false false)
+  check ctx "first-build wait: the wait outcome does not depend on how often it was evaluated (no count or time limit in the decision)"
+    ((List.range 1000).all fun _ => waits .notFound unk false false)
   for (bad, why) in [("h:12121 role=0 state=0 partition=0", "no version line"),
                      ("version=7\nversion=8\nh:12121 role=0 state=0 partition=0", "two version lines"),
                      ("version=x\nh:12121 role=0 state=0 partition=0", "unreadable version"),
@@ -1639,6 +1662,23 @@ def checkNodeMapRecovery (ctx : Ctx) : IO Unit := do
       && NodeMapRecovery.classifyRead (.error "configmaps \"x\" not found") == .failed "configmaps \"x\" not found"
       && NodeMapRecovery.classifyRead (.ok "x") == .present "x")
   -- history: only positive proof is "new"; any gap is unknown
+  -- the FirstBuildApproval status condition (set while waiting, removed after)
+  let uid := "9f1c2d3e-0000-4000-8000-123456789abc"
+  let patch := (NodeMapRecovery.approvalConditionPatch "flare-x" uid "2026-01-01T00:00:00Z").compress
+  check ctx "SAF-09: the FirstBuildApproval condition is Required and its message names the annotation and the UID"
+    ((patch.splitOn "\"type\":\"FirstBuildApproval\"").length > 1 && (patch.splitOn "\"status\":\"Required\"").length > 1
+      && (patch.splitOn "flare.gree.net/first-build-approved=").length > 1 && (patch.splitOn uid).length > 1
+      && ((NodeMapRecovery.approvalMessage "flare-x" uid).splitOn uid).length > 1)
+  check ctx "SAF-09: clearing the condition is a merge patch that nulls the conditions (nothing else is written)"
+    (NodeMapRecovery.approvalConditionClearPatch.compress == "{\"status\":{\"conditions\":null}}")
+  -- the waiting operator's answer: one fixed SERVER_ERROR line, no node, no META, no OK
+  let pend := FlareOperator.Flare.serializeResponse FlareOperator.Flare.firstBuildPendingResponse
+  check ctx "first-build wait: the pending answer is exactly one SERVER_ERROR line with the token flared waits on"
+    (pend == "SERVER_ERROR first_build_approval_pending\r\n")
+  check ctx "first-build wait: the pending answer is not an index (no NODE/META/END/OK line) and not the registration refusal"
+    ((pend.splitOn "NODE").length == 1 && (pend.splitOn "META").length == 1 && (pend.splitOn "END").length == 1
+      && pend != FlareOperator.Flare.serializeOK
+      && pend != FlareOperator.Flare.serializeServerError "registration closed: the first-build history record is not written yet")
   let p (n : String) (r : Bool) (v i : Option Nat) : NodeMapRecovery.PodEvidence := { name := n, ready := r, nodeMapVersion := v, currItems := i }
   let isSeen := fun (h : NodeMapRecovery.History) => match h with | .seen _ => true | _ => false
   let isUnk := fun (h : NodeMapRecovery.History) => match h with | .unknown _ => true | _ => false

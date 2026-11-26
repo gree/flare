@@ -54,10 +54,19 @@
 #include "proxy_event_listener.h"
 
 #include <functional>
+#include <boost/shared_ptr.hpp>
+#include <pthread.h>
+#include <time.h>
 #include <boost/bind.hpp>
+#include <cerrno>
+#include <cstdio>
+#include <cstring>
 
 namespace gree {
 namespace flare {
+
+const char* const cluster::first_build_pending_answer = "first_build_approval_pending";
+const char* const cluster::first_index_wait_marker = "/tmp/flared-waiting-first-index";
 
 // {{{ global functions
 // }}}
@@ -104,6 +113,8 @@ cluster::cluster(thread_pool* req_tp, thread_pool* other_tp, string server_name,
 		_wal_follow_batch_delay_usec(0),
 		_replication_type(replication_async),
 		_proxy_prior_netmask(0), 
+		_wait_first_index_connect(false),
+		_first_index_waiting(false),
 		_max_total_thread_queue(0),
 		_read_unavailable_error(false) {
 	this->_node_key = this->to_node_key(server_name, server_port);
@@ -316,20 +327,36 @@ int cluster::startup_node(const vector<index_server>& index_servers, uint32_t pr
 
 	log_notice("setting up cluster node... (type=%d, index_server_name=%s, index_server_port=%d)", this->_type, this->_index_servers[0].index_server_name.c_str(), this->_index_servers[0].index_server_port);
 
-	shared_connection c = this->_open_index();
-	if (!c) {
-		log_err("failed to connect to index server", 0);
-		return -1;
-	}
-
-	op_node_add* p_na = new op_node_add(c, this);
+	shared_connection c;
 	vector<node> v;
-	if (p_na->run_client(v) < 0) {
-		log_err("failed to add node to index server", 0);
-		delete p_na;
+	if (this->_wait_first_index_connect) {
+		// the first attempt is the plain one (as without the wait); only the
+		// operator's explicit pending answer to it turns startup into a wait.
+		// flared listens only after its registration, so the liveness probe
+		// cannot reach its port while it waits here: this marker tells the
+		// probe that the process is alive and waiting (the chart's liveness
+		// accepts it while it is fresh). It exists only during that wait,
+		// never afterwards, and is removed on a shutdown request too.
+		first_index_wait_result r = run_first_index_wait(
+				boost::bind(&cluster::_first_index_attempt, this, boost::ref(c), boost::ref(v)),
+				boost::bind(&cluster::_sleep_ms, _1, this->_first_index_stop),
+				boost::bind(&cluster::_jitter_permille),
+				this->_first_index_stop,
+				boost::bind(&cluster::_first_index_heartbeat));
+		unlink(first_index_wait_marker);
+		if (r == first_index_wait_stopped) {
+			log_notice("shutdown requested while waiting for the first-build approval", 0);
+			return -1;
+		}
+		if (r != first_index_wait_registered) {
+			if (this->_first_index_stop && this->_first_index_stop()) {
+				log_notice("shutdown requested during the first-build wait", 0);
+			}
+			return -1;
+		}
+	} else if (this->_first_index_attempt(c, v) != first_index_registered) {
 		return -1;
 	}
-	delete p_na;
 
 	// get meta data from index server
 	key_resolver::type key_resolver_type;
@@ -379,6 +406,233 @@ int cluster::startup_node(const vector<index_server>& index_servers, uint32_t pr
 	this->_fixed_proxy_event_listeners = listeners;
 
 	return 0;
+}
+
+uint32_t cluster::first_index_backoff_ms(unsigned attempt, uint32_t jitter_permille) {
+	uint64_t ceiling = first_index_backoff_base_ms;
+	for (unsigned i = 0; i < attempt && ceiling < first_index_backoff_cap_ms; i++) {
+		ceiling *= 2;
+	}
+	if (ceiling > first_index_backoff_cap_ms) {
+		ceiling = first_index_backoff_cap_ms;
+	}
+	if (jitter_permille > 1000) {
+		jitter_permille = 1000;
+	}
+	uint64_t half = ceiling / 2;
+	return (uint32_t)(half + (ceiling - half) * jitter_permille / 1000);
+}
+
+bool cluster::is_first_build_pending_line(const char* line) {
+	if (line == NULL) {
+		return false;
+	}
+	size_t n = strlen(first_build_pending_answer);
+	if (strncmp(line, "SERVER_ERROR ", 13) != 0 || strncmp(line + 13, first_build_pending_answer, n) != 0) {
+		return false;
+	}
+	const char* rest = line + 13 + n;
+	return strcmp(rest, "") == 0 || strcmp(rest, "\n") == 0 || strcmp(rest, "\r\n") == 0;
+}
+
+cluster::first_index_step cluster::first_index_decide(bool wait_enabled, bool connected, bool added, bool pending_answer) {
+	if (!connected) {
+		return first_index_failed;
+	}
+	if (added) {
+		return first_index_registered;
+	}
+	return (wait_enabled && pending_answer) ? first_index_pending : first_index_failed;
+}
+
+cluster::first_index_step cluster::_first_index_attempt(shared_connection& c, vector<node>& v) {
+	c.reset();
+	v.clear();
+	if (this->_first_index_waiting) {
+		// after the operator said it waits: bounded, stoppable attempts
+		c = open_bounded(boost::bind(&cluster::_open_index_for_wait, this->_index_servers),
+				this->_first_index_stop, first_index_attempt_deadline_ms, first_index_stop_poll_ms);
+	} else {
+		c = this->_open_index();
+	}
+	if (!c) {
+		log_err("failed to connect to index server", 0);
+		return first_index_decide(this->_wait_first_index_connect, false, false, false);
+	}
+	op_node_add* p_na = new op_node_add(c, this);
+	bool added = p_na->run_client(v) >= 0;
+	bool pending = p_na->first_build_pending();
+	delete p_na;
+	first_index_step r = first_index_decide(this->_wait_first_index_connect, true, added, pending);
+	if (r == first_index_pending) {
+		this->_first_index_waiting = true;
+		c.reset();	// the operator serves nothing yet: a new connection per attempt
+	} else if (r == first_index_failed) {
+		log_err("failed to add node to index server", 0);
+	}
+	return r;
+}
+
+cluster::first_index_wait_result cluster::run_first_index_wait(const boost::function<first_index_step()>& attempt,
+		const boost::function<void(uint32_t)>& sleep_ms,
+		const boost::function<uint32_t()>& jitter_permille,
+		const boost::function<bool()>& stop,
+		const boost::function<void()>& heartbeat) {
+	for (unsigned n = 0; ; n++) {
+		first_index_step r = attempt();
+		if (r == first_index_registered) {
+			return first_index_wait_registered;
+		}
+		if (r == first_index_failed) {
+			return first_index_wait_failed;
+		}
+		if (stop && stop()) {
+			return first_index_wait_stopped;
+		}
+		if (heartbeat) {
+			heartbeat();
+		}
+		uint32_t ms = first_index_backoff_ms(n, jitter_permille());
+		// log on the first answer, then about once a minute at the cap (3 s)
+		if (n == 0 || n % 20 == 0) {
+			log_warning("the operator waits for the first-build approval (answer %u: %s); retrying in %u msec -- flared keeps waiting", n + 1, first_build_pending_answer, ms);
+		}
+		sleep_ms(ms);
+		if (stop && stop()) {
+			return first_index_wait_stopped;
+		}
+		if (heartbeat) {
+			heartbeat();
+		}
+	}
+}
+
+namespace {
+	// state shared by open_bounded's caller and its helper thread; the helper
+	// may outlive the caller (a resolver that does not return), so it owns a
+	// reference of its own
+	struct bounded_open_state {
+		pthread_mutex_t mutex;
+		pthread_cond_t cond;
+		bool done;
+		shared_connection result;
+		boost::function<shared_connection()> open;
+		bounded_open_state(const boost::function<shared_connection()>& o): done(false), open(o) {
+			pthread_mutex_init(&mutex, NULL);
+			pthread_cond_init(&cond, NULL);
+		}
+		~bounded_open_state() {
+			pthread_cond_destroy(&cond);
+			pthread_mutex_destroy(&mutex);
+		}
+	};
+	void* bounded_open_run(void* arg) {
+		boost::shared_ptr<bounded_open_state>* sp = static_cast<boost::shared_ptr<bounded_open_state>*>(arg);
+		boost::shared_ptr<bounded_open_state> st = *sp;
+		delete sp;
+		shared_connection c = st->open();
+		pthread_mutex_lock(&st->mutex);
+		st->result = c;
+		st->done = true;
+		pthread_cond_signal(&st->cond);
+		pthread_mutex_unlock(&st->mutex);
+		return NULL;
+	}
+}
+
+shared_connection cluster::open_bounded(const boost::function<shared_connection()>& open,
+		const boost::function<bool()>& stop, uint32_t deadline_ms, uint32_t poll_ms, bool* stopped) {
+	if (stopped) {
+		*stopped = false;
+	}
+	boost::shared_ptr<bounded_open_state> st(new bounded_open_state(open));
+	pthread_t th;
+	pthread_attr_t attr;
+	pthread_attr_init(&attr);
+	pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+	boost::shared_ptr<bounded_open_state>* arg = new boost::shared_ptr<bounded_open_state>(st);
+	int e = pthread_create(&th, &attr, bounded_open_run, arg);
+	pthread_attr_destroy(&attr);
+	if (e != 0) {
+		delete arg;
+		log_err("could not start the connect thread (%s)", strerror(e));
+		return shared_connection();
+	}
+	uint32_t waited = 0;
+	pthread_mutex_lock(&st->mutex);
+	while (!st->done) {
+		if (stop && stop()) {
+			if (stopped) {
+				*stopped = true;
+			}
+			break;
+		}
+		if (waited >= deadline_ms) {
+			break;
+		}
+		struct timespec ts;
+		clock_gettime(CLOCK_REALTIME, &ts);
+		ts.tv_nsec += (long)poll_ms * 1000000L;
+		ts.tv_sec += ts.tv_nsec / 1000000000L;
+		ts.tv_nsec %= 1000000000L;
+		pthread_cond_timedwait(&st->cond, &st->mutex, &ts);
+		waited += poll_ms;
+	}
+	shared_connection c = st->done ? st->result : shared_connection();
+	pthread_mutex_unlock(&st->mutex);
+	return c;
+}
+
+bool cluster::write_first_index_marker(const char* path, time_t now) {
+	std::string tmp = std::string(path) + ".tmp";
+	FILE* f = fopen(tmp.c_str(), "w");
+	if (f == NULL) {
+		return false;
+	}
+	bool ok = fprintf(f, "%lld\n", (long long)now) > 0;
+	ok = (fclose(f) == 0) && ok;
+	if (!ok || rename(tmp.c_str(), path) < 0) {
+		unlink(tmp.c_str());
+		return false;
+	}
+	return true;
+}
+
+bool cluster::first_index_marker_fresh(const char* path, time_t now, unsigned max_age_sec) {
+	FILE* f = fopen(path, "r");
+	if (f == NULL) {
+		return false;
+	}
+	long long t = 0;
+	int n = fscanf(f, "%lld", &t);
+	fclose(f);
+	if (n != 1) {
+		return false;
+	}
+	long long age = (long long)now - t;
+	return age < (long long)max_age_sec;
+}
+
+void cluster::_first_index_heartbeat() {
+	// best effort: a failed write leaves the marker as it was (it ages out)
+	write_first_index_marker(first_index_wait_marker, time(NULL));
+}
+
+// sleeps in short slices so that a shutdown request ends the backoff at once
+void cluster::_sleep_ms(uint32_t ms, const boost::function<bool()>& stop) {
+	const uint32_t slice_ms = 200;
+	while (ms > 0) {
+		if (stop && stop()) {
+			return;
+		}
+		uint32_t d = ms < slice_ms ? ms : slice_ms;
+		usleep((useconds_t)d * 1000);
+		ms -= d;
+	}
+}
+
+uint32_t cluster::_jitter_permille() {
+	return (uint32_t)(random() % 1001);
 }
 
 /**
@@ -3682,6 +3936,22 @@ shared_connection cluster::_open_index_single_server() {
 #endif
 	if (ctp && ctp->open() == 0) {
 		return ctp;
+	}
+	return shared_connection();
+}
+
+/**
+ * one connect of the first-build wait (a helper thread runs it): a deadline per
+ * connect and no retry of its own, the wait loop is the retry
+ */
+shared_connection cluster::_open_index_for_wait(vector<index_server> servers) {
+	for (vector<index_server>::iterator it = servers.begin(); it != servers.end(); it++) {
+		shared_connection_tcp ctp(new connection_tcp(it->index_server_name, it->index_server_port));
+		ctp->set_connect_timeout_ms(first_index_connect_timeout_ms);
+		ctp->set_connect_retry_limit(0);
+		if (ctp->open() == 0) {
+			return ctp;
+		}
 	}
 	return shared_connection();
 }

@@ -40,6 +40,8 @@
 #include <boost/serialization/map.hpp>
 #include <boost/serialization/string.hpp>
 #include <boost/lexical_cast.hpp>
+#include <boost/function.hpp>
+#include <boost/bind.hpp>
 
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -263,6 +265,18 @@ protected:
 	string									_wal_follower_source;	// node key being followed
 	replication						_replication_type;
 	uint32_t							_proxy_prior_netmask;
+	// K8s first-build wait. The operator of a NEW cluster that waits for its
+	// first-build approval answers every request on its index port with
+	// "SERVER_ERROR first_build_approval_pending" (nothing else: no node map, no
+	// registration). Only that exact answer to the first `node add` makes
+	// startup_node wait and retry; a refused or timed-out connection, any other
+	// answer, and everything after the registration behave as before.
+	// false = never wait (the legacy index server, a non-K8s build).
+	bool								_wait_first_index_connect;
+	// the pending answer was seen: the attempts that follow are bounded (and stoppable)
+	bool								_first_index_waiting;
+	// ends the first-index wait (flared: its shutdown request); empty = never
+	boost::function<bool()>	_first_index_stop;
 	uint32_t							_max_total_thread_queue;
 	bool								_read_unavailable_error;
 
@@ -275,6 +289,64 @@ public:
 
 	int startup_index(coordinator* coord, key_resolver::type key_resolver_type, int key_resolver_modular_hint, int key_resolver_modular_virtual);
 	int startup_node(const vector<index_server>& index_servers, uint32_t proxy_prior_netmask);
+
+	// First-build wait (K8s operator mode only), see _wait_first_index_connect.
+	void set_wait_first_index_connect(bool b) { this->_wait_first_index_connect = b; };
+	void set_first_index_stop(const boost::function<bool()>& stop) { this->_first_index_stop = stop; };
+	// the answer of a waiting operator, exactly (without the line delimiter)
+	static const char* const first_build_pending_answer;
+	// exists only while startup_node waits for the operator's first-build
+	// approval. Its content is the time (epoch seconds) of the last attempt
+	// step: a heartbeat the liveness probe accepts only while it is fresh, so a
+	// stalled attempt (a resolver that does not answer) stops passing it.
+	static const char* const first_index_wait_marker;
+	static const unsigned first_index_marker_max_age_sec = 60;	// the chart's probe uses the same value
+	// writes `now` into `path` atomically (temp file + rename); false on failure
+	static bool write_first_index_marker(const char* path, time_t now);
+	// the probe's rule: the marker exists, holds a time, and is younger than max_age_sec
+	static bool first_index_marker_fresh(const char* path, time_t now, unsigned max_age_sec);
+	static const int first_index_connect_timeout_ms = 5000;	// deadline of each connect of the wait
+	static const uint32_t first_index_attempt_deadline_ms = 10000;	// whole attempt of the wait, resolver included
+	static const uint32_t first_index_stop_poll_ms = 100;	// how often a stop request is looked at during an attempt
+	static const uint32_t first_index_backoff_base_ms = 500;
+	static const uint32_t first_index_backoff_cap_ms = 3000;	// short: flared does not listen while it waits, so a long sleep delays recovery after the operator is ready
+	// exponential backoff with jitter: for attempt n (0-based) the ceiling is
+	// min(cap, base * 2^n) and the result lies in [ceiling/2, ceiling];
+	// jitter_permille (0..1000) picks the point
+	static uint32_t first_index_backoff_ms(unsigned attempt, uint32_t jitter_permille);
+
+	// the result of one registration attempt (connect + node add)
+	enum first_index_step {
+		first_index_registered,	// the operator answered the registration: go on
+		first_index_pending,	// exactly the pending answer: wait and try again
+		first_index_failed		// anything else: startup fails, as before
+	};
+	// the decision (pure): only an explicit pending answer, with the wait enabled, waits
+	static first_index_step first_index_decide(bool wait_enabled, bool connected, bool added, bool pending_answer);
+	// the line is exactly the pending answer (a trailing line delimiter is ignored)
+	static bool is_first_build_pending_line(const char* line);
+
+	enum first_index_wait_result {
+		first_index_wait_registered,
+		first_index_wait_failed,
+		first_index_wait_stopped
+	};
+	// runs `attempt` until it is not pending; sleeps first_index_backoff_ms
+	// between attempts through `sleep_ms`. `stop` (may be empty) is checked
+	// after a pending answer and after the backoff and ends the wait.
+	// `heartbeat` (may be empty) is called after each pending answer and after
+	// each backoff, never inside an attempt, so a stalled attempt leaves it stale.
+	static first_index_wait_result run_first_index_wait(const boost::function<first_index_step()>& attempt,
+			const boost::function<void(uint32_t)>& sleep_ms,
+			const boost::function<uint32_t()>& jitter_permille,
+			const boost::function<bool()>& stop,
+			const boost::function<void()>& heartbeat = boost::function<void()>());
+	// runs `open` (a connect that may sit in a resolver) on a helper thread
+	// and waits for it at most deadline_ms, looking at `stop` every poll_ms;
+	// an empty connection if the deadline passed or stop was requested (the
+	// helper thread is left to finish on its own; `stopped` tells which)
+	static shared_connection open_bounded(const boost::function<shared_connection()>& open,
+			const boost::function<bool()>& stop, uint32_t deadline_ms, uint32_t poll_ms, bool* stopped = NULL);
 
 	int add_node(string node_server_name, int node_server_port);
 	int down_node(string node_server_name, int node_server_port, bool shutdown_mode = false);
@@ -574,6 +646,12 @@ protected:
 	// thread::enqueue so a thread reused since then refuses the item
 	int _get_proxy_thread(string node_key, int key_hash, shared_thread& t, unsigned int& t_id);
 	shared_connection _open_index();
+	// one registration attempt of startup_node (see first_index_step)
+	first_index_step _first_index_attempt(shared_connection& c, vector<node>& v);
+	static shared_connection _open_index_for_wait(vector<index_server> servers);
+	static void _sleep_ms(uint32_t ms, const boost::function<bool()>& stop);
+	static uint32_t _jitter_permille();
+	static void _first_index_heartbeat();
 	shared_connection _open_index_single_server();
 	shared_connection _open_index_redundant();
 	int _get_reconstruction_bwlimit_for_new_partition(size_t current_partition_size);

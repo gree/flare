@@ -307,6 +307,16 @@ spec:
                   type: integer
                 totalNodes:
                   type: integer
+                conditions:
+                  description: |
+                    FirstBuildApproval (status Required) while the operator waits,
+                    without restarting, for the first-build approval of a new
+                    cluster; removed once the wait ends. The message names the
+                    annotation (flare.gree.net/first-build-approved) and the UID.
+                  type: array
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
                 migrationPhase:
                   type: string
                   enum: [None, Dumping, Forwarding]

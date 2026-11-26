@@ -34,6 +34,13 @@ open Std.Net (SocketAddress SocketAddressV4 IPv4Addr)
 -- Server State
 -- ===========================================================================
 
+/-- Set while the operator waits for the first-build approval of a NEW cluster
+    (Main, `await`), and until the normal start of service: every request is then
+    answered with `firstBuildPendingResponse` and nothing else — no state is read or
+    changed, so no client can take it for a serving index. Never set on any other
+    path: an operator that is not waiting answers as before (or, before it
+    listens, refuses the connection). -/
+initialize firstBuildPendingRef : IO.Ref Bool ← IO.mkRef false
 /-- Registration gate (docs/design-authoritative-history.md): `some why` while a
     FIRST BUILD's history record is not written yet — `node add` is then
     answered with an error (no role, no map handed out) and flared retries.
@@ -148,6 +155,9 @@ def handleConnection (sock : Socket) (state : ServerState) (acceptedAtMs : Nat :
     | none =>
       running := false
     | some line =>
+     if (← firstBuildPendingRef.get) then
+      sendResponse sock (serializeResponse firstBuildPendingResponse)
+     else
       -- Parse: pure (String → FlareEvent)
       IO.eprintln s!"[DEBUG] Received command: {line.take 100}"
       -- flare-bug-first-build-node-add-timeout: where a registration's wait
